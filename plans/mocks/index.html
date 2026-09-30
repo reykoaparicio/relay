@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock gallery · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.main{padding:var(--space-10) var(--space-8)}
+.hero{display:flex;flex-direction:column;gap:var(--space-3);padding-bottom:var(--space-6);border-bottom:1px solid var(--color-divider)}
+.hero .brand{font-size:var(--text-2xl)}
+.hero p{max-width:820px;color:var(--color-text-muted)}
+.legend{display:flex;flex-wrap:wrap;gap:var(--space-4);font-size:var(--text-sm);color:var(--color-text-muted)}
+.screens{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-5);list-style:none;margin:0;padding:0}
+@media (max-width:1100px){.screens{grid-template-columns:1fr}}
+.screen h2{display:flex;align-items:center;gap:var(--space-3);font-size:var(--text-lg)}
+.screen h2 svg{width:20px;height:20px;color:var(--color-accent)}
+.screen h2 a{color:var(--color-text);text-decoration:none}
+.screen h2 a:hover{color:var(--color-accent);text-decoration:underline}
+.screen .file{margin-left:auto;font-family:var(--font-mono);font-size:var(--text-xs);color:var(--color-text-subtle);font-weight:var(--weight-regular)}
+.spec{display:flex;flex-wrap:wrap;gap:var(--space-2)}
+.states{display:flex;flex-wrap:wrap;gap:var(--space-2);list-style:none;margin:0;padding:0}
+.state-link{display:inline-flex;align-items:center;gap:4px;min-height:32px;padding:0 var(--space-3);border:1px solid var(--color-border-strong);border-radius:999px;font-family:var(--font-mono);font-size:var(--text-xs);text-decoration:none;color:var(--color-accent);background:var(--color-surface-raised)}
+.state-link:hover{border-color:var(--color-accent-border);background:var(--color-accent-bg)}
+.state-link .subtle{font-family:var(--font-sans)}
+.owner{font-size:var(--text-xs);color:var(--color-text-subtle)}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol><symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol></defs></svg>
+
+<main class="main" id="main"><div class="main-inner">
+<header class="hero">
+  <div class="brand">RELAY<small>Developer preview · UI concept mocks</small></div>
+  <h1 style="font-size:var(--text-xl)">Screen and state gallery</h1>
+  <p>Static HTML mocks for the P0 desktop prototype. Every screen uses the shared tokens in <span class="mono">assets/tokens.css</span> and component classes in <span class="mono">assets/app.css</span>. Each state below is a deep link; inside a mock, the dashed "Mock state" bar at the bottom right switches states and toggles light/dark theme. The bar is not part of the product.</p>
+  <div class="legend">
+    <span><span class="tag">§5.2</span> spec section</span>
+    <span><span class="tag">FR-08</span> P0 functional requirement</span>
+    <span>P0 navigation: Overview, Workflows, Runs, Memory, Settings (Schedules and Usage hidden until P1)</span>
+  </div>
+</header>
+
+<ul class="screens" aria-label="Mock screens">
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><a href="overview.html">Project overview</a><span class="file">overview.html</span></h2>
+    <p class="muted">What is happening, what needs me, what has been spent. Active-run card opens the exact pending step; usage is labeled "tracked by Relay" with in-flight reservations and links to the ledger; memory suggestions link to the approval queue.</p>
+    <div class="spec"><span class="tag">§5.2</span><span class="tag">§4.4</span><span class="tag">§9.1</span><span class="tag">FR-05</span><span class="tag">FR-09</span><span class="tag">FR-11</span><span class="tag">FR-12</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="overview.html#state=awaiting-approval">awaiting-approval <span class="subtle">(default)</span></a></li><li><a class="state-link" href="overview.html#state=active-run">active-run</a></li><li><a class="state-link" href="overview.html#state=empty">empty</a></li><li><a class="state-link" href="overview.html#state=interrupted">interrupted</a></li><li><a class="state-link" href="overview.html#state=provider-disconnected">provider-disconnected</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-sparkles"/></svg><a href="onboarding.html">First launch</a><span class="file">onboarding.html</span></h2>
+    <p class="muted">Eight-step setup: local storage vs remote processing, sample project offer, connect a provider with a redacted test result, pick a folder and inspect eligible files with exclusion reasons, add one approved rule, choose the template, set role profiles and allowance, review input and start.</p>
+    <div class="spec"><span class="tag">§4.1</span><span class="tag">§6.2</span><span class="tag">§11.2</span><span class="tag">FR-01</span><span class="tag">FR-02</span><span class="tag">FR-03</span><span class="tag">FR-06</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="onboarding.html#state=welcome">welcome <span class="subtle">(default)</span></a></li><li><a class="state-link" href="onboarding.html#state=start-point">start-point</a></li><li><a class="state-link" href="onboarding.html#state=connect-provider">connect-provider</a></li><li><a class="state-link" href="onboarding.html#state=select-project">select-project</a></li><li><a class="state-link" href="onboarding.html#state=add-rule">add-rule</a></li><li><a class="state-link" href="onboarding.html#state=choose-template">choose-template</a></li><li><a class="state-link" href="onboarding.html#state=profiles-and-allowance">profiles-and-allowance</a></li><li><a class="state-link" href="onboarding.html#state=review-and-start">review-and-start</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><a href="runs.html">Runs</a><span class="file">runs.html</span></h2>
+    <p class="muted">Run history with status filter and one row for every run state (queued through failed), pinned workflow version, step progress, tracked cost marked reported or estimated, and cursor pagination.</p>
+    <div class="spec"><span class="tag">§7.2</span><span class="tag">§9.5</span><span class="tag">FR-07</span><span class="tag">FR-09</span><span class="tag">FR-12</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="runs.html#state=list">list <span class="subtle">(default)</span></a></li><li><a class="state-link" href="runs.html#state=filtered">filtered</a></li><li><a class="state-link" href="runs.html#state=empty">empty</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg><a href="new-run.html">Start a workflow</a><span class="file">new-run.html</span></h2>
+    <p class="muted">Goal, diff or file input with preview, pinned workflow version, role-to-profile snapshot, limits, approved memory selection, input summary with first-step reservation and the providers that will receive context. Shows field-level validation and the §9.3 admission arithmetic when the monthly allowance blocks a start.</p>
+    <div class="spec"><span class="tag">§4.2</span><span class="tag">§4.3</span><span class="tag">§9.3</span><span class="tag">§10.2</span><span class="tag">§12.6</span><span class="tag">FR-03</span><span class="tag">FR-04</span><span class="tag">FR-05</span><span class="tag">FR-06</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="new-run.html#state=ready">ready <span class="subtle">(default)</span></a></li><li><a class="state-link" href="new-run.html#state=validation-errors">validation-errors</a></li><li><a class="state-link" href="new-run.html#state=budget-blocked">budget-blocked</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><a href="settings-providers.html">Settings: providers</a><span class="file">settings-providers.html</span></h2>
+    <p class="muted">Providers with redacted keys and test results, model catalog with capabilities and price catalog version, editable model profiles, per-project provider policy, and diagnostics (runner heartbeat, migration, unresolved calls, backup, redacted export). Covers the no-secure-storage fallback to a session-only key.</p>
+    <div class="spec"><span class="tag">§5.6</span><span class="tag">§6.4</span><span class="tag">§11.1</span><span class="tag">§18.2</span><span class="tag">FR-02</span><span class="tag">FR-03</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="settings-providers.html#state=connected">connected <span class="subtle">(default)</span></a></li><li><a class="state-link" href="settings-providers.html#state=no-secure-storage">no-secure-storage</a></li><li><a class="state-link" href="settings-providers.html#state=auth-failed">auth-failed</a></li><li><a class="state-link" href="settings-providers.html#state=diagnostics">diagnostics</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><a href="workflow-editor.html">Workflow editor</a><span class="file">workflow-editor.html</span></h2>
+    <p class="muted">Fixed review-to-patch template with editable prompts, profiles and limits; structural editing disabled with an explanation; draft revisions and validation before a run can use them.</p>
+    <div class="spec"><span class="tag">§5.3</span><span class="tag">§7.1</span><span class="tag">FR-03</span><span class="tag">FR-04</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="workflow-editor.html#state=editing">editing <span class="subtle">(default)</span></a></li><li><a class="state-link" href="workflow-editor.html#state=validation-errors">validation-errors</a></li><li><a class="state-link" href="workflow-editor.html#state=validated">validated</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-eye"/></svg><a href="run-inspector.html">Run inspector</a><span class="file">run-inspector.html</span></h2>
+    <p class="muted">Step timeline, selected step content, plan approval tied to snapshot hashes, budget ledger and context sources, plus streaming, budget pause, unknown outcome, schema failure, auth failure, cancellation and final states; recovery after an interrupted runner, user and limit pauses (with inline limit raise), rate limiting, provider refusal and outage, invalid output after repair, cost overrun, internal failure and cancelled runs. The approval state includes an exportable per-entry Ledger tab.</p>
+    <div class="spec"><span class="tag">§5.4</span><span class="tag">§7.3</span><span class="tag">§7.5</span><span class="tag">§9.5</span><span class="tag">FR-05</span><span class="tag">FR-07</span><span class="tag">FR-08</span><span class="tag">FR-09</span><span class="tag">FR-11</span><span class="tag">FR-12</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="run-inspector.html#state=awaiting-approval">awaiting-approval <span class="subtle">(default)</span></a></li><li><a class="state-link" href="run-inspector.html#state=running-streaming">running-streaming</a></li><li><a class="state-link" href="run-inspector.html#state=budget-paused">budget-paused</a></li><li><a class="state-link" href="run-inspector.html#state=unknown-outcome">unknown-outcome</a></li><li><a class="state-link" href="run-inspector.html#state=schema-invalid">schema-invalid</a></li><li><a class="state-link" href="run-inspector.html#state=auth-failed">auth-failed</a></li><li><a class="state-link" href="run-inspector.html#state=cancelling">cancelling</a></li><li><a class="state-link" href="run-inspector.html#state=approval-stale">approval-stale</a></li><li><a class="state-link" href="run-inspector.html#state=completed">completed</a></li><li><a class="state-link" href="run-inspector.html#state=incomplete">incomplete</a></li><li><a class="state-link" href="run-inspector.html#state=interrupted">interrupted</a></li><li><a class="state-link" href="run-inspector.html#state=paused-user">paused-user</a></li><li><a class="state-link" href="run-inspector.html#state=paused-limit">paused-limit</a></li><li><a class="state-link" href="run-inspector.html#state=rate-limited">rate-limited</a></li><li><a class="state-link" href="run-inspector.html#state=refused">refused</a></li><li><a class="state-link" href="run-inspector.html#state=output-invalid">output-invalid</a></li><li><a class="state-link" href="run-inspector.html#state=provider-unavailable">provider-unavailable</a></li><li><a class="state-link" href="run-inspector.html#state=budget-overrun">budget-overrun</a></li><li><a class="state-link" href="run-inspector.html#state=failed">failed</a></li><li><a class="state-link" href="run-inspector.html#state=cancelled">cancelled</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><a href="memory.html">Project memory</a><span class="file">memory.html</span></h2>
+    <p class="muted">Approved records with provenance, suggestions queue, side-by-side conflict resolution, editing with revisions, deletion consequences, and stale source references.</p>
+    <div class="spec"><span class="tag">§5.5</span><span class="tag">§4.5</span><span class="tag">§10</span><span class="tag">FR-06</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="memory.html#state=approved">approved <span class="subtle">(default)</span></a></li><li><a class="state-link" href="memory.html#state=suggestions">suggestions</a></li><li><a class="state-link" href="memory.html#state=conflict">conflict</a></li><li><a class="state-link" href="memory.html#state=edit">edit</a></li><li><a class="state-link" href="memory.html#state=delete-confirm">delete-confirm</a></li><li><a class="state-link" href="memory.html#state=stale-source">stale-source</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg><a href="report.html">Run report and patch</a><span class="file">report.html</span></h2>
+    <p class="muted">Final report, proposed patch viewer, and export to a user-selected destination without writing to project source files, including export failure and an incomplete report after the revision limit.</p>
+    <div class="spec"><span class="tag">§7.1</span><span class="tag">§12.5</span><span class="tag">FR-10</span></div>
+    <ul class="states" aria-label="States"><li><a class="state-link" href="report.html#state=report">report <span class="subtle">(default)</span></a></li><li><a class="state-link" href="report.html#state=patch">patch</a></li><li><a class="state-link" href="report.html#state=export-dialog">export-dialog</a></li><li><a class="state-link" href="report.html#state=export-failed">export-failed</a></li><li><a class="state-link" href="report.html#state=incomplete-report">incomplete-report</a></li></ul>
+  </li>
+
+  <li class="card screen">
+    <h2><svg class="i" aria-hidden="true" focusable="false"><use href="#i-list"/></svg><a href="index.html">This gallery</a><span class="file">index.html</span></h2>
+    <p class="muted">Index of every mock and state. Not part of the product.</p>
+    <ul class="states" aria-label="States"><li><span class="subtle">Single view</span></li></ul>
+  </li>
+</ul>
+<p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+</div></main>
+</body>
+</html>

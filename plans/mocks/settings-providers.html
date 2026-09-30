@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · Providers · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.settings-layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:var(--space-6);align-items:start}
+@media (max-width:1100px){.settings-layout{grid-template-columns:170px minmax(0,1fr)}}
+.subnav{position:sticky;top:var(--space-6);display:flex;flex-direction:column;gap:var(--space-1)}
+.subnav a{display:flex;align-items:center;gap:var(--space-2);min-height:36px;padding:0 var(--space-3);border-radius:var(--radius-md);color:var(--color-text-muted);text-decoration:none;font-weight:var(--weight-medium);font-size:var(--text-sm);border:1px solid transparent}
+.subnav a:hover{background:var(--color-surface-raised);color:var(--color-text)}
+.subnav a[aria-current="page"]{background:var(--color-surface-raised);color:var(--color-text);border-color:var(--color-border-strong)}
+.settings-main{display:flex;flex-direction:column;gap:var(--space-5);min-width:0}
+.provider-card{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}
+.provider-card.is-danger{border-color:var(--color-danger-border)}
+.provider-card h3{font-size:var(--text-md);display:flex;align-items:center;gap:var(--space-2)}
+.provider-card .kv{font-size:var(--text-sm);gap:var(--space-2) var(--space-4)}
+.key-row{display:flex;gap:var(--space-2);align-items:flex-end;flex-wrap:wrap}
+.key-row .field{flex:1;min-width:220px}
+.yes{color:var(--color-success);display:inline-flex;gap:4px;align-items:center}
+.no{color:var(--color-text-muted);display:inline-flex;gap:4px;align-items:center}
+.table tbody tr{cursor:default}
+.table .select{min-height:34px;padding:var(--space-1) var(--space-2);font-size:var(--text-sm)}
+.table td .checkbox-row{min-height:auto}
+.table .sub{display:block;font-size:var(--text-xs);color:var(--color-text-subtle);font-family:var(--font-sans);font-weight:var(--weight-regular)}
+.catalog td,.catalog th{padding:var(--space-2) var(--space-3)}
+.diag-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-4)}
+@media (max-width:1100px){.table .sub{display:block;font-size:var(--text-xs);color:var(--color-text-subtle);font-family:var(--font-sans);font-weight:var(--weight-regular)}
+.catalog td,.catalog th{padding:var(--space-2) var(--space-3)}
+.diag-grid{grid-template-columns:1fr 1fr}}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol><symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol><symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol><symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol><symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-database" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></symbol><symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol><symbol id="i-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol><symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol><symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol><symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-plug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5M9 8V2M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol><symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></symbol><symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol><symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol><symbol id="i-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol></defs></svg>
+<div class="mock-states" data-states="connected,no-secure-storage,auth-failed,diagnostics"></div>
+<div class="shell">
+  <aside class="sidebar" aria-label="Application sidebar">
+    <div class="brand">RELAY<small>Developer preview</small></div>
+    <nav class="nav" aria-label="Main">
+      <a class="nav-item" href="overview.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="workflow-editor.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><span>Workflows</span></a>
+      <a class="nav-item" href="runs.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><span>Runs</span><span class="nav-count"><span class="sr-only">, approvals waiting: </span>1</span></a>
+      <a class="nav-item" href="memory.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><span>Memory</span></a>
+      <a class="nav-item" href="settings-providers.html" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="workspace">
+      <span class="eyebrow" id="ws-label">Local workspace</span>
+      <button class="project-switcher" type="button" aria-haspopup="listbox" aria-describedby="ws-label"><span>Example API</span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg><span class="sr-only">Switch project</span></button>
+      <div data-state-view="connected,diagnostics"><span class="provider-status"><!--I:check-circle-->2 providers connected</span></div>
+<div data-state-view="no-secure-storage"><span class="provider-status warn"><!--I:alert-->1 session-only key</span></div>
+<div data-state-view="auth-failed"><span class="provider-status warn"><!--I:alert-->1 of 2 providers connected</span></div>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+<header class="topbar">
+  <div>
+    <h1>Settings</h1>
+    <div class="breadcrumbs" aria-label="Location"><span>Example API</span><span>Settings</span><span data-state-view="connected,no-secure-storage,auth-failed">Providers</span><span data-state-view="diagnostics">Diagnostics</span></div>
+  </div>
+</header>
+
+<p class="sr-only" role="status" aria-live="polite">
+  <span data-state-view="connected">Both providers connected.</span>
+  <span data-state-view="no-secure-storage">Secure credential storage is unavailable. Keys can be used for this session only.</span>
+  <span data-state-view="auth-failed">OpenAI authentication failed.</span>
+  <span data-state-view="diagnostics">Runner healthy. 1 unresolved call.</span>
+</p>
+
+<div class="settings-layout">
+  <nav class="subnav" aria-label="Settings sections">
+    <div data-state-view="connected,no-secure-storage,auth-failed">
+      <a href="#providers" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plug"/></svg>Providers</a>
+    </div>
+    <div data-state-view="diagnostics">
+      <a href="settings-providers.html#state=connected"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plug"/></svg>Providers</a>
+    </div>
+    <a href="#profiles"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-cpu"/></svg>Model profiles</a>
+    <a href="#policy"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>Projects</a>
+    <a href="#storage"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-database"/></svg>Storage &amp; data</a>
+    <div data-state-view="connected,no-secure-storage,auth-failed">
+      <a href="settings-providers.html#state=diagnostics"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-activity"/></svg>Diagnostics</a>
+    </div>
+    <div data-state-view="diagnostics">
+      <a href="#diagnostics" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-activity"/></svg>Diagnostics</a>
+    </div>
+    <a href="#about"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-info"/></svg>About</a>
+  </nav>
+
+  <div class="settings-main">
+
+  <!-- =================== PROVIDERS VIEW =================== -->
+  <div data-state-view="connected,no-secure-storage,auth-failed">
+
+    <div data-state-view="no-secure-storage">
+      <section class="banner danger" aria-labelledby="nss-title">
+        <svg class="i" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg>
+        <div class="body">
+          <strong id="nss-title">OS credential protection is unavailable</strong>
+          <p>Relay could not use the macOS Keychain through Electron <span class="mono">safeStorage</span>. Relay never writes API keys to disk in plaintext, so keys cannot be saved right now.</p>
+          <p>You can use a <b>session-only key</b>: it stays in the privileged main process memory, is never shown to the interface, and is cleared when Relay quits.</p>
+          <div class="row">
+            <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>Retry credential storage</button>
+            <a class="btn ghost" href="#storage">What Relay stores locally</a>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div data-state-view="auth-failed">
+      <section class="banner danger" aria-labelledby="af-title">
+        <svg class="i" aria-hidden="true" focusable="false"><use href="#i-key"/></svg>
+        <div class="body">
+          <strong id="af-title">OpenAI rejected the stored key</strong>
+          <p>The last test returned <span class="mono">401 · AUTH_REQUIRED</span>. The <b>Balanced</b> profile uses OpenAI, so runs that assign it to a role cannot start. Run 029 is paused before its next OpenAI call; nothing was sent with the failing key.</p>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" id="providers" aria-labelledby="prov-title">
+      <div class="card-header"><h2 id="prov-title">Providers</h2><button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plus"/></svg>Add provider</button></div>
+      <p class="subtle">Keys are submitted to the privileged main process and never returned to this screen. Only a redacted label is shown.</p>
+      <div class="grid grid-2">
+        <!-- Anthropic -->
+        <article class="provider-card" aria-labelledby="p-anth">
+          <div class="card-header">
+            <h3 id="p-anth">Anthropic <span class="subtle">Provider A</span></h3>
+            <span data-state-view="connected,auth-failed"><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Connected</span></span>
+            <span data-state-view="no-secure-storage"><span class="badge info"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-clock"/></svg>Session only</span></span>
+          </div>
+          <dl class="kv">
+            <dt>Key</dt><dd><span class="mono">sk-ant-…a1F9</span></dd>
+            <dt>Stored in</dt><dd><span data-state-view="connected,auth-failed">macOS Keychain (safeStorage)</span><span data-state-view="no-secure-storage">Memory only · cleared when Relay quits</span></dd>
+            <dt>Last test</dt><dd>Today 09:58 · <span class="num">412 ms</span> · <span class="num">12</span> tokens · <span class="num">$0.0001</span> <span class="est">est.</span></dd>
+          </dl>
+          <div class="row">
+            <button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>Test connection</button>
+            <button class="btn sm" type="button">Replace key</button>
+            <button class="btn sm danger" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-trash"/></svg>Remove key</button>
+          </div>
+        </article>
+
+        <!-- OpenAI -->
+        <div data-state-view="connected">
+          <article class="provider-card" aria-labelledby="p-oai">
+            <div class="card-header"><h3 id="p-oai">OpenAI <span class="subtle">Provider B</span></h3><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Connected</span></div>
+            <dl class="kv">
+              <dt>Key</dt><dd><span class="mono">sk-…Q7d2</span></dd>
+              <dt>Stored in</dt><dd>macOS Keychain (safeStorage)</dd>
+              <dt>Last test</dt><dd>Today 09:59 · <span class="num">538 ms</span> · <span class="num">9</span> tokens · <span class="num">$0.0001</span> <span class="est">est.</span></dd>
+            </dl>
+            <div class="row">
+              <button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>Test connection</button>
+              <button class="btn sm" type="button">Replace key</button>
+              <button class="btn sm danger" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-trash"/></svg>Remove key</button>
+            </div>
+          </article>
+        </div>
+        <div data-state-view="no-secure-storage">
+          <article class="provider-card" aria-labelledby="p-oai2">
+            <div class="card-header"><h3 id="p-oai2">OpenAI <span class="subtle">Provider B</span></h3><span class="badge"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plug"/></svg>Not connected</span></div>
+            <div class="key-row">
+              <div class="field">
+                <label for="oai-key-s">API key</label>
+                <input class="input mono" id="oai-key-s" type="password" autocomplete="off" value="sk-proj-exampleexampleexample" aria-describedby="oai-key-s-hint">
+                <span class="hint" id="oai-key-s-hint">Masked. Kept in memory for this session only.</span>
+              </div>
+            </div>
+            <div class="row">
+              <button class="btn sm primary" type="button">Test and use for this session</button>
+              <button class="btn sm" type="button" aria-disabled="true">Save to Keychain (unavailable)</button>
+            </div>
+          </article>
+        </div>
+        <div data-state-view="auth-failed">
+          <article class="provider-card is-danger" aria-labelledby="p-oai3">
+            <div class="card-header"><h3 id="p-oai3">OpenAI <span class="subtle">Provider B</span></h3><span class="badge danger"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-x-circle"/></svg>Auth failed</span></div>
+            <dl class="kv">
+              <dt>Key</dt><dd><span class="mono">sk-…Q7d2</span> <span class="subtle">(rejected)</span></dd>
+              <dt>Last test</dt><dd>Today 11:31 · <span class="mono">401 Unauthorized</span></dd>
+              <dt>Last success</dt><dd>Sep 29 16:20</dd>
+            </dl>
+            <div class="key-row">
+              <div class="field">
+                <label for="oai-key-r">Replacement API key</label>
+                <input class="input mono" id="oai-key-r" type="password" autocomplete="off" placeholder="Paste a new key" aria-describedby="oai-key-r-hint">
+                <span class="hint" id="oai-key-r-hint">Relay sends a deliberately small test request before saving.</span>
+              </div>
+              <button class="btn primary" type="button">Test and save</button>
+            </div>
+            <div class="row"><button class="btn sm danger" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-trash"/></svg>Remove key</button></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="cat-title">
+      <div class="card-header"><h2 id="cat-title">Model catalog</h2><span class="subtle">Price catalog <span class="mono">cat-2026-09-15</span></span></div>
+      <p class="subtle">Capabilities are checked before a run starts. Updated prices never rewrite estimates on earlier attempts. Prices shown are illustrative, per million tokens.</p>
+      <div class="table-wrap">
+        <table class="table catalog">
+          <caption class="sr-only">Models available from connected providers</caption>
+          <thead><tr>
+            <th scope="col">Model id</th><th scope="col">Structured output</th><th scope="col">Streaming</th>
+            <th scope="col" class="num">Max input</th><th scope="col" class="num">Max output</th><th scope="col" class="num">Price in / out</th><th scope="col">Price catalog · source date</th>
+          </tr></thead>
+          <tbody>
+            <tr><th scope="row"><span class="mono">claude-example-large</span><span class="sub">Anthropic</span></th><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td class="num">200,000</td><td class="num">8,192</td><td class="num nowrap">$3.00 / $15.00</td><td class="nowrap"><span class="mono">cat-2026-09-15</span><span class="sub">Sep 15, 2026</span></td></tr>
+            <tr><th scope="row"><span class="mono">claude-example-small</span><span class="sub">Anthropic</span></th><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td class="num">200,000</td><td class="num">8,192</td><td class="num nowrap">$0.80 / $4.00</td><td class="nowrap"><span class="mono">cat-2026-09-15</span><span class="sub">Sep 15, 2026</span></td></tr>
+            <tr><th scope="row"><span class="mono">gpt-example-standard</span><span class="sub">OpenAI</span></th><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td class="num">128,000</td><td class="num">8,192</td><td class="num nowrap">$2.50 / $10.00</td><td class="nowrap"><span class="mono">cat-2026-09-10</span><span class="sub">Sep 10, 2026</span></td></tr>
+            <tr><th scope="row"><span class="mono">gpt-example-mini</span><span class="sub">OpenAI</span></th><td><span class="no"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>No</span></td><td><span class="yes"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Yes</span></td><td class="num">128,000</td><td class="num">4,096</td><td class="num nowrap">$0.15 / $0.60</td><td class="nowrap"><span class="mono">cat-2026-09-10</span><span class="sub">Sep 10, 2026</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="profiles" aria-labelledby="prof-title">
+      <div class="card-header"><h2 id="prof-title">Model profiles</h2><button class="btn sm primary" type="button">Save profiles</button></div>
+      <p class="subtle">Workflows assign profiles to roles. Each run snapshots the profile, so edits here affect only future runs.</p>
+      <div class="table-wrap">
+        <table class="table">
+          <caption class="sr-only">Editable model profiles</caption>
+          <thead><tr><th scope="col">Profile</th><th scope="col">Provider</th><th scope="col">Model</th><th scope="col" class="num">Default max output</th><th scope="col">Validation</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Economy</th>
+              <td><label class="sr-only" for="pe-p">Economy provider</label><select class="select" id="pe-p"><option>Anthropic</option><option>OpenAI</option></select></td>
+              <td><label class="sr-only" for="pe-m">Economy model</label><select class="select mono" id="pe-m"><option>claude-example-small</option></select></td>
+              <td class="num">2,000</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Valid</span></td></tr>
+            <tr><th scope="row">Balanced</th>
+              <td><label class="sr-only" for="pb-p">Balanced provider</label><select class="select" id="pb-p"><option>OpenAI</option><option>Anthropic</option></select></td>
+              <td><label class="sr-only" for="pb-m">Balanced model</label><select class="select mono" id="pb-m"><option>gpt-example-standard</option><option>gpt-example-mini</option></select></td>
+              <td class="num">4,000</td>
+              <td><span data-state-view="connected,no-secure-storage"><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Valid</span></span><span data-state-view="auth-failed"><span class="badge danger"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-key"/></svg>Needs credential</span></span></td></tr>
+            <tr><th scope="row">Capable</th>
+              <td><label class="sr-only" for="pc-p">Capable provider</label><select class="select" id="pc-p"><option>Anthropic</option><option>OpenAI</option></select></td>
+              <td><label class="sr-only" for="pc-m">Capable model</label><select class="select mono" id="pc-m"><option>claude-example-large</option></select></td>
+              <td class="num">4,000</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Valid</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="policy" aria-labelledby="pol-title">
+      <h2 id="pol-title">Project provider policy</h2>
+      <p class="subtle">Selected context leaves this computer only through calls to providers a project allows. Local storage does not make remote processing private.</p>
+      <div class="table-wrap">
+        <table class="table">
+          <caption class="sr-only">Which providers may receive selected context, per project</caption>
+          <thead><tr><th scope="col">Project</th><th scope="col">Allow sending selected context to</th><th scope="col">Effect</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Example API</th>
+              <td><div class="row">
+                <label class="checkbox-row" for="pol-a1"><input type="checkbox" id="pol-a1" checked>Anthropic</label>
+                <label class="checkbox-row" for="pol-o1"><input type="checkbox" id="pol-o1" checked>OpenAI</label>
+              </div></td>
+              <td class="subtle">All profiles usable</td></tr>
+            <tr><th scope="row">Payments sandbox</th>
+              <td><div class="row">
+                <label class="checkbox-row" for="pol-a2"><input type="checkbox" id="pol-a2" checked>Anthropic</label>
+                <label class="checkbox-row" for="pol-o2"><input type="checkbox" id="pol-o2">OpenAI</label>
+              </div></td>
+              <td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-alert"/></svg>Balanced profile blocked</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- =================== DIAGNOSTICS VIEW =================== -->
+  <div data-state-view="diagnostics">
+    <section class="card" id="diagnostics" aria-labelledby="diag-title">
+      <div class="card-header">
+        <h2 id="diag-title">Diagnostics</h2>
+        <div class="row">
+          <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-database"/></svg>Create backup</button>
+          <button class="btn primary" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-download"/></svg>Export diagnostics (redacted)</button>
+        </div>
+      </div>
+      <div class="diag-grid">
+        <div class="card stat"><span class="eyebrow">Runner heartbeat</span><span class="badge success" style="align-self:flex-start"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-activity"/></svg>Healthy</span><span class="hint">Last beat 2 s ago · lease <span class="mono">runner-7c1e</span></span></div>
+        <div class="card stat"><span class="eyebrow">Database migration</span><span class="value" style="font-size:var(--text-lg)">0007</span><span class="hint"><span class="mono">attempt_usage</span> · current, ran before runner start</span></div>
+        <div class="card stat"><span class="eyebrow">Unresolved calls</span><span class="value">1</span><span class="hint"><a href="run-inspector.html#state=unknown-outcome">Run 027 · <span class="mono">att_05</span></a> · <span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-help"/></svg>Unknown charge</span></span></div>
+      </div>
+      <dl class="kv">
+        <dt>App version</dt><dd class="mono">0.1.0-preview.3</dd>
+        <dt>Build id</dt><dd class="mono">a41c9e2 · 2026-09-28</dd>
+        <dt>Platform</dt><dd>macOS 15 · arm64 · Electron runtime</dd>
+        <dt>Credential storage</dt><dd><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg>safeStorage available</span></dd>
+        <dt>Single-instance lock</dt><dd>Held by this window</dd>
+        <dt>Database</dt><dd><span class="num">4.2 MB</span> · last backup Sep 29 18:02 · <span class="mono">relay-2026-09-29.db.bak</span></dd>
+        <dt>Artifacts</dt><dd><span class="num">38</span> files · <span class="num">1.9 MB</span></dd>
+      </dl>
+    </section>
+
+    <section class="card" aria-labelledby="err-title">
+      <h2 id="err-title">Recent errors (redacted)</h2>
+      <div class="table-wrap">
+        <table class="table">
+          <caption class="sr-only">Recent error events with stable codes</caption>
+          <thead><tr><th scope="col">Time</th><th scope="col">Code · attempt</th><th scope="col">Message</th><th scope="col">Retryable</th></tr></thead>
+          <tbody>
+            <tr><td class="nowrap subtle">Today 11:31</td><th scope="row"><span class="mono">AUTH_REQUIRED</span><span class="sub"><span class="mono">Run 029 · att_03</span></span></th><td>Provider rejected credential <span class="mono">sk-…Q7d2</span></td><td>After reconnect</td></tr>
+            <tr><td class="nowrap subtle">Sep 29 09:15</td><th scope="row"><span class="mono">REQUEST_OUTCOME_UNKNOWN</span><span class="sub"><span class="mono">Run 027 · att_05</span></span></th><td>Runner lost after dispatch; no response recorded</td><td>User decision</td></tr>
+            <tr><td class="nowrap subtle">Sep 26 09:04</td><th scope="row"><span class="mono">OUTPUT_INVALID</span><span class="sub"><span class="mono">Run 023 · att_03</span></span></th><td>Plan did not match schema <span class="mono">plan.v2</span> (missing <span class="mono">file_scope</span>)</td><td>New attempt</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="subtle">Exports include versions, migration state, error codes and attempt ids. They exclude API keys, prompts, file contents and memory text.</p>
+    </section>
+  </div>
+
+  <section class="card" id="storage" aria-labelledby="st-title">
+    <h2 id="st-title">Storage &amp; data</h2>
+    <dl class="kv">
+      <dt>Data folder</dt><dd class="mono">~/Library/Application Support/Relay</dd>
+      <dt>Contains</dt><dd>SQLite database, run artifacts, memory records, usage ledger. Never API keys.</dd>
+    </dl>
+    <div class="row"><button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>Show data folder</button><button class="btn sm danger" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-trash"/></svg>Purge project history…</button></div>
+  </section>
+  <section class="card" id="about" aria-labelledby="about-title">
+    <h2 id="about-title">About</h2>
+    <p class="muted">Relay <span class="mono">0.1.0-preview.3</span> · local desktop prototype. Project data, runs, memory and the usage ledger are stored on this computer. Model calls are processed by the providers you connect.</p>
+  </section>
+  </div>
+</div>
+      <p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

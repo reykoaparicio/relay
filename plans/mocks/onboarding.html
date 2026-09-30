@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First launch · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.stepper .n svg{width:12px;height:12px}
+.setup-card{max-width:960px}
+.lead{font-size:var(--text-lg);color:var(--color-text)}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4)}
+@media (max-width:1100px){.split{grid-template-columns:1fr}}
+.panel{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-raised);padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}
+.panel h3{display:flex;gap:var(--space-2);align-items:center;font-size:var(--text-md)}
+.panel h3 svg{width:20px;height:20px;color:var(--color-accent)}
+.panel ul{margin:0;padding-left:var(--space-5);display:flex;flex-direction:column;gap:var(--space-1);color:var(--color-text-muted);font-size:var(--text-sm)}
+.step-nav{display:flex;gap:var(--space-3);align-items:center;flex-wrap:wrap;border-top:1px solid var(--color-divider);padding-top:var(--space-4)}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+legend{font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--color-text-muted);padding:0;margin-bottom:var(--space-2)}
+.choice-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3)}
+@media (max-width:1100px){.choice-grid{grid-template-columns:1fr}}
+.choice{display:flex;gap:var(--space-3);align-items:flex-start;padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-raised);cursor:pointer}
+.choice:has(input:checked){border-color:var(--color-accent-border);background:var(--color-surface-selected)}
+.choice input{margin-top:4px;width:16px;height:16px;accent-color:var(--color-accent-strong)}
+.choice span{display:flex;flex-direction:column;gap:var(--space-1)}
+.choice small{color:var(--color-text-muted);font-size:var(--text-sm)}
+.choice.disabled{opacity:.6;cursor:not-allowed}
+.key-row{display:flex;gap:var(--space-3);align-items:flex-end;flex-wrap:wrap}
+.key-row .field{flex:1;min-width:260px}
+.tree-box{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-canvas);padding:var(--space-3);overflow:auto}
+.tree li.excluded{text-decoration:none}
+.tree li.excluded .name{text-decoration:line-through}
+.tree li .size{margin-left:auto;color:var(--color-text-subtle);font-size:var(--text-xs)}
+.tree li.excluded .size{display:none}
+.tree li svg{width:14px;height:14px;color:var(--color-text-subtle)}
+.tree li .why{display:inline-flex;gap:4px;align-items:center}
+.path{display:flex;gap:var(--space-3);align-items:center;flex-wrap:wrap;padding:var(--space-3) var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-raised)}
+.path .mono{flex:1;min-width:0;overflow-wrap:anywhere}
+.steps-list{margin:0;padding-left:var(--space-6);display:flex;flex-direction:column;gap:var(--space-2)}
+.steps-list li span{color:var(--color-text-muted);font-size:var(--text-sm)}
+.table tbody tr{cursor:default}
+.table .select{min-height:34px;padding:var(--space-1) var(--space-2);font-size:var(--text-sm)}
+.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-4)}
+@media (max-width:1100px){.form-grid{grid-template-columns:1fr 1fr}}
+.record{border:1px solid var(--color-accent-border);background:var(--color-surface-selected);border-radius:var(--radius-md);padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-2)}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol><symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></symbol><symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol><symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol><symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-drive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01M10 16h.01"/></symbol><symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol><symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol><symbol id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></symbol><symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol><symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol><symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol><symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></symbol><symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol></defs></svg>
+<div class="mock-states" data-states="welcome,start-point,connect-provider,select-project,add-rule,choose-template,profiles-and-allowance,review-and-start"></div>
+<div class="shell">
+  <aside class="sidebar" aria-label="Application sidebar">
+    <div class="brand">RELAY<small>Developer preview</small></div>
+    <nav class="nav" aria-label="Main">
+      <a class="nav-item" href="overview.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="workflow-editor.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><span>Workflows</span></a>
+      <a class="nav-item" href="runs.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><span>Runs</span></a>
+      <a class="nav-item" href="memory.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><span>Memory</span></a>
+      <a class="nav-item" href="settings-providers.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="workspace">
+      <span class="eyebrow" id="ws-label">Local workspace</span>
+      <button class="project-switcher" type="button" aria-haspopup="listbox" aria-describedby="ws-label"><span><span data-state-view="welcome,start-point,connect-provider">No project yet</span><span data-state-view="select-project,add-rule,choose-template,profiles-and-allowance,review-and-start">Example API</span></span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg><span class="sr-only">Switch project</span></button>
+      <div data-state-view="welcome,start-point"><span class="provider-status warn"><!--I:plug-->No providers connected</span></div>
+<div data-state-view="connect-provider,select-project,add-rule,choose-template,profiles-and-allowance,review-and-start"><span class="provider-status"><!--I:check-circle-->1 provider connected</span></div>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+<header class="topbar">
+  <div>
+    <h1>Set up Relay</h1>
+    <div class="breadcrumbs" aria-label="Location"><span>First launch</span>
+      <span data-state-view="welcome">Step 1 of 8</span><span data-state-view="start-point">Step 2 of 8</span><span data-state-view="connect-provider">Step 3 of 8</span><span data-state-view="select-project">Step 4 of 8</span><span data-state-view="add-rule">Step 5 of 8</span><span data-state-view="choose-template">Step 6 of 8</span><span data-state-view="profiles-and-allowance">Step 7 of 8</span><span data-state-view="review-and-start">Step 8 of 8</span>
+    </div>
+  </div>
+  <div class="actions"><button class="btn ghost" type="button">Skip setup</button></div>
+</header>
+
+<div data-state-view="welcome"><nav aria-label="Setup progress, step 1 of 8"><ol class="stepper"><li aria-current="step"><span class="n">1</span>Welcome</li><li><span class="n">2</span>Start point</li><li><span class="n">3</span>Provider</li><li><span class="n">4</span>Project folder</li><li><span class="n">5</span>Project rule</li><li><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="start-point"><nav aria-label="Setup progress, step 2 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li aria-current="step"><span class="n">2</span>Start point</li><li><span class="n">3</span>Provider</li><li><span class="n">4</span>Project folder</li><li><span class="n">5</span>Project rule</li><li><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="connect-provider"><nav aria-label="Setup progress, step 3 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li aria-current="step"><span class="n">3</span>Provider</li><li><span class="n">4</span>Project folder</li><li><span class="n">5</span>Project rule</li><li><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="select-project"><nav aria-label="Setup progress, step 4 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Provider</li><li aria-current="step"><span class="n">4</span>Project folder</li><li><span class="n">5</span>Project rule</li><li><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="add-rule"><nav aria-label="Setup progress, step 5 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Provider</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project folder</li><li aria-current="step"><span class="n">5</span>Project rule</li><li><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="choose-template"><nav aria-label="Setup progress, step 6 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Provider</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project folder</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project rule</li><li aria-current="step"><span class="n">6</span>Template</li><li><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="profiles-and-allowance"><nav aria-label="Setup progress, step 7 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Provider</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project folder</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project rule</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Template</li><li aria-current="step"><span class="n">7</span>Profiles &amp; allowance</li><li><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+<div data-state-view="review-and-start"><nav aria-label="Setup progress, step 8 of 8"><ol class="stepper"><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Welcome</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Start point</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Provider</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project folder</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Project rule</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Template</li><li class="done"><span class="n"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check"/></svg><span class="sr-only">Completed:</span></span>Profiles &amp; allowance</li><li aria-current="step"><span class="n">8</span>Review &amp; start</li></ol></nav></div>
+
+<!-- ================= 1. WELCOME ================= -->
+<div data-state-view="welcome">
+<section class="card setup-card" aria-labelledby="s1">
+  <h2 id="s1">Welcome to Relay</h2>
+  <p class="lead">Run a repeatable AI review-to-patch workflow on your code, with visible spending and your approval before any patch is drafted.</p>
+  <div class="split">
+    <div class="panel">
+      <h3><svg class="i" aria-hidden="true" focusable="false"><use href="#i-drive"/></svg>Stored on this computer</h3>
+      <ul>
+        <li>Projects, runs, step checkpoints and artifacts</li>
+        <li>Approved project memory and its revision history</li>
+        <li>The usage ledger tracked by Relay</li>
+        <li>API keys, in your OS credential store (never plaintext)</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3><svg class="i" aria-hidden="true" focusable="false"><use href="#i-cloud"/></svg>Processed remotely</h3>
+      <ul>
+        <li>Only the context you select: goal, diff or files, approved memory</li>
+        <li>Sent only to model providers you connect and allow per project</li>
+        <li>Nothing is sent until you start a run</li>
+        <li>Local storage does not make remote processing private or offline</li>
+      </ul>
+    </div>
+  </div>
+  <p class="safe-note"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>In this preview Relay never modifies your project files. Results are proposed patches you export.</p>
+  <div class="banner info">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-box"/></svg>
+    <div class="body"><strong>Want to look around first?</strong><p>A fictional sample project with a prepared diff lets you try a full run before pointing Relay at your own code.</p></div>
+    <a class="btn sm" href="#state=start-point">Use the sample project</a>
+  </div>
+  <div class="step-nav"><span class="spacer"></span><a class="btn primary" href="#state=start-point">Continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 2. START POINT ================= -->
+<div data-state-view="start-point">
+<section class="card setup-card" aria-labelledby="s2">
+  <h2 id="s2">Choose a starting point</h2>
+  <fieldset>
+    <legend>Project to set up</legend>
+    <div class="choice-grid">
+      <label class="choice" for="sp-sample"><input type="radio" name="sp" id="sp-sample" checked><span><strong>Built-in sample project</strong><small>Fictional "Example API": 14 small TypeScript files and a prepared diff that adds input validation. Safe to share on screen.</small><span class="tag" style="align-self:flex-start">Recommended for a first run</span></span></label>
+      <label class="choice" for="sp-own"><input type="radio" name="sp" id="sp-own"><span><strong>My own project folder</strong><small>Use a repository you own or have permission to process. You will see exactly which files are eligible before anything is sent.</small></span></label>
+    </div>
+  </fieldset>
+  <p class="subtle">Either way, you need one connected provider to run the workflow.</p>
+  <div class="step-nav"><a class="btn" href="#state=welcome"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn primary" href="#state=connect-provider">Continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 3. CONNECT PROVIDER ================= -->
+<div data-state-view="connect-provider">
+<section class="card setup-card" aria-labelledby="s3">
+  <h2 id="s3">Connect a model provider</h2>
+  <fieldset>
+    <legend>Provider</legend>
+    <div class="choice-grid">
+      <label class="choice" for="pv-a"><input type="radio" name="pv" id="pv-a" checked><span><strong>Anthropic</strong><small>API key from your Anthropic console</small></span></label>
+      <label class="choice" for="pv-o"><input type="radio" name="pv" id="pv-o"><span><strong>OpenAI</strong><small>API key from your OpenAI dashboard</small></span></label>
+    </div>
+  </fieldset>
+  <div class="key-row">
+    <div class="field">
+      <label for="api-key">API key</label>
+      <input class="input mono" id="api-key" type="password" autocomplete="off" value="sk-ant-example-example-example-a1F9" aria-describedby="api-key-hint">
+      <span class="hint" id="api-key-hint">Masked. Stored in the macOS Keychain and never shown again.</span>
+    </div>
+    <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>Test connection</button>
+  </div>
+  <div role="status" aria-live="polite">
+    <div class="banner success">
+      <svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>
+      <div class="body">
+        <strong>Connected to Anthropic · <span class="mono">sk-…a1F9</span></strong>
+        <p class="subtle">Test request: <span class="num">12</span> tokens · <span class="num">412 ms</span> · <span class="num">$0.0001</span> <span class="est">est.</span> · 3 models available</p>
+      </div>
+    </div>
+  </div>
+  <div class="banner">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-info"/></svg>
+    <div class="body">
+      <strong>A second provider is optional for setup</strong>
+      <p class="muted">It is required for the multi-provider demo, where different roles in one run use different providers. You can add it now or later in Settings.</p>
+    </div>
+    <button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plus"/></svg>Add OpenAI too</button>
+  </div>
+  <div class="step-nav"><a class="btn" href="#state=start-point"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn primary" href="#state=select-project">Continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 4. SELECT PROJECT ================= -->
+<div data-state-view="select-project">
+<section class="card setup-card" aria-labelledby="s4">
+  <h2 id="s4">Select the project folder</h2>
+  <div class="path">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>
+    <span class="mono">/Users/you/code/example-api</span>
+    <button class="btn sm" type="button">Choose a different folder</button>
+  </div>
+  <div class="form-grid">
+    <div class="field"><label for="pname">Project name</label><input class="input" id="pname" value="Example API"></div>
+    <div class="field" style="grid-column:span 2"><label for="pexcl">Extra exclude patterns</label><input class="input mono" id="pexcl" value="fixtures/**/*.json" aria-describedby="pexcl-hint"><span class="hint" id="pexcl-hint">Added to the built-in exclusions for dependencies, build output, secrets, binaries and OS files.</span></div>
+  </div>
+
+  <div class="row" style="justify-content:space-between">
+    <h3 class="eyebrow">Included-file preview</h3>
+    <span class="subtle"><span class="num">11</span> included · <span class="num">6</span> excluded · <span class="num">38.6 KB</span> of <span class="num">256 KB</span> input cap</span>
+  </div>
+  <div class="meter" role="img" aria-label="38.6 KB of 256 KB input cap used"><span class="settled" style="width:15%"></span></div>
+  <div class="tree-box">
+    <ul class="tree" aria-label="Files under the project root">
+      <li><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>example-api/</li>
+      <li class="indent-1"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>src/</li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>handlers/orders.ts<span class="size num">6.1 KB</span></li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>handlers/users.ts<span class="size num">4.8 KB</span></li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>lib/errors.ts<span class="size num">2.2 KB</span></li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>lib/validate.ts<span class="size num">3.0 KB</span></li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>server.ts<span class="size num">1.9 KB</span></li>
+      <li class="indent-1"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg>test/</li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>orders.test.ts<span class="size num">5.4 KB</span></li>
+      <li class="indent-2"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>users.test.ts<span class="size num">4.1 KB</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg><span class="name">node_modules/</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: dependency directory</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-folder"/></svg><span class="name">dist/</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: build output</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><span class="name">.env</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: credentials file</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-image"/></svg><span class="name">docs/diagram.png</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: binary</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg><span class="name">fixtures/orders-dump.json</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: too large (2.4 MB &gt; 64 KB per file) and your pattern</span></li>
+      <li class="indent-1 excluded"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg><span class="name">.DS_Store</span><span class="why"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Excluded: OS file</span></li>
+      <li class="indent-1"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>package.json<span class="size num">1.2 KB</span></li>
+      <li class="indent-1"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>README.md<span class="size num">3.6 KB</span></li>
+      <li class="indent-1"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-file"/></svg>tsconfig.json<span class="size num">0.6 KB</span></li>
+    </ul>
+  </div>
+  <p class="subtle">Only files you select for a run are sent. This preview shows what is eligible. Paths are checked against the canonical project root, including symlinks.</p>
+  <div class="step-nav"><a class="btn" href="#state=connect-provider"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn primary" href="#state=add-rule">Create project and continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 5. ADD RULE ================= -->
+<div data-state-view="add-rule">
+<section class="card setup-card" aria-labelledby="s5">
+  <h2 id="s5">Add one project rule</h2>
+  <p class="muted">Rules are approved memory. Relay includes them in future runs within their scope, and every run keeps a snapshot of the revision it used.</p>
+  <div class="form-grid">
+    <div class="field"><label for="rtype">Type</label><select class="select" id="rtype"><option>User rule</option><option>Project decision</option></select></div>
+    <div class="field" style="grid-column:span 2"><label for="rscope">Scope</label><select class="select" id="rscope"><option>This project · all roles</option><option>This project · reviewer and patch reviewer</option><option>Path: src/handlers/**</option></select></div>
+  </div>
+  <div class="field">
+    <label for="rtext">Rule</label>
+    <textarea class="textarea" id="rtext" style="font-family:var(--font-sans);font-size:var(--text-md)">Preserve the existing public response format. Do not rename or remove response fields or change status code conventions.</textarea>
+    <span class="hint">A rule guides the models. It cannot change file access, providers or budget limits.</span>
+  </div>
+  <div class="record" aria-label="Preview of the record">
+    <div class="row"><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Approved by you</span><span class="tag">User rule</span><span class="tag">Project · all roles</span><span class="subtle mono">rev 1</span></div>
+    <p>Preserve the existing public response format. Do not rename or remove response fields or change status code conventions.</p>
+  </div>
+  <div class="step-nav"><a class="btn" href="#state=select-project"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn ghost" href="#state=choose-template">Skip for now</a><a class="btn primary" href="#state=choose-template">Save rule and continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 6. TEMPLATE ================= -->
+<div data-state-view="choose-template">
+<section class="card setup-card" aria-labelledby="s6">
+  <h2 id="s6">Choose a workflow template</h2>
+  <fieldset>
+    <legend>Template</legend>
+    <div class="choice-grid">
+      <label class="choice" for="t1"><input type="radio" name="tpl" id="t1" checked><span><strong>Review &amp; propose a fix <span class="tag mono">v3</span></strong><small>Review a selected change, plan a fix, pause for your approval, draft a patch, then review the patch. Produces a report and an exportable patch.</small></span></label>
+      <div class="choice disabled" aria-disabled="true"><span><strong>More templates</strong><small>Additional templates and structural editing come in a later release. You can edit prompts, profiles and limits of this template in Workflows.</small></span></div>
+    </div>
+  </fieldset>
+  <h3 class="eyebrow">Steps in this template</h3>
+  <ol class="steps-list">
+    <li><strong>Read context</strong> <span>· builds an immutable manifest of the selected files and memory</span></li>
+    <li><strong>Review input</strong> <span>· Reviewer role · findings with severity and file references</span></li>
+    <li><strong>Plan a fix</strong> <span>· Planner role · ordered steps and proposed file scope</span></li>
+    <li><strong>Approve plan</strong> <span>· you · approval is tied to this plan and context snapshot</span></li>
+    <li><strong>Produce patch</strong> <span>· Implementer role · proposed patch artifact, no source writes</span></li>
+    <li><strong>Review patch</strong> <span>· Patch reviewer role · accept, request a bounded revision, or mark incomplete</span></li>
+  </ol>
+  <div class="step-nav"><a class="btn" href="#state=add-rule"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn primary" href="#state=profiles-and-allowance">Continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 7. PROFILES & ALLOWANCE ================= -->
+<div data-state-view="profiles-and-allowance">
+<section class="card setup-card" aria-labelledby="s7">
+  <h2 id="s7">Pick role profiles and a run allowance</h2>
+  <div class="table-wrap">
+    <table class="table">
+      <caption class="sr-only">Model profile for each role</caption>
+      <thead><tr><th scope="col">Role</th><th scope="col">Profile</th><th scope="col">Provider · model</th><th scope="col" class="num">Max output</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Reviewer</th><td><label class="sr-only" for="o-rev">Reviewer profile</label><select class="select" id="o-rev"><option>Capable</option><option>Economy</option></select></td><td>Anthropic · <span class="mono">claude-example-large</span></td><td class="num">4,000</td></tr>
+        <tr><th scope="row">Planner</th><td><label class="sr-only" for="o-pln">Planner profile</label><select class="select" id="o-pln"><option>Economy</option><option>Capable</option></select></td><td>Anthropic · <span class="mono">claude-example-small</span></td><td class="num">4,000</td></tr>
+        <tr><th scope="row">Implementer</th><td><label class="sr-only" for="o-imp">Implementer profile</label><select class="select" id="o-imp"><option>Capable</option><option>Economy</option></select></td><td>Anthropic · <span class="mono">claude-example-large</span></td><td class="num">8,000</td></tr>
+        <tr><th scope="row">Patch reviewer</th><td><label class="sr-only" for="o-pr">Patch reviewer profile</label><select class="select" id="o-pr"><option>Economy</option><option>Capable</option></select></td><td>Anthropic · <span class="mono">claude-example-small</span></td><td class="num">4,000</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="subtle">Only Anthropic is connected, so every role uses it. Connect OpenAI in Settings to split roles across two providers.</p>
+  <div class="form-grid">
+    <div class="field"><label for="o-allow">Run allowance (USD)</label><input class="input num" id="o-allow" inputmode="decimal" value="3.00" aria-describedby="o-allow-hint"><span class="hint" id="o-allow-hint">Relay blocks the next call if its reservation would exceed this.</span></div>
+    <div class="field"><label for="o-month">Project monthly allowance (USD)</label><input class="input num" id="o-month" inputmode="decimal" value="20.00"><span class="hint">Tracked by Relay, not a provider billing cap.</span></div>
+    <div class="field"><label for="o-rev-c">Revision cycles</label><input class="input num" id="o-rev-c" type="number" min="0" max="5" value="2"><span class="hint">Then the run is marked incomplete.</span></div>
+  </div>
+  <div class="step-nav"><a class="btn" href="#state=choose-template"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><a class="btn primary" href="#state=review-and-start">Continue<svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg></a></div>
+</section>
+</div>
+
+<!-- ================= 8. REVIEW & START ================= -->
+<div data-state-view="review-and-start">
+<section class="card setup-card" aria-labelledby="s8">
+  <h2 id="s8">Review the input and start</h2>
+  <div class="field">
+    <label for="o-goal">Goal</label>
+    <textarea class="textarea" id="o-goal" style="font-family:var(--font-sans);font-size:var(--text-md);min-height:72px">Reject invalid request values consistently in the orders handler.</textarea>
+  </div>
+  <div class="split">
+    <div class="panel">
+      <h3><svg class="i" aria-hidden="true" focusable="false"><use href="#i-list"/></svg>Input summary</h3>
+      <dl class="kv">
+        <dt>Project</dt><dd>Example API</dd>
+        <dt>Input</dt><dd>Working tree diff · <span class="num">3</span> files · <span class="num">18.4 KB</span></dd>
+        <dt>Memory records</dt><dd><span class="num">1</span> approved rule</dd>
+        <dt>Workflow</dt><dd>Review &amp; propose a fix <span class="tag mono">v3</span></dd>
+        <dt>Run allowance</dt><dd><span class="num">$3.00</span></dd>
+        <dt>First reservation</dt><dd><span class="num">$0.36</span> <span class="est">est.</span></dd>
+      </dl>
+    </div>
+    <div class="panel">
+      <h3><svg class="i" aria-hidden="true" focusable="false"><use href="#i-cloud"/></svg>Providers receiving data</h3>
+      <dl class="kv">
+        <dt>Anthropic</dt><dd>All 4 roles · selected diff, goal, 1 rule</dd>
+        <dt>OpenAI</dt><dd class="muted">Not connected · receives nothing</dd>
+      </dl>
+      <p class="subtle">Excluded files such as <span class="mono">.env</span> are never sent.</p>
+    </div>
+  </div>
+  <p class="safe-note"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>Relay will pause for your approval before drafting a patch. No project files will be modified.</p>
+  <div class="step-nav"><a class="btn" href="#state=profiles-and-allowance"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-left"/></svg>Back</a><span class="spacer"></span><button class="btn primary" type="button" onclick="location.href='run-inspector.html'"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start run</button></div>
+</section>
+</div>
+      <p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

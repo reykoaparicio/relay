@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Start a workflow · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.code .ctx{display:block}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+legend{font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--color-text-muted);padding:0;margin-bottom:var(--space-2)}
+.radio-cards{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3)}
+.radio-card{display:flex;gap:var(--space-3);align-items:flex-start;padding:var(--space-3) var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-raised);cursor:pointer}
+.radio-card:has(input:checked){border-color:var(--color-accent-border);background:var(--color-surface-selected)}
+.radio-card input{margin-top:4px;accent-color:var(--color-accent-strong);width:16px;height:16px}
+.radio-card small{display:block;color:var(--color-text-muted);font-size:var(--text-xs)}
+.form-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4)}
+@media (max-width:1100px){.form-grid{grid-template-columns:1fr 1fr}.radio-cards{grid-template-columns:1fr}}
+.input-affix{display:flex;align-items:center;gap:var(--space-2)}
+.table .select{min-height:34px;padding:var(--space-1) var(--space-2);font-size:var(--text-sm)}
+.table .input{min-height:34px;padding:var(--space-1) var(--space-2);font-size:var(--text-sm);max-width:110px;text-align:right;font-family:var(--font-mono)}
+.table tbody tr{cursor:default}
+.mem-row{display:flex;gap:var(--space-3);align-items:flex-start;padding:var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-raised)}
+.mem-row input{margin-top:4px;width:16px;height:16px;accent-color:var(--color-accent-strong)}
+.mem-row label{display:flex;flex-direction:column;gap:2px;cursor:pointer;flex:1}
+.mem-row .meta{display:flex;gap:var(--space-2);flex-wrap:wrap}
+.side-sticky{position:sticky;top:var(--space-6);display:flex;flex-direction:column;gap:var(--space-5)}
+.provider-line{display:flex;align-items:center;gap:var(--space-2);justify-content:space-between;padding:var(--space-2) 0;border-bottom:1px solid var(--color-divider)}
+.provider-line:last-child{border-bottom:0}
+.error-summary ul{margin:0;padding-left:var(--space-5)}
+.admission td,.admission th{padding:var(--space-2) var(--space-3)}
+.admission .over td{color:var(--color-danger);font-weight:var(--weight-semibold)}
+.option-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-3)}
+@media (max-width:1100px){.option-grid{grid-template-columns:1fr}}
+.option{border:1px solid var(--color-border);border-radius:var(--radius-md);padding:var(--space-4);background:var(--color-surface-raised);display:flex;flex-direction:column;gap:var(--space-3)}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-alert-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol><symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol><symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol><symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol><symbol id="i-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol><symbol id="i-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol></defs></svg>
+<div class="mock-states" data-states="ready,validation-errors,budget-blocked"></div>
+<div class="shell">
+  <aside class="sidebar" aria-label="Application sidebar">
+    <div class="brand">RELAY<small>Developer preview</small></div>
+    <nav class="nav" aria-label="Main">
+      <a class="nav-item" href="overview.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="workflow-editor.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><span>Workflows</span></a>
+      <a class="nav-item" href="runs.html" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><span>Runs</span><span class="nav-count"><span class="sr-only">, approvals waiting: </span>1</span></a>
+      <a class="nav-item" href="memory.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><span>Memory</span></a>
+      <a class="nav-item" href="settings-providers.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="workspace">
+      <span class="eyebrow" id="ws-label">Local workspace</span>
+      <button class="project-switcher" type="button" aria-haspopup="listbox" aria-describedby="ws-label"><span>Example API</span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg><span class="sr-only">Switch project</span></button>
+      <div data-state-view="ready,budget-blocked"><span class="provider-status"><!--I:check-circle-->2 providers connected</span></div>
+<div data-state-view="validation-errors"><span class="provider-status warn"><!--I:alert-->1 of 2 providers connected</span></div>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+<header class="topbar">
+  <div>
+    <h1>Start a workflow</h1>
+    <div class="breadcrumbs" aria-label="Location"><span>Example API</span><span>Runs</span><span>New run</span></div>
+  </div>
+  <div class="actions">
+    <a class="btn" href="runs.html">Cancel</a>
+  </div>
+</header>
+
+<p class="sr-only" role="status" aria-live="polite">
+  <span data-state-view="ready">All checks passed. Ready to start.</span>
+  <span data-state-view="validation-errors">3 problems prevent starting this run.</span>
+  <span data-state-view="budget-blocked">Start blocked: the project monthly allowance would be exceeded.</span>
+</p>
+
+<div data-state-view="validation-errors">
+  <section class="banner danger error-summary" aria-labelledby="err-title" tabindex="-1">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-alert-circle"/></svg>
+    <div class="body">
+      <strong id="err-title">3 problems prevent starting this run</strong>
+      <ul>
+        <li><a href="#role-planner">Planner: no working credential for OpenAI</a> <span class="mono subtle">AUTH_REQUIRED</span></li>
+        <li><a href="#max-implementer">Implementer: max output exceeds the model limit</a> <span class="mono subtle">MODEL_UNSUPPORTED</span></li>
+        <li><a href="#input-source">Selected context is too large for the Reviewer profile</a> <span class="mono subtle">CONTEXT_TOO_LARGE</span></li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<div data-state-view="budget-blocked">
+  <section class="banner warning" aria-labelledby="bud-title">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-wallet"/></svg>
+    <div class="body">
+      <strong id="bud-title">The project monthly allowance would be exceeded</strong>
+      <p>Relay did not reserve or send anything. The first step needs <span class="num">$0.54</span> <span class="est">est.</span>, and only <span class="num">$0.32</span> of this month's tracked allowance is uncommitted. A model cannot raise this allowance; only you can, in project settings.</p>
+    </div>
+  </section>
+  <section class="card" aria-labelledby="adm-title">
+    <div class="card-header"><h2 id="adm-title">Admission check</h2><span class="badge danger"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-x-circle"/></svg>Blocked</span></div>
+    <p class="subtle">Dispatch only when C + R + U + N ≤ L. Amounts are tracked by Relay (spec §9.3).</p>
+    <div class="table-wrap">
+      <table class="ledger admission">
+        <caption class="sr-only">Monthly allowance admission arithmetic</caption>
+        <thead><tr><th scope="col">Symbol</th><th scope="col">Meaning</th><th scope="col">Source</th><th scope="col" class="num">Amount</th></tr></thead>
+        <tbody>
+          <tr><th scope="row" class="mono">L</th><td>Project monthly allowance</td><td class="subtle">Example API · September</td><td class="num">$20.00</td></tr>
+          <tr><th scope="row" class="mono">C</th><td>Settled tracked cost, incl. labeled estimates</td><td class="subtle">31 runs</td><td class="num">$18.70</td></tr>
+          <tr><th scope="row" class="mono">R</th><td>Active reservations</td><td class="subtle">Run 031 (queued)</td><td class="num">$0.36</td></tr>
+          <tr><th scope="row" class="mono">U</th><td>Unresolved liability for unknown outcomes</td><td class="subtle">Run 027 · <span class="mono">att_05</span></td><td class="num">$0.62 <span class="est">est.</span></td></tr>
+          <tr><th scope="row" class="mono">N</th><td>Proposed first-step reservation</td><td class="subtle">Reviewer · Capable profile</td><td class="num">$0.54 <span class="est">est.</span></td></tr>
+        </tbody>
+        <tfoot>
+          <tr class="over"><th scope="row" class="mono">C+R+U+N</th><td colspan="2">Combined commitment exceeds L by <span class="num">$0.22</span></td><td class="num">$20.22</td></tr>
+        </tfoot>
+      </table>
+    </div>
+    <h3 class="eyebrow">Choose how to continue</h3>
+    <div class="option-grid">
+      <div class="option">
+        <strong>Increase monthly allowance</strong>
+        <div class="field">
+          <label for="new-monthly">New monthly allowance (USD)</label>
+          <input class="input num" id="new-monthly" inputmode="decimal" value="25.00">
+          <span class="hint">Recorded as a policy change with your name and time.</span>
+        </div>
+        <button class="btn" type="button">Save allowance and re-check</button>
+      </div>
+      <div class="option">
+        <strong>Use a cheaper permitted profile</strong>
+        <div class="field">
+          <label for="cheaper">Reviewer profile</label>
+          <select class="select" id="cheaper"><option>Economy · Anthropic · claude-example-small</option><option>Capable (current)</option></select>
+          <span class="hint">N becomes <span class="num">$0.12</span> <span class="est">est.</span>; total <span class="num">$19.80</span> ≤ <span class="num">$20.00</span>.</span>
+        </div>
+        <button class="btn" type="button">Switch profile and re-check</button>
+      </div>
+      <div class="option">
+        <strong>Don't start</strong>
+        <p class="subtle">Nothing was reserved or sent. Your goal and selections are kept as a draft.</p>
+        <a class="btn" href="runs.html">Cancel and keep draft</a>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="grid grid-main-side">
+  <form class="stack" style="gap:var(--space-5)" aria-label="New run" onsubmit="return false">
+
+    <section class="card" aria-labelledby="goal-title">
+      <h2 id="goal-title">Goal and input</h2>
+      <div class="field">
+        <label for="goal">Goal</label>
+        <textarea class="textarea" id="goal" style="font-family:var(--font-sans);font-size:var(--text-md)" aria-describedby="goal-hint">Reject invalid request values consistently in the orders handler, without changing the public response format.</textarea>
+        <span class="hint" id="goal-hint">Describe the outcome. Relay sends this to every role in the workflow.</span>
+      </div>
+      <fieldset id="input-source">
+        <legend>Input source</legend>
+        <div class="radio-cards">
+          <label class="radio-card" for="src-diff"><input type="radio" name="src" id="src-diff" checked><span><strong>Selected diff</strong><small>Uncommitted changes or a commit range</small></span></label>
+          <label class="radio-card" for="src-files"><input type="radio" name="src" id="src-files"><span><strong>Selected files</strong><small>Pick up to 30 files under the project root</small></span></label>
+        </div>
+      </fieldset>
+      <div class="field">
+        <label for="diff-pick">Diff</label>
+        <div data-state-view="ready,budget-blocked">
+          <select class="select" id="diff-pick"><option>Working tree vs main · 3 files · +42 −9</option><option>HEAD~1..HEAD · 2 files</option></select>
+        </div>
+        <div data-state-view="validation-errors">
+          <select class="select" id="diff-pick-err" aria-label="Diff" aria-invalid="true" aria-describedby="ctx-err"><option>main..feature/orders-v2 · 41 files · +1,902 −310</option></select>
+          <span class="error" id="ctx-err" style="margin-top:var(--space-1)"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-alert-circle"/></svg>412 KB of mandatory context exceeds the 256 KB input cap for the Capable profile. Relay will not silently truncate files.</span>
+          <div class="row" style="margin-top:var(--space-2)"><button class="btn sm" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-list"/></svg>Narrow scope</button><button class="btn sm ghost" type="button">Choose a profile with a larger input allowance</button></div>
+        </div>
+      </div>
+      <pre class="code" aria-label="Diff preview, first hunk"><span class="ctx subtle">src/handlers/orders.ts</span><span class="diff-hunk">@@ -18,7 +18,12 @@ export async function createOrder(req, res) {</span><span class="ctx">   const body = req.body;</span><span class="diff-del">-  const qty = Number(body.quantity);</span><span class="diff-add">+  const qty = Number.parseInt(body.quantity, 10);</span><span class="diff-add">+  if (!Number.isInteger(qty) || qty &lt; 1) {</span><span class="diff-add">+    return res.status(400).json(errorBody("quantity", "must be a positive integer"));</span><span class="diff-add">+  }</span><span class="ctx">   const order = await orders.create({ ...body, qty });</span></pre>
+      <p class="subtle">Also in this diff: <span class="mono">src/lib/errors.ts</span>, <span class="mono">test/orders.test.ts</span>. Excluded by project policy: <span class="mono">.env</span> (credentials).</p>
+    </section>
+
+    <section class="card" aria-labelledby="wf-title">
+      <div class="card-header">
+        <h2 id="wf-title">Workflow</h2>
+        <a class="btn ghost sm" href="workflow-editor.html">Open in editor</a>
+      </div>
+      <dl class="kv">
+        <dt>Version</dt><dd>Review &amp; propose a fix · <span class="tag mono">v3</span> <span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg>Pinned for this run</span></dd>
+        <dt>Snapshot</dt><dd class="mono">6f4a…b18c</dd>
+      </dl>
+      <p class="subtle">Profiles below are copied into the run snapshot. Later edits to profiles or the workflow do not change this run.</p>
+      <div class="table-wrap">
+        <table class="table">
+          <caption class="sr-only">Role to model profile snapshot</caption>
+          <thead><tr><th scope="col">Role</th><th scope="col">Profile</th><th scope="col">Provider · model</th><th scope="col" class="num">Max output (tokens)</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Reviewer</th>
+              <td><label class="sr-only" for="role-reviewer">Reviewer profile</label><select class="select" id="role-reviewer"><option>Capable</option><option>Balanced</option><option>Economy</option></select></td>
+              <td>Anthropic · <span class="mono">claude-example-large</span></td>
+              <td class="num"><label class="sr-only" for="max-reviewer">Reviewer max output</label><input class="input" id="max-reviewer" value="4,000"></td></tr>
+            <tr><th scope="row">Planner</th>
+              <td>
+                <label class="sr-only" for="role-planner">Planner profile</label>
+                <div data-state-view="ready,budget-blocked"><select class="select" id="role-planner"><option>Balanced</option><option>Capable</option><option>Economy</option></select></div>
+                <div data-state-view="validation-errors"><select class="select" id="role-planner-err" aria-label="Planner profile" aria-invalid="true" aria-describedby="planner-err"><option>Balanced</option></select>
+                <span class="error" id="planner-err"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-key"/></svg>OpenAI credential failed. <a href="settings-providers.html#state=auth-failed">Reconnect</a> or pick a profile on Anthropic.</span></div>
+              </td>
+              <td>OpenAI · <span class="mono">gpt-example-standard</span></td>
+              <td class="num"><label class="sr-only" for="max-planner">Planner max output</label><input class="input" id="max-planner" value="4,000"></td></tr>
+            <tr><th scope="row">Implementer</th>
+              <td><label class="sr-only" for="role-impl">Implementer profile</label><select class="select" id="role-impl"><option>Balanced</option><option>Capable</option></select></td>
+              <td>OpenAI · <span class="mono">gpt-example-standard</span></td>
+              <td class="num">
+                <label class="sr-only" for="max-implementer">Implementer max output</label>
+                <div data-state-view="ready,budget-blocked"><input class="input" id="max-implementer" value="8,000"></div>
+                <div data-state-view="validation-errors"><input class="input" id="max-implementer-err" aria-label="Implementer max output" value="16,000" aria-invalid="true" aria-describedby="impl-err">
+                <span class="error" id="impl-err" style="justify-content:flex-end"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-alert-circle"/></svg>Model limit is 8,192</span></div>
+              </td></tr>
+            <tr><th scope="row">Patch reviewer</th>
+              <td><label class="sr-only" for="role-pr">Patch reviewer profile</label><select class="select" id="role-pr"><option>Capable</option><option>Balanced</option></select></td>
+              <td>Anthropic · <span class="mono">claude-example-large</span></td>
+              <td class="num"><label class="sr-only" for="max-pr">Patch reviewer max output</label><input class="input" id="max-pr" value="4,000"></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="lim-title">
+      <h2 id="lim-title">Limits</h2>
+      <div class="form-grid">
+        <div class="field"><label for="allow">Run allowance (USD)</label><input class="input num" id="allow" inputmode="decimal" value="3.00"><span class="hint">Checked before every call</span></div>
+        <div class="field"><label for="rev">Revision cycles</label><input class="input num" id="rev" type="number" min="0" max="5" value="2"><span class="hint">Then marked incomplete</span></div>
+        <div class="field"><label for="att">Max attempts (run)</label><input class="input num" id="att" type="number" min="1" value="8"><span class="hint">Across all steps</span></div>
+        <div class="field"><label for="tmo">Timeout (minutes)</label><input class="input num" id="tmo" type="number" min="1" value="15"><span class="hint">Elapsed execution time</span></div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="mem-title">
+      <div class="card-header"><h2 id="mem-title">Memory records to include</h2><span class="subtle">Approved records only</span></div>
+      <ul class="list" role="list">
+        <li class="mem-row"><input type="checkbox" id="m1" checked><label for="m1"><strong>Preserve the existing public response format</strong><span class="meta"><span class="tag">Rule</span><span class="tag">Scope: project · all roles</span><span class="subtle mono">rev 2</span></span></label></li>
+        <li class="mem-row"><input type="checkbox" id="m2" checked><label for="m2"><strong>Validation errors use <span class="mono">errorBody(field, message)</span></strong><span class="meta"><span class="tag">Decision</span><span class="tag">Scope: project · implementer, patch reviewer</span><span class="subtle mono">rev 1</span></span></label></li>
+        <li class="mem-row"><input type="checkbox" id="m3" checked><label for="m3"><strong>Use SQLite for prototype state</strong><span class="meta"><span class="tag">Decision</span><span class="tag">Scope: project · planner</span><span class="subtle mono">rev 1</span></span></label></li>
+        <li class="mem-row"><input type="checkbox" id="m4"><label for="m4"><strong>Tests use table-driven cases</strong><span class="meta"><span class="tag">Rule</span><span class="tag">Scope: path test/**</span><span class="subtle mono">rev 3</span></span></label></li>
+      </ul>
+      <p class="subtle">2 suggested records are excluded until approved. <a href="memory.html#state=suggestions">Review suggestions</a></p>
+    </section>
+  </form>
+
+  <aside aria-label="Run summary">
+    <div class="side-sticky">
+      <section class="card" aria-labelledby="sum-title">
+        <h2 id="sum-title">Input summary</h2>
+        <dl class="kv">
+          <dt>Files</dt>
+          <dd><span data-state-view="ready,budget-blocked"><span class="num">3</span> · <span class="num">18.4 KB</span> of 256 KB</span><span data-state-view="validation-errors"><span class="num" style="color:var(--color-danger)">41 · 412 KB</span> of 256 KB</span></dd>
+          <dt>Memory records</dt><dd><span class="num">3</span> approved</dd>
+          <dt>Input tokens</dt><dd><span class="num">~6,200</span> <span class="est">est.</span></dd>
+          <dt>First-step reservation</dt><dd><span class="num">$0.54</span> <span class="est">est.</span></dd>
+          <dt>Run allowance</dt><dd><span class="num">$3.00</span></dd>
+          <dt>Monthly uncommitted</dt>
+          <dd><span data-state-view="ready,validation-errors"><span class="num">$5.86</span> tracked</span><span data-state-view="budget-blocked"><span class="num" style="color:var(--color-danger)">$0.32</span> tracked</span></dd>
+        </dl>
+        <p class="subtle">Reservation = estimated input + configured max output for the Reviewer call. Tracked by Relay; your provider bill may differ.</p>
+      </section>
+
+      <section class="card" aria-labelledby="prov-title">
+        <h2 id="prov-title">Providers that will receive this context</h2>
+        <div>
+          <div class="provider-line"><span><strong>Anthropic</strong><br><span class="subtle">Reviewer, Patch reviewer</span></span>
+            <span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Connected</span></div>
+          <div class="provider-line"><span><strong>OpenAI</strong><br><span class="subtle">Planner, Implementer</span></span>
+            <span data-state-view="ready,budget-blocked"><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Connected</span></span>
+            <span data-state-view="validation-errors"><span class="badge danger"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-x-circle"/></svg>Auth failed</span></span></div>
+        </div>
+        <p class="subtle">Both are allowed by the Example API provider policy. Selected context leaves this computer only through these calls.</p>
+        <p style="display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>No project files will be modified. Output is a proposed patch.</p>
+      </section>
+
+      <div class="stack">
+        <div data-state-view="ready"><button class="btn primary" type="button" style="width:100%"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start run</button></div>
+        <div data-state-view="validation-errors"><button class="btn primary" type="button" style="width:100%" aria-disabled="true" aria-describedby="err-title"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start run</button><p class="subtle" style="margin-top:var(--space-2)">Fix 3 problems to start.</p></div>
+        <div data-state-view="budget-blocked"><button class="btn primary" type="button" style="width:100%" aria-disabled="true" aria-describedby="bud-title"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start run</button><p class="subtle" style="margin-top:var(--space-2)">Blocked by the monthly allowance. Choose an option above.</p></div>
+        <a class="btn" href="runs.html">Cancel</a>
+      </div>
+    </div>
+  </aside>
+</div>
+      <p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

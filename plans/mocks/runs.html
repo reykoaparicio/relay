@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runs · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.filters{display:flex;gap:var(--space-4);align-items:flex-end;flex-wrap:wrap}
+.filters .field{min-width:200px}
+.filters .field.grow{flex:1;min-width:240px}
+.cost-legend{display:flex;gap:var(--space-4);flex-wrap:wrap;font-size:var(--text-xs);color:var(--color-text-muted)}
+.runs-table td .goal{display:block;font-weight:var(--weight-medium)}
+.runs-table td .sub{display:block;font-size:var(--text-xs);color:var(--color-text-subtle)}
+.pager{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);flex-wrap:wrap}
+.runs-table td:nth-child(2){min-width:240px}
+.empty-state{display:flex;flex-direction:column;align-items:center;text-align:center;gap:var(--space-3);padding:var(--space-10) var(--space-4)}
+.empty-state svg{width:32px;height:32px;color:var(--color-text-subtle)}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-alert-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol><symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol><symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol><symbol id="i-hourglass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14M5 2h14"/><path d="M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22"/><path d="M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/></symbol><symbol id="i-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M10 15V9M14 15V9"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol><symbol id="i-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol><symbol id="i-zap-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 4.86 13.12 2.17a.5.5 0 0 1 .86.46l-1.38 4.32"/><path d="M15.66 10H20a1 1 0 0 1 .78 1.63l-1.72 1.77"/><path d="M16.27 16.27 10.88 21.83a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14H4a1 1 0 0 1-.78-1.63l4.51-4.64"/><path d="m2 2 20 20"/></symbol></defs></svg>
+<div class="mock-states" data-states="list,filtered,empty"></div>
+<div class="shell">
+  <aside class="sidebar" aria-label="Application sidebar">
+    <div class="brand">RELAY<small>Developer preview</small></div>
+    <nav class="nav" aria-label="Main">
+      <a class="nav-item" href="overview.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="workflow-editor.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><span>Workflows</span></a>
+      <a class="nav-item" href="runs.html" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><span>Runs</span><span data-state-view="list,filtered"><span class="nav-count"><span class="sr-only">, approvals waiting: </span>1</span></span></a>
+      <a class="nav-item" href="memory.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><span>Memory</span></a>
+      <a class="nav-item" href="settings-providers.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="workspace">
+      <span class="eyebrow" id="ws-label">Local workspace</span>
+      <button class="project-switcher" type="button" aria-haspopup="listbox" aria-describedby="ws-label"><span>Example API</span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg><span class="sr-only">Switch project</span></button>
+      <span class="provider-status"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>2 providers connected</span>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+<header class="topbar">
+  <div>
+    <h1>Runs</h1>
+    <div class="breadcrumbs" aria-label="Location"><span>Example API</span><span>All workflows</span></div>
+  </div>
+  <div class="actions">
+    <a class="btn primary" href="new-run.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start a workflow</a>
+  </div>
+</header>
+
+<div data-state-view="list,filtered">
+<section class="card" aria-labelledby="runs-title">
+  <h2 id="runs-title" class="sr-only">Run history</h2>
+  <form class="filters" role="search" aria-label="Filter runs">
+    <div class="field">
+      <label for="f-status">Status</label>
+      <select class="select" id="f-status">
+        <option>All statuses</option>
+        <option>Needs attention (awaiting approval, paused, interrupted)</option>
+        <option>Queued</option><option>Running</option><option>Awaiting approval</option><option>Paused</option><option>Interrupted</option><option>Completed</option><option>Incomplete</option><option>Cancelled</option><option>Failed</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-workflow">Workflow</label>
+      <select class="select" id="f-workflow"><option>All workflows</option><option>Review &amp; propose a fix</option></select>
+    </div>
+    <div class="field grow">
+      <label for="f-search">Search goals</label>
+      <input class="input" id="f-search" type="search" placeholder="e.g. validation">
+    </div>
+  </form>
+
+  <div class="tabs" role="tablist" aria-label="Quick status filter">
+    <button class="tab" role="tab" type="button" data-state-view="list" aria-selected="true">All <span class="num subtle">31</span></button>
+    <button class="tab" role="tab" type="button" data-state-view="filtered" aria-selected="false">All <span class="num subtle">31</span></button>
+    <button class="tab" role="tab" type="button" data-state-view="list" aria-selected="false">Needs attention <span class="num subtle">3</span></button>
+    <button class="tab" role="tab" type="button" data-state-view="filtered" aria-selected="true">Needs attention <span class="num subtle">3</span></button>
+    <button class="tab" role="tab" type="button" aria-selected="false">Active <span class="num subtle">2</span></button>
+    <button class="tab" role="tab" type="button" aria-selected="false">Finished <span class="num subtle">26</span></button>
+  </div>
+
+  <div class="cost-legend" aria-label="Cost labels">
+    <span><span class="rep">reported</span> provider-reported usage</span>
+    <span><span class="est">est.</span> Relay estimate from the price catalog</span>
+    <span><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-help"/></svg>Unknown charge</span> request outcome unknown</span>
+    <span>Costs are tracked by Relay, not your provider bill.</span>
+  </div>
+
+  <p class="sr-only" role="status" aria-live="polite"><span data-state-view="list">Showing 9 of 31 runs.</span><span data-state-view="filtered">Showing 3 runs that need attention.</span></p>
+
+  <div class="table-wrap">
+    <table class="table runs-table">
+      <caption class="sr-only">Runs in Example API, newest first</caption>
+      <thead>
+        <tr>
+          <th scope="col">Run</th>
+          <th scope="col">Goal</th>
+          <th scope="col">Workflow version</th>
+          <th scope="col">Status</th>
+          <th scope="col" class="num">Steps</th>
+          <th scope="col" class="num">Tracked cost</th>
+          <th scope="col">Started</th>
+          <th scope="col" class="num">Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="run-inspector.html">Run 031</a></th>
+          <td><span class="goal">Summarize API changes for release notes</span><span class="sub">Waiting for runner slot (concurrency 1)</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg>Queued</span></td>
+          <td class="num">0/6</td>
+          <td class="num nowrap">$0.00</td>
+          <td class="nowrap subtle">Today 11:52</td>
+          <td class="num">—</td>
+        </tr>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=running-streaming">Run 030</a></th>
+          <td><span class="goal">Tighten pagination limits</span><span class="sub">Review input · streaming</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge info"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-loader"/></svg>Running</span></td>
+          <td class="num">2/6</td>
+          <td class="num nowrap">$0.21<span class="rep">reported</span><span class="sub">+ $0.36 reserved</span></td>
+          <td class="nowrap subtle">Today 11:40</td>
+          <td class="num">12m 05s</td>
+        </tr>
+        <tr data-state-view="list,filtered">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=awaiting-approval">Run 029</a></th>
+          <td><span class="goal">Review input validation</span><span class="sub">Plan <span class="mono">6f4a…b18c</span> waiting for you</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-pause"/></svg>Awaiting approval</span></td>
+          <td class="num">3/6</td>
+          <td class="num nowrap">$0.48<span class="rep">reported</span></td>
+          <td class="nowrap subtle">Today 10:02</td>
+          <td class="num">1m 48s</td>
+        </tr>
+        <tr data-state-view="list,filtered">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=budget-paused">Run 028</a></th>
+          <td><span class="goal">Check error handling</span><span class="sub">Next reservation $0.54 exceeds run allowance</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-wallet"/></svg>Paused: budget</span></td>
+          <td class="num">4/6</td>
+          <td class="num nowrap">$2.62<span class="rep">reported</span></td>
+          <td class="nowrap subtle">Sep 29 16:20</td>
+          <td class="num">4m 31s</td>
+        </tr>
+        <tr data-state-view="list,filtered">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=unknown-outcome">Run 027</a></th>
+          <td><span class="goal">Normalize error response shape</span><span class="sub">Runner lost during Produce patch</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-zap-off"/></svg>Interrupted</span></td>
+          <td class="num">4/6</td>
+          <td class="num nowrap">$0.48<span class="rep">reported</span><span class="sub"><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-help"/></svg>Unknown charge</span> ≤ $0.62 est.</span></td>
+          <td class="nowrap subtle">Sep 29 09:12</td>
+          <td class="num">3m 02s</td>
+        </tr>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="report.html#state=report">Run 026</a></th>
+          <td><span class="goal">Add request ID to logs</span><span class="sub">Patch accepted by final reviewer</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v3</span></td>
+          <td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Completed</span></td>
+          <td class="num">6/6</td>
+          <td class="num nowrap">$0.93<span class="rep">reported</span></td>
+          <td class="nowrap subtle">Sep 28 14:05</td>
+          <td class="num">6m 40s</td>
+        </tr>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=incomplete">Run 025</a></th>
+          <td><span class="goal">Refactor auth middleware</span><span class="sub">Revision limit (2) reached; artifacts kept</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v2</span></td>
+          <td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-alert-circle"/></svg>Incomplete</span></td>
+          <td class="num">6/6</td>
+          <td class="num nowrap">$1.37<span class="rep">reported</span></td>
+          <td class="nowrap subtle">Sep 27 11:30</td>
+          <td class="num">9m 12s</td>
+        </tr>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="run-inspector.html">Run 024</a></th>
+          <td><span class="goal">Explain module boundaries</span><span class="sub">Plan rejected by you</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v2</span></td>
+          <td><span class="badge"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-ban"/></svg>Cancelled</span></td>
+          <td class="num">3/6</td>
+          <td class="num nowrap">$0.19<span class="est">est.</span></td>
+          <td class="nowrap subtle">Sep 26 17:48</td>
+          <td class="num">2m 10s</td>
+        </tr>
+        <tr data-state-view="list">
+          <th scope="row"><a class="mono" href="run-inspector.html#state=schema-invalid">Run 023</a></th>
+          <td><span class="goal">Draft tests for date parsing</span><span class="sub"><span class="mono">OUTPUT_INVALID</span> after 3 attempts</span></td>
+          <td>Review &amp; propose a fix <span class="tag mono">v2</span></td>
+          <td><span class="badge danger"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-x-circle"/></svg>Failed</span></td>
+          <td class="num">1/6</td>
+          <td class="num nowrap">$0.06<span class="est">est.</span></td>
+          <td class="nowrap subtle">Sep 26 09:03</td>
+          <td class="num">1m 22s</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div data-state-view="list"><div class="pager">
+    <p class="subtle">Showing 9 of 31 runs, newest first.</p>
+    <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg>Load older runs</button>
+  </div></div>
+  <div data-state-view="filtered"><div class="pager">
+    <p class="subtle">3 runs need attention. No older matches.</p>
+    <button class="btn" type="button" disabled>No older runs</button>
+  </div></div>
+</section>
+</div>
+
+<div data-state-view="empty">
+<section class="card" aria-labelledby="empty-title">
+  <div class="empty-state">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg>
+    <h2 id="empty-title">No runs yet</h2>
+    <p class="muted">Start the review-to-patch template on a selected diff. Each run keeps its steps, approvals, artifacts and tracked cost here.</p>
+    <div class="row">
+      <a class="btn primary" href="new-run.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start a workflow</a>
+      <a class="btn" href="onboarding.html#state=start-point"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-box"/></svg>Try the sample project</a>
+    </div>
+  </div>
+  <p class="sr-only" role="status" aria-live="polite">No runs yet.</p>
+</section>
+</div>
+      <p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

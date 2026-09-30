@@ -1,0 +1,156 @@
+/*
+ * Relay design tokens — single source of truth for mocks AND for
+ * apps/desktop/src/renderer/styles/tokens.css (Plan 09 copies this file verbatim).
+ *
+ * Direction (ui-ux-pro-max: "developer tool / dashboard / technical"):
+ *   - Dark-first "code dark + run green" palette matching the concept mockups.
+ *   - Fira Sans for UI text, Fira Code for numbers, IDs, hashes, money, tokens.
+ *   - Status is ALWAYS text + color (+ icon), never color alone (spec §5.7).
+ *   - All text/background pairs below were chosen for >= 4.5:1 contrast.
+ *
+ * Fonts: the app bundles @fontsource/fira-sans and @fontsource/fira-code (no network
+ * font loading in Electron). Mocks fall back to system fonts if Fira is not installed.
+ */
+
+:root {
+  /* ---------- Typography ---------- */
+  --font-sans: "Fira Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Fira Code", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.75rem;    /* 12px — captions, eyebrow labels */
+  --text-sm: 0.8125rem;  /* 13px — secondary rows */
+  --text-md: 0.9375rem;  /* 15px — body (desktop app, dense but readable) */
+  --text-lg: 1.125rem;   /* 18px — card titles */
+  --text-xl: 1.5rem;     /* 24px — page titles */
+  --text-2xl: 2rem;      /* 32px — stat numbers */
+
+  --leading-tight: 1.25;
+  --leading-body: 1.55;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --tracking-eyebrow: 0.06em;
+
+  /* ---------- Spacing (4px grid) ---------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---------- Radius, borders, elevation ---------- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --border-width: 1px;
+  --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.35);
+
+  /* ---------- Layout ---------- */
+  --sidebar-width: 228px;
+  --detail-panel-width: 420px;
+  --topbar-height: 96px;
+  --content-max: 1280px;
+  --control-height: 40px;   /* >= 40px desktop hit target; 44px for primary actions */
+  --control-height-lg: 44px;
+
+  /* ---------- Z-index scale (ui-ux-pro-max: z-index-management) ---------- */
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-dialog: 30;
+  --z-toast: 50;
+
+  /* ---------- Motion ---------- */
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------- Color: dark theme (default) ---------- */
+  color-scheme: dark;
+  --color-canvas: #0B1119;          /* app background */
+  --color-sidebar: #0F1722;
+  --color-surface: #131C29;         /* cards */
+  --color-surface-raised: #1A2535;  /* list rows, inputs */
+  --color-surface-selected: #1C3A33;/* selected row (green tint, mock 2/4) */
+  --color-border: #243246;
+  --color-border-strong: #33455F;
+  --color-divider: #1D2939;
+
+  --color-text: #F1F5F9;            /* 15.9:1 on canvas */
+  --color-text-muted: #9FB0C6;      /* 7.9:1 on surface */
+  --color-text-subtle: #7F91A9;     /* 5.2:1 on surface — captions only */
+  --color-text-inverse: #0B1119;
+
+  --color-accent: #6EE7C7;          /* brand / links / success text */
+  --color-accent-strong: #34D399;
+  --color-accent-bg: #173B33;       /* primary button bg */
+  --color-accent-border: #2B6456;
+  --color-accent-bg-hover: #1D4A40;
+
+  --color-focus: #7DD3FC;           /* focus ring — distinct from accent so it is visible on green buttons */
+
+  /* Semantic status colors — ALWAYS paired with a text label */
+  --color-success: #6EE7C7;
+  --color-success-bg: #133229;
+  --color-warning: #FBBF24;         /* awaiting approval, budget paused */
+  --color-warning-bg: #3A2E0E;
+  --color-danger: #F87171;          /* failed, destructive */
+  --color-danger-bg: #3B1717;
+  --color-danger-border: #6B2A2A;
+  --color-info: #7DD3FC;            /* running, streaming */
+  --color-info-bg: #102C3D;
+  --color-unknown: #C4B5FD;         /* unknown provider outcome — deliberately NOT red/green */
+  --color-unknown-bg: #2A2346;
+  --color-neutral: #9FB0C6;         /* not started, cancelled */
+  --color-neutral-bg: #1A2535;
+}
+
+/* ---------- Color: light theme (same layout + contrast rules, spec §5.1) ---------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-canvas: #F6F8FB;
+  --color-sidebar: #EEF2F7;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #F3F6FA;
+  --color-surface-selected: #E3F5EF;
+  --color-border: #D5DEE9;
+  --color-border-strong: #B8C5D6;
+  --color-divider: #E4EAF2;
+
+  --color-text: #0F172A;
+  --color-text-muted: #475569;
+  --color-text-subtle: #5B6B80;
+  --color-text-inverse: #FFFFFF;
+
+  --color-accent: #047857;
+  --color-accent-strong: #065F46;
+  --color-accent-bg: #D1FAE5;
+  --color-accent-border: #6EE7B7;
+  --color-accent-bg-hover: #BBF7D0;
+  --color-focus: #0369A1;
+
+  --color-success: #047857;
+  --color-success-bg: #D1FAE5;
+  --color-warning: #92400E;
+  --color-warning-bg: #FEF3C7;
+  --color-danger: #B91C1C;
+  --color-danger-bg: #FEE2E2;
+  --color-danger-border: #FCA5A5;
+  --color-info: #0369A1;
+  --color-info-bg: #E0F2FE;
+  --color-unknown: #6D28D9;
+  --color-unknown-bg: #EDE9FE;
+  --color-neutral: #475569;
+  --color-neutral-bg: #F1F5F9;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+  }
+}

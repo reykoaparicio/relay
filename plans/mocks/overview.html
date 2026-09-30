@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project overview · Relay concept mock</title>
+<link rel="stylesheet" href="assets/app.css">
+<style>
+:where(svg.i){width:16px;height:16px;flex:none}
+.est{display:inline-block;margin-left:4px;padding:0 4px;border:1px dashed var(--color-border-strong);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted);vertical-align:1px}
+.rep{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--color-accent-border);border-radius:4px;font-family:var(--font-sans);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-accent);vertical-align:1px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:1100px){.grid-4{grid-template-columns:1fr 1fr}}
+.table td.nowrap,.table th.nowrap{white-space:nowrap}
+.table th.num{text-align:right}
+tbody[data-state-view].active{display:table-row-group}
+tr[data-state-view].active{display:table-row}
+.stat a{font-size:var(--text-sm)}
+.stat .value,.stat .hint{display:block}
+a.btn{text-decoration:none}
+.mock-states{top:auto;bottom:var(--space-2)}
+.table tbody th{text-transform:none;letter-spacing:0;font-size:inherit;color:inherit;font-weight:var(--weight-medium);padding:var(--space-3);border-bottom:1px solid var(--color-divider);white-space:nowrap}
+.tab[data-state-view].active{display:inline-block}
+.badge{font-family:var(--font-sans)}
+.card-header{flex-wrap:wrap}
+.safe-note{display:flex;gap:var(--space-2);align-items:flex-start;color:var(--color-accent);font-size:var(--text-sm)}
+.safe-note svg{margin-top:3px}
+.btn.sm{min-height:32px;padding:0 var(--space-3);font-size:var(--text-sm)}
+.attention-title{font-size:var(--text-lg);font-weight:var(--weight-medium)}
+.stat .label-row{display:flex;justify-content:space-between;align-items:center;gap:var(--space-2)}
+.start-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-4)}
+@media (max-width:1100px){.start-options{grid-template-columns:1fr}}
+.option{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}
+.empty-row td{text-align:center;color:var(--color-text-muted);padding:var(--space-8) var(--space-3)}
+</style>
+<script src="assets/mock.js" defer></script>
+<script>/* mock-only: in-page links to #state=… switch state without reload */
+addEventListener("hashchange",function(){var n=(location.hash.match(/state=([\w-]+)/)||[])[1];document.querySelectorAll(".mock-states button").forEach(function(b){if(b.textContent===n)b.click()});scrollTo(0,0)});</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs><symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol><symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol><symbol id="i-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol><symbol id="i-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol><symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></symbol><symbol id="i-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></symbol><symbol id="i-memory" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol><symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M10 15V9M14 15V9"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol><symbol id="i-plug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5M9 8V2M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol><symbol id="i-runs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol><symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol><symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="2"/></symbol><symbol id="i-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></symbol><symbol id="i-workflow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></symbol><symbol id="i-zap-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 4.86 13.12 2.17a.5.5 0 0 1 .86.46l-1.38 4.32"/><path d="M15.66 10H20a1 1 0 0 1 .78 1.63l-1.72 1.77"/><path d="M16.27 16.27 10.88 21.83a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14H4a1 1 0 0 1-.78-1.63l4.51-4.64"/><path d="m2 2 20 20"/></symbol></defs></svg>
+<div class="mock-states" data-states="awaiting-approval,active-run,empty,interrupted,provider-disconnected"></div>
+<div class="shell">
+  <aside class="sidebar" aria-label="Application sidebar">
+    <div class="brand">RELAY<small>Developer preview</small></div>
+    <nav class="nav" aria-label="Main">
+      <a class="nav-item" href="overview.html" aria-current="page"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-dashboard"/></svg><span>Overview</span></a>
+      <a class="nav-item" href="workflow-editor.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-workflow"/></svg><span>Workflows</span></a>
+      <a class="nav-item" href="runs.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-runs"/></svg><span>Runs</span><span data-state-view="awaiting-approval"><span class="nav-count"><span class="sr-only">, approvals waiting: </span>1</span></span></a>
+      <a class="nav-item" href="memory.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-memory"/></svg><span>Memory</span></a>
+      <a class="nav-item" href="settings-providers.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="workspace">
+      <span class="eyebrow" id="ws-label">Local workspace</span>
+      <button class="project-switcher" type="button" aria-haspopup="listbox" aria-describedby="ws-label"><span>Example API</span><svg class="i" aria-hidden="true" focusable="false"><use href="#i-chevron-down"/></svg><span class="sr-only">Switch project</span></button>
+      <div data-state-view="awaiting-approval,active-run,empty,interrupted"><span class="provider-status"><!--I:check-circle-->2 providers connected</span></div>
+<div data-state-view="provider-disconnected"><span class="provider-status warn"><!--I:alert-->1 of 2 providers connected</span></div>
+    </div>
+  </aside>
+  <main class="main" id="main" tabindex="-1">
+    <div class="main-inner">
+<header class="topbar">
+  <div>
+    <h1>Project overview</h1>
+    <div class="breadcrumbs" aria-label="Location"><span>Example API</span><span>Local project</span><span>Last opened today</span></div>
+  </div>
+  <div class="actions">
+    <a class="btn primary" href="new-run.html"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-play"/></svg>Start a workflow</a>
+  </div>
+</header>
+
+<p class="sr-only" role="status" aria-live="polite">
+  <span data-state-view="awaiting-approval">Run 024 is waiting for your approval.</span>
+  <span data-state-view="active-run">Run 025 is running step 2 of 6, Review input.</span>
+  <span data-state-view="empty">No runs yet in this project.</span>
+  <span data-state-view="interrupted">Run 024 was interrupted. One request has an unknown outcome.</span>
+  <span data-state-view="provider-disconnected">Authentication failed for OpenAI. Reconnect to start runs that use it.</span>
+</p>
+
+<!-- ============ Banners ============ -->
+<div data-state-view="interrupted">
+  <section class="banner warning" aria-labelledby="int-title">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-zap-off"/></svg>
+    <div class="body">
+      <strong id="int-title">Run 024 was interrupted</strong>
+      <p>Relay closed while <b>Produce patch</b> was running. The last completed step is <b>Approve plan</b> (approved today 10:14). Completed outputs are intact and will not be re-run automatically.</p>
+      <p><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-help"/></svg>Unknown charge</span> 1 unresolved request may already have incurred a charge. Up to <span class="num">$0.62</span> <span class="est">est.</span> is held as unresolved liability until you decide.</p>
+      <div class="row">
+        <a class="btn primary" href="run-inspector.html#state=unknown-outcome"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-arrow-right"/></svg>Review recovery options</a>
+        <button class="btn" type="button">Keep run paused</button>
+      </div>
+    </div>
+  </section>
+</div>
+<div data-state-view="provider-disconnected">
+  <section class="banner danger" aria-labelledby="auth-title">
+    <svg class="i" aria-hidden="true" focusable="false"><use href="#i-key"/></svg>
+    <div class="body">
+      <strong id="auth-title">Authentication failed for OpenAI (provider B)</strong>
+      <p>The stored key <span class="mono">sk-…Q7d2</span> was rejected during the last connection test (<span class="mono">AUTH_REQUIRED</span>). Workflows that use the <b>Balanced</b> profile cannot start until it is reconnected. No requests were sent with this key.</p>
+      <div class="row">
+        <a class="btn danger" href="settings-providers.html#state=auth-failed"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-plug"/></svg>Reconnect OpenAI</a>
+        <a class="btn ghost" href="settings-providers.html#state=connected">Open provider settings</a>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ============ Stat tiles ============ -->
+<section class="grid grid-3" aria-label="Project summary">
+  <div class="card stat">
+    <span class="eyebrow">Active runs</span>
+    <div data-state-view="awaiting-approval,provider-disconnected"><span class="value">1</span><span class="hint">Waiting for your approval</span></div>
+    <div data-state-view="active-run"><span class="value">1</span><span class="hint">Running · step 2 of 6</span></div>
+    <div data-state-view="empty"><span class="value">0</span><span class="hint">No runs yet</span></div>
+    <div data-state-view="interrupted"><span class="value">0</span><span class="hint">1 interrupted run needs a decision</span></div>
+  </div>
+
+  <div class="card stat">
+    <div class="label-row"><span class="eyebrow">Usage tracked by Relay</span><span class="subtle">September</span></div>
+    <div data-state-view="awaiting-approval,active-run,provider-disconnected">
+      <span class="value">$1.24</span>
+      <span class="hint"><span class="num">$0.36</span> reserved in flight (Run 025, queued)</span>
+    </div>
+    <div data-state-view="empty">
+      <span class="value">$0.00</span>
+      <span class="hint">Nothing reserved in flight</span>
+    </div>
+    <div data-state-view="interrupted">
+      <span class="value">$1.24</span>
+      <span class="hint"><span class="num">$0.00</span> reserved · <span class="num">$0.62</span> <span class="est">est.</span> unresolved</span>
+    </div>
+    <p class="subtle">Only calls made through Relay. Your provider account bill may be higher.</p>
+    <a href="run-inspector.html#state=awaiting-approval">Open usage ledger</a>
+  </div>
+
+  <div class="card stat">
+    <span class="eyebrow">Project memory</span>
+    <div data-state-view="awaiting-approval,active-run,interrupted,provider-disconnected">
+      <span class="value">8</span>
+      <span class="hint">approved records</span>
+    </div>
+    <div data-state-view="empty">
+      <span class="value">1</span>
+      <span class="hint">approved record (added during setup)</span>
+    </div>
+    <div data-state-view="awaiting-approval,active-run,interrupted,provider-disconnected"><a href="memory.html#state=suggestions">2 suggestions to review</a></div>
+    <div data-state-view="empty"><a href="memory.html#state=approved">Manage memory</a></div>
+  </div>
+</section>
+
+<!-- ============ Attention + run controls ============ -->
+<div class="grid grid-main-side">
+  <div data-state-view="awaiting-approval,provider-disconnected">
+    <section class="card interactive" aria-labelledby="att-title">
+      <div class="card-header"><h2 id="att-title">Needs your attention</h2><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-pause"/></svg>Awaiting approval</span></div>
+      <div class="stack">
+        <p class="attention-title">Review &amp; propose a fix <span class="subtle mono">Run 024</span></p>
+        <p class="muted">Planner proposes changes to 2 files. Approval covers plan <span class="mono">6f4a…b18c</span> only.</p>
+        <p class="safe-note"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>No project files have been modified.</p>
+      </div>
+      <div class="row">
+        <a class="btn primary" href="run-inspector.html#state=awaiting-approval">Inspect plan</a>
+        <a class="btn" href="run-inspector.html#state=awaiting-approval">View run 024</a>
+      </div>
+    </section>
+  </div>
+
+  <div data-state-view="active-run">
+    <section class="card interactive" aria-labelledby="act-title">
+      <div class="card-header"><h2 id="act-title">Active run</h2><span class="badge info"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-loader"/></svg>Running</span></div>
+      <div class="stack">
+        <p class="attention-title">Review &amp; propose a fix <span class="subtle mono">Run 025</span></p>
+        <p class="muted">Step 2 of 6 · <b>Review input</b> · Anthropic, Capable profile · streaming response</p>
+        <div class="meter" role="img" aria-label="Run allowance: $0.21 settled, $0.36 reserved of $3.00"><span class="settled" style="width:7%"></span><span class="reserved" style="width:12%"></span></div>
+        <div class="meter-legend"><span><i style="background:var(--color-accent-strong)"></i>Settled <span class="num">$0.21</span></span><span><i style="background:var(--color-info)"></i>Reserved <span class="num">$0.36</span></span><span>Allowance <span class="num">$3.00</span></span></div>
+        <p class="safe-note"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>No project files have been modified.</p>
+      </div>
+      <div class="row">
+        <a class="btn primary" href="run-inspector.html#state=running-streaming">Open current step</a>
+        <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-stop"/></svg>Stop after this step</button>
+      </div>
+    </section>
+  </div>
+
+  <div data-state-view="interrupted">
+    <section class="card" aria-labelledby="intc-title">
+      <div class="card-header"><h2 id="intc-title">Needs your attention</h2><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-zap-off"/></svg>Interrupted</span></div>
+      <div class="stack">
+        <p class="attention-title">Review &amp; propose a fix <span class="subtle mono">Run 024</span></p>
+        <dl class="kv">
+          <dt>Last completed step</dt><dd>Approve plan</dd>
+          <dt>Unresolved request</dt><dd><span class="mono">att_05</span> · Produce patch · <span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-help"/></svg>Unknown charge</span></dd>
+          <dt>Retry</dt><dd>Not automatic. A retry creates a new attempt.</dd>
+        </dl>
+        <p class="safe-note"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg>No project files have been modified.</p>
+      </div>
+      <div class="row"><a class="btn primary" href="run-inspector.html#state=unknown-outcome">Review recovery options</a></div>
+    </section>
+  </div>
+
+  <div data-state-view="empty">
+    <section class="card" aria-labelledby="start-title">
+      <h2 id="start-title">Start your first run</h2>
+      <p class="muted">Example API has no runs yet. Try the built-in sample first, or run the template against a diff from this project.</p>
+      <div class="start-options">
+        <div class="option">
+          <strong>Open the sample project</strong>
+          <p class="subtle">A fictional 14-file API with a prepared diff. Uses about <span class="num">$0.40</span> <span class="est">est.</span> of your allowance.</p>
+          <button class="btn" type="button"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-box"/></svg>Open sample project</button>
+        </div>
+        <div class="option">
+          <strong>Review &amp; propose a fix <span class="tag">v3</span></strong>
+          <p class="subtle">Review a change, plan a fix, draft a patch, review the patch. You approve the plan before any patch is drafted.</p>
+          <a class="btn primary" href="new-run.html">Start with this template</a>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="rc-title">
+    <div class="card-header"><h2 id="rc-title">Run controls</h2><a class="btn ghost sm" href="workflow-editor.html">Edit limits</a></div>
+    <dl class="kv">
+      <dt>Run allowance</dt><dd><span class="num">$3.00</span></dd>
+      <dt>Monthly allowance</dt><dd><span class="num">$20.00</span> tracked by Relay</dd>
+      <dt>Revision cycles</dt><dd>2 maximum</dd>
+      <dt>Actions</dt><dd>Draft patch only</dd>
+      <dt>Execution</dt><dd>One step at a time</dd>
+    </dl>
+  </section>
+</div>
+
+<!-- ============ Recent runs ============ -->
+<section class="card" aria-labelledby="rr-title">
+  <div class="card-header"><h2 id="rr-title">Recent runs</h2><a href="runs.html">All runs</a></div>
+  <div class="table-wrap">
+    <table class="table">
+      <caption class="sr-only">Three most recent runs in Example API</caption>
+      <thead><tr><th scope="col">Run</th><th scope="col">Goal</th><th scope="col">Status</th><th scope="col" class="num">Tracked cost</th><th scope="col">Started</th></tr></thead>
+      <tbody data-state-view="awaiting-approval,provider-disconnected">
+        <tr><td><a class="mono" href="run-inspector.html#state=awaiting-approval">Run 024</a></td><td>Review input validation</td><td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-pause"/></svg>Awaiting approval</span></td><td class="num">$0.48</td><td class="subtle">Today 10:02</td></tr>
+        <tr><td><a class="mono" href="report.html#state=report">Run 023</a></td><td>Explain module boundaries</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Completed</span></td><td class="num">$0.31</td><td class="subtle">Yesterday</td></tr>
+        <tr><td><a class="mono" href="run-inspector.html#state=budget-paused">Run 022</a></td><td>Check error handling</td><td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-wallet"/></svg>Paused: budget</span></td><td class="num">$0.45</td><td class="subtle">Sep 27</td></tr>
+      </tbody>
+      <tbody data-state-view="active-run">
+        <tr><td><a class="mono" href="run-inspector.html#state=running-streaming">Run 025</a></td><td>Tighten pagination limits</td><td><span class="badge info"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-loader"/></svg>Running</span></td><td class="num">$0.21</td><td class="subtle">Today 11:40</td></tr>
+        <tr><td><a class="mono" href="report.html#state=report">Run 024</a></td><td>Review input validation</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Completed</span></td><td class="num">$0.93</td><td class="subtle">Today 10:02</td></tr>
+        <tr><td><a class="mono" href="report.html#state=report">Run 023</a></td><td>Explain module boundaries</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Completed</span></td><td class="num">$0.31</td><td class="subtle">Yesterday</td></tr>
+      </tbody>
+      <tbody data-state-view="interrupted">
+        <tr><td><a class="mono" href="run-inspector.html#state=unknown-outcome">Run 024</a></td><td>Review input validation</td><td><span class="badge unknown"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-zap-off"/></svg>Interrupted</span></td><td class="num">$0.48 <span class="est">+ $0.62 est. unresolved</span></td><td class="subtle">Today 10:02</td></tr>
+        <tr><td><a class="mono" href="report.html#state=report">Run 023</a></td><td>Explain module boundaries</td><td><span class="badge success"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-check-circle"/></svg>Completed</span></td><td class="num">$0.31</td><td class="subtle">Yesterday</td></tr>
+        <tr><td><a class="mono" href="run-inspector.html#state=budget-paused">Run 022</a></td><td>Check error handling</td><td><span class="badge warning"><svg class="i" aria-hidden="true" focusable="false"><use href="#i-wallet"/></svg>Paused: budget</span></td><td class="num">$0.45</td><td class="subtle">Sep 27</td></tr>
+      </tbody>
+      <tbody data-state-view="empty">
+        <tr class="empty-row"><td colspan="5">No runs yet. Runs you start appear here with their status and tracked cost.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+      <p class="mock-footer">CONCEPT MOCKUP / All runs, prices, findings and project data are illustrative.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>
