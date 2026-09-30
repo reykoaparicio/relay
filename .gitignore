@@ -1,0 +1,28 @@
+node_modules/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+.tsbuild/
+*.tsbuildinfo
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+!.env.example
+.DS_Store
+tmp/
+.userdata*/
+
+# Claude Code local-only state (never committed)
+.claude/settings.local.json
+.claude/*.lock
+
+# Committed fixtures and demo snapshot (R2-4). The fixture .env holds only an obviously fake marker (sk-fixture-DO-NOT-READ…).
+!tests/fixtures/sample-api/.env
+!tests/fixtures/sample-api/node_modules/
+!tests/fixtures/sample-api/dist/
+!tests/fixtures/databases/*.sqlite
+!docs/demo/snapshot/**

@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "tests"
+
+# Supply-chain hygiene: only packages listed here may run install scripts.
+onlyBuiltDependencies:
+  - esbuild
+ignoredBuiltDependencies:
+  - "@google/genai"
+  - electron-winstaller
+  - protobufjs
+  - unrs-resolver

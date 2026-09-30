@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tsbuild",
+    "tsBuildInfoFile": ".tsbuild/.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["fixtures/**", ".tsbuild/**", "node_modules/**"],
+  "references": [
+    { "path": "../packages/contracts" },
+    { "path": "../packages/storage" },
+    { "path": "../packages/providers" },
+    { "path": "../packages/tools" },
+    { "path": "../packages/templates" },
+    { "path": "../packages/engine" }
+  ]
+}

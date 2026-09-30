@@ -1,0 +1,22 @@
+{
+  "name": "@relay/storage",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@relay/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0"
+  }
+}
