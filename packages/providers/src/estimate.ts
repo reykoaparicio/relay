@@ -69,6 +69,15 @@ export function localInputTokens(req: ModelRequest): number {
   return localTokenEstimate(promptChars(req)) + LOCAL_REQUEST_OVERHEAD_TOKENS;
 }
 
+/**
+ * Conservative local input bound for price-cliff models when no provider count is available: one token per UTF-16 code
+ * unit of all prompt text + serialized schema (dense scripts such as CJK tokenize at about one token per character,
+ * which the chars/3.2 heuristic undercounts ~3x), plus {@link LOCAL_REQUEST_OVERHEAD_TOKENS}.
+ */
+export function conservativeInputTokens(req: ModelRequest): number {
+  return promptChars(req) + LOCAL_REQUEST_OVERHEAD_TOKENS;
+}
+
 /** Local-heuristic estimate for `req`. */
 export function localEstimate(req: ModelRequest, prices: ModelPrices, priceCatalogVersion: string): UsageEstimate {
   return buildEstimate(localInputTokens(req), req, prices, 'local_estimate', priceCatalogVersion);

@@ -5,8 +5,11 @@ import type { ModelPrices } from '@relay/contracts';
 import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
 import { createMockFetch, jsonResponse, streamBody, sseChunks, tickingClock } from './__fixtures__/mock-fetch.js';
 import type { MockFetchCall, StreamBodyOptions } from './__fixtures__/mock-fetch.js';
-import { LOCAL_REQUEST_OVERHEAD_TOKENS } from './estimate.js';
-import { createOpenAIAdapter, mapEffort, openAISchemaName, supportsRequestLookupFor } from './openai.js';
+import * as catalogModule from './catalog.js';
+import { findCatalogEntry } from './catalog.js';
+import { CONNECTION_TEST_MAX_OUTPUT_TOKENS, OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS, connectionTestRequest } from './connection-test.js';
+import { LOCAL_REQUEST_OVERHEAD_TOKENS, localTokenEstimate } from './estimate.js';
+import { createOpenAIAdapter, isPriceTierMismatch, mapEffort, openAISchemaName, supportsRequestLookupFor } from './openai.js';
 import { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD } from './pricing.js';
 import type { GenerateHooks, ModelRequest, ModelResult } from './types.js';
 
@@ -63,7 +66,21 @@ const bodyOf = (call: MockFetchCall | undefined): Record<string, unknown> => cal
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
+
+/** `name`.sse with every lifecycle `response` snapshot passed through `edit` (terminal events included). */
+function editedSse(name: string, edit: (resp: Record<string, unknown>) => Record<string, unknown>): string {
+  return sse(name)
+    .split('\n')
+    .map((line) => {
+      if (!line.startsWith('data: ')) return line;
+      const event = JSON.parse(line.slice(6)) as { type: string; response?: Record<string, unknown> };
+      if (event.response === undefined) return line;
+      return `data: ${JSON.stringify({ ...event, response: edit(event.response) })}`;
+    })
+    .join('\n');
+}
 
 describe('openai adapter: request', () => {
   it('streams a Responses request with strict json_schema, store, and only the two metadata ids', async () => {
@@ -113,6 +130,65 @@ describe('openai adapter: request', () => {
     expect(calls[0]!.headers.get('openai-organization')).toBeNull();
     expect(calls[0]!.headers.get('openai-project')).toBeNull();
     expect(calls[0]!.headers.get('authorization')).toBe(`Bearer ${API_KEY}`);
+  });
+
+  it('OPENAI_CUSTOM_HEADERS can never override the key or add an organization/project', async () => {
+    vi.stubEnv(
+      'OPENAI_CUSTOM_HEADERS',
+      ['Authorization: Bearer sk-env-attacker', 'OpenAI-Organization: org_env', 'openai-project: proj_env', 'X-Env-Extra: kept'].join('\n'),
+    );
+    const { fetch, calls } = serve('success');
+    const countFetch = createMockFetch(() => jsonResponse(200, { object: 'response.input_tokens', input_tokens: 5 }));
+    const retrieveFetch = createMockFetch(() => jsonResponse(404, { error: { type: 'x', message: 'x', code: null, param: null } }));
+
+    await run(fetch);
+    await createOpenAIAdapter({ clock: tickingClock(), fetch: countFetch.fetch }).estimate(request(), PRICES, { apiKey: API_KEY });
+    await createOpenAIAdapter({ clock: tickingClock(), fetch: retrieveFetch.fetch }).reconcile!(
+      { providerResponseId: 'resp_1' },
+      { apiKey: API_KEY, signal: new AbortController().signal },
+    );
+
+    for (const call of [calls[0]!, countFetch.calls[0]!, retrieveFetch.calls[0]!]) {
+      expect(call.headers.get('authorization')).toBe(`Bearer ${API_KEY}`);
+      expect(call.headers.get('openai-organization')).toBeNull();
+      expect(call.headers.get('openai-project')).toBeNull();
+      expect(JSON.stringify([...call.headers.entries()])).not.toContain('sk-env-attacker');
+    }
+    expect(calls[0]!.headers.get('x-env-extra')).toBe('kept'); // unrelated env headers are left alone
+  });
+
+  it('requests the default service tier (catalog prices) and flags any other billed tier', async () => {
+    const { fetch, calls } = serve('success');
+
+    const plain = await run(fetch);
+    const tier = (t: unknown) => serveText(editedSse('success', (r) => ({ ...r, service_tier: t }))).fetch;
+    const def = await run(tier('default'));
+    const priority = await run(tier('priority'));
+    const flex = await run(tier('flex'));
+    const truncated = await run(serveText(editedSse('incomplete-max-output', (r) => ({ ...r, service_tier: 'scale' }))).fetch);
+
+    expect(bodyOf(calls[0])['service_tier']).toBe('default');
+    expect(plain).not.toHaveProperty('priceTierMismatch');
+    expect(def).not.toHaveProperty('priceTierMismatch');
+    expect(priority).toMatchObject({ kind: 'success', priceTierMismatch: true });
+    expect(flex).toMatchObject({ kind: 'success', priceTierMismatch: true });
+    expect(truncated).toMatchObject({ kind: 'truncated', priceTierMismatch: true });
+    expect(isPriceTierMismatch(undefined)).toBe(false);
+    expect(isPriceTierMismatch(null)).toBe(false);
+    expect(isPriceTierMismatch('auto')).toBe(true);
+  });
+
+  it('a terminal response without usage is flagged usageKnown: false (never a known $0)', async () => {
+    const noUsage = (name: string) => serveText(editedSse(name, (r) => ({ ...r, usage: null }))).fetch;
+
+    const success = await run(noUsage('success'));
+    const truncated = await run(noUsage('incomplete-max-output'));
+    const withUsage = await run(serve('success').fetch);
+
+    expect(success).toMatchObject({ kind: 'success', usageKnown: false, usage: { uncachedInputTokens: 0, outputTokens: 0 } });
+    expect(truncated).toMatchObject({ kind: 'truncated', usageKnown: false });
+    expect(withUsage.kind).toBe('success');
+    expect(withUsage).not.toHaveProperty('usageKnown');
   });
 
   it('honors maxRetries 0: a 500 produces exactly one fetch call and PROVIDER_UNAVAILABLE', async () => {
@@ -413,7 +489,31 @@ describe('openai adapter: reconcile', () => {
   it('failed without usage carries no usage', async () => {
     const { result } = await reconcileWith(() => jsonResponse(200, completedResponse('failed', { usage: null })));
 
-    expect(result).toEqual({ kind: 'failed' });
+    expect(result).toEqual({ kind: 'failed', usageKnown: false });
+  });
+
+  it.each(['failed', 'cancelled', null])('status %s without usage keeps the liability (usageKnown: false, never a known $0)', async (status) => {
+    const { result } = await reconcileWith(() => jsonResponse(200, completedResponse('x', { status, usage: null })));
+
+    expect(result).toEqual({ kind: 'failed', usageKnown: false });
+  });
+
+  it('failed with usage and completed with usage report usageKnown: true', async () => {
+    const failed = await reconcileWith(() => jsonResponse(200, completedResponse('failed')));
+    const completed = await reconcileWith(() => jsonResponse(200, completedResponse('completed')));
+
+    expect(failed.result).toMatchObject({ kind: 'failed', usageKnown: true, usage: { uncachedInputTokens: 1000 } });
+    expect(completed.result).toMatchObject({ kind: 'completed', usageKnown: true });
+  });
+
+  it('completed without usage returns zero placeholders flagged usageKnown: false', async () => {
+    const { result } = await reconcileWith(() => jsonResponse(200, completedResponse('completed', { usage: null })));
+
+    expect(result).toMatchObject({
+      kind: 'completed',
+      usageKnown: false,
+      usage: { uncachedInputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 },
+    });
   });
 
   it('404 → not_found', async () => {
@@ -457,7 +557,8 @@ describe('openai adapter: estimate, capabilities, testConnection, helpers', () =
     const schemaChars = JSON.stringify(STRICT_SCHEMA).length;
     const local = Math.ceil(((21 + 26 + schemaChars) * 23) / 64) + LOCAL_REQUEST_OVERHEAD_TOKENS;
     expect(noKey).toMatchObject({ basis: 'local_estimate', inputTokens: local });
-    expect(failed).toMatchObject({ basis: 'local_estimate', inputTokens: local });
+    // gpt-6.1-sol has a price cliff (maxInputTokens): a failed count falls back to 1 token per UTF-16 code unit.
+    expect(failed).toMatchObject({ basis: 'local_estimate', inputTokens: 21 + 26 + schemaChars + LOCAL_REQUEST_OVERHEAD_TOKENS });
     expect(warn).toHaveBeenCalledWith('provider.count_tokens_failed', expect.objectContaining({ providerId: 'openai' }));
     expect(JSON.stringify(warn.mock.calls)).not.toContain(API_KEY);
   });
@@ -470,14 +571,47 @@ describe('openai adapter: estimate, capabilities, testConnection, helpers', () =
     expect((err as RelayError).appError.code).toBe('MODEL_UNSUPPORTED');
   });
 
-  it('testConnection sends a 16-token { ok } strict request at the lowest listed effort', async () => {
+  it('a failed count for 300k CJK chars bounds input at ≥ 1 token per char, so capability validation blocks it', async () => {
+    const { fetch } = createMockFetch(() => jsonResponse(500, { error: { type: 'server_error', message: 'x', code: null, param: null } }));
+    const adapter = createOpenAIAdapter({ clock: tickingClock(), fetch });
+    const cjk = '漢'.repeat(300_000);
+
+    const est = await adapter.estimate(request({ messages: [{ role: 'user', content: cjk }] }), PRICES, { apiKey: API_KEY });
+    const caps = await adapter.capabilities(MODEL);
+
+    // The chars/3.2 heuristic would say ~108k tokens (under the 272k cliff); the conservative bound does not.
+    expect(localTokenEstimate(300_000)).toBeLessThan(caps.maxInputTokens!);
+    expect(est.basis).toBe('local_estimate');
+    expect(est.inputTokens).toBeGreaterThanOrEqual(300_000);
+    expect(est.inputTokens).toBeGreaterThan(caps.maxInputTokens!);
+  });
+
+  it('a failed count on a model without a price cliff keeps the chars/3.2 heuristic', async () => {
+    const entry = findCatalogEntry('openai', MODEL)!;
+    const caps = { ...entry.capabilities };
+    delete caps.maxInputTokens;
+    vi.spyOn(catalogModule, 'findCatalogEntry').mockReturnValue({ ...entry, capabilities: caps });
+    const { fetch } = createMockFetch(() => jsonResponse(500, { error: { type: 'server_error', message: 'x', code: null, param: null } }));
+    const adapter = createOpenAIAdapter({ clock: tickingClock(), fetch });
+
+    const est = await adapter.estimate(request(), PRICES, { apiKey: API_KEY });
+
+    const schemaChars = JSON.stringify(STRICT_SCHEMA).length;
+    expect(est.inputTokens).toBe(localTokenEstimate(21 + 26 + schemaChars) + LOCAL_REQUEST_OVERHEAD_TOKENS);
+  });
+
+  it('testConnection sends a 256-token { ok } strict request at the lowest listed effort', async () => {
     const { fetch, calls } = serve('success');
     const adapter = createOpenAIAdapter({ clock: tickingClock(), fetch });
 
     const result = await adapter.testConnection({ apiKey: API_KEY, signal: new AbortController().signal, modelId: MODEL });
 
     const body = bodyOf(calls[0]);
-    expect(body['max_output_tokens']).toBe(16);
+    // 16 tokens can be spent entirely on reasoning even at the lowest effort; 256 lets the model finish.
+    expect(body['max_output_tokens']).toBe(OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS);
+    expect(OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS).toBe(256);
+    expect(connectionTestRequest('openai', MODEL).maxOutputTokens).toBe(256);
+    expect(connectionTestRequest('anthropic', 'claude-haiku-4-5').maxOutputTokens).toBe(CONNECTION_TEST_MAX_OUTPUT_TOKENS);
     expect(body['reasoning']).toEqual({ effort: 'low' });
     expect(body['text']).toMatchObject({ format: { name: 'connection_test', strict: true, schema: { required: ['ok'] } } });
     expect(result.kind).toBe('success');

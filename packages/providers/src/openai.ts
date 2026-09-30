@@ -6,7 +6,7 @@ import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
 import { connectionTestRequest } from './connection-test.js';
 import { mapProviderError } from './errors.js';
 import type { SdkErrorClasses } from './errors.js';
-import { buildEstimate, localEstimate } from './estimate.js';
+import { buildEstimate, conservativeInputTokens, localEstimate } from './estimate.js';
 import { NOOP_LOGGER, safeHook } from './safe-hook.js';
 import { assertStrictCompatible } from './strict-schema.js';
 import { createTrackedFetch } from './tracked-fetch.js';
@@ -67,6 +67,7 @@ interface ResponseLike {
   readonly usage?: OpenAIUsageLike | null;
   readonly incomplete_details?: { readonly reason?: string | null } | null;
   readonly error?: unknown;
+  readonly service_tier?: string | null;
 }
 interface StreamEventLike {
   readonly type: string;
@@ -119,6 +120,38 @@ export function mapEffort(effort: Effort, capabilities: Pick<ModelCapabilities, 
   return effort; // Relay's levels are a subset of OpenAI's ReasoningEffort ('none'|'minimal'|'low'|…|'max')
 }
 
+/**
+ * The only service tier Relay requests: the catalog prices are the standard (`default`) tier. `auto` would let a project
+ * setting route calls to flex/priority/scale tiers at different prices; the response echoes the tier actually used.
+ */
+export const OPENAI_SERVICE_TIER = 'default' as const;
+
+/**
+ * Headers that pin authentication per request. `RequestOptions.headers` are applied LAST by the SDK, after
+ * `defaultHeaders` (which is where the SDK merges `OPENAI_CUSTOM_HEADERS` from the environment), so nothing from the
+ * environment can replace the user's key or add an organization/project. `null` removes a header.
+ */
+function pinnedAuthHeaders(apiKey: string): Record<string, string | null> {
+  return { Authorization: `Bearer ${apiKey}`, 'OpenAI-Organization': null, 'OpenAI-Project': null };
+}
+
+/**
+ * Default headers that strip any env-supplied (`OPENAI_CUSTOM_HEADERS`) `Authorization`, `OpenAI-Organization` or
+ * `OpenAI-Project` header (case-insensitive; the SDK merges env headers before these). Defense in depth next to
+ * {@link pinnedAuthHeaders}.
+ */
+const STRIPPED_ENV_HEADERS: Readonly<Record<string, null>> = Object.freeze({
+  Authorization: null,
+  'OpenAI-Organization': null,
+  'OpenAI-Project': null,
+});
+
+/** Whether a response's reported `service_tier` means it was billed at other than the standard (catalog) prices. */
+export function isPriceTierMismatch(serviceTier: string | null | undefined): boolean {
+  // Absent: the tier was not reported (the request asked for `default`); only an explicit other tier is a mismatch.
+  return serviceTier != null && serviceTier !== OPENAI_SERVICE_TIER;
+}
+
 /** Request body per 04 §D5. Only attemptId + runId are sent as metadata; stepKey/purpose never leave the machine. */
 function requestParams(req: ModelRequest, effort: Effort | undefined) {
   return {
@@ -136,6 +169,7 @@ function requestParams(req: ModelRequest, effort: Effort | undefined) {
     },
     ...(effort === undefined ? {} : { reasoning: { effort } }),
     store: openAIStoreResponses(req),
+    service_tier: OPENAI_SERVICE_TIER,
     metadata: { relay_attempt_id: req.metadata.attemptId, relay_run_id: req.metadata.runId },
   };
 }
@@ -192,6 +226,7 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
       project: null,
       webhookSecret: null,
       baseURL: API_BASE_URL,
+      defaultHeaders: { ...STRIPPED_ENV_HEADERS },
       maxRetries: 0,
       timeout: REQUEST_TIMEOUT_MS,
       fetch: trackedFetch,
@@ -251,6 +286,9 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
       rawUsage: resp.usage ?? null,
       providerResponseId: resp.id,
       ...(requestId === undefined ? {} : { providerRequestId: requestId }),
+      // A terminal response without `usage` must not read as a known $0 (the zeros above are placeholders).
+      ...(resp.usage == null ? { usageKnown: false } : {}),
+      ...(isPriceTierMismatch(resp.service_tier) ? { priceTierMismatch: true } : {}),
     };
     const rawText = outputText(resp);
     if (resp.status === 'completed') {
@@ -287,7 +325,10 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     });
     const state: CallState = { outputChars: 0 };
     try {
-      const stream = makeClient(ctx.apiKey, trackedFetch).responses.stream(requestParams(req, effort), { signal: ctx.signal });
+      const stream = makeClient(ctx.apiKey, trackedFetch).responses.stream(requestParams(req, effort), {
+        signal: ctx.signal,
+        headers: pinnedAuthHeaders(ctx.apiKey),
+      });
       stream.on('event', (event) => {
         try {
           onEvent(event, state, ctx, tracker, startedAt);
@@ -324,7 +365,7 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     const params = requestParams(req, undefined);
     const res = await makeClient(apiKey, trackedFetch).responses.inputTokens.count(
       { model: params.model, instructions: params.instructions, input: params.input, text: params.text },
-      signal === undefined ? {} : { signal },
+      { headers: pinnedAuthHeaders(apiKey), ...(signal === undefined ? {} : { signal }) },
     );
     return res.input_tokens;
   };
@@ -338,6 +379,12 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
         return buildEstimate(inputTokens, req, prices, 'provider_count', version);
       } catch (err) {
         logger.warn('provider.count_tokens_failed', { providerId: 'openai', errorName: err instanceof Error ? err.name : typeof err });
+        // Price cliff (catalog `maxInputTokens`, e.g. 272K for gpt-6.1-sol): the chars/3.2 heuristic can undercount
+        // dense scripts (CJK ≈ 1+ token per character) and slip a long-context prompt past capability validation into
+        // the 2x tier. Without a provider count, bound it at one token per UTF-16 code unit instead.
+        if (entry.capabilities.maxInputTokens !== undefined) {
+          return buildEstimate(conservativeInputTokens(req), req, prices, 'local_estimate', version);
+        }
       }
     }
     return localEstimate(req, prices, version);
@@ -350,16 +397,28 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     const { fetch: trackedFetch, tracker } = createTrackedFetch(baseFetch(), { clock, logger });
     let resp: ResponseLike;
     try {
-      resp = await makeClient(ctx.apiKey, trackedFetch).responses.retrieve(ids.providerResponseId, {}, { signal: ctx.signal });
+      resp = await makeClient(ctx.apiKey, trackedFetch).responses.retrieve(
+        ids.providerResponseId,
+        {},
+        { signal: ctx.signal, headers: pinnedAuthHeaders(ctx.apiKey) },
+      );
     } catch (err) {
       if (err instanceof OpenAI.NotFoundError) return { kind: 'not_found' };
       const mapped = mapProviderError(err, { providerId: 'openai', tracker, classes: OPENAI_ERRORS, clock, aborted: ctx.signal.aborted });
       throw new RelayError(mapped.error);
     }
     const usage = resp.usage == null ? undefined : normalizeOpenAIUsage(resp.usage);
+    // `usageKnown: false` keeps the liability: a missing usage block is NOT a known $0 (04 §D5).
+    const usageKnown = usage !== undefined;
     switch (resp.status) {
       case 'completed':
-        return { kind: 'completed', json: tryParseJson(outputText(resp)), usage: usage ?? normalizeOpenAIUsage(null), rawUsage: resp.usage ?? null };
+        return {
+          kind: 'completed',
+          json: tryParseJson(outputText(resp)),
+          usage: usage ?? normalizeOpenAIUsage(null),
+          rawUsage: resp.usage ?? null,
+          usageKnown,
+        };
       case 'queued':
       case 'in_progress':
         return { kind: 'in_progress' };
@@ -369,8 +428,9 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
       case null:
       case undefined:
       default:
-        // failed / cancelled / incomplete: no usable output; the usage (if any) settles the liability.
-        return { kind: 'failed', ...(usage === undefined ? {} : { usage }) };
+        // failed / cancelled / incomplete: no usable output; the usage (if any) settles the liability, otherwise the
+        // engine keeps it (usageKnown: false), since the provider may still have billed the call.
+        return usage === undefined ? { kind: 'failed', usageKnown } : { kind: 'failed', usage, usageKnown };
     }
   };
 
@@ -391,8 +451,9 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     generate,
     reconcile,
     testConnection: (ctx) => {
-      // Reasoning is always on for current models; the lowest listed effort keeps the 16-token test from being spent on
-      // reasoning where possible (a `truncated` answer still proves the key and model work).
+      // Reasoning is always on for current models: the lowest listed effort plus a 256-token allowance
+      // (OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS, set by connectionTestRequest) lets the model finish its answer; a
+      // `truncated` answer still proves the key and model work.
       const effort = lowestEffort(ctx.modelId);
       const req = connectionTestRequest('openai', ctx.modelId);
       return generate(effort === undefined ? req : { ...req, effort }, { apiKey: ctx.apiKey, signal: ctx.signal });

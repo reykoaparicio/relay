@@ -35,6 +35,7 @@ export default defineConfig({
             'apps/desktop/src/{main,runner}/**/*.test.ts',
             'apps/desktop/build/**/*.test.ts',
             'tests/evaluations/**/*.test.ts',
+            'tests/live/live-budget.test.ts', // offline accounting for the live caps (no network)
           ],
           environment: 'node',
           setupFiles: [NO_NETWORK],

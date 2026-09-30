@@ -93,8 +93,26 @@ export interface FallbackInfo {
   readonly iterations: readonly ServedIteration[];
 }
 
+/**
+ * Optional billing flags on `success` / `truncated` / `refused` results (04 §D1). Absent fields mean "usage known, prices
+ * match", so adapters that never set them (Anthropic, the fake) stay backward compatible.
+ */
+export interface ResultFlags {
+  /**
+   * `false` when the provider's terminal response carried no `usage` block: `usage` is then all zeros and says nothing
+   * about the bill, so the engine settles at the reservation N (`estimated`) instead of a known $0. Absent ⇒ `true`
+   * (Anthropic and the fake always report usage and leave it unset).
+   */
+  readonly usageKnown?: boolean;
+  /**
+   * `true` when the provider reports it served (and billed) the call at a price tier other than the one the catalog
+   * prices describe (OpenAI `service_tier` ≠ `'default'`); the engine then marks the cost `estimated`. Absent ⇒ `false`.
+   */
+  readonly priceTierMismatch?: boolean;
+}
+
 /** Successful completion. `json` is `undefined` when `rawText` is not valid JSON (the engine's Zod check then fails). */
-export interface ModelSuccess {
+export interface ModelSuccess extends ResultFlags {
   readonly kind: 'success';
   readonly json: unknown;
   readonly rawText: string;
@@ -109,7 +127,7 @@ export interface ModelSuccess {
 }
 
 /** Output allowance reached (or an unrecognized stop reason, recorded in `rawStopReason`). */
-export interface ModelTruncated {
+export interface ModelTruncated extends ResultFlags {
   readonly kind: 'truncated';
   readonly rawText: string;
   readonly usage: NormalizedUsage;
@@ -121,7 +139,7 @@ export interface ModelTruncated {
 }
 
 /** The model declined. */
-export interface ModelRefused {
+export interface ModelRefused extends ResultFlags {
   readonly kind: 'refused';
   readonly category?: string;
   readonly usage: NormalizedUsage;
@@ -173,10 +191,20 @@ export interface EstimateContext {
   readonly priceCatalogVersion?: string;
 }
 
-/** Answer of `reconcile` (§7.5). */
+/**
+ * Answer of `reconcile` (§7.5). `usageKnown` is `true` only when the retrieved response carried a usage block; `false`
+ * means the (zero or absent) `usage` is NOT a known $0 and the engine must keep the liability (settle at N, `estimated`).
+ * Absent ⇒ legacy semantics (known when `usage` is present); the OpenAI adapter always sets it.
+ */
 export type ReconciliationResult =
-  | { readonly kind: 'completed'; readonly json: unknown; readonly usage: NormalizedUsage; readonly rawUsage: unknown }
-  | { readonly kind: 'failed'; readonly usage?: NormalizedUsage }
+  | {
+      readonly kind: 'completed';
+      readonly json: unknown;
+      readonly usage: NormalizedUsage;
+      readonly rawUsage: unknown;
+      readonly usageKnown?: boolean;
+    }
+  | { readonly kind: 'failed'; readonly usage?: NormalizedUsage; readonly usageKnown?: boolean }
   | { readonly kind: 'in_progress' }
   | { readonly kind: 'not_found' };
 

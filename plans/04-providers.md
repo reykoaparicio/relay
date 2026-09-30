@@ -61,11 +61,18 @@ export type DispatchPhase =
   | 'responded'           // status line arrived; no body byte of a 2xx stream read yet
   | 'responded_partial';  // at least one body byte of a 2xx stream was read (firstByteAt set)
 
+export interface ResultFlags {                       // optional on success / truncated / refused; absent = known usage, matching prices
+  usageKnown?: boolean;        // false: the terminal response had no usage block; `usage` is a zero placeholder, NOT a known $0
+                               //   (engine settles at the reservation N, certainty `estimated`). Anthropic/fake never set it (always known).
+  priceTierMismatch?: boolean; // true: billed at a tier the catalog prices do not describe (OpenAI service_tier ≠ 'default');
+                               //   engine marks the cost `estimated`
+}
+
 export type ModelResult =
-  | { kind: 'success'; json: unknown; rawText: string; usage: NormalizedUsage; rawUsage: unknown;
+  | ResultFlags & { kind: 'success'; json: unknown; rawText: string; usage: NormalizedUsage; rawUsage: unknown;
       stopReason: 'end_turn'; providerRequestId?: string; providerResponseId?: string; latencyMs: number; firstByteMs?: number }
-  | { kind: 'truncated'; rawText: string; usage: NormalizedUsage; rawUsage: unknown; providerRequestId?: string; providerResponseId?: string }
-  | { kind: 'refused'; category?: string; usage: NormalizedUsage; rawUsage: unknown; providerRequestId?: string }
+  | ResultFlags & { kind: 'truncated'; rawText: string; usage: NormalizedUsage; rawUsage: unknown; providerRequestId?: string; providerResponseId?: string }
+  | ResultFlags & { kind: 'refused'; category?: string; usage: NormalizedUsage; rawUsage: unknown; providerRequestId?: string }
   | { kind: 'error'; error: AppError; phase: DispatchPhase; retryAfterMs?: number;
       usage?: NormalizedUsage; providerRequestId?: string; providerResponseId?: string };
 // error.details may carry: causeCode (network cause, D3), providerError (redacted body), aborted, partialUsage.
@@ -86,15 +93,15 @@ export interface ProviderAdapter {
   testConnection(ctx: { apiKey: string; signal: AbortSignal; modelId: string }): Promise<ModelResult>; // FR-02 tiny request
 }
 
-export type ReconciliationResult =
-  | { kind: 'completed'; json: unknown; usage: NormalizedUsage; rawUsage: unknown }
-  | { kind: 'failed'; usage?: NormalizedUsage }
+export type ReconciliationResult =                  // usageKnown: true only when the retrieved response carried usage;
+  | { kind: 'completed'; json: unknown; usage: NormalizedUsage; rawUsage: unknown; usageKnown?: boolean }
+  | { kind: 'failed'; usage?: NormalizedUsage; usageKnown?: boolean }   // false ⇒ keep the liability (never a known $0)
   | { kind: 'in_progress' }
   | { kind: 'not_found' };
 ```
 
 - `generate` **never throws** for provider/network conditions. It returns `kind: 'error'` with an accurate `phase`. It throws only on programmer errors (invariant violations).
-- **Estimate contract (R4-12).** When `ctx.apiKey` is present **and** the model's `supportsTokenCounting` is true, the adapter uses the provider count endpoint (`basis: 'provider_count'`). Otherwise, or if the count call fails, it uses the local heuristic (`basis: 'local_estimate'`). The engine (06 §F4) resolves the credential **before** estimating, so live dispatches normally pass the key. `upperAllowanceMicrousd = upperBound(inputTokens, maxOutputTokens, prices)` in both cases.
+- **Estimate contract (R4-12).** When `ctx.apiKey` is present **and** the model's `supportsTokenCounting` is true, the adapter uses the provider count endpoint (`basis: 'provider_count'`). Otherwise, or if the count call fails, it uses the local heuristic (`basis: 'local_estimate'`). **Price-cliff exception (OpenAI):** when the count call fails for a model whose catalog entry sets `maxInputTokens` (the long-context price cliff), the local bound is `conservativeInputTokens(req)` = one token per UTF-16 code unit of system + messages + serialized schema, plus the fixed overhead, so a dense-script prompt (CJK ≈ 1 token/char) cannot slip under `maxInputTokens` via the chars/3.2 heuristic. The engine (06 §F4) resolves the credential **before** estimating, so live dispatches normally pass the key. `upperAllowanceMicrousd = upperBound(inputTokens, maxOutputTokens, prices)` in both cases.
 - **Hooks never break a call (R4-27).** Every hook invocation (`onDispatched`, `onResponseId`, `onProgress`) goes through `safeHook(name, fn)`, which wraps it in try/catch, logs `{ hook, errorName }` at `warn` (never the arguments), and swallows the error. A hook failure is never thrown into the SDK stream and never changes the `ModelResult`. The engine's `onResponseId` persists via `AttemptRepo.setProviderIds`, whose per-column COALESCE semantics are defined in 03.
 
 ## D2: Catalog & pricing (`src/catalog.ts`, `src/pricing.ts`, `catalog/2026-09-25.json`)
@@ -241,12 +248,16 @@ The SDK is `openai` 7.25+ using the **Responses API** (facts verified 2026-09-30
 - `client.responses.stream({ model, instructions: req.system, input: req.messages, max_output_tokens: req.maxOutputTokens, text: { format: { type: 'json_schema', name: req.outputSchema.name, schema: req.outputSchema.jsonSchema, strict: true } }, reasoning: req.effort ? { effort: mapEffort(req.effort) } : undefined, store, metadata: { relay_attempt_id: req.metadata.attemptId, relay_run_id: req.metadata.runId } }, { signal })`. Only the two ids are sent; `stepKey` and `purpose` are never sent.
   - `store: true` (the project default, `providerOptions.openai.storeResponses`) is **required for reconciliation** via `responses.retrieve(id)`. It keeps the response on the provider for ≥ 30 days. Surface this in Settings as a data-handling note (§6.2 boundary honesty) and let the user switch it off per project. When off, send `store: false` and report `supportsRequestLookup = false`.
   - `mapEffort`: map only to levels the catalog lists for that model. Otherwise block at validation.
+  - `service_tier: 'default'` is always sent (the catalog prices are the standard tier; `auto` could route to flex/priority/scale per project settings). The response's `service_tier` is read: any reported tier other than `'default'` sets `priceTierMismatch: true` on the result (the engine marks the cost `estimated`); an absent value is treated as the requested default.
+  - **Auth headers are pinned per request.** The SDK merges `OPENAI_CUSTOM_HEADERS` from the environment into `defaultHeaders`, which are applied after the auth headers. The adapter therefore (a) strips `Authorization` / `OpenAI-Organization` / `OpenAI-Project` via `defaultHeaders: { …: null }` and (b) passes `headers: { Authorization: 'Bearer <user key>', 'OpenAI-Organization': null, 'OpenAI-Project': null }` in the per-call `RequestOptions` (applied last) on `responses.stream`, `responses.inputTokens.count` and `responses.retrieve`, so nothing from the environment can replace the user's key or add an org/project.
   - **Strict JSON-schema subset:** templates must emit schemas compatible with OpenAI strict mode (every property in `required`, `additionalProperties: false`, and `null` unions instead of optional). `z.toJSONSchema` output is post-processed by `toStrictJsonSchema()` in **templates** (07 §G6). D owns only the assertion `assertStrictCompatible(schema)`, which throws in dev.
 - **Ids:** the first stream event `response.created` → `onResponseId({ providerResponseId: response.id, providerRequestId })`. **Persisting this early is what makes post-crash reconciliation possible.** `providerRequestId` comes from the tracker's `x-request-id` header, falling back to `_request_id`.
+- **Usage presence:** a terminal response without a `usage` block yields zero placeholders plus `usageKnown: false` on `success` / `truncated` / `refused` (never a known $0).
 - **Status handling:** `response.status === 'completed'` → parse `output_text` → `success`. `'incomplete'` with `incomplete_details.reason === 'max_output_tokens'` → `truncated`. `'incomplete'` with reason `content_filter` → `refused`. A refusal content item → `refused`. A terminal `response.failed`, an `error` stream event, or a dropped stream after `response.created` → D3 row 2 (`REQUEST_OUTCOME_UNKNOWN`, `responded_partial`, with `providerResponseId`); reconciliation then settles it from `responses.retrieve`.
 - **Usage mapping** (disjoint; §8.4): `cached = usage.input_tokens_details?.cached_tokens ?? 0`, `cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0`, `uncachedInputTokens = usage.input_tokens − cached − cacheWrite`, `outputTokens = usage.output_tokens` (**includes** `output_tokens_details.reasoning_tokens`), `reasoningTokens = …reasoning_tokens`. In OpenAI, `input_tokens` **includes** cached tokens, while in Anthropic it excludes them. This asymmetry is the double-count trap named in spec §8.4. `usage.test.ts` pins both mappings with fixtures.
 - **Estimate:** per D1's estimate contract. `supportsTokenCounting` is `false` in the catalog (local heuristic only) unless a token-count endpoint is verified at implementation time, in which case the catalog flag and the provider-count branch are added together.
-- **Reconcile:** `client.responses.retrieve(providerResponseId)`. `completed` → `{kind:'completed', json, usage}`. `failed`/`cancelled` → `{kind:'failed', usage}`. `queued`/`in_progress` → `{kind:'in_progress'}`. 404 → `not_found`.
+- **Reconcile:** `client.responses.retrieve(providerResponseId)`. `completed` → `{kind:'completed', json, usage, usageKnown}`. `failed`/`cancelled`/`incomplete`/missing status → `{kind:'failed', usage?, usageKnown}`. `usageKnown` is `true` only when the response carried usage; without it the result keeps the liability (`usageKnown: false`) instead of reading as a known $0. `queued`/`in_progress` → `{kind:'in_progress'}`. 404 → `not_found`.
+- **testConnection:** `max_output_tokens: 256` (`OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS`; `connectionTestRequest('openai', …)` carries it, `connectionTestMaxOutputTokens(providerId)` exposes it for N) at the **lowest** listed effort. Reasoning is always on, and 16 tokens can be consumed by reasoning before the answer; a `truncated` result still counts as a working connection.
 - **Cancellation:** abort the stream via the signal. OpenAI may still bill partial output, so the engine keeps liability until reconciled (§9.5).
 
 ## D6: OpenAI catalog entries
@@ -386,17 +397,19 @@ Scheduled for the end of Wave 2, **after** D4 and D5 pass their gates. It is not
 - **Tests:** `gemini.test.ts` (mock fetch or mock client with recorded chunks under `src/__fixtures__/gemini/`), plus the `usage.test.ts` Gemini fixture, plus `tests/live/gemini.live.test.ts` (same $0.10 cap).
 - **Fake mode:** the registry resolves `'gemini'` to a fake adapter reporting `providerId: 'gemini'`, like the others.
 
-## D9: Live smoke tests (`tests/live/` — **owned by D** as an exception, listed here: `tests/live/anthropic.live.test.ts`, `tests/live/openai.live.test.ts`)
+## D9: Live smoke tests (`tests/live/` — **owned by D** as an exception, listed here: `tests/live/providers.live.test.ts`, `tests/live/provider-smoke.ts`, `tests/live/live-budget.ts` + its offline `live-budget.test.ts`)
 - They run only with `RELAY_LIVE_TESTS=1` and keys from env (the test runner's env only, never the app's).
 - Each test does one `testConnection`, one `estimate` with the key (provider count where supported), and one tiny `generate` against the `findings.v1` schema with a 20-line fixture input.
-- A cumulative cap is enforced: the test sums `computeCost` across calls and fails if it exceeds `RELAY_LIVE_TEST_CAP_MICROUSD` (default 100 000 = $0.10). §20.4 says not to spend without authorization.
+- A cumulative cap is enforced: `RELAY_LIVE_TEST_CAP_MICROUSD` (default 100 000 = $0.10) for **all providers together** — both providers run in the single file `providers.live.test.ts`, sharing one `LiveBudget` (separate files would run in separate workers with separate totals). §20.4 says not to spend without authorization.
+  - **Pre-check before every billable call** (including `testConnection`, using the estimate of `connectionTestRequest(providerId, modelId)`): `spent + upperAllowance > cap` fails the test without dispatching.
+  - **Charging** (`liveChargeMicrousd`): known usage → `computeCost`; `usageKnown: false` → the upper allowance N; `priceTierMismatch` → max(cost, N); an `error` with phase `not_sent` → 0; any other `error` (outcome possibly billed) → max(N, cost of `partialUsage`).
 - The tests assert the id capture (`providerResponseId` is set before completion; `providerRequestId` comes from the response header), the usage mapping with no negative values, and the redaction of the error body on a deliberately invalid model id.
 
 ## D9b: Live workflow test (`tests/live/workflow.live.test.ts` — owned by D)
 - Runs only with `RELAY_LIVE_TESTS=1` and provider keys from env.
 - For each live adapter (Anthropic, then OpenAI; an adapter whose key is absent is skipped with a printed notice), it runs the **full template once** via `createRuntime({ providerMode: 'live', … })` (06 §F16) against a temp copy of `tests/fixtures/sample-api`, with every step on that adapter's catalog model and a credentials resolver that reads the env key.
 - Approval is automatic through the service API (`approvals.decide` with `approve`), never through the UI.
-- Spend cap: `RELAY_LIVE_WORKFLOW_CAP_MICROUSD` (default `1_500_000` = $1.50) for the whole file. Each run's budget `L` is set to the remaining cap, so the engine's admission blocks any dispatch that would exceed it. After each run, the test sums the ledger (`settled + unknown` liability) and fails if the cumulative total exceeds the cap.
+- Spend cap: `RELAY_LIVE_WORKFLOW_CAP_MICROUSD` (default `1_500_000` = $1.50) for the whole file. Each run's budget `L` is set to the remaining cap, so the engine's admission blocks any dispatch that would exceed it. In `finally` (every path, **before** `rt.dispose()`), the test adds the run's ledger `C + U + R` (settled + unknown + still-reserved) to the file total (`createWorkflowSpend`) and then fails if the cumulative total exceeds the cap (or if the ledger could not be read). After any failure the remaining providers are skipped.
 - Asserts: run reaches `completed` (or `paused(budget_run)` with a clear message if the cap is too low), every attempt has a `providerResponseId`, ledger certainty is `calculated`, and the patch applies to the snapshot.
 
 ## Unit tests (owned by D, colocated)

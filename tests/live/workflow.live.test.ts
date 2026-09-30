@@ -12,6 +12,7 @@ import type { ProviderId, RunId } from '@relay/contracts';
 import { createRuntime } from '@relay/engine';
 import type { Runtime } from '@relay/engine';
 import { cheapestCatalogModel } from '@relay/providers';
+import { createWorkflowSpend } from './live-budget.js';
 import { LIVE, capFromEnv, liveKey, skipNotice, usd } from './live-env.js';
 
 const DEFAULT_CAP_MICROUSD = 1_500_000;
@@ -22,10 +23,11 @@ const INPUT_FILES = ['src/handlers/user.ts', 'src/handlers/orders.ts', 'src/lib/
 const STOP_STATUSES = new Set(['awaiting_approval', 'paused', 'completed', 'incomplete', 'cancelled', 'failed']);
 
 const cap = LIVE ? capFromEnv('RELAY_LIVE_WORKFLOW_CAP_MICROUSD', DEFAULT_CAP_MICROUSD) : DEFAULT_CAP_MICROUSD;
-let spent = 0;
+/** One cumulative total for the file; every run's ledger (C + U + R) is added in `finally`, also for failed runs. */
+const spend = createWorkflowSpend(cap);
 
 afterAll(() => {
-  if (LIVE) process.stdout.write(`[live] workflow total: ${usd(spent)} (cap ${usd(cap)})\n`);
+  if (LIVE) process.stdout.write(`[live] workflow total: ${usd(spend.spent())} (cap ${usd(cap)})\n`);
 });
 
 async function waitForStop(rt: Runtime, runId: RunId): Promise<string> {
@@ -56,12 +58,19 @@ function defineWorkflow(providerId: ProviderId): void {
   const key = liveKey(providerId);
   skipNotice(providerId);
 
-  it.skipIf(!LIVE || key === undefined)(`${providerId}: full template on the catalog model`, async () => {
+  it.skipIf(!LIVE || key === undefined)(`${providerId}: full template on the catalog model`, async (ctx) => {
     if (key === undefined) return;
+    const halted = spend.haltedReason();
+    if (halted !== undefined) {
+      // After any failure the remaining providers are not run (no further spend on a broken setup).
+      process.stdout.write(`[live] skipping ${providerId} workflow: ${halted}\n`);
+      ctx.skip();
+      return;
+    }
     const model = cheapestCatalogModel(providerId);
     expect(model).toBeDefined();
     if (model === undefined) return;
-    const remaining = cap - spent;
+    const remaining = spend.remaining();
     expect(remaining, 'workflow cap already exhausted').toBeGreaterThan(0);
 
     const userDataDir = mkdtempSync(join(tmpdir(), `relay-live-ud-${providerId}-`));
@@ -74,6 +83,7 @@ function defineWorkflow(providerId: ProviderId): void {
       credentials: { resolve: (req) => Promise.resolve(ok(req.providerId === providerId ? key : '')) },
       idleMs: 250,
     });
+    let runId: RunId | undefined;
     try {
       await rt.engine.start();
       const project = await rt.engine.handle('relay/v1/projects.createFromRoot', {
@@ -115,7 +125,7 @@ function defineWorkflow(providerId: ProviderId): void {
         profileOverrides: Object.fromEntries(MODEL_STEPS.map((s) => [s, profile.data.profile.id])),
       });
       if (!started.ok) throw new Error(`runs.start: ${started.error.code} ${JSON.stringify(started.error.details)}`);
-      const runId = started.data.runId;
+      runId = started.data.runId;
 
       let status = await waitForStop(rt, runId);
       if (status === 'awaiting_approval') {
@@ -125,30 +135,41 @@ function defineWorkflow(providerId: ProviderId): void {
 
       const r = rt.db.repos;
       const balances = r.ledger.runBalances(runId);
-      spent += balances.C + balances.U;
       process.stdout.write(`[live] ${providerId} run ${runId}: ${status}, settled ${usd(balances.C)}, unknown ${usd(balances.U)}\n`);
-      expect(spent, `cumulative live workflow spend ${usd(spent)} exceeds cap ${usd(cap)}`).toBeLessThanOrEqual(cap);
 
       const run = r.runs.get(runId);
       if (status === 'paused' && run.pauseReason === 'budget_run') {
         process.stdout.write(`[live] ${providerId}: paused(budget_run) — raise RELAY_LIVE_WORKFLOW_CAP_MICROUSD to complete the template\n`);
-        return;
+      } else {
+        expect(status, JSON.stringify(run.statusDetail)).toBe('completed');
+        const attempts = r.attempts.listForRun(runId);
+        expect(attempts.length).toBeGreaterThanOrEqual(MODEL_STEPS.length);
+        for (const a of attempts) expect(a.providerResponseId, `attempt ${a.id}`).toBeTruthy();
+        const certainty = r.ledger.settledByCertainty(runId);
+        expect(certainty.calculated).toBe(balances.C);
+        expect(balances.U).toBe(0);
+        // The engine accepts a patch only when every diff parses and applies cleanly to the snapshot (06 F8).
+        expect(r.steps.latestPerStepKey(runId).find((s) => s.stepKey === 'implement')?.state).toBe('succeeded');
+        expect(r.artifacts.listForRun(runId, ['patch']).length).toBeGreaterThan(0);
       }
-      expect(status, JSON.stringify(run.statusDetail)).toBe('completed');
-      const attempts = r.attempts.listForRun(runId);
-      expect(attempts.length).toBeGreaterThanOrEqual(MODEL_STEPS.length);
-      for (const a of attempts) expect(a.providerResponseId, `attempt ${a.id}`).toBeTruthy();
-      const certainty = r.ledger.settledByCertainty(runId);
-      expect(certainty.calculated).toBe(balances.C);
-      expect(balances.U).toBe(0);
-      // The engine accepts a patch only when every diff parses and applies cleanly to the snapshot (06 F8).
-      expect(r.steps.latestPerStepKey(runId).find((s) => s.stepKey === 'implement')?.state).toBe('succeeded');
-      expect(r.artifacts.listForRun(runId, ['patch']).length).toBeGreaterThan(0);
+    } catch (err) {
+      spend.halt(`${providerId} workflow failed`);
+      throw err;
     } finally {
+      // Account the run's liability BEFORE dispose closes the db, on every path (a failed run may still have spent).
+      if (runId !== undefined) {
+        try {
+          const b = rt.db.repos.ledger.runBalances(runId);
+          spend.record(b);
+        } catch {
+          spend.recordUnreadable(`${providerId}: run ledger unreadable`);
+        }
+      }
       await rt.dispose();
       rmSync(userDataDir, { recursive: true, force: true });
       rmSync(projectRoot, { recursive: true, force: true });
     }
+    spend.assertWithinCap();
   }, RUN_TIMEOUT_MS + 60_000);
 }
 

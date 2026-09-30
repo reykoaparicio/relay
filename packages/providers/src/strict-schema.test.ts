@@ -42,4 +42,39 @@ describe('assertStrictCompatible', () => {
     ]);
     expect(() => { assertStrictCompatible(schema); }).toThrow(/not OpenAI strict-compatible/);
   });
+
+  it('requires the root to be type object (not a union, array, or primitive)', () => {
+    const obj = { type: 'object', properties: {}, required: [], additionalProperties: false };
+
+    expect(strictSchemaProblems({ anyOf: [obj, { type: 'null' }] })).toContain('$: root schema must have type "object"');
+    expect(strictSchemaProblems({ type: 'array', items: obj })).toContain('$: root schema must have type "object"');
+    expect(strictSchemaProblems({ type: 'string' })).toEqual(['$: root schema must have type "object"']);
+    expect(strictSchemaProblems({ type: ['object', 'null'], properties: {}, required: [], additionalProperties: false })).toEqual([
+      '$: root schema must have type "object"',
+    ]);
+    expect(strictSchemaProblems(obj)).toEqual([]);
+  });
+
+  it('rejects tuple-form items arrays and prefixItems, and still walks their members', () => {
+    const loose = { type: 'object', properties: { x: { type: 'string' } } };
+    const schema = {
+      type: 'object',
+      properties: {
+        tuple: { type: 'array', items: [{ type: 'string' }, loose] },
+        prefixed: { type: 'array', prefixItems: [loose], items: false },
+      },
+      required: ['tuple', 'prefixed'],
+      additionalProperties: false,
+    };
+
+    expect(strictSchemaProblems(schema)).toEqual([
+      '$.properties.tuple.items: tuple-form items arrays are not supported',
+      '$.properties.tuple.items[1]: additionalProperties must be false',
+      '$.properties.tuple.items[1].properties.x: must be listed in required',
+      '$.properties.prefixed.prefixItems: tuple schemas (prefixItems) are not supported',
+      '$.properties.prefixed.prefixItems[0]: additionalProperties must be false',
+      '$.properties.prefixed.prefixItems[0].properties.x: must be listed in required',
+    ]);
+    expect(() => { assertStrictCompatible(schema); }).toThrow(/tuple-form items/);
+  });
 });

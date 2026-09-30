@@ -15,6 +15,7 @@ export type {
   NormalizedUsage,
   ProviderAdapter,
   ReconciliationResult,
+  ResultFlags,
   ServedIteration,
   Timers,
   UsageEstimate,
@@ -29,12 +30,26 @@ export {
 } from './catalog.js';
 export { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, computeIterationsCost, upperBound } from './pricing.js';
 export type { CalculatedCost, IterationsCost } from './pricing.js';
-export { LOCAL_REQUEST_OVERHEAD_TOKENS, localTokenEstimate } from './estimate.js';
+export { LOCAL_REQUEST_OVERHEAD_TOKENS, conservativeInputTokens, localTokenEstimate } from './estimate.js';
 export { normalizeAnthropicUsage, normalizeOpenAIUsage } from './usage.js';
-export { CONNECTION_TEST_SCHEMA, connectionTestRequest } from './connection-test.js';
+export {
+  CONNECTION_TEST_MAX_OUTPUT_TOKENS,
+  CONNECTION_TEST_SCHEMA,
+  OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS,
+  connectionTestMaxOutputTokens,
+  connectionTestRequest,
+} from './connection-test.js';
 export { createAnthropicAdapter } from './anthropic.js';
 export type { AnthropicAdapterOptions } from './anthropic.js';
-export { createOpenAIAdapter, mapEffort, openAISchemaName, openAIStoreResponses, supportsRequestLookupFor } from './openai.js';
+export {
+  OPENAI_SERVICE_TIER,
+  createOpenAIAdapter,
+  isPriceTierMismatch,
+  mapEffort,
+  openAISchemaName,
+  openAIStoreResponses,
+  supportsRequestLookupFor,
+} from './openai.js';
 export type { OpenAIAdapterOptions } from './openai.js';
 export { assertStrictCompatible, strictSchemaProblems } from './strict-schema.js';
 export { createJsonlCallLog, createMemoryCallLog } from './call-log.js';
