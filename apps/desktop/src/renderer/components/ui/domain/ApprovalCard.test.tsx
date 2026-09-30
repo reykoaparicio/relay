@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { planV1Schema } from '@relay/contracts';
 import type { ApprovalDecision } from '@relay/contracts';
 import { approval, plan } from '../test-fixtures';
+import { axe, describeViolations, renderWithProviders } from '../test-utils';
 import { ApprovalCard } from './ApprovalCard';
 
 describe('ApprovalCard', () => {
@@ -72,10 +73,10 @@ describe('ApprovalCard', () => {
     const onDecide = vi.fn();
     render(<ApprovalCard approval={approval()} plan={plan()} onDecide={onDecide} />);
 
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Reject plan' }));
 
     expect(onDecide).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole('button', { name: 'Reject plan' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reject plan' }));
     expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ decision: 'rejected' }));
   });
 
@@ -83,7 +84,7 @@ describe('ApprovalCard', () => {
     render(<ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} pendingDecision="approved" />);
 
     expect(screen.getByRole('button', { name: 'Approve plan' })).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reject plan' })).toBeDisabled();
   });
 
   it('keeps focus in the card (not <body>) after confirming a reject that disables the opener @a11y', async () => {
@@ -94,8 +95,8 @@ describe('ApprovalCard', () => {
     }
     render(<Harness />);
 
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
-    await user.click(await screen.findByRole('button', { name: 'Reject plan' }));
+    await user.click(screen.getByRole('button', { name: 'Reject plan' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reject plan' }));
 
     await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull(); });
     await waitFor(() => { expect(document.activeElement).not.toBe(document.body); });
@@ -111,13 +112,62 @@ describe('ApprovalCard', () => {
       return <ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} pendingDecision={pending} />;
     }
     render(<Harness />);
-    const reject = screen.getByRole('button', { name: 'Reject' });
+    const reject = screen.getByRole('button', { name: 'Reject plan' });
     await user.click(reject);
-    await user.click(await screen.findByRole('button', { name: 'Reject plan' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reject plan' }));
     await waitFor(() => { expect(reject).toHaveFocus(); });
 
     act(() => { setPendingLater('rejected'); });
 
     expect(screen.getByRole('heading', { name: 'Proposed plan' })).toHaveFocus();
+  });
+
+  it('hides the decisions that are not allowed', () => {
+    render(<ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} allowedDecisions={['approved', 'rejected']} />);
+
+    expect(screen.getByRole('button', { name: 'Approve plan' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Reject plan' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Request revision' })).toBeNull();
+  });
+
+  it('can offer revision only (no approve or reject buttons)', () => {
+    render(<ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} allowedDecisions={['revision_requested']} />);
+
+    expect(screen.getByRole('button', { name: 'Request revision' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Approve plan' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject plan' })).toBeNull();
+  });
+
+  it('shows the revision note in the revision form and ties it to the submit button', async () => {
+    const user = userEvent.setup();
+    render(
+      <ApprovalCard
+        approval={approval()}
+        plan={plan()}
+        onDecide={vi.fn()}
+        revisionNote="Revision 2 of 3. Re-planning costs about $0.12."
+      />,
+    );
+
+    expect(screen.queryByText(/Revision 2 of 3/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+
+    const note = screen.getByText('Revision 2 of 3. Re-planning costs about $0.12.');
+    expect(note).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send revision request' })).toHaveAccessibleDescription(
+      'Revision 2 of 3. Re-planning costs about $0.12.',
+    );
+  });
+
+  it('has no axe violations with the revision form and note open @a11y', async () => {
+    const user = userEvent.setup();
+    const { baseElement } = renderWithProviders(
+      <main>
+        <ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} revisionNote="Revision 2 of 3." allowedDecisions={['approved', 'revision_requested']} />
+      </main>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+
+    expect(describeViolations(await axe(baseElement))).toEqual([]);
   });
 });

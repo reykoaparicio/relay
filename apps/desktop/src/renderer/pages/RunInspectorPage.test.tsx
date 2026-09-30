@@ -45,7 +45,6 @@ const CONTROL_NAME: Readonly<Record<RunAction, string>> = {
   ...RUN_ACTION_LABELS,
   approve: 'Approve plan',
   request_revision: 'Request revision',
-  reject: 'Reject',
 };
 
 function controls(name: string): HTMLElement[] {

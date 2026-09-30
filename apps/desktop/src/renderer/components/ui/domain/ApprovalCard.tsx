@@ -1,6 +1,8 @@
 import { useId, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Check, MessageSquareText, ShieldCheck, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalView, PlanV1 } from '@relay/contracts';
+import { RUN_ACTION_LABELS } from '../../../lib/format/actions';
 import { PROVIDER_LABELS } from '../../../lib/format/labels';
 import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
@@ -25,7 +27,19 @@ export interface ApprovalCardProps {
   readonly onDecide: (input: ApprovalDecisionInput) => void;
   /** The decision currently being submitted; its button shows pending and the others are disabled. */
   readonly pendingDecision?: ApprovalDecision | null;
+  /**
+   * Decisions the user may make right now (default: all three). A decision left out has no button, so
+   * e.g. `['approved', 'rejected']` hides "Request revision" once the revision limit is reached.
+   */
+  readonly allowedDecisions?: readonly ApprovalDecision[];
+  /**
+   * Shown inside the revision form above its submit button and announced with it (aria-describedby),
+   * e.g. "Revision 2 of 3. Re-planning costs about $0.12."
+   */
+  readonly revisionNote?: ReactNode;
 }
+
+const ALL_DECISIONS: readonly ApprovalDecision[] = ['approved', 'revision_requested', 'rejected'];
 
 const NOTE_MAX = 2000;
 
@@ -42,11 +56,20 @@ function sourceRefText(ref: PlanV1['sourceRefs'][number]): string {
 }
 
 /** §11.3 bound approval: plan, file scope, providers, and exactly which hashes the approval covers. */
-export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null }: ApprovalCardProps) {
+export function ApprovalCard({
+  approval,
+  plan,
+  onDecide,
+  pendingDecision = null,
+  allowedDecisions = ALL_DECISIONS,
+  revisionNote,
+}: ApprovalCardProps) {
   const [isRevising, setIsRevising] = useState(false);
   const [note, setNote] = useState('');
   const [confirmReject, setConfirmReject] = useState(false);
   const headingId = useId();
+  const revisionNoteId = useId();
+  const allows = (d: ApprovalDecision) => allowedDecisions.includes(d);
   const sectionRef = useRef<HTMLElement>(null);
   // Focus lands here when a decision disables or removes the button that had it (never on <body>).
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -127,34 +150,40 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
       ) : (
         <>
           <div className="actions">
-            <Button
-              variant="primary"
-              icon={Check}
-              pending={pendingDecision === 'approved'}
-              disabled={isBusy}
-              onClick={() => { decide('approved'); }}
-            >
-              Approve plan
-            </Button>
-            <Button
-              icon={MessageSquareText}
-              aria-expanded={isRevising}
-              disabled={isBusy}
-              onClick={() => { setIsRevising((v) => !v); }}
-            >
-              Request revision
-            </Button>
-            <Button
-              variant="danger"
-              icon={X}
-              pending={pendingDecision === 'rejected'}
-              disabled={isBusy}
-              onClick={() => { setConfirmReject(true); }}
-            >
-              Reject
-            </Button>
+            {allows('approved') ? (
+              <Button
+                variant="primary"
+                icon={Check}
+                pending={pendingDecision === 'approved'}
+                disabled={isBusy}
+                onClick={() => { decide('approved'); }}
+              >
+                {RUN_ACTION_LABELS.approve}
+              </Button>
+            ) : null}
+            {allows('revision_requested') ? (
+              <Button
+                icon={MessageSquareText}
+                aria-expanded={isRevising}
+                disabled={isBusy}
+                onClick={() => { setIsRevising((v) => !v); }}
+              >
+                {RUN_ACTION_LABELS.request_revision}
+              </Button>
+            ) : null}
+            {allows('rejected') ? (
+              <Button
+                variant="danger"
+                icon={X}
+                pending={pendingDecision === 'rejected'}
+                disabled={isBusy}
+                onClick={() => { setConfirmReject(true); }}
+              >
+                {RUN_ACTION_LABELS.reject}
+              </Button>
+            ) : null}
           </div>
-          {isRevising ? (
+          {isRevising && allows('revision_requested') ? (
             <form
               className="stack"
               onSubmit={(e) => {
@@ -171,9 +200,13 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
                   <Textarea {...control} value={note} onValueChange={setNote} maxLength={NOTE_MAX} rows={4} />
                 )}
               </Field>
+              {revisionNote === undefined ? null : (
+                <div id={revisionNoteId} className="subtle">{revisionNote}</div>
+              )}
               <div className="actions">
                 <Button
                   type="submit"
+                  {...(revisionNote === undefined ? {} : { 'aria-describedby': revisionNoteId })}
                   pending={pendingDecision === 'revision_requested'}
                   disabled={note.trim() === '' || isBusy}
                 >
@@ -189,7 +222,7 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
         onOpenChange={setConfirmReject}
         title="Reject this plan?"
         consequences="The run stops without producing a patch. Finished steps and their costs are kept."
-        confirmLabel="Reject plan"
+        confirmLabel={RUN_ACTION_LABELS.reject}
         cancelLabel="Keep reviewing"
         pending={pendingDecision === 'rejected'}
         returnFocusFallback={headingRef}

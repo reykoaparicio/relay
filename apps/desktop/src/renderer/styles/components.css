@@ -86,19 +86,28 @@
   .card h2 { font-size: var(--text-lg); font-weight: var(--weight-semibold); }
   .card-header { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
   .card-header > h2, .card-header > h3 { min-width: 0; overflow-wrap: anywhere; }
+  /* Page-level section heading: an h2 on the canvas outside a .card (matches `.card h2`). */
+  .section-heading { font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--color-text); min-width: 0; overflow-wrap: anywhere; }
   /* RecoveryPanel: heading + badge row, then the status detail on its own full-width, wrapping line. */
   .recovery-header { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
   .recovery-header .status-detail { margin: 0; overflow-wrap: anywhere; }
   .stat { gap: var(--space-2); padding: var(--space-5); }
-  .stat .label { color: var(--color-text-muted); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
-  .stat .value { font-family: var(--font-mono); font-size: var(--text-2xl); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
-  .stat .hint { color: var(--color-text-muted); font-size: var(--text-sm); }
+  .stat .label, .stat-main .label { color: var(--color-text-muted); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+  .stat .value, .stat-main .value { font-family: var(--font-mono); font-size: var(--text-2xl); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
+  .stat .hint, .stat-main .hint { color: var(--color-text-muted); font-size: var(--text-sm); }
   a.stat { color: inherit; text-decoration: none; transition: border-color var(--duration-fast); }
   a.stat:hover { border-color: var(--color-border-strong); }
   .stat .label-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
   .stat .label-aside { color: var(--color-text-subtle); font-size: var(--text-sm); }
   /* StatTile with a secondaryAction: the primary link covers label/value/hint only (no nested links). */
-  .stat-main { display: flex; flex-direction: column; gap: var(--space-2); color: inherit; text-decoration: none; border-radius: var(--radius-md); }
+  .stat-main, .link-block { display: flex; flex-direction: column; gap: var(--space-2); text-decoration: none; border-radius: var(--radius-md); }
+  .stat-main { color: inherit; }
+  /* Generic block link (a whole region is one link) that works on any background, with its own hover. */
+  .link-block {
+    color: var(--color-text); padding: var(--space-3); border: var(--border-width) solid transparent;
+    transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast);
+  }
+  .link-block:hover { color: var(--color-text); background: var(--color-surface-raised); border-color: var(--color-border-strong); }
   .stat:has(> .stat-main:hover) { border-color: var(--color-border-strong); }
   .stat-secondary { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
   .muted { color: var(--color-text-muted); }
@@ -336,6 +345,8 @@
     border-radius: var(--radius-md); padding: var(--space-4); color: inherit; font: inherit;
     transition: border-color var(--duration-fast);
   }
+  /* RecoveryPanel: per-attempt decision buttons under the attempt summary. */
+  .list-item > .actions { margin-top: var(--space-2); }
   .list-item:hover { border-color: var(--color-border-strong); }
   .list-item[aria-current="true"] { background: var(--color-surface-selected); border-color: var(--color-accent-border); }
   .list-item .title { font-weight: var(--weight-semibold); }

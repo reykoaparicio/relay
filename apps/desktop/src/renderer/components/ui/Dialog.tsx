@@ -90,6 +90,85 @@ export interface ConfirmDialogProps {
   readonly returnFocusFallback?: RefObject<HTMLElement | null>;
 }
 
+export interface DialogCloseProps {
+  /** A custom control (rendered with asChild). Without it, a secondary `Button` labelled `label`. */
+  readonly children?: ReactNode;
+  /** Label of the default button (default "Cancel"). Ignored when `children` is given. */
+  readonly label?: string;
+  readonly disabled?: boolean;
+}
+
+/** Closes the enclosing `Dialog` (Radix Close). Focus then returns to the opener or the fallback. */
+export function DialogClose({ children, label = 'Cancel', disabled = false }: DialogCloseProps) {
+  return (
+    <RadixDialog.Close asChild>
+      {children ?? (
+        <Button variant="secondary" disabled={disabled}>
+          {label}
+        </Button>
+      )}
+    </RadixDialog.Close>
+  );
+}
+
+export interface DialogFooterProps {
+  /** Primary action label (e.g. "Increase allowance"). */
+  readonly primaryLabel: string;
+  /**
+   * The `id` of a `<form>` in the dialog body. The primary button becomes `type="submit" form={formId}`,
+   * so Enter in a field and the button both submit through the form's own `onSubmit`.
+   */
+  readonly formId?: string;
+  /** Click handler for the primary button when there is no `formId` (or in addition to submitting). */
+  readonly onPrimary?: () => void;
+  readonly primaryVariant?: 'primary' | 'danger';
+  /** Disables the primary button (e.g. nothing chosen yet). */
+  readonly primaryDisabled?: boolean;
+  /** Secondary action label (default "Cancel"). */
+  readonly secondaryLabel?: string;
+  /** Secondary click handler. Without it, the secondary button simply closes the dialog. */
+  readonly onSecondary?: () => void;
+  /** Request in flight: the primary shows a spinner + aria-busy, the secondary is disabled. */
+  readonly pending?: boolean;
+}
+
+/**
+ * Standard dialog footer: secondary (Cancel) then primary, with pending and form-submit support.
+ * Pass it as `<Dialog footer={<DialogFooter … />}>`; it must render inside a `Dialog`.
+ */
+export function DialogFooter({
+  primaryLabel,
+  formId,
+  onPrimary,
+  primaryVariant = 'primary',
+  primaryDisabled = false,
+  secondaryLabel = 'Cancel',
+  onSecondary,
+  pending = false,
+}: DialogFooterProps) {
+  return (
+    <>
+      {onSecondary === undefined ? (
+        <DialogClose label={secondaryLabel} disabled={pending} />
+      ) : (
+        <Button variant="secondary" disabled={pending} onClick={onSecondary}>
+          {secondaryLabel}
+        </Button>
+      )}
+      <Button
+        variant={primaryVariant}
+        type={formId === undefined ? 'button' : 'submit'}
+        {...(formId === undefined ? {} : { form: formId })}
+        {...(onPrimary === undefined ? {} : { onClick: onPrimary })}
+        pending={pending}
+        disabled={primaryDisabled}
+      >
+        {primaryLabel}
+      </Button>
+    </>
+  );
+}
+
 /** For destructive actions only (§5.7: no confirmations for read-only actions). */
 export function ConfirmDialog({
   open,
@@ -113,16 +192,13 @@ export function ConfirmDialog({
       {...(trigger === undefined ? {} : { trigger })}
       {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       footer={
-        <>
-          <RadixDialog.Close asChild>
-            <Button variant="secondary" disabled={pending}>
-              {cancelLabel}
-            </Button>
-          </RadixDialog.Close>
-          <Button variant={destructive ? 'danger' : 'primary'} pending={pending} onClick={onConfirm}>
-            {confirmLabel}
-          </Button>
-        </>
+        <DialogFooter
+          primaryLabel={confirmLabel}
+          primaryVariant={destructive ? 'danger' : 'primary'}
+          secondaryLabel={cancelLabel}
+          pending={pending}
+          onPrimary={onConfirm}
+        />
       }
     />
   );

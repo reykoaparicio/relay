@@ -13,8 +13,8 @@ export { CopyButton } from './CopyButton';
 export type { CopyButtonProps } from './CopyButton';
 export { DataTable } from './DataTable';
 export type { DataTableColumn, DataTableProps } from './DataTable';
-export { Dialog, ConfirmDialog } from './Dialog';
-export type { DialogProps, ConfirmDialogProps } from './Dialog';
+export { Dialog, DialogClose, DialogFooter, ConfirmDialog } from './Dialog';
+export type { DialogProps, DialogCloseProps, DialogFooterProps, ConfirmDialogProps } from './Dialog';
 export { EmptyState } from './EmptyState';
 export type { EmptyStateProps } from './EmptyState';
 export { ErrorView } from './ErrorView';
@@ -95,6 +95,6 @@ export type { FileTreeProps, FileTreeIncluded, FileTreeExcluded } from './domain
 export { MemoryRecordCard } from './domain/MemoryRecordCard';
 export type { MemoryRecordCardProps } from './domain/MemoryRecordCard';
 export { RecoveryPanel } from './domain/RecoveryPanel';
-export type { RecoveryPanelProps } from './domain/RecoveryPanel';
+export type { RecoveryPanelProps, RecoveryDecisionDetail } from './domain/RecoveryPanel';
 export { StepTimeline } from './domain/StepTimeline';
 export type { StepTimelineProps } from './domain/StepTimeline';

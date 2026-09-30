@@ -235,6 +235,15 @@ const SCENARIOS: ReadonlyArray<readonly [string, () => ReactElement, { readonly 
     </>
   )],
   ['RecoveryPanel', () => <RecoveryPanel run={runDetail()} onDecide={noop} />],
+  ['Page section heading + link-block', () => (
+    <section aria-labelledby="sec-h">
+      <h2 id="sec-h" className="section-heading">Recent runs</h2>
+      <a className="link-block" href="#/runs/1">
+        <span className="label">Run 024</span>
+        <span className="hint">Completed 2 minutes ago</span>
+      </a>
+    </section>
+  )],
   ['CatalogTable', () => (
     <CatalogTable entries={[catalogModel()]} catalogVersion="2026-09-30" profileChecks={{ 'claude-opus-5-5': [capabilityWarning()] }} />
   )],

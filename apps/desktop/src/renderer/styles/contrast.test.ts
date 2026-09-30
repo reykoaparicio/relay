@@ -169,6 +169,15 @@ const CSS_PAIRS: ReadonlyArray<readonly [name: string, selector: string, bg: Css
   ['estimated certainty tag in a table', '.tag.certainty-estimated', { token: 'color-surface' }],
   ['estimated certainty tag on a raised row', '.tag.certainty-estimated', { token: 'color-surface-raised' }],
   ['unknown certainty tag on its tint', '.tag.certainty-unknown', { ruleTintOver: 'color-surface' }],
+  ['page section heading on the canvas', '.section-heading', { token: 'color-canvas' }],
+  ['page section heading in a card', '.section-heading', { token: 'color-surface' }],
+  ['block link on the canvas', '.link-block', { token: 'color-canvas' }],
+  ['block link in a card', '.link-block', { token: 'color-surface' }],
+  ['block link hover on its own background', '.link-block:hover', { ruleTintOver: 'color-canvas' }],
+  ['stat-style label outside a stat tile (canvas)', '.stat-main .label', { token: 'color-canvas' }],
+  ['stat-style label outside a stat tile (card)', '.stat-main .label', { token: 'color-surface' }],
+  ['stat-style hint outside a stat tile (canvas)', '.stat-main .hint', { token: 'color-canvas' }],
+  ['stat-style hint on a block-link hover', '.stat-main .hint', { token: 'color-surface-raised' }],
 ];
 
 function cssPairColors(palette: Palette, selector: string, bg: CssBackground): readonly [string, string] {

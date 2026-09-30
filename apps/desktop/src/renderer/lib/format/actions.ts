@@ -1,4 +1,4 @@
-import type { NextAction, RunAction } from '@relay/contracts';
+import type { NextAction, RunAction, UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 
 /** Button labels for `AppError.nextAction` (ErrorView). Exhaustive over contracts NEXT_ACTIONS. */
 export const NEXT_ACTION_LABELS: Readonly<Record<NextAction, string>> = {
@@ -51,3 +51,21 @@ export const RUN_ACTION_LABELS: Readonly<Record<RunAction, string>> = {
 
 /** Actions that stop or discard work and therefore need a ConfirmDialog (§5.7: destructive only). */
 export const DESTRUCTIVE_RUN_ACTIONS: ReadonlySet<RunAction> = new Set<RunAction>(['cancel', 'stop', 'reject']);
+
+/** `runs.decideUnknown` decision (contracts UNKNOWN_OUTCOME_DECISIONS). */
+export type UnknownOutcomeDecision = (typeof UNKNOWN_OUTCOME_DECISIONS)[number];
+
+/** §4.4 labels for the unknown-outcome decisions. The retry label always says it may incur another charge. */
+export const UNKNOWN_OUTCOME_DECISION_LABELS: Readonly<Record<UnknownOutcomeDecision, string>> = {
+  retry_acknowledging_charge: 'Retry (may incur another charge)',
+  mark_failed_keep_liability: 'Mark as failed without retry',
+  accept_estimated_charge: 'Accept the estimated charge',
+};
+
+/** One-line consequence of each unknown-outcome decision (RecoveryPanel rows, DecideUnknownDialog hints). */
+export const UNKNOWN_OUTCOME_DECISION_HINTS: Readonly<Record<UnknownOutcomeDecision, string>> = {
+  retry_acknowledging_charge:
+    'Creates a new attempt with a new reservation. The possible charge of the earlier request stays until it is resolved.',
+  mark_failed_keep_liability: 'The step is marked failed; the possible charge stays recorded as unknown liability.',
+  accept_estimated_charge: 'Records the estimated amount as the charge for this request.',
+};
