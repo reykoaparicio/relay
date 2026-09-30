@@ -104,12 +104,12 @@ export class NewRun {
   }
 }
 
-/** Run inspector. In M1 this route is a placeholder ("Coming soon"); approval UI lands in Wave 2. */
+/** Run inspector (J8). */
 export class RunInspector {
   constructor(readonly page: Page) {}
 
   async expectLoaded(): Promise<void> {
-    await expect(this.page.getByRole('heading', { level: 1, name: 'Run inspector' })).toBeVisible();
+    await expect(this.page.getByRole('heading', { level: 1, name: 'Run inspection' })).toBeVisible();
   }
 }
 
