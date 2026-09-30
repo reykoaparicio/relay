@@ -2,15 +2,20 @@
 // allowance, choose profile, raise limits, and the unknown-outcome decision. Each one only builds a
 // `RunActionRequest`; the page dispatches it through `useRunActions` (the single action→op mapping).
 import { useId, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { RUN_LIMIT_MAXIMUMS, UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import type { Microusd, ProfileWithWarnings, ProjectDetail, RunDetail, StepView } from '@relay/contracts';
-import { Button, Dialog, Field, Money, MoneyInput, NumberInput, RadioGroup, Select } from '../../components/ui';
-import { formatDuration, PROVIDER_LABELS } from '../../lib/format';
+import { Dialog, DialogFooter, Field, Money, MoneyInput, NumberInput, RadioGroup, Select } from '../../components/ui';
+import {
+  formatDuration,
+  PROVIDER_LABELS,
+  UNKNOWN_OUTCOME_DECISION_HINTS,
+  UNKNOWN_OUTCOME_DECISION_LABELS,
+} from '../../lib/format';
+import type { UnknownOutcomeDecision } from '../../lib/format';
 import { dollarsText } from '../run-setup/limits';
 import { ActionErrorNotice } from './ActionErrorNotice';
 import { stepTitle } from './inspector-model';
-import type { UnknownOutcomeDecision } from './run-actions';
 
 interface BaseDialogProps {
   readonly open: boolean;
@@ -18,31 +23,8 @@ interface BaseDialogProps {
   readonly pending: boolean;
   /** The last failure of this action (shown inside the dialog; the dialog stays open). */
   readonly error: unknown;
-}
-
-function DialogFooter({
-  formId,
-  submitLabel,
-  pending,
-  disabled = false,
-  onCancel,
-}: {
-  readonly formId: string;
-  readonly submitLabel: string;
-  readonly pending: boolean;
-  readonly disabled?: boolean;
-  readonly onCancel: () => void;
-}) {
-  return (
-    <>
-      <Button variant="secondary" disabled={pending} onClick={onCancel}>
-        Cancel
-      </Button>
-      <Button variant="primary" type="submit" form={formId} pending={pending} disabled={disabled}>
-        {submitLabel}
-      </Button>
-    </>
-  );
+  /** Where focus goes on close when the opener is gone or disabled (a heading with `tabIndex={-1}`). */
+  readonly returnFocusFallback?: RefObject<HTMLElement | null>;
 }
 
 function ActionForm({ id, onSubmit, children }: { readonly id: string; readonly onSubmit: () => void; readonly children: ReactNode }) {
@@ -69,7 +51,7 @@ export interface AllowanceDialogProps extends BaseDialogProps {
 }
 
 /** `increase_allowance` → `runs.increaseAllowance`. Only a higher allowance is accepted. */
-export function IncreaseAllowanceDialog({ open, onOpenChange, pending, error, run, onSubmit }: AllowanceDialogProps) {
+export function IncreaseAllowanceDialog({ open, onOpenChange, pending, error, run, onSubmit, returnFocusFallback }: AllowanceDialogProps) {
   const formId = useId();
   const [text, setText] = useState(() => dollarsText(run.cost.allowance));
   const [value, setValue] = useState<Microusd | null>(run.cost.allowance);
@@ -80,16 +62,14 @@ export function IncreaseAllowanceDialog({ open, onOpenChange, pending, error, ru
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       title="Increase the run allowance"
       description="Only you can raise it; the model cannot. It applies to this run only."
       footer={
         <DialogFooter
           formId={formId}
-          submitLabel="Save allowance and continue"
+          primaryLabel="Save allowance and continue"
           pending={pending}
-          onCancel={() => {
-            onOpenChange(false);
-          }}
         />
       }
     >
@@ -130,7 +110,7 @@ export interface ProjectAllowanceDialogProps extends BaseDialogProps {
 }
 
 /** `edit_project_allowance` → `projects.update({ patch: { monthlyAllowanceMicrousd } })`. */
-export function ProjectAllowanceDialog({ open, onOpenChange, pending, error, project, onSubmit }: ProjectAllowanceDialogProps) {
+export function ProjectAllowanceDialog({ open, onOpenChange, pending, error, project, onSubmit, returnFocusFallback }: ProjectAllowanceDialogProps) {
   const formId = useId();
   const current = project?.monthlyAllowanceMicrousd ?? null;
   const [text, setText] = useState(() => (current === null ? '' : dollarsText(current)));
@@ -141,17 +121,15 @@ export function ProjectAllowanceDialog({ open, onOpenChange, pending, error, pro
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       title="Edit the project monthly allowance"
       description="Applies to every run of this project this month. Paused runs that now fit continue on their own."
       footer={
         <DialogFooter
           formId={formId}
-          submitLabel="Save project allowance"
+          primaryLabel="Save project allowance"
           pending={pending}
-          disabled={project === undefined}
-          onCancel={() => {
-            onOpenChange(false);
-          }}
+          primaryDisabled={project === undefined}
         />
       }
     >
@@ -184,8 +162,10 @@ export function ProjectAllowanceDialog({ open, onOpenChange, pending, error, pro
 
 export interface ProfileDialogProps extends BaseDialogProps {
   readonly step: StepView | undefined;
-  /** Profiles the project permits (its allowed providers). */
+  /** Profiles the project permits: those whose provider is in the loaded project's `allowedProviderIds`. */
   readonly profiles: readonly ProfileWithWarnings[];
+  /** Shown instead of the generic copy when no profile is offered (e.g. the project allows no provider). */
+  readonly emptyMessage?: ReactNode;
   readonly onSubmit: (profileId: string) => void;
 }
 
@@ -193,7 +173,7 @@ export interface ProfileDialogProps extends BaseDialogProps {
  * `choose_profile`: permitted profiles only. A failed step is retried with the new profile (`runs.retryStep`);
  * other pauses switch the step's profile and resume (`runs.resume` `switch_profile`) — the mapping lives in run-actions.
  */
-export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, profiles, onSubmit }: ProfileDialogProps) {
+export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, profiles, emptyMessage, onSubmit, returnFocusFallback }: ProfileDialogProps) {
   const formId = useId();
   const options = profiles
     .filter((p) => p.profile.name !== step?.profileName)
@@ -207,17 +187,15 @@ export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, 
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       title={step === undefined ? 'Choose another profile' : `Choose another profile for ${stepTitle(step)}`}
       description="Only profiles permitted for this project are listed. The change is recorded as a configuration revision of this run."
       footer={
         <DialogFooter
           formId={formId}
-          submitLabel={step?.state === 'failed' ? 'Retry step with this profile' : 'Switch profile and continue'}
+          primaryLabel={step?.state === 'failed' ? 'Retry step with this profile' : 'Switch profile and continue'}
           pending={pending}
-          disabled={selected === '' || step === undefined}
-          onCancel={() => {
-            onOpenChange(false);
-          }}
+          primaryDisabled={selected === '' || step === undefined}
         />
       }
     >
@@ -228,7 +206,7 @@ export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, 
         }}
       >
         {options.length === 0 ? (
-          <p>No other profile is permitted for this project. Add one in Settings → Model profiles.</p>
+          <p>{emptyMessage ?? 'No other profile is permitted for this project. Add one in Settings → Model profiles.'}</p>
         ) : (
           <Field
             label="Profile"
@@ -264,7 +242,7 @@ function checkRaise(text: string, current: number, max: number): { value: number
 }
 
 /** `raise_limits` → `runs.resume({ kind: 'raise_limits' })`. Bounded by `RUN_LIMIT_MAXIMUMS` with inline errors. */
-export function RaiseLimitsDialog({ open, onOpenChange, pending, error, run, onSubmit }: LimitsDialogProps) {
+export function RaiseLimitsDialog({ open, onOpenChange, pending, error, run, onSubmit, returnFocusFallback }: LimitsDialogProps) {
   const formId = useId();
   const currentMinutes = Math.floor(run.limits.executionTimeoutSeconds / 60);
   const [attempts, setAttempts] = useState('');
@@ -279,16 +257,14 @@ export function RaiseLimitsDialog({ open, onOpenChange, pending, error, run, onS
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       title="Raise limits for this run"
       description="Only you can raise limits; the model cannot. This applies to this run only and does not change the run allowance."
       footer={
         <DialogFooter
           formId={formId}
-          submitLabel="Save limits and resume"
+          primaryLabel="Save limits and resume"
           pending={pending}
-          onCancel={() => {
-            onOpenChange(false);
-          }}
         />
       }
     >
@@ -348,27 +324,13 @@ export function RaiseLimitsDialog({ open, onOpenChange, pending, error, run, onS
 
 // ---------------------------------------------------------------------------------------------------------------
 
-/** §4.4 decision labels: the retry label says it may incur another charge. */
-export const UNKNOWN_DECISION_LABELS: Readonly<Record<UnknownOutcomeDecision, string>> = {
-  retry_acknowledging_charge: 'Retry (may incur another charge)',
-  mark_failed_keep_liability: 'Mark as failed without retry',
-  accept_estimated_charge: 'Accept the estimated charge',
-};
-
-const UNKNOWN_DECISION_HINTS: Readonly<Record<UnknownOutcomeDecision, string>> = {
-  retry_acknowledging_charge:
-    'Creates a new attempt with a new reservation. The possible charge of the earlier request stays until it is resolved.',
-  mark_failed_keep_liability: 'The step is marked failed; the possible charge stays recorded as unknown liability.',
-  accept_estimated_charge: 'Records the estimated amount as the charge for this request.',
-};
-
 export interface DecideUnknownDialogProps extends BaseDialogProps {
   readonly run: RunDetail;
   readonly onSubmit: (attemptId: string, decision: UnknownOutcomeDecision) => void;
 }
 
 /** `decide_unknown` → `runs.decideUnknown`, one decision per unresolved attempt. */
-export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, onSubmit }: DecideUnknownDialogProps) {
+export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, onSubmit, returnFocusFallback }: DecideUnknownDialogProps) {
   const formId = useId();
   const [attemptChoice, setAttemptChoice] = useState('');
   const [decision, setDecision] = useState<UnknownOutcomeDecision | null>(null);
@@ -379,17 +341,15 @@ export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, o
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       title="Decide on the unknown request"
       description="Relay cannot confirm whether the provider processed this request. Choose how to record it."
       footer={
         <DialogFooter
           formId={formId}
-          submitLabel="Continue with selected option"
+          primaryLabel="Continue with selected option"
           pending={pending}
-          disabled={decision === null || attempt === undefined}
-          onCancel={() => {
-            onOpenChange(false);
-          }}
+          primaryDisabled={decision === null || attempt === undefined}
         />
       }
     >
@@ -425,8 +385,8 @@ export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, o
           onValueChange={setDecision}
           options={UNKNOWN_OUTCOME_DECISIONS.map((d) => ({
             value: d,
-            label: UNKNOWN_DECISION_LABELS[d],
-            description: UNKNOWN_DECISION_HINTS[d],
+            label: UNKNOWN_OUTCOME_DECISION_LABELS[d],
+            description: UNKNOWN_OUTCOME_DECISION_HINTS[d],
           }))}
         />
         <ActionErrorNotice error={error} />

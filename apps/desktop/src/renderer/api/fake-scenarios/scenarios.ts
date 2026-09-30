@@ -290,7 +290,18 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }));
     case 'incomplete':
     case 'incomplete-report':
-      return withFocus(focus('incomplete', null, { steps: ALL_DONE, revisionCycle: 2, cost: { reported: 1_370_000 } }));
+      // 06: an incomplete run says why in `statusDetail.details.incompleteCause` (+ the cycle counts at the limit).
+      return withFocus(
+        focus('incomplete', null, {
+          steps: ALL_DONE,
+          revisionCycle: 2,
+          cost: { reported: 1_370_000 },
+          statusDetail: appError('LIMIT_REACHED', {
+            userMessage: 'The reviewer still requested changes when the revision limit was reached.',
+            details: { limit: 'revisions', incompleteCause: 'revision_limit', revisionCycle: 2, maxRevisionCycles: 2 },
+          }),
+        }),
+      );
     case 'no-secure-storage':
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { secureStorage: false });
     case 'first-launch':
@@ -324,7 +335,8 @@ function decorate(name: FakeScenarioName, world: FakeWorld, now: number): FakeWo
     // 06 F4: `ledger.overrun { attemptId, N, X }` — the last call cost X, more than the N reserved.
     const events = world.events.get(focusRun.id) ?? [];
     const seq = (events.at(-1)?.seq ?? 0) + 1;
-    const attemptId = world.steps.get(focusRun.steps.find((s) => s.stepKey === 'implement')?.id ?? '')?.attempts[0]?.id ?? null;
+    const implementRow = focusRun.steps.find((s) => s.stepKey === 'implement');
+    const attemptId = world.steps.get(implementRow?.id ?? '')?.attempts[0]?.id ?? null;
     world.events.set(focusRun.id, [
       ...events,
       runEventSchema.parse({
@@ -333,7 +345,7 @@ function decorate(name: FakeScenarioName, world: FakeWorld, now: number): FakeWo
         seq,
         type: 'ledger.overrun',
         at: now - HOUR,
-        payload: { stepKey: 'implement', attemptId, N: 620_000, X: 710_000 },
+        payload: { stepKey: 'implement', stepRunId: implementRow?.id, attemptId, N: 620_000, X: 710_000 },
       }),
     ]);
   }

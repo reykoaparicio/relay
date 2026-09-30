@@ -718,12 +718,13 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
   });
 
   const events = buildEvents(run, spec, attemptsAll);
-  const byStep = new Map<string, RunEvent[]>();
+  // `runs.getStep` events: those whose payload names the row (`stepRunId`), never every row of the same step key.
+  const byRow = new Map<string, RunEvent[]>();
   for (const e of events) {
-    const stepKey = e.payload['stepKey'];
-    if (typeof stepKey === 'string') byStep.set(stepKey, [...(byStep.get(stepKey) ?? []), e]);
+    const stepRunId = e.payload['stepRunId'];
+    if (typeof stepRunId === 'string') byRow.set(stepRunId, [...(byRow.get(stepRunId) ?? []), e]);
   }
-  const steps = stepDetails.map((d) => ({ ...d, events: byStep.get(d.step.stepKey) ?? [] }));
+  const steps = stepDetails.map((d) => ({ ...d, events: byRow.get(d.step.id) ?? [] }));
   return { run, steps, events, ledger: buildLedger(run, attemptsAll), artifacts };
 }
 
@@ -813,17 +814,19 @@ function buildEvents(run: RunDetail, spec: RunSpec, attempts: readonly AttemptVi
   run.steps.forEach((s, i) => {
     if (s.state === 'pending') return;
     const at = run.createdAt + 5_000 * (i + 1);
-    push('step.state_changed', at, { stepKey: s.stepKey, stepId: s.id, to: s.state });
+    // Every step / attempt event names its row (`stepRunId`), as the engine emits it; `stepKey` is kept for display.
+    const row = { stepKey: s.stepKey, stepRunId: s.id };
+    push('step.state_changed', at, { ...row, to: s.state });
     const attempt = attempts.find((a) => a.stepRunId === s.id);
     if (attempt !== undefined) {
-      push('attempt.created', at + 100, { stepKey: s.stepKey, attemptId: attempt.id });
+      push('attempt.created', at + 100, { ...row, attemptId: attempt.id });
       if (spec.streaming === true && s.state === 'executing') {
-        push('attempt.stream_progress', attempt.startedAt + 46_500, { stepKey: s.stepKey, outputTokensSoFar: 1_380, elapsedMs: 46_100 });
+        push('attempt.stream_progress', attempt.startedAt + 46_500, { ...row, outputTokensSoFar: 1_380, elapsedMs: 46_100 });
       }
-      if (attempt.state === 'succeeded') push('attempt.settled', at + 9_100, { stepKey: s.stepKey, attemptId: attempt.id });
-      if (attempt.state === 'unknown') push('attempt.unknown', at + 9_100, { stepKey: s.stepKey, attemptId: attempt.id });
+      if (attempt.state === 'succeeded') push('attempt.settled', at + 9_100, { ...row, attemptId: attempt.id });
+      if (attempt.state === 'unknown') push('attempt.unknown', at + 9_100, { ...row, attemptId: attempt.id });
     }
-    if (s.state === 'awaiting_approval') push('approval.requested', at + 200, { stepKey: s.stepKey });
+    if (s.state === 'awaiting_approval') push('approval.requested', at + 200, row);
   });
   if (run.status !== 'running' && run.status !== 'queued') {
     push('run.status_changed', (run.endedAt ?? run.createdAt + spec.durationMs) + 0, {

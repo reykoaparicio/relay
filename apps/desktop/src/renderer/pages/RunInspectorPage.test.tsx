@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { errors, RUN_ACTIONS, runEventSchema } from '@relay/contracts';
-import type { RunAction, RunDetail } from '@relay/contracts';
+import { appError, errors, RUN_ACTIONS, runEventSchema, stepViewSchema } from '@relay/contracts';
+import type { RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeBridge, FakeScenarioName } from '../api/fake-bridge';
-import { RUN_ACTION_LABELS } from '../lib/format';
+import { RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_LABELS } from '../lib/format';
 import { axe, describeViolations } from '../components/ui/test-utils';
 import { renderApp } from '../features/testing/render-app';
+import { sid } from '../api/fake-scenarios/world';
 
 const P = `/p/${FAKE_PROJECT_ID}`;
 
@@ -101,7 +102,9 @@ describe('RunInspectorPage', () => {
     // Approval controls render once the plan is loaded.
     if (run.availableActions.includes('approve')) await screen.findByRole('button', { name: 'Approve plan' });
     for (const action of RUN_ACTIONS) {
-      const found = controls(CONTROL_NAME[action]);
+      // With unresolved attempts, the RecoveryPanel offers decide_unknown per attempt (one button per decision).
+      const perAttempt = action === 'decide_unknown' && run.unresolvedAttempts.length > 0;
+      const found = controls(perAttempt ? UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge : CONTROL_NAME[action]);
       if (run.availableActions.includes(action)) expect(found.length, `${action} should be shown`).toBeGreaterThan(0);
       else expect(found, `${action} must not be shown`).toHaveLength(0);
     }
@@ -269,21 +272,35 @@ describe('RunInspectorPage', () => {
     expect(within(dialog).getByText(/charge may stay unknown/)).toBeInTheDocument();
   });
 
-  it('decide unknown → runs.decideUnknown with the chosen decision; the retry label warns about another charge', async () => {
+  it('decide unknown: a RecoveryPanel row decision confirms (retry "may incur another charge") and decides that attempt', async () => {
     const { bridge, run } = open('unknown-outcome');
-    await userEvent.click(await screen.findByRole('button', { name: 'Decide on unknown charge' }));
-    const retry = await screen.findByRole('radio', { name: /Retry \(may incur another charge\)/ });
+    const attempt = run.unresolvedAttempts[0];
+    expect(screen.queryByRole('button', { name: 'Decide on unknown charge' })).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry (may incur another charge)' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Retry this request?' });
+    expect(within(dialog).getByText(/The retry may incur another charge/)).toBeInTheDocument();
     expect(describeViolations(await axe(document.body))).toEqual([]);
-    await userEvent.click(retry);
-    await userEvent.click(screen.getByRole('button', { name: 'Continue with selected option' }));
+    expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry (may incur another charge)' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(1);
     });
     expect(bridge.callsTo('relay/v1/runs.decideUnknown')[0]?.input).toMatchObject({
       runId: run.id,
-      attemptId: run.unresolvedAttempts[0]?.id,
+      attemptId: attempt?.id,
       decision: 'retry_acknowledging_charge',
     });
+  });
+
+  it('decide unknown: "Not now" closes the confirmation without deciding', async () => {
+    const { bridge } = open('unknown-outcome');
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark as failed without retry' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Mark this request as failed?' });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
   });
 
   it('a runner channel that is not implemented yet shows the not-available notice', async () => {
@@ -369,5 +386,220 @@ describe('RunInspectorPage', () => {
     expect(screen.getByText(/Repair attempts used: 1 of 1/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'View raw response (redacted)' }));
     expect(await screen.findByText(/"_redacted"/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Referee regressions (B1–B5)
+
+/** Adds a newer retry row of `stepKey` (and its step detail) to the focus run; returns the old and new rows. */
+function addNewerRow(bridge: FakeBridge, stepKey: string): { readonly old: StepView; readonly newer: StepView } {
+  const run = focusRun(bridge);
+  const old = run.steps.find((s) => s.stepKey === stepKey);
+  if (old === undefined) throw new Error(`no ${stepKey} row`);
+  const newer = stepViewSchema.parse({ ...old, id: sid('stepRun', 99_001), retryIndex: old.retryIndex + 1, state: 'ready', outputArtifactId: null, error: null });
+  bridge.world.runs[0] = { ...run, steps: [...run.steps, newer] };
+  const detail = bridge.world.steps.get(old.id);
+  if (detail === undefined) throw new Error('no step detail');
+  bridge.world.steps.set(newer.id, { ...detail, step: newer, output: null, attempts: [], events: [] });
+  return { old, newer };
+}
+
+function pushEvent(bridge: FakeBridge, type: RunEvent['type'], payload: Record<string, unknown>): RunEvent {
+  const run = focusRun(bridge);
+  const list = bridge.world.events.get(run.id) ?? [];
+  const seq = (list.at(-1)?.seq ?? 0) + 1;
+  const event = runEventSchema.parse({ id: sid('event', 88_000 + seq), runId: run.id, seq, type, at: Date.now(), payload });
+  bridge.world.events.set(run.id, [...list, event]);
+  return event;
+}
+
+function stepParam(router: { readonly state: { readonly location: { readonly search: string } } }): string | null {
+  return new URLSearchParams(router.state.location.search).get('step');
+}
+
+describe('RunInspectorPage regressions', () => {
+  it('B1: only profiles whose provider is in the loaded project allowlist are offered', async () => {
+    const bridge = createFakeBridge('refused');
+    const project = bridge.world.projects[0];
+    if (project === undefined) throw new Error('no project');
+    bridge.world.projects[0] = { ...project, providerPolicy: { ...project.providerPolicy, allowedProviderIds: ['openai'] } };
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    const select = await screen.findByRole('combobox', { name: 'Profile' });
+    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatch(/^Balanced · OpenAI/); // Economy (Anthropic) is not permitted
+  });
+
+  it('B1: an empty allowlist permits no profile (not every profile)', async () => {
+    const bridge = createFakeBridge('refused');
+    const project = bridge.world.projects[0];
+    if (project === undefined) throw new Error('no project');
+    bridge.world.projects[0] = { ...project, providerPolicy: { ...project.providerPolicy, allowedProviderIds: [] } };
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    const dialog = await screen.findByRole('dialog', { name: /Choose another profile/ });
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/This project allows no provider/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Retry step with this profile' })).toBeDisabled();
+  });
+
+  it('B1: while the project is loading, Choose profile is disabled with a reason', async () => {
+    const bridge = createFakeBridge('refused');
+    const release = bridge.hold('relay/v1/projects.get');
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    const button = await screen.findByRole('button', { name: 'Choose another profile' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(/loading the project's allowed providers/);
+    release();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Choose another profile' })).toBeEnabled();
+    });
+  });
+
+  it('B1: when the project fails to load, Choose profile stays disabled with a reason', async () => {
+    const bridge = createFakeBridge('refused');
+    bridge.failNext('relay/v1/projects.get', errors.notFound('project'));
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Choose another profile' })).toHaveAccessibleDescription(/could not be loaded/);
+    });
+    expect(screen.getByRole('button', { name: 'Choose another profile' })).toBeDisabled();
+  });
+
+  it('B2: the Events tab lists only the selected row; legacy step-key-only events are a separate run-level group', async () => {
+    const bridge = createFakeBridge('completed');
+    const { old, newer } = addNewerRow(bridge, 'implement');
+    pushEvent(bridge, 'attempt.dispatching', { stepKey: 'implement', stepRunId: newer.id });
+    pushEvent(bridge, 'artifact.write_failed', { stepKey: 'implement', stepRunIds: [newer.id] });
+    pushEvent(bridge, 'error.recorded', { stepKey: 'implement' }); // legacy: no row id
+    const run = focusRun(bridge);
+    const { router } = renderApp(`${P}/runs/${run.id}?step=${old.id}&tab=events`, { bridge });
+    const own = await screen.findByRole('list', { name: 'Events for this step' });
+    await waitFor(() => {
+      expect(within(own).getAllByText('attempt.settled').length).toBeGreaterThan(0);
+    });
+    expect(within(own).queryByText('attempt.dispatching')).not.toBeInTheDocument();
+    expect(within(own).queryByText('artifact.write_failed')).not.toBeInTheDocument();
+    expect(within(own).queryByText('error.recorded')).not.toBeInTheDocument();
+    const legacy = screen.getByRole('list', { name: 'Run-level events' });
+    expect(within(legacy).getByText('error.recorded')).toBeInTheDocument();
+
+    await act(async () => {
+      await router.navigate(`${P}/runs/${run.id}?step=${newer.id}&tab=events`);
+    });
+    const newerList = await screen.findByRole('list', { name: 'Events for this step' });
+    await waitFor(() => {
+      expect(within(newerList).getByText('attempt.dispatching')).toBeInTheDocument();
+    });
+    expect(within(newerList).getByText('artifact.write_failed')).toBeInTheDocument(); // stepRunIds[] (revision events)
+    expect(within(newerList).queryByText('attempt.settled')).not.toBeInTheDocument();
+  });
+
+  it('B3: after Retry step the selection (and ?step=) moves to the newer row of the step', async () => {
+    const bridge = createFakeBridge('output-invalid');
+    const run = focusRun(bridge);
+    const failed = run.steps.find((s) => s.state === 'failed');
+    const { router } = renderApp(`${P}/runs/${run.id}?step=${failed?.id ?? ''}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry step' }));
+    await waitFor(() => {
+      const latest = focusRun(bridge).steps.filter((s) => s.stepKey === 'implement').at(-1);
+      expect(latest?.id).not.toBe(failed?.id);
+      expect(stepParam(router)).toBe(latest?.id);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('newer-attempt-notice')).not.toBeInTheDocument();
+    });
+  });
+
+  it('B3: after Choose profile the selection follows the newer row', async () => {
+    const bridge = createFakeBridge('refused');
+    const run = focusRun(bridge);
+    const failed = run.steps.find((s) => s.state === 'failed');
+    const { router } = renderApp(`${P}/runs/${run.id}?step=${failed?.id ?? ''}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry step with this profile' }));
+    await waitFor(() => {
+      const latest = focusRun(bridge).steps.filter((s) => s.stepKey === 'implement').at(-1);
+      expect(latest?.id).not.toBe(failed?.id);
+      expect(stepParam(router)).toBe(latest?.id);
+    });
+  });
+
+  it('B3: a URL-selected superseded row shows "A newer attempt of this step exists" with a View latest link', async () => {
+    const bridge = createFakeBridge('completed');
+    const { old, newer } = addNewerRow(bridge, 'implement');
+    const { router } = renderApp(`${P}/runs/${focusRun(bridge).id}?step=${old.id}`, { bridge });
+    const notice = await screen.findByTestId('newer-attempt-notice');
+    expect(notice).toHaveTextContent('A newer attempt of this step exists.');
+    await userEvent.click(within(notice).getByRole('link', { name: 'View latest' }));
+    await waitFor(() => {
+      expect(stepParam(router)).toBe(newer.id);
+    });
+    expect(screen.queryByTestId('newer-attempt-notice')).not.toBeInTheDocument();
+  });
+
+  it('B4: incomplete copy follows statusDetail.incompleteCause', async () => {
+    const cases = [
+      [{ limit: 'revisions', incompleteCause: 'verifier_incomplete' }, 'The workflow reviewer marked the result incomplete'],
+      [{ limit: 'revisions', incompleteCause: 'revision_limit', revisionCycle: 1, maxRevisionCycles: 3 }, 'Revision limit reached (1 of 3)'],
+      [undefined, 'Incomplete'],
+    ] as const;
+    for (const [details, title] of cases) {
+      const bridge = createFakeBridge('incomplete');
+      const run = focusRun(bridge);
+      bridge.world.runs[0] = {
+        ...run,
+        statusDetail: details === undefined ? null : { ...(run.statusDetail ?? appError('LIMIT_REACHED')), details },
+      };
+      const { unmount } = renderApp(`${P}/runs/${run.id}`, { bridge });
+      const banner = await screen.findByTestId('status-banner');
+      const titles = [...banner.querySelectorAll('strong')].map((n) => n.textContent);
+      expect(titles, String(details?.incompleteCause)).toContain(title);
+      if (details?.incompleteCause !== 'revision_limit') expect(banner).not.toHaveTextContent(/Revision limit reached/);
+      unmount();
+    }
+  });
+
+  it('B5: when a banner action removes its button, focus moves to the step heading (not <body>)', async () => {
+    open('paused-user');
+    const resume = await screen.findByRole('button', { name: 'Resume' });
+    resume.focus();
+    await userEvent.click(resume);
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement?.id).toBe('inspector-step-heading');
+    });
+  });
+
+  it('B5: a confirmed stop whose opener disappears returns focus to the step heading', async () => {
+    open('paused-user');
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop run' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Stop this run?' });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Stop run' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Stop run' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement?.id).toBe('inspector-step-heading');
+    });
+  });
+
+  it('B5: an action dialog closed after its opener is gone returns focus to the step heading', async () => {
+    open('refused');
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry step with this profile' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement?.id).toBe('inspector-step-heading');
+    });
   });
 });

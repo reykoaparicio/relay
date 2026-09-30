@@ -1,10 +1,12 @@
 // Run status banners (10 J8 StatusBanner table): status / pause reason → InlineAlert + the action buttons. The
 // mapping is exhaustive over `pauseReasonSchema` and `runStatusSchema` (a new member is a compile error), and every
 // button comes from `RunDetail.availableActions` (the server's 06 F2 table): nothing here re-derives run policy.
+import { useId } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { microusd } from '@relay/contracts';
 import type { PauseReason, RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
+import { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import {
   BudgetBreakdownTable,
   Button,
@@ -16,12 +18,15 @@ import {
   RecoveryPanel,
   StatusBadge,
 } from '../../components/ui';
+import type { RecoveryDecisionDetail } from '../../components/ui';
 import { DESTRUCTIVE_RUN_ACTIONS, formatDuration, PROVIDER_LABELS, RUN_ACTION_LABELS, statusPresentation } from '../../lib/format';
 import { paths } from '../shell/paths';
 import {
   bannerActions,
   blockedStep,
   breakdownOf,
+  incompleteCauseOf,
+  incompleteTitle,
   issuesOf,
   lastOverrun,
   numberDetail,
@@ -30,6 +35,7 @@ import {
   stringListDetail,
   usefulArtifactSteps,
 } from './inspector-model';
+import type { IncompleteCause } from './inspector-model';
 import { planRunAction } from './run-actions';
 import { RawResponseToggle, repairsText, ValidationIssueList } from './StepIssues';
 
@@ -40,10 +46,15 @@ export interface StatusBannerProps {
   readonly events: readonly RunEvent[];
   /** A user chose an action: the page opens its dialog / confirmation, or runs it. */
   readonly onAction: (action: RunAction) => void;
-  /** An action already confirmed inside the RecoveryPanel (its own ConfirmDialog for stop). */
-  readonly onConfirmedAction: (action: RunAction) => void;
+  /**
+   * A RecoveryPanel choice: an action it already confirmed (its own ConfirmDialog for stop), or a per-attempt
+   * `decide_unknown` with `{ attemptId, decision }` (the page confirms and calls `runs.decideUnknown` for it).
+   */
+  readonly onRecoveryAction: (action: RunAction, detail?: RecoveryDecisionDetail) => void;
   readonly pending: RunAction | null;
   readonly busy: boolean;
+  /** Available actions that cannot be used right now, with the reason shown next to the disabled button. */
+  readonly disabledReasons?: Partial<Readonly<Record<RunAction, string>>>;
 }
 
 function providerName(id: string | null): string {
@@ -57,13 +68,20 @@ function ActionButtons({
   onAction,
   pending,
   busy,
+  disabledReasons = {},
 }: {
   readonly actions: readonly RunAction[];
   readonly onAction: (a: RunAction) => void;
   readonly pending: RunAction | null;
   readonly busy: boolean;
+  readonly disabledReasons?: Partial<Readonly<Record<RunAction, string>>> | undefined;
 }) {
+  const reasonId = useId();
   if (actions.length === 0) return null;
+  const reasons = actions.flatMap((a) => {
+    const r = disabledReasons[a];
+    return r === undefined ? [] : [{ action: a, reason: r }];
+  });
   return (
     <>
       {actions.map((a, i) => {
@@ -75,12 +93,14 @@ function ActionButtons({
             </ButtonLink>
           );
         }
+        const reason = disabledReasons[a];
         return (
           <Button
             key={a}
             variant={DESTRUCTIVE_RUN_ACTIONS.has(a) ? 'danger' : i === 0 ? 'primary' : 'secondary'}
             pending={pending === a}
-            disabled={busy && pending !== a}
+            disabled={(busy && pending !== a) || reason !== undefined}
+            aria-describedby={reason === undefined ? undefined : `${reasonId}-${a}`}
             onClick={() => {
               onAction(a);
             }}
@@ -89,6 +109,11 @@ function ActionButtons({
           </Button>
         );
       })}
+      {reasons.map(({ action, reason }) => (
+        <p key={action} id={`${reasonId}-${action}`} className="subtle small basis-full">
+          {RUN_ACTION_LABELS[action]} is unavailable: {reason}
+        </p>
+      ))}
     </>
   );
 }
@@ -371,6 +396,12 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
   }
 }
 
+const INCOMPLETE_BODY: Readonly<Record<IncompleteCause | 'unknown', string>> = {
+  revision_limit: 'The reviewer still requested changes when the revision limit was reached. No further revisions were started.',
+  verifier_incomplete: 'The workflow reviewer did not accept the patch and no further revision was requested.',
+  unknown: 'The workflow ended before its reviewer accepted a patch.',
+};
+
 function LimitFacts({ run }: { readonly run: RunDetail }) {
   return (
     <KeyValueList
@@ -484,10 +515,10 @@ function statusContent(run: RunDetail, projectId: string, events: readonly RunEv
     }
     case 'incomplete':
       return {
-        title: `Revision limit reached (${String(run.revisionCycle)} of ${String(run.limits.maxRevisionCycles)})`,
+        title: incompleteTitle(run),
         body: (
           <>
-            <p>The workflow stopped before its reviewer accepted a patch. No further revisions were started.</p>
+            <p>{INCOMPLETE_BODY[incompleteCauseOf(run) ?? 'unknown']}</p>
             <UsefulArtifacts run={run} projectId={projectId} />
             <ReportLink run={run} projectId={projectId} />
           </>
@@ -497,7 +528,7 @@ function statusContent(run: RunDetail, projectId: string, events: readonly RunEv
 }
 
 /** The run-level banner above the step panel. Returns null for statuses that need none (running, queued, approval). */
-export function StatusBanner({ run, projectId, events, onAction, onConfirmedAction, pending, busy }: StatusBannerProps) {
+export function StatusBanner({ run, projectId, events, onAction, onRecoveryAction, pending, busy, disabledReasons }: StatusBannerProps) {
   const step = blockedStep(run);
   const content = statusContent(run, projectId, events, step);
   if (content === null) return null;
@@ -510,7 +541,9 @@ export function StatusBanner({ run, projectId, events, onAction, onConfirmedActi
         tone={p.tone}
         title={content.title}
         actions={
-          recovery ? undefined : actions.length > 0 ? <ActionButtons actions={actions} onAction={onAction} pending={pending} busy={busy} /> : undefined
+          recovery ? undefined : actions.length > 0 ? (
+            <ActionButtons actions={actions} onAction={onAction} pending={pending} busy={busy} disabledReasons={disabledReasons} />
+          ) : undefined
         }
       >
         {recovery ? null : (
@@ -520,7 +553,9 @@ export function StatusBanner({ run, projectId, events, onAction, onConfirmedActi
         )}
         {content.body}
       </InlineAlert>
-      {recovery ? <RecoveryPanel run={run} onDecide={onConfirmedAction} pendingAction={pending} /> : null}
+      {recovery ? (
+        <RecoveryPanel run={run} onDecide={onRecoveryAction} pendingAction={pending} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />
+      ) : null}
     </div>
   );
 }

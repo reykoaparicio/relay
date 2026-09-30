@@ -2,14 +2,15 @@
 // `report.v1` artifact (type from `@relay/contracts` `outputs/report.v1`), never from a local shape.
 import { useId, useState } from 'react';
 import type { ReactNode } from 'react';
-import { addMicrousd, microusd } from '@relay/contracts';
+import { addMicrousd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
-import { Button, Dialog, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
+import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
 import { PROVIDER_LABELS, statusPresentation } from '../../lib/format';
 import { errorTitle, isNotImplemented, toViewError } from '../../api/errors';
 import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { FindingsView } from '../outputs/OutputViews';
-import { stepTitle } from '../run-inspector/inspector-model';
+import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
+import type { IncompleteCause } from '../run-inspector/inspector-model';
 
 type ReportStep = ReportV1['steps'][number];
 
@@ -33,7 +34,7 @@ const VERDICT_TEXT: Readonly<Record<ReportV1['status'], { readonly title: string
   },
   incomplete: {
     title: 'Incomplete',
-    note: 'Incomplete means the workflow stopped at a limit before its reviewer accepted a patch. It is not a failure of Relay and not a judgment that the patch is wrong.',
+    note: 'Incomplete means the workflow ended before its reviewer accepted a patch. It is not a failure of Relay and not a judgment that the patch is wrong.',
   },
   cancelled: { title: 'Cancelled', note: 'The run was stopped before the workflow finished. Finished steps are kept.' },
   failed: { title: 'Failed', note: 'Relay hit an internal error. Artifacts produced before it are kept.' },
@@ -66,9 +67,24 @@ function providersUsed(steps: readonly ReportStep[]): string {
     .join('; ');
 }
 
+/** Why an incomplete run stopped, from `statusDetail.incompleteCause` (B4); neutral when the engine did not say. */
+const INCOMPLETE_NOTE: Readonly<Record<IncompleteCause, string>> = {
+  revision_limit:
+    'The reviewer still requested changes when the revision limit was reached. It is not a failure of Relay and not a judgment that the patch is wrong.',
+  verifier_incomplete:
+    'The workflow reviewer marked the result incomplete. It is not a failure of Relay; review the latest proposal before using it.',
+};
+
 export function SummarySection({ report, run }: { readonly report: ReportV1; readonly run: RunDetail | undefined }) {
   const verdict = VERDICT_TEXT[report.status];
-  const verdictTitle = report.status === 'completed' && report.verdict !== 'accept' ? 'Completed' : verdict.title;
+  const cause = report.status === 'incomplete' && run !== undefined ? incompleteCauseOf(run) : null;
+  const verdictTitle =
+    report.status === 'completed' && report.verdict !== 'accept'
+      ? 'Completed'
+      : report.status === 'incomplete' && run !== undefined
+        ? incompleteTitle(run)
+        : verdict.title;
+  const verdictNote = cause === null ? verdict.note : INCOMPLETE_NOTE[cause];
   return (
     <Section title="Summary">
       <KeyValueList
@@ -80,7 +96,7 @@ export function SummarySection({ report, run }: { readonly report: ReportV1; rea
             value: (
               <span className="stack">
                 <strong>{verdictTitle}</strong>
-                <span className="subtle">{verdict.note}</span>
+                <span className="subtle">{verdictNote}</span>
               </span>
             ),
           },
@@ -121,8 +137,8 @@ export function TerminalLead({ report, run }: { readonly report: ReportV1; reado
   const title =
     report.status === 'incomplete'
       ? run === undefined
-        ? 'Incomplete: the workflow stopped at a limit'
-        : `Incomplete: revision limit reached (${String(run.revisionCycle)} of ${String(run.limits.maxRevisionCycles)})`
+        ? 'Incomplete'
+        : incompleteTitle(run)
       : report.status === 'cancelled'
         ? 'Cancelled: the run was stopped before it finished'
         : 'Failed: the run stopped because of an internal error';
@@ -271,26 +287,14 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
       title={failed ? 'Export failed' : 'Export the run'}
       description={failed ? undefined : 'Relay asks where to save; it never exports into the project folder.'}
       footer={
-        <>
-          <Button
-            variant="secondary"
-            disabled={pending}
-            onClick={() => {
-              onOpenChange(false);
-            }}
-          >
-            {failed ? 'Close' : 'Cancel'}
-          </Button>
-          <Button
-            variant="primary"
-            pending={pending}
-            onClick={() => {
-              onExport(what);
-            }}
-          >
-            {failed ? 'Retry export' : what === 'both' ? 'Export 2 files' : 'Export'}
-          </Button>
-        </>
+        <DialogFooter
+          primaryLabel={failed ? 'Retry export' : what === 'both' ? 'Export 2 files' : 'Export'}
+          secondaryLabel={failed ? 'Close' : 'Cancel'}
+          pending={pending}
+          onPrimary={() => {
+            onExport(what);
+          }}
+        />
       }
     >
       {failed && e !== null ? (
@@ -320,21 +324,69 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
   );
 }
 
+/** Limitations of the fallback summary: what it cannot show, and which amounts are not settled facts. */
+export function fallbackLimitations(run: RunDetail): string[] {
+  const out = [
+    'The full report is not available in this build, so this summary comes from the run record: findings, per-step costs, and patch details are not shown here.',
+  ];
+  if (run.cost.settledEstimated > 0) {
+    out.push('Part of the tracked cost is estimated because the provider did not report usage for every request.');
+  }
+  if (run.cost.unknown > 0 || run.unresolvedAttempts.length > 0) {
+    out.push('Some requests have an unknown outcome; their possible charge is kept as unknown liability until you decide.');
+  }
+  if (run.status !== 'completed') {
+    out.push('The run did not complete, so the workflow reviewer did not accept a patch.');
+  }
+  out.push('Relay never modifies your project files; any patch is a proposal only.');
+  out.push('Tracked by Relay; your provider invoice may differ.');
+  return out;
+}
+
 /** The run cost summary when `report.v1` cannot be loaded (not-implemented fallback): straight from `runs.get`. */
 export function RunFallbackSummary({ run }: { readonly run: RunDetail }) {
+  const c = run.cost;
+  const settled = addMicrousd(c.settledReported, c.settledCalculated, c.settledEstimated);
   return (
-    <Section title="Summary">
-      <KeyValueList
-        items={[
-          { id: 'goal', term: 'Goal', value: run.goal },
-          { id: 'status', term: 'Status', value: <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail /> },
-          {
-            id: 'cost',
-            term: 'Tracked cost',
-            value: <Money value={microusd(run.cost.settledReported + run.cost.settledCalculated + run.cost.settledEstimated)} />,
-          },
-        ]}
-      />
-    </Section>
+    <>
+      <Section title="Summary">
+        <KeyValueList
+          items={[
+            { id: 'goal', term: 'Goal', value: run.goal },
+            { id: 'status', term: 'Status', value: <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail /> },
+            {
+              id: 'cost',
+              term: 'Tracked cost',
+              value: <Money value={settled} certainty={c.settledEstimated > 0 ? 'estimated' : null} />,
+            },
+            { id: 'rep', term: 'Reported', value: <Money value={c.settledReported} /> },
+            { id: 'calc', term: 'Calculated', value: <Money value={c.settledCalculated} /> },
+            { id: 'est', term: 'Estimated', value: <Money value={c.settledEstimated} certainty="estimated" /> },
+            { id: 'unk', term: 'Unknown liability', value: <Money value={c.unknown} /> },
+            { id: 'allow', term: 'Run allowance', value: <Money value={c.allowance} /> },
+          ]}
+        />
+        {run.unresolvedAttempts.length > 0 ? (
+          <div className="stack">
+            <h3 className="section-label">Unresolved charges</h3>
+            <ul className="small">
+              {run.unresolvedAttempts.map((a) => (
+                <li key={a.id}>
+                  {stepTitle(a)} · attempt {a.seq}: up to{' '}
+                  {a.cost === null ? 'an amount not known' : <Money value={a.cost.microusd} certainty={a.cost.certainty} />}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </Section>
+      <Section title="Limitations">
+        <ul>
+          {fallbackLimitations(run).map((l) => (
+            <li key={l}>{l}</li>
+          ))}
+        </ul>
+      </Section>
+    </>
   );
 }

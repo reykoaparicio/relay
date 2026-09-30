@@ -47,7 +47,7 @@ function EventRow({ e }: { readonly e: RunEvent }) {
   );
 }
 
-function VirtualEvents({ events }: { readonly events: readonly RunEvent[] }) {
+function VirtualEvents({ events, label }: { readonly events: readonly RunEvent[]; readonly label: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual returns fresh functions by design
   const virtualizer = useVirtualizer({
@@ -58,7 +58,7 @@ function VirtualEvents({ events }: { readonly events: readonly RunEvent[] }) {
   });
   return (
     // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- a scrollable region must be keyboard reachable
-    <div ref={scrollRef} style={{ maxHeight: 480, overflowY: 'auto' }} tabIndex={0} role="region" aria-label="Events, scrollable">
+    <div ref={scrollRef} style={{ maxHeight: 480, overflowY: 'auto' }} tabIndex={0} role="region" aria-label={`${label}, scrollable`}>
       <ol style={{ height: virtualizer.getTotalSize(), position: 'relative', listStyle: 'none', margin: 0, padding: 0 }}>
         {virtualizer.getVirtualItems().map((item) => {
           const e = events[item.index];
@@ -78,23 +78,45 @@ function VirtualEvents({ events }: { readonly events: readonly RunEvent[] }) {
   );
 }
 
-/** Events of the run that reference the selected step, oldest first. */
-export function EventsList({ events, loaded }: { readonly events: readonly RunEvent[]; readonly loaded: boolean }) {
-  if (!loaded && events.length === 0) return <Skeleton lines={4} />;
+function EventItems({ events, label }: { readonly events: readonly RunEvent[]; readonly label: string }) {
+  if (events.length > EVENTS_VIRTUALIZE_THRESHOLD) return <VirtualEvents events={events} label={label} />;
+  return (
+    <ol className="stack small" aria-label={label} style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+      {events.map((e) => (
+        <li key={e.id}>
+          <EventRow e={e} />
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export interface EventsListProps {
+  /** Events whose payload names the selected row (`stepRunId` / `stepRunIds[]`), oldest first. */
+  readonly events: readonly RunEvent[];
+  /** Legacy events naming only the step key: listed apart, since they may belong to any row of that step. */
+  readonly runLevel?: readonly RunEvent[];
+  readonly loaded: boolean;
+}
+
+/** Events of the selected step row, oldest first, plus a separate run-level group for legacy step-key-only events. */
+export function EventsList({ events, runLevel = [], loaded }: EventsListProps) {
+  if (!loaded && events.length === 0 && runLevel.length === 0) return <Skeleton lines={4} />;
   return (
     <div className="stack">
       {events.length === 0 ? (
         <p className="subtle">No events for this step yet.</p>
-      ) : events.length > EVENTS_VIRTUALIZE_THRESHOLD ? (
-        <VirtualEvents events={events} />
       ) : (
-        <ol className="stack small" aria-label="Events for this step" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {events.map((e) => (
-            <li key={e.id}>
-              <EventRow e={e} />
-            </li>
-          ))}
-        </ol>
+        <EventItems events={events} label="Events for this step" />
+      )}
+      {runLevel.length === 0 ? null : (
+        <div className="stack">
+          <h3 className="section-label">Run-level events</h3>
+          <p className="subtle small">
+            These older events name the step but not a specific attempt, so they may belong to any attempt of this step.
+          </p>
+          <EventItems events={runLevel} label="Run-level events" />
+        </div>
       )}
       <p className="subtle small">Payloads are redacted. No hidden model reasoning is recorded or shown.</p>
     </div>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { appError, microusd } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
 import { axe, describeViolations } from '../components/ui/test-utils';
@@ -45,13 +46,13 @@ describe('ReportPage', () => {
   });
 
   it.each([
-    ['incomplete', /Incomplete: revision limit reached \(2 of 2\)/, true],
+    ['incomplete', 'Revision limit reached (2 of 2)', true],
     ['cancelled', 'Cancelled: the run was stopped before it finished', false],
     ['failed', 'Failed: the run stopped because of an internal error', false],
   ] as const)('incomplete-report (%s): leads with the status, lists unfinished steps; patch tab only with a patch', async (scenario, lead, hasPatch) => {
     open(scenario);
     await ready();
-    expect(screen.getByText(lead)).toBeInTheDocument();
+    expect(screen.getAllByText(lead).length).toBeGreaterThan(0);
     expect(screen.getByText('Useful artifacts are still listed below and can be exported.')).toBeInTheDocument();
     expect(screen.getByText('Original project files were not modified.')).toBeInTheDocument();
     if (scenario !== 'incomplete') expect(screen.getByText('Steps that did not finish:')).toBeInTheDocument();
@@ -112,6 +113,46 @@ describe('ReportPage', () => {
     expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument();
     expect(screen.getByText('Original project files were not modified.')).toBeInTheDocument();
+  });
+
+  it.each([
+    [{ limit: 'revisions', incompleteCause: 'verifier_incomplete' }, 'The workflow reviewer marked the result incomplete', /reviewer marked the result incomplete\. It is not a failure/],
+    [{ limit: 'revisions', incompleteCause: 'revision_limit', revisionCycle: 1, maxRevisionCycles: 3 }, 'Revision limit reached (1 of 3)', /revision limit was reached/],
+    [null, 'Incomplete', /ended before its reviewer accepted a patch/],
+  ] as const)('B4: the incomplete lead and verdict follow statusDetail.incompleteCause (%o)', async (details, lead, note) => {
+    const bridge = createFakeBridge('incomplete-report');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    bridge.world.runs[0] = {
+      ...run,
+      statusDetail: details === null ? null : { ...appError('LIMIT_REACHED'), details },
+    };
+    renderApp(`${P}/runs/${run.id}/report`, { bridge });
+    await ready();
+    const alert = screen.getAllByText(lead).find((el) => el.tagName === 'STRONG');
+    expect(alert).toBeDefined();
+    expect(screen.getByText(note)).toBeInTheDocument();
+    if (details?.incompleteCause !== 'revision_limit') expect(screen.queryByText(/revision limit reached/i)).not.toBeInTheDocument();
+  });
+
+  it('B6: the run fallback summary shows the certainty breakdown, unknown liability, and limitations', async () => {
+    const bridge = createFakeBridge('cancelled');
+    bridge.world.notImplemented.add('artifacts.get');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    bridge.world.runs[0] = { ...run, cost: { ...run.cost, settledReported: microusd(480_000), settledCalculated: microusd(20_000), settledEstimated: microusd(70_000) } };
+    renderApp(`${P}/runs/${run.id}/report`, { bridge });
+    const summary = (await screen.findByRole('heading', { name: 'Summary' })).closest('section') as HTMLElement;
+    for (const term of ['Reported', 'Calculated', 'Estimated', 'Unknown liability']) {
+      expect(within(summary).getByText(term)).toBeInTheDocument();
+    }
+    expect(within(summary).getByText('$0.62')).toBeInTheDocument(); // run.cost.unknown
+    expect(within(summary).getByRole('heading', { name: 'Unresolved charges' })).toBeInTheDocument();
+    expect(within(summary).getByText(/Produce patch · attempt 1: up to/)).toBeInTheDocument();
+    const limitations = screen.getByRole('heading', { name: 'Limitations' }).closest('section') as HTMLElement;
+    expect(within(limitations).getByText(/Part of the tracked cost is estimated/)).toBeInTheDocument();
+    expect(within(limitations).getByText(/unknown outcome/)).toBeInTheDocument();
+    expect(within(limitations).getByText(/Tracked by Relay; your provider invoice may differ/)).toBeInTheDocument();
   });
 
   it('a run without a report yet links back to the inspector', async () => {

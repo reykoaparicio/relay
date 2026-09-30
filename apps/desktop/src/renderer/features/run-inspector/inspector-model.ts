@@ -41,13 +41,112 @@ export function stepTitle(step: { readonly stepKey: string }): string {
 }
 
 /** Only the latest `(revision, retry)` row of each step key is the "live" row (06 F3); older rows are history. */
-function isLatestRow(step: StepView, steps: readonly StepView[]): boolean {
+export function isLatestRow(step: StepView, steps: readonly StepView[]): boolean {
   return !steps.some(
     (s) =>
       s.stepKey === step.stepKey &&
       s.id !== step.id &&
       (s.revisionIndex > step.revisionIndex || (s.revisionIndex === step.revisionIndex && s.retryIndex > step.retryIndex)),
   );
+}
+
+/** The latest `(revision, retry)` row of `stepKey` (the one a retry, profile switch, or revision just created). */
+export function latestRowOf(steps: readonly StepView[], stepKey: string): StepView | undefined {
+  let best: StepView | undefined;
+  for (const s of steps) {
+    if (s.stepKey !== stepKey) continue;
+    if (
+      best === undefined ||
+      s.revisionIndex > best.revisionIndex ||
+      (s.revisionIndex === best.revisionIndex && s.retryIndex > best.retryIndex)
+    ) {
+      best = s;
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Events of one step row
+
+/** The step rows an event names: `payload.stepRunId`, `payload.stepRunIds[]` (revision events), or legacy `stepId`. */
+export function eventStepRunIds(e: RunEvent): readonly string[] | null {
+  const p = e.payload;
+  const ids: string[] = [];
+  if (typeof p['stepRunId'] === 'string') ids.push(p['stepRunId']);
+  if (Array.isArray(p['stepRunIds'])) for (const id of p['stepRunIds']) if (typeof id === 'string') ids.push(id);
+  if (typeof p['stepId'] === 'string') ids.push(p['stepId']);
+  return ids.length === 0 ? null : ids;
+}
+
+export interface StepEvents {
+  /** Events whose payload names this exact row (`stepRunId` / `stepRunIds[]`). */
+  readonly events: RunEvent[];
+  /**
+   * Legacy events that name only the step key (no row id): they cannot be attributed to one attempt row, so they
+   * are listed apart as run-level events, never mixed into the row's own list.
+   */
+  readonly runLevel: RunEvent[];
+}
+
+/**
+ * Events of the selected step row, oldest first. Matching is by row id only (two rows of the same step key — a
+ * retry, a profile switch, a revision — never share events); `stepKey` is a fallback only for legacy events that
+ * carry no row id at all, and those go to `runLevel`.
+ */
+export function stepEventsOf(sources: ReadonlyArray<readonly RunEvent[] | undefined>, step: StepView): StepEvents {
+  const own = new Map<number, RunEvent>();
+  const legacy = new Map<number, RunEvent>();
+  for (const list of sources) {
+    for (const e of list ?? []) {
+      const ids = eventStepRunIds(e);
+      if (ids !== null) {
+        if (ids.includes(step.id)) own.set(e.seq, e);
+      } else if (e.payload['stepKey'] === step.stepKey) {
+        legacy.set(e.seq, e);
+      }
+    }
+  }
+  const sorted = (m: Map<number, RunEvent>) => [...m.values()].sort((a, b) => a.seq - b.seq);
+  return { events: sorted(own), runLevel: sorted(legacy) };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Why a run ended incomplete
+
+export type IncompleteCause = 'revision_limit' | 'verifier_incomplete';
+
+/**
+ * `statusDetail.incompleteCause` (06: `details.incompleteCause`; a top-level field is accepted too). Null when the
+ * engine did not say, so the UI never claims "revision limit reached" for a verifier verdict.
+ */
+export function incompleteCauseOf(run: Pick<RunDetail, 'statusDetail'>): IncompleteCause | null {
+  const d = run.statusDetail;
+  if (d === null) return null;
+  const raw = (d as Readonly<Record<string, unknown>>)['incompleteCause'] ?? d.details?.['incompleteCause'];
+  return raw === 'revision_limit' || raw === 'verifier_incomplete' ? raw : null;
+}
+
+/** "n of m" revision cycles for the revision-limit case: from the detail when present, else the run. */
+export function revisionCounts(run: Pick<RunDetail, 'statusDetail' | 'revisionCycle' | 'limits'>): { readonly used: number; readonly max: number } {
+  return {
+    used: numberDetail(run.statusDetail, 'revisionCycle') ?? run.revisionCycle,
+    max: numberDetail(run.statusDetail, 'maxRevisionCycles') ?? run.limits.maxRevisionCycles,
+  };
+}
+
+/** The headline of an incomplete run, by cause (B4): never a revision-limit claim without the engine saying so. */
+export function incompleteTitle(run: Pick<RunDetail, 'statusDetail' | 'revisionCycle' | 'limits'>): string {
+  switch (incompleteCauseOf(run)) {
+    case 'revision_limit': {
+      const { used, max } = revisionCounts(run);
+      return `Revision limit reached (${String(used)} of ${String(max)})`;
+    }
+    case 'verifier_incomplete':
+      return 'The workflow reviewer marked the result incomplete';
+    case null:
+      return 'Incomplete';
+  }
 }
 
 const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([

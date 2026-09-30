@@ -2,7 +2,7 @@
 // per-schema output viewer. Everything is typed from `@relay/contracts`.
 import { Link } from 'react-router';
 import { planV1Schema } from '@relay/contracts';
-import type { ApprovalDecision, AttemptView, PlanV1, RunDetail, RunEvent, StepDetail, StepView } from '@relay/contracts';
+import type { ApprovalDecision, AttemptView, PlanV1, RunAction, RunDetail, RunEvent, StepDetail, StepView } from '@relay/contracts';
 import {
   ApprovalCard,
   EmptyState,
@@ -156,7 +156,6 @@ function useApprovalPlan(run: RunDetail): { plan: PlanV1 | undefined; error: unk
 
 export interface ApprovalOutputProps {
   readonly run: RunDetail;
-  readonly canDecide: boolean;
   readonly onDecide: (input: ApprovalDecisionInput) => void;
   readonly pendingDecision: ApprovalDecision | null;
   readonly error: unknown;
@@ -164,8 +163,27 @@ export interface ApprovalOutputProps {
   readonly staleNotice: boolean;
 }
 
-export function ApprovalOutput({ run, canDecide, onDecide, pendingDecision, error, staleNotice }: ApprovalOutputProps) {
+const DECISION_ACTIONS: ReadonlyArray<readonly [ApprovalDecision, RunAction]> = [
+  ['approved', 'approve'],
+  ['revision_requested', 'request_revision'],
+  ['rejected', 'reject'],
+];
+
+/** The approval decisions the server allows right now (`availableActions`), e.g. no revision past the limit. */
+export function allowedApprovalDecisions(run: RunDetail): ApprovalDecision[] {
+  return DECISION_ACTIONS.filter(([, a]) => run.availableActions.includes(a)).map(([d]) => d);
+}
+
+/** Shown in the revision form: which revision this would be, and that re-planning spends more of the allowance. */
+export function revisionNoteText(run: RunDetail): string {
+  const next = run.revisionCycle + 1;
+  return `This is revision ${String(next)} of ${String(run.limits.maxRevisionCycles)}. Re-planning sends another request and uses more of the run allowance.`;
+}
+
+export function ApprovalOutput({ run, onDecide, pendingDecision, error, staleNotice }: ApprovalOutputProps) {
   const { plan, error: loadError } = useApprovalPlan(run);
+  const allowedDecisions = allowedApprovalDecisions(run);
+  const canDecide = allowedDecisions.length > 0;
   const approval = run.pendingApproval;
   const stale = staleNotice ? (
     <InlineAlert tone="warning" title="The plan or files changed since you opened this page">
@@ -187,7 +205,14 @@ export function ApprovalOutput({ run, canDecide, onDecide, pendingDecision, erro
     <div className="stack">
       {stale}
       {canDecide ? (
-        <ApprovalCard approval={approval} plan={plan} onDecide={onDecide} pendingDecision={pendingDecision} />
+        <ApprovalCard
+          approval={approval}
+          plan={plan}
+          onDecide={onDecide}
+          pendingDecision={pendingDecision}
+          allowedDecisions={allowedDecisions}
+          {...(allowedDecisions.includes('revision_requested') ? { revisionNote: revisionNoteText(run) } : {})}
+        />
       ) : (
         <PlanView value={plan} />
       )}
