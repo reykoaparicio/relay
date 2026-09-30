@@ -1,0 +1,126 @@
+import type { EpochMs, ProjectId, Result } from '@relay/contracts';
+import { RelayError, err, errors, idSchema, microusd, ok } from '@relay/contracts';
+import type { SqlDriver } from '../driver.js';
+import { mapProject, mapProjectWithRoot, readInt, RowReader } from '../mappers.js';
+import { bit, jsonParam, optionalParams, optionalSetClause, toJson } from '../sql.js';
+import type { ProjectPatch, ProjectRepo, ProjectRow } from '../types.js';
+import type { RepoDeps } from './deps.js';
+
+const ACTIVE_STATUSES = ['queued', 'running', 'cancelling', 'awaiting_approval', 'paused', 'interrupted'];
+
+const UPDATE_SQL = `UPDATE projects SET ${optionalSetClause([
+  'name',
+  'exclusions_json',
+  'allowed_provider_ids_json',
+  'provider_options_json',
+  'monthly_allowance_microusd',
+])}, updated_at = ? WHERE id = ? AND updated_at = ?`;
+
+export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRepo {
+  const find = (id: ProjectId): ProjectRow | undefined => {
+    const row = driver.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+    return row === undefined ? undefined : mapProject(row);
+  };
+  const get = (id: ProjectId): ProjectRow => {
+    const p = find(id);
+    if (p === undefined) {
+      throw new RelayError(errors.notFound('project'));
+    }
+    return p;
+  };
+  return {
+    insert(p) {
+      driver
+        .prepare(
+          `INSERT INTO projects (id, name, root_realpath, root_display_path, exclusions_json, allowed_provider_ids_json,
+             provider_options_json, monthly_allowance_microusd, is_demo, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          p.id,
+          p.name,
+          p.rootRealpath,
+          p.rootDisplayPath,
+          toJson(p.exclusions),
+          toJson(p.providerPolicy.allowedProviderIds),
+          toJson(p.providerPolicy.providerOptions),
+          p.monthlyAllowanceMicrousd,
+          bit(p.isDemo),
+          p.createdAt,
+          p.createdAt,
+        );
+      return get(p.id);
+    },
+    get,
+    find,
+    getWithRoot(id) {
+      const row = driver.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+      if (row === undefined) {
+        throw new RelayError(errors.notFound('project'));
+      }
+      return mapProjectWithRoot(row);
+    },
+    list(opts = {}) {
+      return driver
+        .prepare('SELECT * FROM projects WHERE (? = 1 OR archived_at IS NULL) ORDER BY created_at DESC, id DESC')
+        .all(bit(opts.includeArchived ?? false))
+        .map(mapProject);
+    },
+    update(id: ProjectId, patch: ProjectPatch, expectedUpdatedAt: EpochMs): Result<ProjectRow> {
+      const current = find(id);
+      if (current === undefined) {
+        return err(errors.notFound('project'));
+      }
+      // Strictly increasing so a second writer holding the same expectedUpdatedAt always conflicts.
+      const now = Math.max(deps.clock.now(), current.updatedAt + 1);
+      const changes = driver
+        .prepare(UPDATE_SQL)
+        .run(
+          ...optionalParams([
+            patch.name,
+            jsonParam(patch.exclusions),
+            jsonParam(patch.providerPolicy?.allowedProviderIds),
+            jsonParam(patch.providerPolicy?.providerOptions),
+            patch.monthlyAllowanceMicrousd,
+          ]),
+          now,
+          id,
+          expectedUpdatedAt,
+        ).changes;
+      if (changes === 0) {
+        return err(errors.conflict({ entity: 'project', currentUpdatedAt: current.updatedAt }));
+      }
+      return ok(get(id));
+    },
+    archive(id) {
+      const now = deps.clock.now();
+      return (
+        driver
+          .prepare('UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL')
+          .run(now, now, id).changes > 0
+      );
+    },
+    stats(id, monthStart) {
+      const row = driver
+        .prepare(
+          `SELECT
+             (SELECT count(*) FROM runs WHERE project_id = ?1) AS runs,
+             (SELECT id FROM runs WHERE project_id = ?1 AND status IN (SELECT value FROM json_each(?2))
+               ORDER BY created_at DESC, id DESC LIMIT 1) AS active_run_id,
+             (SELECT count(*) FROM memory_records WHERE project_id = ?1 AND status = 'approved') AS approved_memory,
+             (SELECT count(*) FROM memory_records WHERE project_id = ?1 AND status = 'suggested') AS suggestions,
+             (SELECT COALESCE(SUM(delta_microusd), 0) FROM ledger_entries
+               WHERE scope = 'run' AND project_id = ?1 AND bucket = 'settled' AND created_at >= ?3) AS tracked`,
+        )
+        .get(id, JSON.stringify(ACTIVE_STATUSES), monthStart);
+      const r = new RowReader('projects', row, 'active_run_id');
+      return {
+        runs: r.int('runs'),
+        activeRunId: r.asN('active_run_id', idSchema('run')),
+        approvedMemory: r.int('approved_memory'),
+        suggestions: r.int('suggestions'),
+        trackedMonthMicrousd: microusd(readInt('projects', row, 'tracked')),
+      };
+    },
+  };
+}

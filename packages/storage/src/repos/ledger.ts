@@ -1,0 +1,111 @@
+import type { AttemptId, CostCertainty, Microusd, ProjectId, Result, RunId } from '@relay/contracts';
+import { invariant, ok } from '@relay/contracts';
+import { decodeCursor, encodeCursor } from '../cursor.js';
+import type { SqlDriver } from '../driver.js';
+import { mapLedgerEntry, RowReader } from '../mappers.js';
+import { KEYSET } from '../sql.js';
+import type { LedgerEntryRow, LedgerRepo, Page, PageRequest, WindowBalances } from '../types.js';
+import type { RepoDeps } from './deps.js';
+import { RUN_BALANCES_SQL, RUN_COSTS_SQL } from './ledger-sql.js';
+
+// §9.3 month windows are half-open [start, end). C counts settled entries inside the window; R and U are the
+// outstanding totals with no date filter (an open reservation or unknown liability from last month still binds).
+const windowSql = (scopeFilter: string): string => `SELECT
+  COALESCE(SUM(CASE WHEN bucket = 'settled' AND created_at >= ?1 AND created_at < ?2 THEN delta_microusd END), 0) AS c,
+  COALESCE(SUM(CASE WHEN bucket = 'reserved' THEN delta_microusd END), 0) AS r,
+  COALESCE(SUM(CASE WHEN bucket = 'unknown' THEN delta_microusd END), 0) AS u
+  FROM ledger_entries WHERE ${scopeFilter}`;
+const PROJECT_WINDOW_SQL = windowSql("scope = 'run' AND project_id = ?3");
+const SETUP_WINDOW_SQL = windowSql("scope = 'setup'");
+
+const listSql = (sort: 'created_desc' | 'created_asc', withCursor: boolean): string =>
+  `SELECT * FROM ledger_entries WHERE run_id = ? ${withCursor ? `AND ${KEYSET[sort].after}` : ''} ${KEYSET[sort].order} LIMIT ?`;
+
+function readWindow(row: unknown): WindowBalances {
+  const r = new RowReader('ledger_entries', row, 'c');
+  return { C: r.money('c'), R: r.money('r'), U: r.money('u') };
+}
+
+export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo {
+  const list = (runId: RunId, page: PageRequest): Result<Page<LedgerEntryRow>> => {
+    const sort = page.sort ?? 'created_desc';
+    let rows: unknown[];
+    if (page.cursor === undefined) {
+      rows = driver.prepare(listSql(sort, false)).all(runId, page.limit + 1);
+    } else {
+      const pos = decodeCursor(page.cursor, sort);
+      if (!pos.ok) {
+        return pos;
+      }
+      rows = driver.prepare(listSql(sort, true)).all(runId, pos.value.createdAt, pos.value.id, page.limit + 1);
+    }
+    const items = rows.slice(0, page.limit).map(mapLedgerEntry);
+    const last = items.at(-1);
+    const nextCursor = rows.length > page.limit && last !== undefined ? encodeCursor({ createdAt: last.createdAt, id: last.id }, sort) : null;
+    return ok({ items, nextCursor });
+  };
+
+  return {
+    append(entries) {
+      const groupId = deps.ids.next('ledger');
+      const now = deps.clock.now();
+      const stmt = driver.prepare(
+        `INSERT INTO ledger_entries (id, scope, run_id, project_id, attempt_id, type, bucket, delta_microusd, certainty,
+           price_catalog_version, group_id, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+      );
+      return entries.map((e) => {
+        invariant(Number.isSafeInteger(e.deltaMicrousd), 'ledger delta must be a safe-integer µUSD amount');
+        const row = stmt.get(
+          deps.ids.next('ledger'),
+          e.scope,
+          e.runId ?? null,
+          e.projectId ?? null,
+          e.attemptId ?? null,
+          e.type,
+          e.bucket,
+          e.deltaMicrousd,
+          e.certainty ?? null,
+          e.priceCatalogVersion ?? null,
+          groupId,
+          e.note ?? null,
+          e.createdAt ?? now,
+        );
+        return mapLedgerEntry(row);
+      });
+    },
+    runBalances(runId) {
+      const r = new RowReader('run_budget_v', driver.prepare(RUN_BALANCES_SQL).get(runId), 'l');
+      return { L: r.money('l'), C: r.money('c'), R: r.money('r'), U: r.money('u') };
+    },
+    projectMonthBalances(projectId: ProjectId, monthStartMs, monthEndMs) {
+      return readWindow(driver.prepare(PROJECT_WINDOW_SQL).get(monthStartMs, monthEndMs, projectId));
+    },
+    setupBalances(monthStartMs, monthEndMs) {
+      return readWindow(driver.prepare(SETUP_WINDOW_SQL).get(monthStartMs, monthEndMs));
+    },
+    attemptBalances(attemptId: AttemptId) {
+      const row = driver
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN bucket = 'reserved' THEN delta_microusd END), 0) AS reserved,
+             COALESCE(SUM(CASE WHEN bucket = 'unknown' THEN delta_microusd END), 0) AS unknown,
+             COALESCE(SUM(CASE WHEN bucket = 'settled' THEN delta_microusd END), 0) AS settled
+           FROM ledger_entries WHERE attempt_id = ?`,
+        )
+        .get(attemptId);
+      const r = new RowReader('ledger_entries', row, 'reserved');
+      return { reserved: r.money('reserved'), unknown: r.money('unknown'), settled: r.money('settled') };
+    },
+    list,
+    settledByCertainty(runId): Readonly<Record<CostCertainty, Microusd>> {
+      const r = new RowReader('ledger_entries', driver.prepare(RUN_COSTS_SQL).get(runId), 'l');
+      return {
+        reported: r.money('s_reported'),
+        calculated: r.money('s_calculated'),
+        estimated: r.money('s_estimated'),
+        unknown: r.money('s_unknown'),
+      };
+    },
+  };
+}
