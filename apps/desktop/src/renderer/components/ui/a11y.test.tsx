@@ -29,6 +29,7 @@ import {
   BudgetLedger,
   BudgetMeter,
   Button,
+  ButtonLink,
   Card,
   CardHeader,
   CatalogTable,
@@ -110,6 +111,8 @@ const SCENARIOS: ReadonlyArray<readonly [string, () => ReactElement, { readonly 
       <Button variant="ghost">Ghost</Button>
       <Button pending>Saving</Button>
       <IconButton label="Open settings" icon={Settings} />
+      <ButtonLink href="#/runs" variant="primary" icon={Play}>Review recovery options</ButtonLink>
+      <ButtonLink href="#/memory" size="sm">Manage memory</ButtonLink>
     </div>
   )],
   ['StatusBadge: every run status and pause reason', () => (
@@ -123,6 +126,13 @@ const SCENARIOS: ReadonlyArray<readonly [string, () => ReactElement, { readonly 
       <Card labelledBy="c1"><CardHeader title="Budget" titleId="c1" actions={<Button>Edit</Button>} /><p>Body</p></Card>
       <StatTile label="Tracked this month" value={<Money value={costSummary().allowance} />} hint="of $50.00" href="#/runs" />
       <StatTile label="Runs" value="12" />
+      <StatTile
+        label="Usage tracked by Relay"
+        labelAside="September"
+        value={<Money value={costSummary().allowance} />}
+        href="#/usage"
+        secondaryAction={<a href="#/ledger">Open usage ledger</a>}
+      />
       <KeyValueList items={[{ term: 'Model', value: 'claude-opus-5-5', mono: true }, { term: 'Profile', value: 'Balanced' }]} />
     </>
   )],

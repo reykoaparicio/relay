@@ -2,6 +2,7 @@ import { useId, useRef, useState } from 'react';
 import type { RunAction, RunDetail } from '@relay/contracts';
 import { DESTRUCTIVE_RUN_ACTIONS, RUN_ACTION_LABELS } from '../../../lib/format/actions';
 import { stepKeyLabel } from '../../../lib/format/labels';
+import { statusPresentation } from '../../../lib/format/status-presentation';
 import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
 import { Money } from '../Money';
@@ -32,12 +33,18 @@ export function RecoveryPanel({ run, onDecide, pendingAction = null }: RecoveryP
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
   // The server decides which actions apply (06 F2); the UI never re-derives the rules.
   const actions = run.availableActions.filter((a) => a !== 'export_report' && a !== 'export_patch');
+  // The status detail sits on its own full-width line under the heading row, so on narrow cards it
+  // wraps below "Recovery" instead of being squeezed beside it (no text is truncated).
+  const statusDetail = statusPresentation('run', run.status, run.pauseReason).detail;
 
   return (
     <section ref={sectionRef} className="card" aria-labelledby={headingId}>
-      <div className="card-header">
-        <h2 id={headingId} ref={headingRef} tabIndex={-1}>Recovery</h2>
-        <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail />
+      <div className="recovery-header">
+        <div className="card-header">
+          <h2 id={headingId} ref={headingRef} tabIndex={-1}>Recovery</h2>
+          <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} />
+        </div>
+        {statusDetail === undefined ? null : <p className="status-detail">{statusDetail}</p>}
       </div>
       <p>
         Last completed step:{' '}

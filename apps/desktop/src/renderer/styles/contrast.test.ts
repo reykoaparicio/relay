@@ -154,6 +154,21 @@ const CSS_PAIRS: ReadonlyArray<readonly [name: string, selector: string, bg: Css
   ['table column header', '.table thead th', { token: 'color-surface' }],
   ['sidebar eyebrow', '.eyebrow', { token: 'color-sidebar' }],
   ['excluded file', '.tree li.excluded', { token: 'color-surface' }],
+  ['recovery status detail', '.status-detail', { token: 'color-surface' }],
+  ['stat tile label aside', '.stat .label-aside', { token: 'color-surface' }],
+  ['provider status in the page header', '.provider-status', { token: 'color-canvas' }],
+  ['provider status in a card', '.provider-status', { token: 'color-surface' }],
+  ['provider status warning in the page header', '.provider-status.warn', { token: 'color-canvas' }],
+  ['provider status warning in a card', '.provider-status.warn', { token: 'color-surface' }],
+  ['safe note in a card', '.safe-note', { token: 'color-surface' }],
+  ['safe note on the canvas', '.safe-note', { token: 'color-canvas' }],
+  ['cost legend on the canvas', '.cost-legend', { token: 'color-canvas' }],
+  ['cost legend in a card', '.cost-legend', { token: 'color-surface' }],
+  ['reported certainty tag in a table', '.tag.certainty-reported', { token: 'color-surface' }],
+  ['reported certainty tag on a raised row', '.tag.certainty-reported', { token: 'color-surface-raised' }],
+  ['estimated certainty tag in a table', '.tag.certainty-estimated', { token: 'color-surface' }],
+  ['estimated certainty tag on a raised row', '.tag.certainty-estimated', { token: 'color-surface-raised' }],
+  ['unknown certainty tag on its tint', '.tag.certainty-unknown', { ruleTintOver: 'color-surface' }],
 ];
 
 function cssPairColors(palette: Palette, selector: string, bg: CssBackground): readonly [string, string] {

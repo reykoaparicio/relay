@@ -3,6 +3,8 @@ export { AppShell, MAIN_ID } from './AppShell';
 export type { AppShellProps } from './AppShell';
 export { Button } from './Button';
 export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
+export { ButtonLink } from './ButtonLink';
+export type { ButtonLinkProps } from './ButtonLink';
 export { Card, CardHeader } from './Card';
 export type { CardProps, CardHeaderProps } from './Card';
 export { Checkbox } from './Checkbox';

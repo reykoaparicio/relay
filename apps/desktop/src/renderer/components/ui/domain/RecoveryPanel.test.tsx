@@ -23,4 +23,18 @@ describe('RecoveryPanel', () => {
     await waitFor(() => { expect(document.activeElement).not.toBe(document.body); });
     expect(screen.getByRole('heading', { name: 'Recovery' })).toHaveFocus();
   });
+
+  it('shows the status detail in full on its own line under the heading row (wraps on narrow cards)', () => {
+    render(<RecoveryPanel run={runDetail()} onDecide={() => undefined} />);
+    const heading = screen.getByRole('heading', { name: 'Recovery' });
+    const detail = screen.getByText('Relay stopped unexpectedly. Review what happened before continuing');
+    const headerRow = heading.closest('.card-header');
+
+    expect(detail.tagName).toBe('P');
+    expect(detail).toHaveClass('status-detail');
+    expect(headerRow).not.toBeNull();
+    expect(headerRow?.contains(detail)).toBe(false);
+    expect(headerRow?.nextElementSibling).toBe(detail);
+    expect(screen.getByText('Interrupted')).toBeInTheDocument();
+  });
 });
