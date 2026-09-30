@@ -208,6 +208,9 @@ importers:
       '@relay/templates':
         specifier: workspace:*
         version: link:../templates
+      diff:
+        specifier: ^9.0.0
+        version: 9.0.0
     devDependencies:
       '@relay/providers':
         specifier: workspace:*

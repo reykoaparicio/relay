@@ -15,11 +15,12 @@
   },
   "dependencies": {
     "@relay/contracts": "workspace:*",
-    "@relay/templates": "workspace:*"
+    "@relay/templates": "workspace:*",
+    "diff": "^9.0.0"
   },
   "devDependencies": {
-    "@relay/storage": "workspace:*",
     "@relay/providers": "workspace:*",
+    "@relay/storage": "workspace:*",
     "@relay/tools": "workspace:*",
     "@types/node": "^24.19.0"
   }
