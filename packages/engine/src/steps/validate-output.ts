@@ -19,8 +19,16 @@ export interface ValidationInputs {
   readonly files: ReadonlyMap<string, string | null>;
   /** The approved plan's `file_scope_json` for patch steps (null when no approval binds the step). */
   readonly approvedScope: readonly string[] | null;
-  /** True for a quality revision (revision_index > 0): leaving the approved scope invalidates the approval (F10). */
+  /**
+   * True for a quality revision under the current approval (`run.revisionCycle > 0`; `resnapshot_and_replan` resets
+   * the cycle and binds a new approval): leaving the approved scope invalidates the approval (F10).
+   */
   readonly isRevision: boolean;
+  /**
+   * Input paths whose snapshot bytes exist but could not be read or verified (missing artifact row, unreadable file,
+   * sha mismatch). A check that needs their content fails with `snapshot_unavailable` — never accepted unverified.
+   */
+  readonly unavailable?: ReadonlySet<string>;
 }
 
 /** No inputs: Zod only (plus the checks that need no files). */
@@ -33,6 +41,10 @@ const issue = (path: string, message: string, code: string): ValidationIssue => 
 /** A path quoted for a message (bounded: issue messages are ≤ 400 chars). */
 const q = (p: string): string => `"${p.length > 160 ? `${p.slice(0, 160)}…` : p}"`;
 
+/** The content check of `relPath` cannot run: its snapshot is unreadable or unverifiable (BH-7). */
+const unavailableIssue = (path: string, relPath: string): ValidationIssue =>
+  issue(path, `The input snapshot of ${q(relPath)} could not be read or verified, so this output cannot be checked against it.`, 'snapshot_unavailable');
+
 function lineCount(content: string): number {
   if (content === '') return 0;
   const lines = content.split('\n').length;
@@ -41,6 +53,7 @@ function lineCount(content: string): number {
 
 function checkRef(ref: SourceRef, path: string, inputs: ValidationInputs): ValidationIssue[] {
   if (!inputs.files.has(ref.relPath)) return [issue(`${path}.relPath`, `${q(ref.relPath)} is not one of the run's input files.`, 'unknown_file')];
+  if (inputs.unavailable?.has(ref.relPath) === true) return [unavailableIssue(`${path}.relPath`, ref.relPath)];
   const content = inputs.files.get(ref.relPath);
   if (content === null || content === undefined) return [];
   const lines = lineCount(content);
@@ -96,13 +109,24 @@ function checkDiff(file: PatchV1['files'][number], path: string, content: string
 function checkPatch(v: PatchV1, inputs: ValidationInputs): { issues: ValidationIssue[]; outsideScope: string[] } {
   const issues: ValidationIssue[] = [];
   const outsideScope: string[] = [];
+  const seen = new Set<string>();
   v.files.forEach((f, i) => {
     const path = `files[${String(i)}]`;
     if (!inputs.files.has(f.relPath)) {
       issues.push(issue(`${path}.relPath`, `${q(f.relPath)} is not one of the run's input files.`, 'unknown_file'));
       return;
     }
+    // Two diffs for one file would each apply to the snapshot alone, never to each other's result.
+    if (seen.has(f.relPath)) {
+      issues.push(issue(`${path}.relPath`, `${q(f.relPath)} appears more than once; put all its changes in one diff.`, 'duplicate_file'));
+      return;
+    }
+    seen.add(f.relPath);
     if (inputs.approvedScope !== null && !inputs.approvedScope.includes(f.relPath)) outsideScope.push(f.relPath);
+    if (inputs.unavailable?.has(f.relPath) === true) {
+      issues.push(unavailableIssue(`${path}.unifiedDiff`, f.relPath));
+      return;
+    }
     issues.push(...checkDiff(f, path, inputs.files.get(f.relPath) ?? null));
   });
   return { issues, outsideScope };

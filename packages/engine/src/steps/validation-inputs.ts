@@ -25,12 +25,15 @@ async function diffFileNames(ctx: EngineCtx, diffArtifactId: ArtifactId): Promis
 }
 
 /**
- * Loads the F8 inputs of `run`: every input file's snapshot content (a file whose snapshot cannot be read keeps its
- * path with `null` content, logged) and the approved scope (latest valid approval, or the B4-preserved one).
+ * Loads the F8 inputs of `run`: every input file's snapshot content (a file whose snapshot cannot be read or
+ * verified is listed in `unavailable`, logged — its content checks then fail as `snapshot_unavailable`), the approved
+ * scope (latest valid approval, or the B4-preserved one), and whether this is a quality revision under that approval
+ * (`run.revisionCycle > 0`; a replan resets the cycle).
  */
-export async function loadValidationInputs(ctx: EngineCtx, run: RunRow, revisionIndex: number): Promise<ValidationInputs> {
+export async function loadValidationInputs(ctx: EngineCtx, run: RunRow): Promise<ValidationInputs> {
   const r = ctx.db.repos;
   const files = new Map<string, string | null>();
+  const unavailable = new Set<string>();
   const cache = new Map<ArtifactId, string | null>();
   for (const f of r.runs.inputFiles(run.id)) {
     let content = cache.get(f.artifactId);
@@ -42,8 +45,9 @@ export async function loadValidationInputs(ctx: EngineCtx, run: RunRow, revision
       cache.set(f.artifactId, content);
     }
     files.set(f.relPath, content);
+    if (content === null) unavailable.add(f.relPath);
   }
   if (run.input.kind === 'diff') for (const name of await diffFileNames(ctx, run.input.diffArtifactId)) if (!files.has(name)) files.set(name, null);
   const approval = r.approvals.latestApprovedForRun(run.id) ?? preservedApproval(r, run.id);
-  return { files, approvedScope: approval === undefined ? null : [...approval.fileScope], isRevision: revisionIndex > 0 };
+  return { files, approvedScope: approval === undefined ? null : [...approval.fileScope], isRevision: r.runs.get(run.id).revisionCycle > 0, unavailable };
 }

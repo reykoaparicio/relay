@@ -86,14 +86,21 @@ function base(result: ModelResult, abortReason: AbortReason | null): Omit<Classi
   };
 }
 
-function classifySuccess(result: ModelResult & { kind: 'success' }, validated: Validation | null, canonicalOk: boolean, b: ReturnType<typeof base>): ClassifiedOutcome {
-  const charge = known(result.usage, result.fallback, flagsOf(result));
+/**
+ * The outcome of a COMPLETED response after F8 validation and the canonical-output write — shared by the live settle
+ * and the F9b reconcile path (BH-6): APPROVAL_STALE → `scope_changed`, other invalid → `invalid_output`, a failed
+ * canonical write → `artifact_failed`, else `valid`.
+ */
+export function validatedOutcome(validated: Validation | null, canonicalOk: boolean): Pick<ClassifiedOutcome, 'kind' | 'attemptState' | 'error'> {
   if (validated !== null && !validated.ok) {
-    const kind = validated.error.code === 'APPROVAL_STALE' ? 'scope_changed' : 'invalid_output';
-    return { ...b, kind, attemptState: 'failed', charge, error: validated.error };
+    return { kind: validated.error.code === 'APPROVAL_STALE' ? 'scope_changed' : 'invalid_output', attemptState: 'failed', error: validated.error };
   }
-  if (!canonicalOk) return { ...b, kind: 'artifact_failed', attemptState: 'failed', charge, error: errors.artifactWriteFailed() };
-  return { ...b, kind: 'valid', attemptState: 'succeeded', charge, error: null };
+  if (!canonicalOk) return { kind: 'artifact_failed', attemptState: 'failed', error: errors.artifactWriteFailed() };
+  return { kind: 'valid', attemptState: 'succeeded', error: null };
+}
+
+function classifySuccess(result: ModelResult & { kind: 'success' }, validated: Validation | null, canonicalOk: boolean, b: ReturnType<typeof base>): ClassifiedOutcome {
+  return { ...b, ...validatedOutcome(validated, canonicalOk), charge: known(result.usage, result.fallback, flagsOf(result)) };
 }
 
 const ERROR_KINDS: Readonly<Partial<Record<AppError['code'], OutcomeKind>>> = {
@@ -219,10 +226,13 @@ export function nextAttemptPlan(
 export function nextPurpose(step: Pick<StepRow, 'retryIndex'>, attempts: readonly AttemptRow[]): AttemptPurpose {
   const latest = attempts.at(-1);
   if (latest === undefined) return step.retryIndex > 0 ? 'user_retry' : 'initial';
-  if (latest.state === 'abandoned') return 'user_retry';
+  // The error recorded on the latest attempt names the counter its retry consumed — for live settles and for F9b
+  // reconciled attempts alike (the reconcile tx records the classified error, BH-5), so a reconciled invalid output
+  // is followed by a `schema_repair` attempt (with the repair block) and a reconciled failure by `transport_retry`.
   const code = latest.error?.code;
   if (code === 'PROVIDER_UNAVAILABLE') return 'transport_retry';
   if (code === 'OUTPUT_INVALID') return 'schema_repair';
+  if (latest.state === 'abandoned') return 'user_retry';
   return latest.purpose;
 }
 
@@ -270,13 +280,17 @@ export function overrunError(attemptId: AttemptId, N: Microusd, X: Microusd): Ap
   });
 }
 
-/** Maps a failed step's error to the pause event (F13 `eventForFailedStep`). */
+/**
+ * Maps a FAILED step's error to the pause event (F13 `eventForFailedStep`). A responded non-retryable provider error
+ * (MODEL_UNSUPPORTED from 400/404/422, CONTEXT_TOO_LARGE from 413, …) failed the step, so it pauses as
+ * `provider_unavailable` (retry_step / choose_profile → runs.retryStep, stop). `setup_blocked` is reserved for
+ * pre-dispatch configuration problems ({@link eventForError}), whose step is still `ready`.
+ */
 export function eventForFailure(error: AppError): RunMachineEvent {
   const code = error.code;
   if (code === 'OUTPUT_INVALID' || code === 'ARTIFACT_WRITE_FAILED') return { type: 'OUTPUT_INVALID_EXHAUSTED', error };
   if (code === 'MODEL_REFUSED') return { type: 'MODEL_REFUSED', error };
   if (code === 'REQUEST_OUTCOME_UNKNOWN' && error.attemptId !== undefined) return { type: 'UNKNOWN_OUTCOME', attemptId: error.attemptId, error };
-  if (code === 'MODEL_UNSUPPORTED' || code === 'CONTEXT_TOO_LARGE') return { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error };
   return { type: 'TRANSPORT_EXHAUSTED', error };
 }
 

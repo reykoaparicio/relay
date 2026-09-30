@@ -152,10 +152,8 @@ describe('approval_stale decisions (F2 resume)', () => {
     expect(stale.ok ? null : stale.error.code).toBe('PROJECT_CHANGED');
     expect(x.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'approval_stale' }));
 
-    const replan = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'replan-changed-01', runId, decision: { kind: 'resnapshot_and_replan' } });
     const res = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'preserve-key-0002', runId, decision: { kind: 'use_preserved_snapshot' } });
 
-    expect(replan.ok ? null : [replan.error.code, replan.error.details?.['reason']]).toEqual(['PROJECT_CHANGED', 'resnapshot_requires_new_run']);
     expect(res.ok && res.data.status).toBe('queued');
     expect(x.db.repos.events.list(runId, 0, 1000).some((e) => e.type === 'run.snapshot_preserved')).toBe(true);
     expect(await drive(x, runId, ['awaiting_approval'])).toBe('awaiting_approval');

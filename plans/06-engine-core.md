@@ -138,7 +138,7 @@ Transition table (every row is one `it()` in `run-machine.test.ts`; all other pa
 | queued | SETUP_BLOCKED | paused | setup_blocked / auth_required / budget_run / budget_project |
 | queued | CANCEL_REQUESTED | cancelled | – (nothing in flight) |
 | running | PLAN_READY | awaiting_approval | – |
-| running | SETUP_BLOCKED | paused | setup_blocked / auth_required (context too large, model unsupported, provider not permitted) |
+| running | SETUP_BLOCKED | paused | setup_blocked / auth_required (**pre-dispatch only**: context too large, model unsupported, provider not permitted found by the context assembler or F6 before any attempt; the step is still `ready`) |
 | running | BUDGET_BLOCKED | paused | budget_run / budget_project |
 | running | BUDGET_OVERRUN | paused | budget_overrun |
 | running | USER_PAUSE | paused | user (takes effect **before the next dispatch**; the in-flight call completes) |
@@ -147,7 +147,7 @@ Transition table (every row is one `it()` in `run-machine.test.ts`; all other pa
 | running | APPROVAL_STALE | paused | approval_stale |
 | running | LIMIT_REACHED | paused | limit_attempts / deadline |
 | running | OUTPUT_INVALID_EXHAUSTED | paused | output_invalid |
-| running | TRANSPORT_EXHAUSTED | paused | provider_unavailable |
+| running | TRANSPORT_EXHAUSTED | paused | provider_unavailable (transport retries spent, or a responded non-retryable provider error such as MODEL_UNSUPPORTED from 400/404/422 or CONTEXT_TOO_LARGE from 413: the step is `failed`) |
 | running | MODEL_REFUSED | paused | model_refused |
 | running | UNKNOWN_OUTCOME | paused | unknown_outcome |
 | running | RUNNER_LOST | interrupted | – |
@@ -162,6 +162,8 @@ Transition table (every row is one `it()` in `run-machine.test.ts`; all other pa
 | awaiting_approval | CANCEL_REQUESTED | cancelled | – |
 | paused | RESUME_RESOLVED | queued | – |
 | paused | CANCEL_REQUESTED / STOP_REQUESTED | cancelled | – |
+| paused | BUDGET_OVERRUN | paused | budget_overrun (clarification 14: applied by `resumeIfUnknownsResolved` for a deferred reconciled overrun) |
+| paused | APPROVAL_STALE | paused | approval_stale (clarification 14: deferred reconciled scope change) |
 | interrupted | RECOVERY_DECIDED | queued | – |
 | interrupted | CANCEL_REQUESTED / STOP_REQUESTED | cancelled | – |
 | cancelling | WORK_STOPPED | cancelled | – |
@@ -177,7 +179,7 @@ Run status `failed` is reachable **only** through `UNRECOVERABLE` (invariant vio
 - `runs.resume({kind:'raise_limits'})` on `paused(limit_attempts | deadline)`. The new limits are written in the same CAS (F12).
 - `runs.retryStep` on a paused run whose blocked step is `failed` (F7): the step gets a new row. `runs.retryStep` is **only** for failed steps (`CONFLICT` otherwise).
 - The `choose_profile` action maps by the paused step's state (02 B5 `RUN_ACTION_OPS`): if the step is `failed` → `runs.retryStep { stepId, profileId }`; otherwise → `runs.resume({ kind: 'switch_profile', stepKey, profileId })`. So `paused(budget_run | budget_project | setup_blocked)` (step still `ready`) always use `switch_profile`, which appends a `run_config_revisions` row + `run.config_revised` and emits `RESUME_RESOLVED`.
-- `runs.decideUnknown` on `paused(unknown_outcome)` when the last unknown attempt of the run is decided **and** its step went back to `ready` (`retry_acknowledging_charge`).
+- `runs.decideUnknown` on `paused(unknown_outcome)` when the last unknown attempt of the run is decided **and** its step went back to `ready` (`retry_acknowledging_charge`) **and** no reconciled outcome deferred a pause (clarification 14; F9b auto-resume follows the same rule).
 - `runs.resume({kind:'resnapshot_and_replan' | 'use_preserved_snapshot'})` on `paused(approval_stale)`. `use_preserved_snapshot` appends a `run.snapshot_preserved` event in the same transaction (F6 reads it to skip the input-hash comparison).
 
 `RECOVERY_DECIDED` is emitted by `runs.resume` (the `review_recovery` action) on `interrupted`, and only when the run has no attempt in state `unknown` (else `CONFLICT` with `details.unknownAttempts`).
@@ -222,6 +224,9 @@ Run status `failed` is reachable **only** through `UNRECOVERABLE` (invariant vio
 11. `running → incomplete` also fires when the verifier returns `incomplete`, not only on the revision limit (`REVISION_LIMIT.cause`).
 12. `paused → queued` ("resume after resolution") is emitted by the operations listed in "Who emits RESUME_RESOLVED".
 13. `interrupted → queued` ("recovery decision") requires every unknown attempt to be decided first.
+14. `paused → paused(budget_overrun | approval_stale)` (BUDGET_OVERRUN / APPROVAL_STALE, Referee BH-2/BH-6): a reconciled result of an unknown attempt (F9b) that overran its liability (X > N, §9.5) or, for a quality revision, left the approved scope (F10) requires that pause. While the run is `paused(unknown_outcome)` it is recorded as `error.recorded { kind: 'deferred_pause' }`; once the run's last unknown attempt is resolved (reconciled or decided), `resumeIfUnknownsResolved` applies the deferred event **instead of** RESUME_RESOLVED (overrun first). It is never auto-resumed. An `interrupted` run keeps waiting for `review_recovery` (the overrun is shown in its cost and `ledger.overrun` event).
+
+**Invariant (tested).** For **every** `PAUSE_REASON`, `referee-wave2.test.ts` builds a representative paused state, checks that the chosen non-stop action is in `allowedRunActions`, performs it through IPC, and asserts the run reaches `queued` via RESUME_RESOLVED (`Record<PauseReason, …>`, so a new reason fails to compile until it has a case).
 
 ## F3: Step state machine (`src/step-machine.ts`) — pure
 
@@ -536,13 +541,13 @@ Retry limits are read from the **step snapshot's `retryPolicy`** (`transport`, `
 | Result | Class | Limit (snapshot `retryPolicy`) | Step | Run event (when exhausted / immediate) |
 |---|---|---|---|---|
 | `PROVIDER_UNAVAILABLE` with phase `not_sent`, or a 5xx **before any body byte** (04 R4-8) | transport | `transport` (default 1) | `ready`, purpose `transport_retry`, `not_before_at = now + 2 s`; exhausted → `failed` | `TRANSPORT_EXHAUSTED` → `paused(provider_unavailable)` |
-| Other known provider errors with phase `responded` (non-retryable 4xx) | none | – | `failed` | `TRANSPORT_EXHAUSTED` → `paused(provider_unavailable)` |
+| Other known provider errors with phase `responded` (non-retryable 4xx, **including** MODEL_UNSUPPORTED from 400/404/422 and CONTEXT_TOO_LARGE from 413) | none | – | `failed` | `TRANSPORT_EXHAUSTED` → `paused(provider_unavailable)`: retry_step / choose_profile (→ `runs.retryStep { profileId }` on the failed step) / stop (ruling BH-1) |
 | `RATE_LIMITED` (incl. 529) | rate_limit | `rateLimitWaits` (default 3) | `ready`, same purpose as the rate-limited attempt, `not_before_at = now + min(retryAfterMs ?? 2 s, 60 s)`; exhausted → stays `ready` | `RATE_LIMIT_EXHAUSTED` → `paused(rate_limited)` |
 | `AUTH_REQUIRED` (401/403, or no credential) | none | – | `ready` | `AUTH_FAILED` → `paused(auth_required)` immediately |
 | `REQUEST_OUTCOME_UNKNOWN`: phase `sent_no_response` or `responded_partial` (incl. a mid-stream SSE error or a connection drop, 04 R3-6), abort after dispatch, or an adapter throw | none | **never auto-retried** | `unknown`; attempt `unknown`; `move_to_unknown` N | `UNKNOWN_OUTCOME` → `paused(unknown_outcome)`. Waits for `runs.decideUnknown` (§7.5, §7.6). `interrupted` is reserved for a lost runner (F9) |
 | `truncated`, Zod-invalid, or semantically invalid output (`OUTPUT_INVALID`) | schema_repair | `schemaRepair` (default 1) | `ready`, purpose `schema_repair` (the prompt appends the validation issues, 07 §G3 repair block); exhausted → `failed` | `OUTPUT_INVALID_EXHAUSTED` → `paused(output_invalid)` |
 | `refused` | none | – | `failed` with `MODEL_REFUSED` | `MODEL_REFUSED` → `paused(model_refused)` |
-| `MODEL_UNSUPPORTED`, `CONTEXT_TOO_LARGE`, `PERMISSION_DENIED` (policy, before any attempt) | none | – | `ready` (never dispatched) | `SETUP_BLOCKED` → `paused(setup_blocked)` |
+| `MODEL_UNSUPPORTED`, `CONTEXT_TOO_LARGE`, `PERMISSION_DENIED` (policy / context assembly, **before any attempt**) | none | – | `ready` (never dispatched) | `SETUP_BLOCKED` → `paused(setup_blocked)`. `setup_blocked` is only for these pre-dispatch configuration problems (BH-1); a failed step is never paused `setup_blocked` (`runs.retryStep` still accepts one left so by an earlier build) |
 | verify outcome `revise` | quality_revision | `maxRevisionCycles` (2) | F10 revision loop | – |
 | Invariant violation / internal error outside an attempt | – | – | – | `UNRECOVERABLE` → `failed` |
 
@@ -579,6 +584,8 @@ Validation uses observable checks only (§7.7). Model-reported confidence is nev
 
 A failed semantic check becomes `OUTPUT_INVALID` with `details.issues: ValidationIssue[]`, and it counts against `schema_repair`.
 
+**Never accepted unverified (BH-7).** An input file whose snapshot cannot be read or verified (missing artifact row, unreadable file, sha mismatch) is listed in `ValidationInputs.unavailable`; a findings line-range check or a patch apply check on it fails with issue `snapshot_unavailable` (OUTPUT_INVALID). Only a diff-input run's path-only names skip the content checks. Two `patch.v1` `files[]` entries for the same `relPath` are OUTPUT_INVALID (`duplicate_file`: each diff would apply to the snapshot alone). `isRevision` (APPROVAL_STALE `scope_changed` instead of OUTPUT_INVALID `outside_approved_scope`) is `run.revisionCycle > 0` — the quality-revision cycle under the current approval — never the step row's `revision_index` (a replan also bumps that, BH-4).
+
 ## F9: Recovery (`src/recovery.ts`) — §4.4, §7.5; runs once at `engine.start()` before the loop
 
 Inside a single transaction per run:
@@ -606,6 +613,8 @@ After recovery, every non-active attempt has `attemptBalances(attempt).reserved 
 
 The run stays `interrupted` until the user chooses `runs.resume` (`review_recovery`). Relay never auto-resumes after a crash (§4.4 "shows the last completed step and any unresolved request").
 
+**One post-validation outcome function (BH-6).** The reconcile tx classifies the result exactly like the live settle (`validatedOutcome`: valid / invalid_output / scope_changed / artifact_failed; a `failed` answer is a transport failure) and then calls the same `applyPostValidation` as F4 step 7 (`outcome.ts`): the F7 plan and step move (`RECONCILED_*` from `unknown`), the F10 scope rule (APPROVAL_STALE `scope_changed` → approval invalidated, step held `ready`), the revision trigger, and `ledger.overrun`. The resulting BUDGET_OVERRUN / APPROVAL_STALE is deferred (F2 clarification 14) because the run is not `running`. The attempt row records the classified error (OUTPUT_INVALID with issues / PROVIDER_UNAVAILABLE / APPROVAL_STALE), so `nextPurpose` after RECONCILED_RETRY returns `schema_repair` (the prompt carries the G3 repair block) or `transport_retry`, matching the counter that was incremented (BH-5).
+
 ## F10: Revision loop & approval reuse (`src/revision.ts`, `src/approvals.ts`) — §12.4 revisionPolicy, §11.3
 
 - After `verify` succeeds with outcome:
@@ -622,6 +631,7 @@ The run stays `interrupted` until the user chooses `runs.resume` (`review_recove
   4. In one decide transaction: CAS-decide the approval, apply the run transition (`approved` / `revision_requested` → `queued`, ruling B2; `rejected` → `cancelled`), append `approval.decided`, and **store the idempotency result**. `revision_requested` creates a new `plan` step row (`revision_index + 1`) with the user's note as structured input, and the planner then re-runs. **This consumes a planner attempt and counts against `maxAttempts`, not against the quality revision count.**
   5. After commit: `hooks.afterApprovalCommit({ stepKey, purpose: null, attemptSeq: 0 })` with `stepKey` = the approval step id (`approve` in `workflow.json`), so the crash spec is `afterApprovalCommit@approve` (F13).
   - **Concurrent duplicates:** two in-flight calls with the same key can both miss the lookup in step 1. The first commits. The second's CAS in step 4 finds the approval already decided and returns `CONFLICT` (`details.reason: 'duplicate_in_flight'`). A later retry with that key replays the stored result via step 1.
+- **`resnapshot_and_replan` (ruling for Referee BH-4 + storage follow-up).** On `paused(approval_stale)`: before the tx the input drift is computed; when files changed (files input), they are re-read and re-snapshotted through the tools (`snapshotSelectedFiles`, new `input_file` artifacts; a file that can no longer be read fails the decision with that error). In one tx: `RunRepo.replaceInputFiles` (03 C6), a new `runs.context_hash` (same intake formula), `context.assembled { kind: 'resnapshot', contextHash, changedPaths }` (a fresh snapshot binding: an earlier `use_preserved_snapshot` / preserved approval no longer applies), approvals invalidated `plan_changed`, new `plan` + downstream rows, **`revision_cycle` reset to 0** (quality-revision cycles count under one approval; the new approval starts fresh), and RESUME_RESOLVED. The new approval binds the new plan hash and context hash.
 - **The planner can never approve its own plan (M2 checklist).** The approval step has no model handler. Only `approvals.decide` from IPC advances it, and the IPC op is only reachable from the renderer.
 
 ## F11: Cancellation & pause (`src/cancellation.ts`) — FR-11, §9.5
@@ -762,6 +772,8 @@ Each issue carries a field path (`steps[3].maxOutputTokens`) matching the mock's
 4. Write the `allowance_set` ledger entry `+L`.
 5. Store the idempotency key and append `run.created`.
 
+The intake step (F13) later snapshots the input files into `run_input_files`; that set changes only through `resnapshot_and_replan` (F10, `RunRepo.replaceInputFiles`), which also recomputes `context_hash`.
+
 Then signal the loop. Preflight uses the same code path with `dryRun: true` and stops before the transaction. **Its first-reservation N (ruling B7)** is computed exactly like dispatch: the same prompt rendering as the context assembler (`renderStepPrompt`: role instructions + output contract, goal, constraints, diff block, file blocks in `run_input_files` order), `buildModelRequest` (output schema, `maxOutputTokens`, `refusalFallback`), and `adapter.estimate` (request overhead, billed hops, allowance prices). Without a key the adapter's local estimate is used, so preflight N equals the first attempt's reservation for the same inputs.
 
 **Config revisions (R3-13).** The snapshot is revision 0 and is never mutated. Every later profile change (`switch_profile`, `runs.retryStep{profileId}`) appends a `run_config_revisions` row and emits `run.config_revised`. `effectiveStepSnapshot` = the latest revision for that step key, else the snapshot entry. Historical attempts keep their own `profile_snapshot_json`.
@@ -836,7 +848,7 @@ It does **not** start the engine. Callers run `await runtime.engine.start()`. `d
 5. **Settle** in one tx (same group):
    - known usage → `release −N` + `settle +X (calculated)`;
    - not sent / no usage → `release −N`;
-   - outcome unknown → `move_to_unknown` N, which stays as setup liability.
+   - outcome unknown (phase `sent_no_response` / `responded_partial`, an abort after dispatch, or **`REQUEST_OUTCOME_UNKNOWN` in any phase**, e.g. a gateway's `responded` answer; BH-3) → `move_to_unknown` N, which stays as setup liability; the result's `certainty` is `unknown`.
    - It also records `CredentialRefRepo.recordTest(providerId, ok, code, at)`.
 6. Returns the 02 `providers.test` output shape `{ ok, latencyMs, modelProbed, error?, costMicrousd, certainty }` (`modelProbed` = the model id used; `error` is the `AppError` when `ok` is false).
 
@@ -865,6 +877,7 @@ It does **not** start the engine. Callers run `await runtime.engine.start()`. `d
 | `setup-calls.test.ts` | Admission over `scope='setup'` entries for the month. `BUDGET_BLOCKED` without a call when exhausted. Settle / release / unknown entries carry `attempt_id` NULL and `certainty` |
 | `crash-hooks.test.ts` | Grammar: `afterStepCommit@plan`, `afterDispatchIntent@review#2`, invalid hook / step key / `#0` rejected. The n-th matching invocation calls the injected `exit(137)`. `crashHooksFromEnv` returns `undefined` without `RELAY_E2E=1` |
 | `referee-fixes.test.ts` | Referee rulings: B3 lost settlement CAS writes nothing and the stop/restart race settles an attempt once (R never negative); B4 PROJECT_CHANGED at implement invalidates the approval (`project_changed`) unless `use_preserved_snapshot`; B5 fallback iterations priced per model (unknown → provider max, `estimated`); B6 no API key reaches the logger; B7 preflight N = first attempt reservation; B9 `runs.pause` and any wake end a `wait_until` sleep |
+| `referee-wave2.test.ts` | Referee Wave-2 rulings: BH-1 responded 4xx → step failed + `paused(provider_unavailable)`, retry_step / choose_profile (→ retryStep) resume, plus the every-`PAUSE_REASON` RESUME_RESOLVED invariant; BH-2 reconciled overrun → `budget_overrun` (also deferred past a remaining unknown); BH-3 setup `REQUEST_OUTCOME_UNKNOWN` in any phase → setup liability; BH-4 replan resets the revision cycle (first implementation after it is OUTPUT_INVALID, not APPROVAL_STALE); `resnapshot_and_replan` with changed files; BH-5 reconciled retry purpose + repair block; BH-6 reconciled scope change → approval invalidated + `paused(approval_stale)`; BH-7 `snapshot_unavailable` and `duplicate_file` |
 | `engine.test.ts` (tagged `@m2`) | Full template on the fake `happy-path` scenario: final statuses, **4 model attempts** (review, plan, implement, verify), synthetic intake/finalize rows succeeded, ledger totals equal fake prices × fixture usage, and the report artifact exists |
 
 ## Success Criteria (gate)
@@ -896,7 +909,7 @@ Recorded where the implemented APIs or later orchestrator rulings refine the tex
 - **F8** inputs come from `steps/validation-inputs.ts` (snapshot contents + approved scope). A patch file outside the approved scope is `OUTPUT_INVALID(outside_approved_scope)` on the first implementation and `APPROVAL_STALE(scope_changed)` on a quality revision (F10 reuse rule: approval invalidated `scope_changed`, step held `ready`, run `paused(approval_stale)`). Diff-input runs validate paths only (no bytes to apply against). OUTPUT_INVALID details also carry `{schemaId, repairsUsed, repairsMax, rawResponseArtifactId}`.
 - **F9b** also auto-emits `RESUME_RESOLVED` for a `paused(unknown_outcome)` run whose last unknown attempt was reconciled and whose steps are not failed (same rule as `runs.decideUnknown`); an `interrupted` run still waits for `review_recovery`. Eligibility uses providers `supportsRequestLookupFor` (injected, `EngineDeps.requestLookup`) with the provider options recorded on the attempt (`estimate_json.providerOptions`, N1). `usageKnown:false` → completed settles N `estimated`; failed keeps the liability (attempt `abandoned`).
 - **F10** revision rows are inserted in the verify step-7 (or reconcile) transaction (`revision.ts`); the new implement row's `input_artifact_ids` = the review artifact (the context assembler consuming it is G's Wave 3). `incomplete` runs record `statusDetail = LIMIT_REACHED{limit:'revisions', incompleteCause, revisionCycle?, maxRevisionCycles?}`.
-- **resnapshot_and_replan** re-plans (new plan / approval / downstream rows, approvals invalidated `plan_changed`) only when the inputs are unchanged: `run_input_files` is immutable per run (03 PK `(run_id, rel_path)`, no replace op), so changed files → `PROJECT_CHANGED{reason:'resnapshot_requires_new_run'}`. `use_preserved_snapshot` is accepted only for a `PROJECT_CHANGED` stale; it re-opens an approval whose row still waits on an invalidated approval, and `approvals.decide` skips the input re-hash afterwards.
+- **resnapshot_and_replan** re-plans (new plan / approval / downstream rows, approvals invalidated `plan_changed`, `revision_cycle` reset to 0) and, when the inputs changed, first re-snapshots them (`RunRepo.replaceInputFiles`, new `context_hash`; see F10). *(Superseded Wave-2 text: changed files used to return `PROJECT_CHANGED{reason:'resnapshot_requires_new_run'}`.)* `use_preserved_snapshot` is accepted only for a `PROJECT_CHANGED` stale; it re-opens an approval whose row still waits on an invalidated approval, and `approvals.decide` skips the input re-hash afterwards.
 - **runs.retryStep** follows this plan (CONFLICT for a non-failed step) over 02's "a ready/pending step keeps its row" wording; budget/setup pauses use `switch_profile`. `runs.increaseAllowance` also writes `limits_json.budgetMicrousd` and requires a strict increase (`VALIDATION_FAILED not_an_increase`).
 - **F18** sizes N from providers `connectionTestRequest` (injected `EngineDeps.connectionTestRequest`; OpenAI 256 output tokens), treats `truncated` as a working connection, and recovery moves an orphaned setup reservation to the setup liability at start. `app.createBackup` goes through `EngineDeps.backup` (runtime.ts wraps storage `createBackup` + `toDisplayPath`).
 - `attempt.stream_progress` events are persisted (≤ 1 / 500 ms) so the per-run `seq` stays gapless; every step/attempt-scoped event payload carries `stepRunId`.

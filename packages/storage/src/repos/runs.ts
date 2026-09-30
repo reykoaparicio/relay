@@ -203,6 +203,19 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
         }
       });
     },
+    replaceInputFiles(runId, files) {
+      // All-or-nothing (joins an open tx). Nothing references run_input_files, and every new row's artifact_id is
+      // FK-checked against artifacts on insert; the old input_file artifacts stay (history, retention).
+      deps.inTx(() => {
+        driver.prepare('DELETE FROM run_input_files WHERE run_id = ?').run(runId);
+        const stmt = driver.prepare(
+          'INSERT INTO run_input_files (run_id, rel_path, sha256, artifact_id, size_bytes, captured_at) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        for (const f of files) {
+          stmt.run(runId, f.relPath, f.sha256, f.artifactId, f.sizeBytes, f.capturedAt);
+        }
+      });
+    },
     inputFiles(runId) {
       return driver.prepare('SELECT * FROM run_input_files WHERE run_id = ? ORDER BY rel_path').all(runId).map(mapInputFile);
     },

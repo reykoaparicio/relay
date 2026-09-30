@@ -394,6 +394,11 @@ export interface RunRepo {
   /** Adds `now − running_since` to `execution_ms_used` and clears `running_since`; no-op if none is open. */
   leaveRunning(id: RunId, now: EpochMs): void;
   insertInputFiles(runId: RunId, files: readonly RunInputFile[]): void;
+  /**
+   * Replaces the run's input-file set atomically (delete + insert in one tx; joins an open tx): `resnapshot_and_replan`
+   * after the project changed (06 F10). Each `artifactId` must reference an existing `input_file` artifact (FK).
+   */
+  replaceInputFiles(runId: RunId, files: readonly RunInputFile[]): void;
   inputFiles(runId: RunId): readonly RunInputFile[];
   /** ≤ 6 statements. @throws RelayError NOT_FOUND */
   getInspectorProjection(runId: RunId): InspectorProjection;

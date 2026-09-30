@@ -1,8 +1,8 @@
 // 06 F13 intake (R4-6): read the selected files ONCE, snapshot them as `input_file` artifacts, record
 // `run_input_files` (each row carries its artifact id), snapshot memory, and set `runs.context_hash`.
 import { INPUT_CAPS, errors } from '@relay/contracts';
-import type { AppError, RunId, Sha256, StepRunId } from '@relay/contracts';
-import type { RunInputFile } from '@relay/storage';
+import type { AppError, EpochMs, RunId, Sha256, StepRunId } from '@relay/contracts';
+import type { Repos, RunInputFile, RunRow } from '@relay/storage';
 import type { InputFileRef, SelectedFile } from '@relay/tools';
 import { computeIntakeContextHash } from '../manifest.js';
 import type { EngineCtx } from '../ports.js';
@@ -11,9 +11,14 @@ import { snapshotOf } from '../snapshot.js';
 import { applyStepEvent } from '../step-machine.js';
 import { blockRun, commitIfReady, setupBlocked } from './local.js';
 
-type Snapshotted = { readonly file: SelectedFile; readonly ref: InputFileRef };
+/** One selected file read at intake (or re-snapshot) and its `input_file` snapshot artifact. */
+export type Snapshotted = { readonly file: SelectedFile; readonly ref: InputFileRef };
 
-async function readFiles(ctx: EngineCtx, runId: RunId, relPaths: readonly string[]): Promise<Snapshotted[] | { error: AppError }> {
+/**
+ * Reads `relPaths` from the project root ONCE and snapshots their bytes as `input_file` artifacts (reusing this run's
+ * existing snapshot per sha). Used by intake and by `resnapshot_and_replan` (06 F10).
+ */
+export async function snapshotSelectedFiles(ctx: EngineCtx, runId: RunId, relPaths: readonly string[]): Promise<Snapshotted[] | { error: AppError }> {
   const run = ctx.db.repos.runs.get(runId);
   const project = ctx.db.repos.projects.getWithRoot(run.projectId);
   const root = await ctx.projectFs.openRoot(project.rootRealpath);
@@ -38,12 +43,33 @@ async function readFiles(ctx: EngineCtx, runId: RunId, relPaths: readonly string
   });
 }
 
+/** Inserts the `input_file` artifact rows of `files` (caller's tx) and returns the matching `run_input_files` rows. */
+export function inputFileRows(r: Repos, run: Pick<RunRow, 'id' | 'projectId'>, files: readonly Snapshotted[], now: EpochMs): RunInputFile[] {
+  return files.map(({ file, ref }) => {
+    const art = r.artifacts.insertIfAbsent({
+      id: ref.artifactId, runId: run.id, projectId: run.projectId, kind: 'input_file', relPath: ref.storeRelPath, sha256: ref.sha256,
+      sizeBytes: file.size, mediaType: 'text/plain; charset=utf-8', createdAt: now,
+    });
+    return { relPath: file.relPath, sha256: file.sha256, artifactId: art.id, sizeBytes: file.size, capturedAt: now };
+  });
+}
+
+/** The run's intake context hash over its CURRENT `run_input_files` and memory snapshot (caller's tx). */
+export function intakeContextHash(r: Repos, run: Pick<RunRow, 'id' | 'goal' | 'input'>): Sha256 {
+  return computeIntakeContextHash({
+    goal: run.goal,
+    input: run.input,
+    files: r.runs.inputFiles(run.id).map((f) => ({ relPath: f.relPath, sha256: f.sha256 })),
+    memory: r.memory.runSnapshot(run.id).map((m) => ({ recordId: m.recordId, revision: m.revision })),
+  });
+}
+
 /** Runs the intake step. Failures (PERMISSION_DENIED, NOT_FOUND, CONTEXT_TOO_LARGE, …) → SETUP_BLOCKED. */
 export async function runIntake(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Promise<void> {
   const run = ctx.db.repos.runs.get(runId);
   let files: Snapshotted[] = [];
   if (run.input.kind === 'files') {
-    const read = await readFiles(ctx, runId, run.input.relPaths);
+    const read = await snapshotSelectedFiles(ctx, runId, run.input.relPaths);
     if ('error' in read) return blockRun(ctx, runId, setupBlocked(read.error));
     files = read;
   } else {
@@ -56,20 +82,9 @@ export async function runIntake(ctx: EngineCtx, runId: RunId, stepRunId: StepRun
   if (!memory.ok) return blockRun(ctx, runId, setupBlocked(memory.error));
   await commitIfReady(ctx, runId, stepRunId, (r, cur, step, fx) => {
     const now = ctx.clock.now();
-    const rows: RunInputFile[] = files.map(({ file, ref }) => {
-      const art = r.artifacts.insertIfAbsent({
-        id: ref.artifactId, runId, projectId: cur.projectId, kind: 'input_file', relPath: ref.storeRelPath, sha256: ref.sha256,
-        sizeBytes: file.size, mediaType: 'text/plain; charset=utf-8', createdAt: now,
-      });
-      return { relPath: file.relPath, sha256: file.sha256, artifactId: art.id, sizeBytes: file.size, capturedAt: now };
-    });
+    const rows = inputFileRows(r, cur, files, now);
     if (r.runs.inputFiles(runId).length === 0 && rows.length > 0) r.runs.insertInputFiles(runId, rows);
-    const contextHash = computeIntakeContextHash({
-      goal: cur.goal,
-      input: cur.input,
-      files: r.runs.inputFiles(runId).map((f) => ({ relPath: f.relPath, sha256: f.sha256 })),
-      memory: r.memory.runSnapshot(runId).map((m) => ({ recordId: m.recordId, revision: m.revision })),
-    });
+    const contextHash = intakeContextHash(r, cur);
     r.runs.setContextHash(runId, contextHash);
     applyStepEvent(r, fx, step, 'LOCAL_STEP_DONE');
     appendRunEvent(r, fx, runId, 'context.assembled', { stepKey: step.stepKey, stepRunId: step.id, contextHash, files: rows.length });

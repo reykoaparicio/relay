@@ -104,7 +104,9 @@ describe('purposes and error mapping', () => {
   it('eventForFailure and eventForError map every class (failed is only UNRECOVERABLE)', () => {
     expect(eventForFailure(errors.artifactWriteFailed()).type).toBe('OUTPUT_INVALID_EXHAUSTED');
     expect(eventForFailure(errors.requestOutcomeUnknown(ID)).type).toBe('UNKNOWN_OUTCOME');
-    expect(eventForFailure(errors.contextTooLarge({ estimatedInputTokens: 1, budgetTokens: 0 })).type).toBe('SETUP_BLOCKED');
+    // BH-1: a responded 4xx failed the step → provider_unavailable (setup_blocked is pre-dispatch only).
+    expect(eventForFailure(errors.contextTooLarge({ estimatedInputTokens: 1, budgetTokens: 0 })).type).toBe('TRANSPORT_EXHAUSTED');
+    expect(eventForFailure(errors.modelUnsupported({ providerId: 'anthropic' })).type).toBe('TRANSPORT_EXHAUSTED');
     expect(eventForFailure(appError('VALIDATION_FAILED')).type).toBe('TRANSPORT_EXHAUSTED');
     expect(eventForError(errors.conflict())).toBeNull();
     expect(eventForError(errors.permissionDenied('provider_not_allowed'))?.type).toBe('SETUP_BLOCKED');

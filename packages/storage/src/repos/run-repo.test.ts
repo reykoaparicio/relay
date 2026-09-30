@@ -282,4 +282,32 @@ describe('RunRepo', () => {
 
     expect(f.db.repos.runs.inputFiles(run.id)).toEqual([]);
   });
+
+  it('replaceInputFiles swaps the whole set in one tx (FK-checked); a failing insert keeps the old set', () => {
+    const p = seedProject(f.db, f.clock);
+    const run = seedRun(f.db, f.clock, p.id);
+    const other = seedRun(f.db, f.clock, p.id);
+    const input = (id: string, digit: string) => f.db.repos.artifacts.insertIfAbsent({
+      id: id as never, runId: run.id, projectId: p.id, kind: 'input_file', relPath: `artifacts/run/${digit}`, sha256: sha(digit),
+      sizeBytes: 3, mediaType: 'text/plain', createdAt: f.clock.now(),
+    });
+    const a1 = input(newId('artifact'), '1');
+    const a2 = input(newId('artifact'), '2');
+    const row = (relPath: string, art: { id: never; sha256: never }) => ({ relPath: relPath as never, sha256: art.sha256, artifactId: art.id, sizeBytes: 3, capturedAt: f.clock.now() });
+    f.db.repos.runs.insertInputFiles(run.id, [row('src/a.ts', a1 as never), row('src/b.ts', a1 as never)]);
+    f.db.repos.runs.insertInputFiles(other.id, [row('src/a.ts', a1 as never)]);
+
+    f.db.repos.runs.replaceInputFiles(run.id, [row('src/a.ts', a2 as never), row('src/c.ts', a1 as never)]);
+
+    expect(f.db.repos.runs.inputFiles(run.id).map((x) => [x.relPath, x.artifactId, x.sha256])).toEqual([
+      ['src/a.ts', a2.id, sha('2')],
+      ['src/c.ts', a1.id, sha('1')],
+    ]);
+    expect(f.db.repos.runs.inputFiles(other.id)).toHaveLength(1); // other runs untouched
+
+    expect(() => {
+      f.db.repos.runs.replaceInputFiles(run.id, [row('src/z.ts', { id: newId('artifact'), sha256: sha('3') } as never)]);
+    }).toThrow(/FOREIGN KEY constraint failed/);
+    expect(f.db.repos.runs.inputFiles(run.id).map((x) => x.relPath)).toEqual(['src/a.ts', 'src/c.ts']);
+  });
 });

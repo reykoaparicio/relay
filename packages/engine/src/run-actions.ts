@@ -24,7 +24,7 @@ import type {
 } from '@relay/contracts';
 import type { ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
 import type { InputDrift } from './approval-binding.js';
-import { inputDrift, invalidateApproval, projectChangedError } from './approval-binding.js';
+import { inputDrift, invalidateApproval } from './approval-binding.js';
 import { admit, resolveUnknownEntries } from './budget.js';
 import { buildModelRequest } from './checkpoints.js';
 import { monthWindow } from './clock.js';
@@ -37,7 +37,9 @@ import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, isTerminal, runEffects } from './run-machine.js';
 import { resolveProfile } from './run-start.js';
-import { ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
+import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
+import type { Snapshotted } from './steps/intake.js';
+import { inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
 import { costSummaryOf, toRunDetail } from './views.js';
 
@@ -155,7 +157,7 @@ export interface ResumeInput {
   readonly decision: RecoveryDecision;
 }
 
-type Prepared = { readonly profile?: ProfileSnapshot; readonly drift?: InputDrift };
+type Prepared = { readonly profile?: ProfileSnapshot; readonly drift?: InputDrift; readonly resnapshot?: readonly Snapshotted[] };
 
 function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: EpochMs): Result<void> {
   if (run.status === 'interrupted') {
@@ -207,11 +209,24 @@ function resumePreserved(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: 
   return ok(undefined);
 }
 
+/**
+ * F10 re-snapshot (inside the replan tx): the files re-read before the tx become the run's input snapshot
+ * (`RunRepo.replaceInputFiles`, new `input_file` artifacts), and `runs.context_hash` is recomputed — the new plan's
+ * approval binds the new hashes. Recorded as `context.assembled { kind: resnapshot }` (a fresh snapshot binding:
+ * an earlier `use_preserved_snapshot` no longer applies).
+ */
+function resnapshotInputs(r: Repos, fx: PostCommitEffect[], run: RunRow, files: readonly Snapshotted[], drift: InputDrift | undefined, now: EpochMs): void {
+  const rows = inputFileRows(r, run, files, now);
+  r.runs.replaceInputFiles(run.id, rows);
+  const contextHash = intakeContextHash(r, run);
+  r.runs.setContextHash(run.id, contextHash);
+  appendRunEvent(r, fx, run.id, 'context.assembled', { kind: RESNAPSHOT_KIND, contextHash, files: rows.length,
+    changedPaths: drift?.changed ?? [], previousContextHash: run.contextHash });
+}
+
 function resumeReplan(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, pre: Prepared, now: EpochMs): Result<void> {
   if (!isPausedFor(run, ['approval_stale'])) return err(notApplicable(run, 'resnapshot_and_replan'));
-  // run_input_files are immutable per run (03: PK (run_id, rel_path), no replace op): changed files cannot be
-  // re-snapshotted into this run — the user keeps the preserved snapshot or starts a new run.
-  if (pre.drift !== undefined && pre.drift.changed.length > 0) return err(projectChangedError(pre.drift, { reason: 'resnapshot_requires_new_run' }));
+  if (pre.resnapshot !== undefined) resnapshotInputs(r, fx, run, pre.resnapshot, pre.drift, now);
   const snapshot = snapshotOf(run);
   const planKey = Object.keys(snapshot.steps).find((k) => {
     const s = snapshot.steps[k];
@@ -223,6 +238,9 @@ function resumeReplan(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: Run
     if (a !== undefined) invalidateApproval(r, fx, run.id, a.id, 'plan_changed', now);
   }
   supersede(r, fx, ctx, run, [planKey, ...downstream.filter((k) => snapshot.steps[k]?.kind !== 'finalize')], now);
+  // BH-4: quality-revision cycles count under ONE approval; the new plan's approval starts at cycle 0 (so its first
+  // implementation is validated as a first implementation, not as a revision).
+  if (run.revisionCycle !== 0) r.runs.setRevisionCycle(run.id, 0);
   applyRunEvent(r, run, { type: 'RESUME_RESOLVED' }, now, fx);
   return ok(undefined);
 }
@@ -236,7 +254,9 @@ function resumeSwitchProfile(r: Repos, fx: PostCommitEffect[], run: RunRow, d: {
     return err(errors.validationFailed([{ path: 'decision.stepKey', message: 'Not a model step of this run.', code: 'unknown_step' }]));
   }
   // A failed step changes profile through runs.retryStep (a new row); a finished step cannot change.
-  if (step.state !== 'ready' && step.state !== 'pending') return err(errors.conflict({ reason: 'step_not_ready', state: step.state }));
+  if (step.state !== 'ready' && step.state !== 'pending') {
+    return err(errors.conflict({ reason: 'step_not_ready', state: step.state, ...(step.state === 'failed' ? { useOp: 'relay/v1/runs.retryStep' } : {}) }));
+  }
   if (pre.profile === undefined) return err(errors.notFound('profile'));
   reviseConfig(r, fx, run, d.stepKey, pre.profile, revisionReason(run));
   r.steps.transition(step.id, [step.state], step.state, { profileName: pre.profile.name });
@@ -294,7 +314,15 @@ async function prepareResume(ctx: EngineCtx, run: RunRow, d: RecoveryDecision): 
     const profile = await permittedProfile(ctx, run, d.stepKey, d.profileId);
     return profile.ok ? ok({ profile: profile.value }) : profile;
   }
-  if (d.kind === 'resnapshot_and_replan' && isPausedFor(run, ['approval_stale'])) return ok({ drift: await inputDrift(ctx, run) });
+  if (d.kind === 'resnapshot_and_replan' && isPausedFor(run, ['approval_stale'])) {
+    const drift = await inputDrift(ctx, run);
+    if (drift.changed.length === 0 || run.input.kind !== 'files') return ok({ drift });
+    // F10: the project changed — re-read and re-snapshot the run's files through the tools (outside any tx). A file
+    // that can no longer be read (deleted, excluded, too large) fails the decision with that error.
+    const files = await snapshotSelectedFiles(ctx, run.id, run.input.relPaths);
+    if ('error' in files) return err(files.error);
+    return ok({ drift, resnapshot: files });
+  }
   return ok({});
 }
 
@@ -456,7 +484,12 @@ export interface RetryStepInput {
   readonly profileId?: ProfileId | undefined;
 }
 
-const RETRYABLE_PAUSES: readonly PauseReason[] = ['output_invalid', 'provider_unavailable', 'model_refused', 'unknown_outcome'];
+/**
+ * Pauses whose failed step `runs.retryStep` accepts (retry_step, and choose_profile on a failed step). A responded
+ * 4xx pauses as provider_unavailable (BH-1); `setup_blocked` is listed only so a run paused that way by an earlier
+ * build with a FAILED step is not stuck (choose_profile maps to retryStep for a failed step, 02 B5).
+ */
+const RETRYABLE_PAUSES: readonly PauseReason[] = ['output_invalid', 'provider_unavailable', 'model_refused', 'unknown_outcome', 'setup_blocked'];
 
 function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, input: RetryStepInput, profile: ProfileSnapshot | null, now: EpochMs): Result<void> {
   if (!isPausedFor(run, RETRYABLE_PAUSES)) return err(notApplicable(run, 'retry_step'));

@@ -80,6 +80,8 @@ const TABLE: readonly Row[] = [
   ['paused', SAMPLES.RESUME_RESOLVED, 'queued', null],
   ['paused', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
   ['paused', SAMPLES.STOP_REQUESTED, 'cancelled', null],
+  ['paused', SAMPLES.BUDGET_OVERRUN, 'paused', 'budget_overrun'],
+  ['paused', SAMPLES.APPROVAL_STALE, 'paused', 'approval_stale'],
   ['interrupted', SAMPLES.RECOVERY_DECIDED, 'queued', null],
   ['interrupted', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
   ['interrupted', SAMPLES.STOP_REQUESTED, 'cancelled', null],
@@ -181,6 +183,10 @@ describe('§7.2 clarifications (one it() each)', () => {
   });
   it('13: interrupted → queued on RECOVERY_DECIDED', () => {
     expect(transitionRun('interrupted', SAMPLES.RECOVERY_DECIDED)).toEqual({ to: 'queued', pauseReason: null });
+  });
+  it('14: paused → paused(budget_overrun | approval_stale) when a reconciled outcome requires that pause (BH-2, BH-6)', () => {
+    expect(transitionRun('paused', SAMPLES.BUDGET_OVERRUN)).toEqual({ to: 'paused', pauseReason: 'budget_overrun' });
+    expect(transitionRun('paused', SAMPLES.APPROVAL_STALE)).toEqual({ to: 'paused', pauseReason: 'approval_stale' });
   });
 });
 

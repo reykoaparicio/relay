@@ -8,14 +8,15 @@ import type { ArtifactId, AttemptId, EpochMs, Microusd, RunId } from '@relay/con
 import type { ModelRequest, NormalizedUsage, ProviderAdapter, ReconciliationResult } from '@relay/providers';
 import type { AttemptRow, Repos } from '@relay/storage';
 import { resolveUnknownEntries, settlementEntries } from './budget.js';
+import type { SettleAmount } from './budget.js';
 import type { ArtifactPut } from './checkpoints.js';
-import { isJsonText, outcomeLabel, putArtifact } from './checkpoints.js';
+import { isJsonText, putArtifact } from './checkpoints.js';
 import { canonicalJson, utf8 } from './hash.js';
 import { logSafe } from './log-safe.js';
 import type { EngineCtx } from './ports.js';
-import type { ResultFlags, Validation } from './retry.js';
-import { flagsOf } from './retry.js';
-import { planRevision } from './revision.js';
+import { applyPostValidation, deferPause, isDeferrablePause, pendingDeferredPause } from './outcome.js';
+import type { ClassifiedOutcome, ResultFlags, Validation } from './retry.js';
+import { flagsOf, validatedOutcome } from './retry.js';
 import { effectiveStepSnapshot } from './snapshot.js';
 import { validateOutput } from './steps/validate-output.js';
 import { loadValidationInputs } from './steps/validation-inputs.js';
@@ -172,51 +173,57 @@ export function reconciledAmount(res: Resolution, prices: AttemptRow['profileSna
   return { X, certainty: res.flags.priceTierMismatch === true ? 'estimated' : 'calculated' };
 }
 
-/** RESUME_RESOLVED for a paused(unknown_outcome) run whose last unknown attempt was just resolved (step not failed). */
+/**
+ * Once the last unknown attempt of a `paused(unknown_outcome)` run is resolved (reconciled or decided): a pause a
+ * reconciled outcome deferred (an overrun X > liability → `budget_overrun`, a quality revision outside the approved
+ * scope → `approval_stale`) is applied INSTEAD of resuming — never auto-resumed (BH-2, BH-6). Otherwise
+ * RESUME_RESOLVED when no step is failed or unknown.
+ */
 export function resumeIfUnknownsResolved(r: Repos, fx: PostCommitEffect[], runId: RunId, now: EpochMs): void {
   const run = r.runs.get(runId);
   if (run.status !== 'paused' || run.pauseReason !== 'unknown_outcome') return;
   if (r.attempts.listForRun(runId).some((x) => x.state === 'unknown')) return;
+  const deferred = pendingDeferredPause(r, runId);
+  if (deferred !== null) {
+    applyRunEvent(r, run, deferred, now, fx);
+    return;
+  }
   if (r.steps.latestPerStepKey(runId).some((s) => s.state === 'failed' || s.state === 'unknown')) return;
   applyRunEvent(r, run, { type: 'RESUME_RESOLVED' }, now, fx);
 }
 
-/** The step move for a reconciled attempt (reconcile tx). */
-function reconcileStep(
-  r: Repos,
-  fx: PostCommitEffect[],
-  ctx: EngineCtx,
-  i: { attempt: AttemptRow; res: Resolution; validated: Validation | null; output: { id: ArtifactId; value: unknown } | null; now: EpochMs },
-): void {
-  const step = r.steps.get(i.attempt.stepRunId);
-  if (step.state !== 'unknown') return;
-  const run = r.runs.get(i.attempt.runId);
-  const policy = effectiveStepSnapshot(r, run, step.stepKey).retryPolicy;
-  if (i.res.kind === 'completed' && i.validated?.ok === true && i.output !== null) {
-    applyStepEvent(r, fx, step, 'RECONCILED_VALID', { outputArtifactId: i.output.id, outcome: outcomeLabel(i.output.value), error: null, notBeforeAt: null });
-    planRevision(r, fx, ctx, r.steps.get(step.id), i.now);
-    return;
+type ReconcileInput = {
+  attempt: AttemptRow;
+  res: Resolution;
+  validated: Validation | null;
+  output: { id: ArtifactId; value: unknown } | null;
+  puts: readonly ArtifactPut[];
+};
+
+/**
+ * The F7 outcome of a reconciled attempt, classified exactly like a live result: a completed response goes through
+ * the same {@link validatedOutcome} (valid / invalid_output / scope_changed / artifact_failed); a failure is a
+ * transport failure (retried with the transport budget).
+ */
+function reconciledOutcome(i: ReconcileInput): ClassifiedOutcome {
+  const common = { charge: { kind: 'not_charged' } as const, usage: i.res.usage, partial: false, stopReason: null, retryAfterMs: null,
+    abortReason: null, providerRequestId: null };
+  if (i.res.kind === 'failed') {
+    return { ...common, kind: 'transport', attemptState: 'failed', error: errors.providerUnavailable(i.attempt.providerId), rawUsage: null };
   }
-  if (i.res.kind === 'completed') {
-    const error = i.validated?.ok === false ? i.validated.error : errors.artifactWriteFailed();
-    if (step.schemaRepairsUsed < policy.schemaRepair) {
-      applyStepEvent(r, fx, step, 'RECONCILED_RETRY', { schemaRepairsUsed: step.schemaRepairsUsed + 1, error, notBeforeAt: null });
-    } else applyStepEvent(r, fx, step, 'RECONCILED_FAILED', { error });
-    return;
-  }
-  const error = errors.providerUnavailable(i.attempt.providerId);
-  if (step.transportRetriesUsed < policy.transport) {
-    applyStepEvent(r, fx, step, 'RECONCILED_RETRY', { transportRetriesUsed: step.transportRetriesUsed + 1, error, notBeforeAt: null });
-  } else applyStepEvent(r, fx, step, 'RECONCILED_FAILED', { error });
+  const canonicalOk = i.validated?.ok !== true || i.output !== null;
+  return { ...common, ...validatedOutcome(i.validated, canonicalOk), rawUsage: i.res.rawUsage };
 }
 
-/** One tx: resolve the unknown liability (resolve_unknown −N + settle +X), the attempt, the step. */
-function commitReconciled(
-  ctx: EngineCtx,
-  fx: PostCommitEffect[],
-  i: { attempt: AttemptRow; res: Resolution; validated: Validation | null; output: { id: ArtifactId; value: unknown } | null; puts: readonly ArtifactPut[] },
-): boolean {
+/**
+ * One tx: resolve the unknown liability (resolve_unknown −N + settle +X), the attempt, then the SAME post-validation
+ * function as the live settle (BH-6). The attempt records the classified error, so the next attempt's purpose
+ * matches the counter the retry consumed (BH-5). A pause the outcome requires is deferred until the run's unknowns
+ * are resolved (BH-2).
+ */
+function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileInput): boolean {
   const a = i.attempt;
+  const outcome = reconciledOutcome(i);
   return ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     const usage = i.res.usage;
@@ -225,24 +232,28 @@ function commitReconciled(
     const to = keepLiability ? 'abandoned' : i.res.kind === 'completed' ? 'reconciled_succeeded' : 'reconciled_failed';
     const won = r.attempts.transition(a.id, ['unknown'], to, {
       usage: usage === null ? null : { ...usage }, rawUsage: i.res.kind === 'completed' ? redactDeep(i.res.rawUsage) : null, finishedAt: now,
+      error: outcome.error,
     });
     if (!won) return false; // decided by the user or reconciled elsewhere meanwhile
     const run = r.runs.get(a.runId);
     const liability = r.ledger.attemptBalances(a.id).unknown;
-    const { X, certainty } = keepLiability ? { X: 0 as Microusd, certainty: 'unknown' as const } : reconciledAmount(i.res, a.profileSnapshot.prices, liability);
+    let cost: SettleAmount = { kind: 'unknown' };
     if (!keepLiability) {
+      const { X, certainty } = reconciledAmount(i.res, a.profileSnapshot.prices, liability);
       r.ledger.append(resolveUnknownEntries({ liability, settled: X, certainty, attemptId: a.id, runId: a.runId,
         projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now }));
+      cost = { kind: 'known', microusd: X, certainty };
     }
     for (const put of i.puts) {
       if (!put.ok) continue;
       r.artifacts.insertIfAbsent({ ...put.meta, stepRunId: a.stepRunId, attemptId: a.id });
       appendRunEvent(r, fx, a.runId, 'artifact.created', { artifactId: put.meta.id, kind: put.meta.kind, attemptId: a.id, stepRunId: a.stepRunId });
     }
-    appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: i.res.kind, liabilityKept: keepLiability,
-      cost: keepLiability ? { kind: 'unknown' } : { kind: 'known', microusd: X, certainty } });
-    if (X > liability) appendRunEvent(r, fx, a.runId, 'ledger.overrun', { attemptId: a.id, stepRunId: a.stepRunId, N: liability, X });
-    reconcileStep(r, fx, ctx, { ...i, now });
+    appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: i.res.kind, liabilityKept: keepLiability, cost });
+    const step = r.steps.get(a.stepRunId);
+    const { event } = applyPostValidation(r, fx, ctx, { source: 'reconcile', stepRunId: a.stepRunId, runId: a.runId, attemptId: a.id, outcome,
+      policy: effectiveStepSnapshot(r, run, step.stepKey).retryPolicy, purpose: a.purpose, output: i.output, cost, N: liability, now });
+    if (isDeferrablePause(event)) deferPause(r, fx, a.runId, event);
     resumeIfUnknownsResolved(r, fx, a.runId, now);
     return true;
   });
@@ -258,7 +269,7 @@ async function settleResolution(ctx: EngineCtx, attempt: AttemptRow, res: Resolu
     const stepSnap = effectiveStepSnapshot(ctx.db.repos, run, step.stepKey);
     const raw = JSON.stringify(res.json);
     puts.push(await putArtifact(ctx, run, { kind: 'raw_response', bytes: utf8(redactString(raw)), mediaType: isJsonText(raw) ? 'application/json' : 'text/plain' }));
-    validated = validateOutput(stepSnap, res.json, ctx.templates, await loadValidationInputs(ctx, run, step.revisionIndex));
+    validated = validateOutput(stepSnap, res.json, ctx.templates, await loadValidationInputs(ctx, run));
     if (validated.ok) {
       const put = await putArtifact(ctx, run, { kind: stepSnap.outputKind, schemaId: stepSnap.outputSchema,
         bytes: utf8(canonicalJson(validated.value)), mediaType: 'application/json' });

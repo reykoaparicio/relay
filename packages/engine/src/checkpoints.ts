@@ -6,7 +6,7 @@ import type { ModelRequest, ModelResult, ProviderAdapter, UsageEstimate } from '
 import type { ArtifactInsert, AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { TemplateRegistry } from '@relay/templates';
 import { logSafe } from './log-safe.js';
-import { reserveEntries, settleAmount, settlementEntries, isOverrun } from './budget.js';
+import { reserveEntries, settleAmount, settlementEntries } from './budget.js';
 import type { SettleAmount } from './budget.js';
 import { monthWindow } from './clock.js';
 import { deadlineReached } from './deadline.js';
@@ -14,10 +14,10 @@ import { canonicalJson, sha256Hex, utf8 } from './hash.js';
 import type { ApprovalBinding } from './policy.js';
 import { checkDispatch } from './policy.js';
 import { invalidateApproval, loadApprovalBinding } from './approval-binding.js';
-import { planRevision } from './revision.js';
+import { applyPostValidation } from './outcome.js';
 import { loadValidationInputs } from './steps/validation-inputs.js';
 import type { AbortReason, AssembledContext, CrashHookCtx, EngineCtx, ModelStepSnapshot } from './ports.js';
-import { classify, eventForError, nextAttemptPlan, nextPurpose, retryOfFor, runEventFor } from './retry.js';
+import { classify, eventForError, nextPurpose, retryOfFor } from './retry.js';
 import type { AttemptPlan, ClassifiedOutcome, OutcomeKind } from './retry.js';
 import { admit } from './budget.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -186,46 +186,7 @@ function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; st
   return fx;
 }
 
-export function outcomeLabel(value: unknown): string | null {
-  const o = (value as { outcome?: unknown } | null)?.outcome;
-  return typeof o === 'string' ? o : null;
-}
-
-/** Moves the executing step per the F7 plan (step-7 tx). */
-function applyStepOutcome(r: Repos, fx: PostCommitEffect[], s: StepRow, plan: AttemptPlan, output: { id: ArtifactId; value: unknown } | null): void {
-  switch (plan.kind) {
-    case 'succeed':
-      applyStepEvent(r, fx, s, 'SETTLED_VALID', {
-        outputArtifactId: output?.id ?? null,
-        outcome: outcomeLabel(output?.value ?? null),
-        error: null,
-        notBeforeAt: null,
-      });
-      return;
-    case 'release':
-      applyStepEvent(r, fx, s, 'NOT_SENT');
-      return;
-    case 'retry': {
-      const counter =
-        plan.counter === 'transport'
-          ? { transportRetriesUsed: s.transportRetriesUsed + 1 }
-          : plan.counter === 'schema_repair'
-            ? { schemaRepairsUsed: s.schemaRepairsUsed + 1 }
-            : { rateLimitWaitsUsed: s.rateLimitWaitsUsed + 1 };
-      applyStepEvent(r, fx, s, 'SETTLED_RETRY', { ...counter, notBeforeAt: plan.notBeforeAt });
-      return;
-    }
-    case 'hold':
-      applyStepEvent(r, fx, s, 'SETTLED_RETRY', { error: plan.error });
-      return;
-    case 'fail':
-      applyStepEvent(r, fx, s, 'SETTLED_FAILED', { error: plan.error });
-      return;
-    case 'unknown':
-      applyStepEvent(r, fx, s, 'OUTCOME_UNKNOWN', { error: plan.error });
-      return;
-  }
-}
+export { outcomeLabel } from './outcome.js';
 
 type Admitted = { readonly ok: true; readonly seq: number } | { readonly ok: false; readonly why: 'paused' | 'not_running' | 'conflict' };
 
@@ -417,19 +378,11 @@ function settle(
     }
     appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId, stepRunId: p.step.id, state: o.attemptState, cost: i.cost });
     if (o.attemptState === 'unknown') appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId, stepRunId: p.step.id });
-    const s = r.steps.get(p.step.id);
-    const plan = nextAttemptPlan(s, o, p.stepSnap.retryPolicy, now, p.purpose);
-    if (s.state === 'executing') applyStepOutcome(r, fx, s, plan, i.output);
-    if (o.kind === 'scope_changed') {
-      // F10 approval reuse rule: a quality revision outside the approved scope needs a new approval.
-      const approval = r.approvals.latestApprovedForRun(run.id);
-      if (approval !== undefined) invalidateApproval(r, fx, run.id, approval.id, 'scope_changed', now);
-    }
-    if (plan.kind === 'succeed') planRevision(r, fx, ctx, r.steps.get(p.step.id), now); // F10: verify `revise` → next cycle
-    if (isOverrun(i.cost, N)) appendRunEvent(r, fx, run.id, 'ledger.overrun', { attemptId, stepRunId: p.step.id, N, X: i.cost.kind === 'known' ? i.cost.microusd : N });
+    // BH-6: the same post-validation function as the F9b reconcile path (step move, F10 scope rule, revision, overrun).
+    const { plan, event } = applyPostValidation(r, fx, ctx, { source: 'live', stepRunId: p.step.id, runId: run.id, attemptId, outcome: o,
+      policy: p.stepSnap.retryPolicy, purpose: p.purpose, output: i.output, cost: i.cost, N, now });
     const cur = r.runs.get(run.id);
-    const ev = runEventFor(o, plan, i.cost, N, attemptId);
-    if (ev !== null && cur.status === 'running') applyRunEvent(r, cur, ev, now, fx);
+    if (event !== null && cur.status === 'running') applyRunEvent(r, cur, event, now, fx);
     return { outcome: o, plan };
   });
 }
@@ -455,7 +408,7 @@ async function persistAndClassify(ctx: EngineCtx, p: Prepared, result: ModelResu
   puts.push(await putArtifact(ctx, p.run, { kind: 'context_manifest', bytes: utf8(canonicalJson(p.assembled.manifest)), mediaType: 'application/json' }));
   // 6. F8 against the input SNAPSHOT (R4-6): contents pre-loaded outside any tx, then the pure validator.
   const validated = result.kind === 'success'
-    ? validateOutput(p.stepSnap, result.json, ctx.templates, await loadValidationInputs(ctx, p.run, p.step.revisionIndex)) : null;
+    ? validateOutput(p.stepSnap, result.json, ctx.templates, await loadValidationInputs(ctx, p.run)) : null;
   let output: { id: ArtifactId; value: unknown } | null = null;
   let canonicalOk = true;
   if (validated?.ok === true) {

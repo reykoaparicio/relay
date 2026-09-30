@@ -119,7 +119,14 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
     APPROVAL_STALE: always(paused('approval_stale')), // clarification 3
     CANCEL_REQUESTED: always(to('cancelled')), // clarification 4
   },
-  paused: { ...STOP_RULES, RESUME_RESOLVED: always(to('queued')) }, // clarification 12
+  paused: {
+    ...STOP_RULES,
+    RESUME_RESOLVED: always(to('queued')), // clarification 12
+    // Clarification 14 (BH-2/BH-6): once the last unknown attempt of a paused(unknown_outcome) run is resolved, a
+    // reconciled overrun or scope change re-pauses it with that reason instead of resuming (never auto-resumed).
+    BUDGET_OVERRUN: always(paused('budget_overrun')),
+    APPROVAL_STALE: always(paused('approval_stale')),
+  },
   interrupted: { ...STOP_RULES, RECOVERY_DECIDED: always(to('queued')) }, // clarification 13
   cancelling: { WORK_STOPPED: always(to('cancelled')), RUNNER_LOST: always(to('cancelled')) }, // clarification 7
   cancelled: {},

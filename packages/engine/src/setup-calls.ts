@@ -46,7 +46,10 @@ export function modelForTest(r: Repos, providerId: ProviderId, modelId?: string)
 /** Maps a connection-test result to its charge (F5 rows with `scope='setup'`). */
 export function setupCharge(result: ModelResult, aborted: boolean, entry: Pick<CatalogModel, 'prices'>, N: Microusd): SettleAmount {
   if (result.kind === 'error') {
-    if (result.phase === 'sent_no_response' || result.phase === 'responded_partial' || (aborted && result.phase !== 'not_sent')) return { kind: 'unknown' };
+    // REQUEST_OUTCOME_UNKNOWN is unknown in ANY phase (a gateway can answer `responded` without knowing whether the
+    // upstream call ran): the full N becomes setup liability, never released.
+    const ambiguous = result.phase === 'sent_no_response' || result.phase === 'responded_partial' || result.error.code === 'REQUEST_OUTCOME_UNKNOWN';
+    if (ambiguous || (aborted && result.phase !== 'not_sent')) return { kind: 'unknown' };
     if (result.usage === undefined) return { kind: 'not_charged' };
   }
   const flags = flagsOf(result);

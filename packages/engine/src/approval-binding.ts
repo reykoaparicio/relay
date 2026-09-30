@@ -9,7 +9,7 @@ import type { ApprovalBinding } from './policy.js';
 import type { EngineCtx, RunSnapshot } from './ports.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent } from './run-machine.js';
-import { ancestorsOf, hasSnapshotPreserved } from './snapshot.js';
+import { ancestorsOf, hasSnapshotPreserved, lastResnapshotSeq } from './snapshot.js';
 
 /** Event payload marker recording an approval invalidated because the project changed (B4). */
 export const PROJECT_CHANGED_MARK = 'approval_invalidated';
@@ -21,7 +21,7 @@ export const PROJECT_CHANGED_MARK = 'approval_invalidated';
 export function preservedApproval(r: Repos, runId: RunId): ApprovalRow | undefined {
   const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
   const mark = events.findLast((e) => e.type === 'error.recorded' && e.payload['kind'] === PROJECT_CHANGED_MARK);
-  if (mark === undefined) return undefined;
+  if (mark === undefined || mark.seq < lastResnapshotSeq(events)) return undefined; // a re-snapshot needs a new approval
   if (!events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > mark.seq)) return undefined;
   const id = mark.payload['approvalId'];
   const a = typeof id === 'string' ? r.approvals.get(id as ApprovalId) : undefined;

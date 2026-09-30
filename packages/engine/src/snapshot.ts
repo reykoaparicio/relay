@@ -11,7 +11,7 @@ import {
   sha256Schema,
   stepKeySchema,
 } from '@relay/contracts';
-import type { ModelOutputSchemaId, RunId, StepKey } from '@relay/contracts';
+import type { ModelOutputSchemaId, RunEvent, RunId, StepKey } from '@relay/contracts';
 import type { Repos, RunRow } from '@relay/storage';
 import type {
   ApprovalStepSnapshot,
@@ -167,7 +167,20 @@ export function modelStepKeys(snapshot: RunSnapshot): StepKey[] {
   return Object.entries(snapshot.steps).flatMap(([k, s]) => (s.kind === 'model' ? [k as StepKey] : []));
 }
 
-/** Whether the user chose `use_preserved_snapshot` for this run (F6: read from its `run.snapshot_preserved` event). */
+/** `context.assembled` payload kind recorded when `resnapshot_and_replan` replaced the run's input snapshot (F10). */
+export const RESNAPSHOT_KIND = 'resnapshot';
+
+/** Seq of the run's latest input re-snapshot (`context.assembled { kind: resnapshot }`), 0 when none. */
+export function lastResnapshotSeq(events: readonly RunEvent[]): number {
+  return events.findLast((e) => e.type === 'context.assembled' && e.payload['kind'] === RESNAPSHOT_KIND)?.seq ?? 0;
+}
+
+/**
+ * Whether the user chose `use_preserved_snapshot` for this run's CURRENT input snapshot (F6: its
+ * `run.snapshot_preserved` event, recorded after the latest re-snapshot — a re-snapshot starts a fresh binding).
+ */
 export function hasSnapshotPreserved(r: Repos, runId: RunId): boolean {
-  return r.events.list(runId, 0, Number.MAX_SAFE_INTEGER).some((e) => e.type === 'run.snapshot_preserved');
+  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
+  const since = lastResnapshotSeq(events);
+  return events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > since);
 }
