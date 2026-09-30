@@ -2,14 +2,15 @@ import ignore from 'ignore';
 import type { Ignore } from 'ignore';
 import { INPUT_CAPS } from '@relay/contracts';
 import type { ProjectRoot } from './paths.js';
-import { normalizeRelPath, readConfined } from './paths.js';
+import { classifyByName } from './exclusions.js';
+import { readConfined, relPathBrand } from './paths.js';
 
 /** `.gitignore` rules keyed by the project-relative directory that holds them (`''` = project root). */
 export type GitignoreRules = ReadonlyMap<string, Ignore>;
 
-/** Parses one `.gitignore` file's text. */
+/** Parses one `.gitignore` file's text (rules are NFC, like every RelPath; B3). */
 export function parseGitignore(text: string): Ignore {
-  return ignore().add(text);
+  return ignore().add(text.normalize('NFC'));
 }
 
 /**
@@ -17,8 +18,11 @@ export function parseGitignore(text: string): Ignore {
  * a deeper `!pattern` re-includes what a shallower file ignored (git semantics).
  */
 export function makeGitignoreMatcher(rules: GitignoreRules): (relPath: string, isDirectory: boolean) => boolean {
-  const ordered = [...rules.entries()].sort(([a], [b]) => a.split('/').length - b.split('/').length || a.localeCompare(b));
-  return (relPath, isDirectory) => {
+  const ordered = [...rules.entries()]
+    .map(([dir, ig]) => [dir.normalize('NFC'), ig] as const)
+    .sort(([a], [b]) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  return (rawRelPath, isDirectory) => {
+    const relPath = rawRelPath.normalize('NFC');
     let ignored = false;
     for (const [dir, ig] of ordered) {
       const sub = dir === '' ? relPath : relPath.slice(dir.length + 1);
@@ -32,11 +36,18 @@ export function makeGitignoreMatcher(rules: GitignoreRules): (relPath: string, i
   };
 }
 
-/** Reads `<dirRel>/.gitignore` through the confined reader; missing or unreadable → null. */
+/**
+ * Reads `<dirRel>/.gitignore` through the confined reader; missing or unreadable → null. `dirRel` may be an on-disk
+ * (possibly NFD) spelling, so it is only schema-checked, not re-normalized. A `.gitignore` that resolves to a secret
+ * is never read.
+ */
 export async function loadGitignore(root: ProjectRoot, dirRel: string): Promise<Ignore | null> {
-  const rel = normalizeRelPath(dirRel === '' ? '.gitignore' : `${dirRel}/.gitignore`);
-  if (!rel.ok) return null;
-  const read = await readConfined(root, rel.value, INPUT_CAPS.maxFileBytes);
+  const rel = relPathBrand.safeParse(dirRel === '' ? '.gitignore' : `${dirRel}/.gitignore`);
+  if (!rel.success) return null;
+  const noSecrets = { maxFileBytes: INPUT_CAPS.maxFileBytes };
+  const read = await readConfined(root, rel.data, INPUT_CAPS.maxFileBytes, (real) =>
+    classifyByName(real, false, noSecrets) === 'secret' ? 'secret' : null,
+  );
   if (!read.ok) return null;
   return parseGitignore(new TextDecoder().decode(read.value.bytes));
 }

@@ -216,3 +216,191 @@ describe('ArtifactStore.sweepOrphans', () => {
     expect(await store.sweepOrphans(new Set())).toEqual({ removed: 0 });
   });
 });
+
+/** A promise gate that opens once `n` callers have arrived. */
+function barrier(n: number): () => Promise<void> {
+  let arrived = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  return async () => {
+    arrived += 1;
+    if (arrived === n) open();
+    await gate;
+  };
+}
+
+/** Runs `fn` on the first call only (hooks fire on every put/purge of the store). */
+function once(fn: () => Promise<unknown>): () => Promise<void> {
+  let fired = false;
+  return async () => {
+    if (fired) return;
+    fired = true;
+    await fn();
+  };
+}
+
+describe('B9: concurrent puts commit with link (no silent overwrite)', () => {
+  it('two concurrent puts with different bytes: exactly one wins, the other fails hash_mismatch', async () => {
+    const { store, userDataDir, newId } = await setup({ faults: { beforeLink: barrier(2) } });
+    const id = newId();
+
+    const [one, two] = await Promise.all([putText(store, id, 'one'), putText(store, id, 'two')]);
+
+    expect([one.ok, two.ok].filter(Boolean)).toHaveLength(1);
+    const loser = one.ok ? two : one;
+    expect(loser.ok || [loser.error.code, loser.error.details?.['reason']]).toEqual(['ARTIFACT_WRITE_FAILED', 'hash_mismatch']);
+    const winner = one.ok ? 'one' : 'two';
+    const read = await store.read(`artifacts/${runId}/${id}`, 100);
+    expect(read.ok && new TextDecoder().decode(read.value)).toBe(winner);
+    expect(await fs.promises.readdir(path.join(userDataDir, 'artifacts', runId))).toEqual([id]);
+  });
+
+  it('two concurrent puts with the same bytes both succeed (idempotent) and leave one 0o444 file', async () => {
+    const { store, userDataDir, newId } = await setup({ faults: { beforeLink: barrier(2) } });
+    const id = newId();
+
+    const [a, b] = await Promise.all([putText(store, id, 'same'), putText(store, id, 'same')]);
+
+    expect(a.ok && b.ok).toBe(true);
+    expect(await fs.promises.readdir(path.join(userDataDir, 'artifacts', runId))).toEqual([id]);
+    expect((await fs.promises.stat(path.join(userDataDir, 'artifacts', runId, id))).mode & 0o777).toBe(0o444);
+  });
+});
+
+describe('B10: purge vs put never resurrects a purged artifact', () => {
+  async function expectPurgedAndGone(store: ArtifactStore, userDataDir: string, id: ArtifactId) {
+    const relPath = `artifacts/${runId}/${id}`;
+    const read = await store.read(relPath, 100);
+    expect(read.ok || [read.error.code, read.error.details?.['purged']]).toEqual(['NOT_FOUND', true]);
+    expect(await store.exists(relPath)).toBe(false);
+    expect(await fs.promises.readdir(path.join(userDataDir, 'artifacts', runId))).toEqual([`${id}.purged`]);
+  }
+
+  it('purge completing between put\'s checks and its link: put removes what it linked and fails purged', async () => {
+    const ref = {} as { store: ArtifactStore };
+    const id = artifactIds()();
+    const s = await setup({ faults: { beforeLink: once(() => ref.store.purge(`artifacts/${runId}/${id}`)) } });
+    const { store } = s;
+    ref.store = store;
+
+    const r = await putText(store, id, 'x');
+
+    expect(r.ok || r.error.details?.['reason']).toBe('purged');
+    await expectPurgedAndGone(store, s.userDataDir, id);
+  });
+
+  it('purge completing after put\'s link but before its re-check: put fails purged, file gone', async () => {
+    const ref = {} as { store: ArtifactStore };
+    const id = artifactIds()();
+    const s = await setup({ faults: { afterCommit: once(() => ref.store.purge(`artifacts/${runId}/${id}`)) } });
+    const { store } = s;
+    ref.store = store;
+
+    const r = await putText(store, id, 'x');
+
+    expect(r.ok || r.error.details?.['reason']).toBe('purged');
+    await expectPurgedAndGone(store, s.userDataDir, id);
+  });
+
+  it('put running between purge\'s tombstone and its unlink fails purged; read already reports purged', async () => {
+    const ref = {} as { store: ArtifactStore };
+    const id = artifactIds()();
+    const relPath = `artifacts/${runId}/${id}`;
+    const seen: unknown[] = [];
+    const s = await setup({
+      faults: {
+        afterTombstone: once(async () => {
+          const put = await putText(ref.store, id, 'y');
+          const read = await ref.store.read(relPath, 100);
+          seen.push(put.ok || put.error.details?.['reason'], read.ok || read.error.details?.['purged']);
+        }),
+      },
+    });
+    const { store } = s;
+    ref.store = store;
+    await putText(store, id, 'x');
+
+    const purged = await store.purge(relPath);
+
+    expect(purged.ok).toBe(true);
+    expect(seen).toEqual(['purged', true]);
+    await expectPurgedAndGone(store, s.userDataDir, id);
+  });
+});
+
+describe('B11: tombstones are crash-safe', () => {
+  it('an empty (crash-truncated) tombstone counts as purged for read/put/purge and is repaired', async () => {
+    const { store, userDataDir, clock: c, newId, logs } = await setup();
+    const id = newId();
+    const relPath = `artifacts/${runId}/${id}`;
+    await putText(store, id, 'x');
+    const tomb = path.join(userDataDir, 'artifacts', runId, `${id}.purged`);
+    await fs.promises.writeFile(tomb, '');
+
+    const read = await store.read(relPath, 100);
+    const put = await putText(store, id, 'x');
+    c.set(c.now() + 5000);
+    const purge = await store.purge(relPath);
+
+    expect(read.ok || [read.error.code, read.error.details?.['purged'], read.error.details?.['purgedAt']]).toEqual([
+      'NOT_FOUND',
+      true,
+      c.now() - 5000,
+    ]);
+    expect(put.ok || put.error.details?.['reason']).toBe('purged');
+    expect(purge.ok && purge.value.purgedAt).toBe(c.now() - 5000);
+    expect(JSON.parse(await fs.promises.readFile(tomb, 'utf8'))).toEqual({ purgedAt: c.now() - 5000 });
+    expect((await fs.promises.stat(tomb)).mode & 0o777).toBe(0o444);
+    expect(logs).toContain('artifact.tombstone.repaired');
+    expect(await fs.promises.readdir(path.join(userDataDir, 'artifacts', runId))).toEqual([`${id}.purged`]);
+  });
+
+  it('a crash while writing the tombstone never leaves an empty tombstone, and a retry purges', async () => {
+    let crash = false;
+    const { store, userDataDir, newId } = await setup({
+      faults: {
+        afterTempWrite: () => {
+          if (crash) throw new FaultInjected();
+        },
+      },
+    });
+    const id = newId();
+    const relPath = `artifacts/${runId}/${id}`;
+    await putText(store, id, 'x');
+    crash = true;
+
+    await expect(store.purge(relPath)).rejects.toBeInstanceOf(FaultInjected);
+    const dir = path.join(userDataDir, 'artifacts', runId);
+    expect((await fs.promises.readdir(dir)).filter((f) => f.endsWith('.purged'))).toEqual([]);
+    crash = false;
+    const retry = await store.purge(relPath);
+
+    expect(retry.ok).toBe(true);
+    const read = await store.read(relPath, 100);
+    expect(read.ok || read.error.details?.['purged']).toBe(true);
+  });
+});
+
+describe('B12: committed and idempotent puts are always 0o444', () => {
+  it('the file is already 0o444 at link time and an idempotent put restores a drifted mode', async () => {
+    const modes: number[] = [];
+    let finalPath = '';
+    const { store, newId, userDataDir } = await setup({
+      faults: {
+        afterCommit: async () => {
+          modes.push((await fs.promises.stat(finalPath)).mode & 0o777);
+        },
+      },
+    });
+    const id = newId();
+    finalPath = path.join(userDataDir, 'artifacts', runId, id);
+    await putText(store, id, 'x');
+    await fs.promises.chmod(finalPath, 0o644);
+
+    const again = await putText(store, id, 'x');
+
+    expect(modes).toEqual([0o444]);
+    expect(again.ok).toBe(true);
+    expect((await fs.promises.stat(finalPath)).mode & 0o777).toBe(0o444);
+  });
+});

@@ -22,6 +22,8 @@ export interface Sniff {
 export interface ClassifyContext {
   /** Per-file cap (`INPUT_CAPS.maxFileBytes`). */
   readonly maxFileBytes: number;
+  /** The project root's realpath passes through a credential dir (B4 defense in depth): everything is `secret`. */
+  readonly rootIsSecret?: boolean;
   /** Project `exclusions` globs, compiled by {@link compileUserPatterns}. */
   readonly isUserExcluded?: (relPath: string) => boolean;
   /** Project `.gitignore` matcher (see `gitignore.ts`); omitted when `respectGitignore` is off. */
@@ -81,7 +83,10 @@ function prefixesOf(segments: readonly string[]): string[] {
 }
 
 /** Rules that need only the path (secret → vcs → dependency → build → os → user → gitignored → binary extension). */
-export function classifyByName(relPath: string, isDirectory: boolean, ctx: ClassifyContext): ExclusionReason | null {
+export function classifyByName(rawRelPath: string, isDirectory: boolean, ctx: ClassifyContext): ExclusionReason | null {
+  if (ctx.rootIsSecret === true) return 'secret';
+  // Classification is always on NFC so an NFD spelling on disk (or in a request) cannot dodge a pattern (B3).
+  const relPath = rawRelPath.normalize('NFC');
   const segments = relPath.split('/');
   const name = segments[segments.length - 1] ?? relPath;
   // Directory-only rules apply to ancestors always, and to the entry itself when it is a directory.
@@ -144,9 +149,12 @@ export function sniffBytes(bytes: Uint8Array): Sniff {
   return { hasNul, nonTextRatio: nonText / window.length };
 }
 
-/** Compiles project `exclusions` globs (picomatch, `dot: true`). No globs → matches nothing. */
+/** Compiles project `exclusions` globs (picomatch, `dot: true`). Globs and paths are matched in NFC (B3). */
 export function compileUserPatterns(globs: readonly string[]): (relPath: string) => boolean {
   if (globs.length === 0) return () => false;
-  const isMatch = picomatch([...globs], { dot: true });
-  return (relPath) => isMatch(relPath);
+  const isMatch = picomatch(
+    globs.map((g) => g.normalize('NFC')),
+    { dot: true },
+  );
+  return (relPath) => isMatch(relPath.normalize('NFC'));
 }

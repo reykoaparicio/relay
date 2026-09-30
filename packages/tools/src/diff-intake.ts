@@ -6,7 +6,7 @@ import type { ClassifyContext } from './exclusions.js';
 import { classifyByName, compileUserPatterns } from './exclusions.js';
 import { loadGitignoresForPaths, makeGitignoreMatcher } from './gitignore.js';
 import type { ProjectRoot } from './paths.js';
-import { normalizeRelPath, realRelPath, resolveInside } from './paths.js';
+import { isSecretRootPath, normalizeRelPath, realRelPath, resolveInside, resolveWouldBe } from './paths.js';
 import type { Denial } from './read.js';
 
 /** One file in an imported diff. `null` = `/dev/null` (the file is added or deleted). */
@@ -92,11 +92,13 @@ export interface DiffCheckOptions {
 async function checkOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): Promise<Denial | null> {
   const byName = classifyByName(rel, false, ctx);
   if (byName !== null) return { relPath: rel, reason: byName };
-  const resolved = await resolveInside(root, rel);
-  if (!resolved.ok) {
-    // A path that does not exist yet (an add) is fine; an escape is not.
-    return resolved.error.code === 'PERMISSION_DENIED' ? { relPath: rel, reason: 'outside_root' } : null;
+  let resolved: Result<{ real: string }> = await resolveInside(root, rel);
+  if (!resolved.ok && resolved.error.code !== 'PERMISSION_DENIED') {
+    // A path that does not exist yet (an add): classify where it WOULD land via its nearest existing ancestor (B2), so
+    // an add under a symlinked dir that points outside the root or into a secret dir is refused.
+    resolved = await resolveWouldBe(root, rel);
   }
+  if (!resolved.ok) return { relPath: rel, reason: 'outside_root' };
   const byReal = classifyByName(realRelPath(root, resolved.value.real), false, ctx);
   return byReal === null ? null : { relPath: rel, reason: byReal };
 }
@@ -107,7 +109,11 @@ async function checkOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): 
  */
 export async function checkDiffPaths(root: ProjectRoot, diff: ImportedDiff, opts: DiffCheckOptions = {}): Promise<Result<void>> {
   const paths = [...new Set(diff.files.flatMap((f) => [f.oldPath, f.newPath]).filter((p): p is RelPath => p !== null))];
-  let ctx: ClassifyContext = { maxFileBytes: INPUT_CAPS.maxFileBytes, isUserExcluded: compileUserPatterns(opts.exclusions ?? []) };
+  let ctx: ClassifyContext = {
+    maxFileBytes: INPUT_CAPS.maxFileBytes,
+    isUserExcluded: compileUserPatterns(opts.exclusions ?? []),
+    rootIsSecret: isSecretRootPath(root.realpath),
+  };
   if (opts.respectGitignore !== false) {
     ctx = { ...ctx, isGitignored: makeGitignoreMatcher(await loadGitignoresForPaths(root, paths)) };
   }

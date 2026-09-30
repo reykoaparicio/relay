@@ -1,11 +1,11 @@
 import type { AppError, ExclusionReason, RelPath, Result, Sha256 } from '@relay/contracts';
-import { INPUT_CAPS, err, errors, ok } from '@relay/contracts';
+import { INPUT_CAPS, err, errors, exclusionReasonSchema, ok } from '@relay/contracts';
 import type { ClassifyContext } from './exclusions.js';
 import { classifyByContent, classifyByName, compileUserPatterns, sniffBytes } from './exclusions.js';
 import { loadGitignoresForPaths, makeGitignoreMatcher } from './gitignore.js';
 import { sha256Hex } from './hash.js';
 import type { ProjectRoot } from './paths.js';
-import { normalizeRelPath, readConfined, realRelPath, resolveInside } from './paths.js';
+import { isSecretRootPath, normalizeRelPath, readConfined } from './paths.js';
 import type { InputCaps } from './scan.js';
 
 /** Options for {@link readSelected}. */
@@ -45,9 +45,10 @@ function denied(relPath: string, reason: DenialReason): Outcome {
 function denialFromReadError(relPath: string, e: AppError): Outcome {
   if (e.code !== 'PERMISSION_DENIED') return { kind: 'error', error: e };
   const exclusion = e.details?.['exclusion'];
-  if (exclusion === 'too_large') return denied(relPath, 'too_large');
   if (exclusion === 'not_regular_file') return denied(relPath, 'not_regular_file');
-  return denied(relPath, 'outside_root');
+  const reason = exclusionReasonSchema.safeParse(exclusion);
+  if (reason.success) return denied(relPath, reason.data);
+  return denied(relPath, 'outside_root'); // escapes and `changed_during_read` (a swap raced the read)
 }
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -60,15 +61,20 @@ function decodeUtf8(bytes: Uint8Array): string | null {
   }
 }
 
-/** normalize → resolveInside → classify (requested and resolved names) → readConfined → sniff/decode. */
-async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): Promise<Outcome> {
+/**
+ * Classify the requested name, then read through {@link readConfined} with the real-name classifier: the path is
+ * resolved once, the real name classified, and the opened handle identity-checked against it (B1), so what is read is
+ * exactly what was classified.
+ */
+async function readClassified(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext) {
   const byName = classifyByName(rel, false, ctx);
-  if (byName !== null) return denied(rel, byName);
-  const resolved = await resolveInside(root, rel);
-  if (!resolved.ok) return denialFromReadError(rel, resolved.error);
-  const byRealName = classifyByName(realRelPath(root, resolved.value.real), false, ctx);
-  if (byRealName !== null) return denied(rel, byRealName);
-  const read = await readConfined(root, rel, ctx.maxFileBytes);
+  if (byName !== null) return err(errors.permissionDenied('excluded', { details: { relPath: rel, exclusion: byName } }));
+  return readConfined(root, rel, ctx.maxFileBytes, (realRel) => classifyByName(realRel, false, ctx));
+}
+
+/** normalize → classify requested name → resolve once → classify real name → open + identity check → sniff/decode. */
+async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): Promise<Outcome> {
+  const read = await readClassified(root, rel, ctx);
   if (!read.ok) return denialFromReadError(rel, read.error);
   const { bytes } = read.value;
   const sniffed = classifyByContent({ isDirectory: false, size: bytes.byteLength }, sniffBytes(bytes), ctx);
@@ -91,7 +97,11 @@ function normalizeAll(relPaths: readonly string[]): Result<RelPath[]> {
 
 async function buildContext(root: ProjectRoot, rels: readonly RelPath[], opts: ReadOptions): Promise<ClassifyContext> {
   const caps = opts.caps ?? INPUT_CAPS;
-  const base: ClassifyContext = { maxFileBytes: caps.maxFileBytes, isUserExcluded: compileUserPatterns(opts.exclusions ?? []) };
+  const base: ClassifyContext = {
+    maxFileBytes: caps.maxFileBytes,
+    isUserExcluded: compileUserPatterns(opts.exclusions ?? []),
+    rootIsSecret: isSecretRootPath(root.realpath),
+  };
   if (opts.respectGitignore === false) return base;
   return { ...base, isGitignored: makeGitignoreMatcher(await loadGitignoresForPaths(root, rels)) };
 }
@@ -149,11 +159,11 @@ export interface LiveHash {
 export async function hashFiles(root: ProjectRoot, relPaths: readonly string[], caps: InputCaps = INPUT_CAPS): Promise<Result<LiveHash[]>> {
   const normalized = normalizeAll(relPaths);
   if (!normalized.ok) return normalized;
-  const ctx: ClassifyContext = { maxFileBytes: caps.maxFileBytes };
+  const ctx: ClassifyContext = { maxFileBytes: caps.maxFileBytes, rootIsSecret: isSecretRootPath(root.realpath) };
   const hashes = await Promise.all(
     normalized.value.map(async (rel): Promise<LiveHash> => {
-      if (classifyByName(rel, false, ctx) !== null) return { relPath: rel, sha256: null };
-      const read = await readConfined(root, rel, caps.maxFileBytes);
+      // Same pipeline as readSelected (B6): requested AND real names classified, identity-checked handle.
+      const read = await readClassified(root, rel, ctx);
       return { relPath: rel, sha256: read.ok ? sha256Hex(read.value.bytes) : null };
     }),
   );

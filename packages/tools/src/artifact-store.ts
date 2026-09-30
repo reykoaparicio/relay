@@ -46,10 +46,19 @@ export interface ArtifactStore {
   sweepOrphans(knownRelPaths: ReadonlySet<string>): Promise<{ removed: number }>;
 }
 
-/** Test-only fault injection. `afterTempWrite` runs after the temp file is fsynced and before rename; a throw there
- * propagates uncaught, simulating a crash (no cleanup runs). */
+/**
+ * Test-only fault injection / interleaving hooks. A {@link FaultInjected} throw propagates uncaught, simulating a crash
+ * (no cleanup runs). Hooks may be async so tests can force exact interleavings of concurrent `put`/`purge` calls.
+ * - `afterTempWrite`: temp file written + fsynced, before chmod/link.
+ * - `beforeLink`: temp file is `0o444`, right before `link(tmp, final)`.
+ * - `afterCommit`: final path linked, before the post-commit tombstone re-check.
+ * - `afterTombstone`: purge wrote the tombstone, before it unlinks the file.
+ */
 export interface ArtifactStoreFaults {
-  readonly afterTempWrite?: () => void;
+  readonly afterTempWrite?: () => void | Promise<void>;
+  readonly beforeLink?: () => void | Promise<void>;
+  readonly afterCommit?: () => void | Promise<void>;
+  readonly afterTombstone?: () => void | Promise<void>;
 }
 
 /** Thrown by fault-injection hooks to simulate a crash; {@link ArtifactStore.put} never swallows it. */
@@ -101,16 +110,26 @@ async function fsyncDir(dir: string): Promise<void> {
   }
 }
 
-async function readTombstone(file: string): Promise<EpochMs | null> {
+/** Tombstone state: absent, valid, or present but unreadable/empty/garbled (e.g. a crash mid-write before B11). */
+type TombstoneState = { readonly kind: 'absent' } | { readonly kind: 'valid'; readonly purgedAt: EpochMs } | { readonly kind: 'broken' };
+
+async function readTombstone(file: string): Promise<TombstoneState> {
+  let text: string;
   try {
-    const parsed: unknown = JSON.parse(await fs.promises.readFile(`${file}${TOMBSTONE_SUFFIX}`, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null && 'purgedAt' in parsed && typeof parsed.purgedAt === 'number') {
-      return parsed.purgedAt as EpochMs;
-    }
-    return null;
-  } catch {
-    return null;
+    text = await fs.promises.readFile(`${file}${TOMBSTONE_SUFFIX}`, 'utf8');
+  } catch (e) {
+    if (isErrno(e, 'ENOENT')) return { kind: 'absent' };
+    return { kind: 'broken' };
   }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === 'object' && parsed !== null && 'purgedAt' in parsed && typeof parsed.purgedAt === 'number') {
+      return { kind: 'valid', purgedAt: parsed.purgedAt as EpochMs };
+    }
+  } catch {
+    // fall through: garbled
+  }
+  return { kind: 'broken' };
 }
 
 async function readAll(file: string, maxBytes: number): Promise<Result<Uint8Array> | 'missing'> {
@@ -131,6 +150,13 @@ async function readAll(file: string, maxBytes: number): Promise<Result<Uint8Arra
   } finally {
     await fh.close();
   }
+}
+
+/** Unlinks a temp name WITHOUT chmod: after `link` it shares the committed inode, whose `0o444` must survive. */
+async function unlinkTemp(file: string): Promise<void> {
+  await fs.promises.unlink(file).catch((e: unknown) => {
+    if (!isErrno(e, 'ENOENT')) throw e;
+  });
 }
 
 async function unlinkWritable(file: string): Promise<void> {
@@ -154,13 +180,27 @@ async function listStoreFiles(artifactsDir: string): Promise<string[]> {
   return nested.flat();
 }
 
-/** Creates the store (05 E6). It only ever writes under `userDataDir/artifacts/`. */
+/**
+ * Creates the store (05 E6). It only ever writes under `userDataDir/artifacts/`.
+ *
+ * Put/purge ordering (B9–B12), which makes every interleaving of a concurrent `put` and `purge` end with the file
+ * gone and `put` failing `purged` (or `put` fully before `purge`):
+ * - `put`: tombstone check → write tmp + fsync → chmod tmp `0o444` → `link(tmp, final)` (never replaces: `EEXIST`
+ *   compares hashes — same bytes are idempotent, different bytes fail) → unlink tmp → fsync dir → re-check the
+ *   tombstone; if it appeared, unlink the file and fail `purged`.
+ * - `purge`: write the tombstone (tmp + fsync + `link`, repairing an empty/garbled one) → THEN unlink the file.
+ * - `read`/`exists`: tombstone first; a present tombstone (even a broken one, which is repaired) means purged.
+ * Since `purge` publishes the tombstone before unlinking and `put` links before re-checking, either `put`'s re-check
+ * sees the tombstone, or the tombstone was written after the link and `purge`'s unlink removes the file.
+ */
 export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
   const abs = (relPath: string): string => path.join(opts.userDataDir, ...relPath.split('/'));
   const log = opts.log ?? (() => undefined);
+  const tmpName = (target: string): string => `${target}.tmp-${randomBytes(6).toString('hex')}`;
 
-  async function writeNew(finalPath: string, bytes: Uint8Array): Promise<void> {
-    const tmp = `${finalPath}.tmp-${randomBytes(6).toString('hex')}`;
+  /** Writes `bytes` to a fresh read-only temp file next to `target` (O_EXCL, fsync, chmod 0o444) and returns it. */
+  async function writeReadOnlyTemp(target: string, bytes: Uint8Array | string): Promise<string> {
+    const tmp = tmpName(target);
     const fh = await fs.promises.open(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, FILE_MODE_WRITABLE);
     try {
       await fh.writeFile(bytes);
@@ -168,18 +208,90 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
     } finally {
       await fh.close();
     }
-    opts.faults?.afterTempWrite?.();
-    await fs.promises.rename(tmp, finalPath);
-    await fsyncDir(path.dirname(finalPath));
-    await fs.promises.chmod(finalPath, FILE_MODE_READONLY);
+    await opts.faults?.afterTempWrite?.();
+    await fs.promises.chmod(tmp, FILE_MODE_READONLY);
+    return tmp;
   }
 
+  /**
+   * Publishes a tombstone for `file` (B11: tmp + fsync + link, so a crash never leaves an empty one). An existing valid
+   * tombstone wins (its `purgedAt` is returned); an existing broken one is replaced atomically (repair).
+   */
+  async function ensureTombstone(file: string): Promise<EpochMs> {
+    const tombstone = `${file}${TOMBSTONE_SUFFIX}`;
+    const current = await readTombstone(file);
+    if (current.kind === 'valid') return current.purgedAt;
+    const purgedAt = opts.clock.now();
+    const tmp = await writeReadOnlyTemp(tombstone, JSON.stringify({ purgedAt }));
+    try {
+      if (current.kind === 'broken') {
+        await fs.promises.rename(tmp, tombstone);
+        log('artifact.tombstone.repaired', {});
+      } else {
+        try {
+          await fs.promises.link(tmp, tombstone);
+        } catch (e) {
+          if (!isErrno(e, 'EEXIST')) throw e;
+          const raced = await readTombstone(file);
+          if (raced.kind === 'valid') return raced.purgedAt;
+          await fs.promises.rename(tmp, tombstone);
+        }
+      }
+    } finally {
+      await unlinkTemp(tmp);
+    }
+    await fsyncDir(path.dirname(file));
+    return purgedAt;
+  }
+
+  /** Tombstone present (valid, or broken → repaired) → its `purgedAt`; absent → null. */
+  async function purgedAtOf(file: string): Promise<EpochMs | null> {
+    const t = await readTombstone(file);
+    if (t.kind === 'absent') return null;
+    if (t.kind === 'valid') return t.purgedAt;
+    return ensureTombstone(file);
+  }
+
+  /** Existing final file: same bytes → idempotent ok (restoring `0o444`, B12); different bytes → failure. */
   async function checkExisting(finalPath: string, relPath: string, sha: Sha256): Promise<Result<true> | null> {
     const existing = await readAll(finalPath, Number.MAX_SAFE_INTEGER);
     if (existing === 'missing') return null;
-    if (existing.ok && sha256Hex(existing.value) === sha) return ok(true);
+    if (existing.ok && sha256Hex(existing.value) === sha) {
+      const st = await fs.promises.stat(finalPath);
+      if ((st.mode & 0o777) !== FILE_MODE_READONLY) await fs.promises.chmod(finalPath, FILE_MODE_READONLY);
+      return ok(true);
+    }
     log('artifact.put.hash_mismatch', { relPath });
     return err(errors.artifactWriteFailed({ details: { reason: 'hash_mismatch' } }));
+  }
+
+  const purgedError = () => err(errors.artifactWriteFailed({ details: { reason: 'purged' } }));
+
+  /** Commits a new file (B9): `link` never replaces, so two concurrent puts with different bytes cannot both win. */
+  async function commitNew(finalPath: string, relPath: string, bytes: Uint8Array, sha: Sha256): Promise<Result<true>> {
+    const tmp = await writeReadOnlyTemp(finalPath, bytes);
+    let linked = false;
+    try {
+      await opts.faults?.beforeLink?.();
+      try {
+        await fs.promises.link(tmp, finalPath);
+        linked = true;
+      } catch (e) {
+        if (!isErrno(e, 'EEXIST')) throw e;
+      }
+    } finally {
+      await unlinkTemp(tmp);
+    }
+    if (!linked) return (await checkExisting(finalPath, relPath, sha)) ?? err(errors.artifactWriteFailed());
+    await fsyncDir(path.dirname(finalPath));
+    await opts.faults?.afterCommit?.();
+    // B10: a purge that ran concurrently published its tombstone before unlinking; if we linked after its unlink, the
+    // tombstone is visible now, so remove what we resurrected.
+    if ((await readTombstone(finalPath)).kind !== 'absent') {
+      await unlinkWritable(finalPath);
+      return purgedError();
+    }
+    return ok(true);
   }
 
   const put: ArtifactStore['put'] = async (input) => {
@@ -190,13 +302,11 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
     const done = ok({ relPath, sha256: sha, sizeBytes: input.bytes.byteLength });
     try {
       await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
-      if ((await readTombstone(finalPath)) !== null) {
-        return err(errors.artifactWriteFailed({ details: { reason: 'purged' } }));
-      }
+      if ((await purgedAtOf(finalPath)) !== null) return purgedError();
       const existing = await checkExisting(finalPath, relPath, sha);
       if (existing !== null) return existing.ok ? done : existing;
-      await writeNew(finalPath, input.bytes);
-      return done;
+      const committed = await commitNew(finalPath, relPath, input.bytes, sha);
+      return committed.ok ? done : committed;
     } catch (e) {
       if (e instanceof FaultInjected) throw e;
       log('artifact.put.failed', { relPath, code: e instanceof Error && 'code' in e ? e.code : undefined });
@@ -207,16 +317,18 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
   const read: ArtifactStore['read'] = async (relPath, maxBytes) => {
     if (!isArtifactRelPath(relPath)) return err(invalidRelPath());
     const file = abs(relPath);
+    // Tombstone FIRST (B10): a file mid-purge (tombstone written, unlink pending) is already purged.
+    const purgedAt = await purgedAtOf(file).catch(() => null);
+    if (purgedAt !== null) return err(errors.notFound('artifact', { purged: true }, { details: { purgedAt } }));
     const r = await readAll(file, maxBytes);
-    if (r !== 'missing') return r;
-    const purgedAt = await readTombstone(file);
-    if (purgedAt === null) return err(errors.notFound('artifact'));
-    return err(errors.notFound('artifact', { purged: true }, { details: { purgedAt } }));
+    return r === 'missing' ? err(errors.notFound('artifact')) : r;
   };
 
   const exists: ArtifactStore['exists'] = async (relPath) => {
     if (!isArtifactRelPath(relPath)) return false;
-    return fs.promises.access(abs(relPath)).then(
+    const file = abs(relPath);
+    if ((await readTombstone(file)).kind !== 'absent') return false;
+    return fs.promises.access(file).then(
       () => true,
       () => false,
     );
@@ -225,22 +337,16 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
   const purge: ArtifactStore['purge'] = async (relPath) => {
     if (!isArtifactRelPath(relPath)) return err(invalidRelPath());
     const file = abs(relPath);
-    const tombstone = `${file}${TOMBSTONE_SUFFIX}`;
     try {
-      await unlinkWritable(file);
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
-      const purgedAt = opts.clock.now();
-      try {
-        await fs.promises.writeFile(tombstone, JSON.stringify({ purgedAt }), { flag: 'wx', mode: FILE_MODE_WRITABLE });
-      } catch (e) {
-        if (!isErrno(e, 'EEXIST')) throw e;
-        const previous = await readTombstone(file);
-        if (previous === null) throw e;
-        return ok({ purgedAt: previous });
-      }
-      await fs.promises.chmod(tombstone, FILE_MODE_READONLY);
+      // Tombstone BEFORE unlink (B10): a concurrent put's post-commit re-check then always sees it. Idempotent: an
+      // existing valid tombstone keeps its purgedAt, and the unlink is repeated (crash between the two steps is safe).
+      const purgedAt = await ensureTombstone(file);
+      await opts.faults?.afterTombstone?.();
+      await unlinkWritable(file);
       return ok({ purgedAt });
-    } catch {
+    } catch (e) {
+      if (e instanceof FaultInjected) throw e;
       log('artifact.purge.failed', { relPath });
       return err(errors.artifactWriteFailed());
     }

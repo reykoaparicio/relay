@@ -8,8 +8,17 @@ export { classify, classifyByContent, classifyByName, compileUserPatterns, sniff
 export type { ExportArtifactsInput } from './export.js';
 export { assertExportDestination, exportArtifacts, isSafeFileName, writeExportFile } from './export.js';
 export { sha256Hex } from './hash.js';
-export type { NormalizeOptions, PathRelation, ProjectRoot, RelPath } from './paths.js';
-export { normalizeRelPath, openProjectRoot, readConfined, relPathBrand, relationOf, resolveInside } from './paths.js';
+export type { NormalizeOptions, OpenRootOptions, PathRelation, ProjectRoot, RelPath } from './paths.js';
+export {
+  isSecretRootPath,
+  normalizeRelPath,
+  openProjectRoot,
+  readConfined,
+  relPathBrand,
+  relationOf,
+  resolveInside,
+  resolveWouldBe,
+} from './paths.js';
 export type { Denial, DenialReason, LiveHash, ReadOptions, SelectedFile } from './read.js';
 export { hashFiles, readSelected } from './read.js';
 export type { ExcludedEntry, FileEntry, InputCaps, ScanOptions, ScanResult, ScanTotals } from './scan.js';
