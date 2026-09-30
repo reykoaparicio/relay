@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "algorithm": "sha256",
+  "treeHash": "1cc494944a4cced997d52c81f6820ece160a59cdf6a05103d779e6291898b5c6",
+  "fileCount": 21,
+  "files": {
+    ".env.example": "0f8a451dc53355ee081de32cdf2ebc009f8f712de9da11195dd1f97c539a4bcd",
+    ".gitignore": "80959ead5e10249d2db0a66aec9f7e9ea586d715e7313666395724e233b483e4",
+    "README.md": "86c6284fc4fa0ee913f7f09e502d4058f82262ac9948d3483fcd2bc83b6fc18a",
+    "assets/logo.png": "3ba2e3b94f242841f245b7bfb923a13c308c728c435c2e34c68473ff4553ba7c",
+    "dist/server.js": "dd4fd47d8319e676aae3895cc5de0d9b15140a392c534dd0ebe459ceaeade9c3",
+    "docs/api.md": "6b6545e91803f913d0619ebbf8a0ac9c9b32005bc1ebec7ec704de6d6332646f",
+    "node_modules/left-pad/index.js": "28a80f0fe00c39f1aa52237f872ae8f5602cf215eeb5edb992e06f54ad711847",
+    "package.json": "593995c838faa3bd8f389a0c3ba58ee8e17b53709cfb6d198ab3ba9d596859b5",
+    "src/config.ts": "7bf3a0766cbc3814f28b0197449b1f45b8f4eee1a4a1c6b366655d783dccaee7",
+    "src/errors.ts": "483e018af16b949f99e1098a6e9803a6f30def03f5801de81b41bdd81e66934f",
+    "src/handlers/health.ts": "d944cf816e1b2778b2a18e2003d3ac3339184548713cedff20106085541c26ed",
+    "src/handlers/orders.ts": "af0d4e9e7281237f4733c3dac5f1b290ccada5ad8c505d3e5776eb55bdecdd24",
+    "src/handlers/user.ts": "839430ff509348f817fc0bea2b14c44c13ffb51e14b9070c94933e6379d9db5f",
+    "src/legacy/notes.ts": "beaca16ba2c4814053d7d7aca4b91f63cea8125eb66b740aa3b33acd7a7ffd00",
+    "src/lib/format.ts": "49bfffd08a15e9c8d008796b9b929f022991c0de566ee31b700b7801b0798520",
+    "src/lib/validate.ts": "cc3d60dce507bde8e8186a17263274e42e327bf9274e9218737f0b2c48493bd6",
+    "src/router.ts": "ece8f278288d6e239250fb6fb174afd68a4523f9042e4d56197cc7a0b09f1b4b",
+    "src/server.ts": "0722adbfa376091611daa0b6d200383a3f73503e8d72ed801baaa135363b0aeb",
+    "test/orders.test.ts": "e364a42d500bdcefe3b6d395dd86f63ad3ade31a02262ef5ae9a71068ee3c2c6",
+    "test/user.test.ts": "ca6d71d94054c4817b5e7d330d67927c9236e9223103be0eadbaba9e5351cb5e",
+    "tsconfig.json": "e7ceac93f288b868b000f0cfa7acdeafefc35614097c9cc62b0e093548055377"
+  }
+}

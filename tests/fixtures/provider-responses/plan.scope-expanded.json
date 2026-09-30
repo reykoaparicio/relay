@@ -1,0 +1,80 @@
+{
+  "summary": "Replan after review feedback: validate age in createUser, and also rework error handling across orders, the router, and the shared error writer.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "startLine": 30,
+      "endLine": 45
+    },
+    {
+      "relPath": "src/lib/validate.ts",
+      "startLine": 29,
+      "endLine": 41
+    },
+    {
+      "relPath": "src/handlers/orders.ts",
+      "startLine": 48,
+      "endLine": 58
+    },
+    {
+      "relPath": "src/router.ts",
+      "startLine": 60,
+      "endLine": 82
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "plan",
+  "goalRestatement": "Reject invalid age values on POST /users with 400 VALIDATION_FAILED, keeping the public response format.",
+  "steps": [
+    {
+      "n": 1,
+      "action": "Call requireNonNegativeInteger(body.age, \"age\", 150) in createUser.",
+      "rationale": "The helper already exists in src/lib/validate.ts but is unused.",
+      "findingIds": [
+        "F1"
+      ]
+    },
+    {
+      "n": 2,
+      "action": "Replace the swallowed catch in listOrders with sendError so failures return 500 INTERNAL.",
+      "rationale": "An empty 200 body breaks the documented response format.",
+      "findingIds": [
+        "F2"
+      ]
+    },
+    {
+      "n": 3,
+      "action": "Add a request-id field to every error written by sendError and the router.",
+      "rationale": "Easier log correlation across handlers.",
+      "findingIds": []
+    },
+    {
+      "n": 4,
+      "action": "Add tests for negative, fractional, and string age values and for a failing order store.",
+      "rationale": "Locks in the new behavior.",
+      "findingIds": [
+        "F1",
+        "F2"
+      ]
+    }
+  ],
+  "fileScope": [
+    "src/handlers/user.ts",
+    "src/lib/validate.ts",
+    "src/handlers/orders.ts",
+    "src/errors.ts",
+    "src/router.ts",
+    "src/config.ts",
+    "test/user.test.ts",
+    "test/orders.test.ts",
+    "docs/api.md"
+  ],
+  "testSuggestions": [
+    "POST /users with age -1 returns 400 VALIDATION_FAILED",
+    "GET /orders with a failing store returns 500 INTERNAL"
+  ],
+  "risks": [
+    "Scope now touches the shared error writer and router, which every endpoint depends on."
+  ],
+  "decisions": []
+}

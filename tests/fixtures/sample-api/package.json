@@ -1,0 +1,21 @@
+{
+  "name": "sample-api",
+  "version": "0.3.1",
+  "private": true,
+  "description": "Small users and orders HTTP API (Relay demonstration project)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test dist-test/"
+  },
+  "dependencies": {
+    "left-pad": "1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "UNLICENSED"
+}

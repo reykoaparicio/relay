@@ -1,0 +1,38 @@
+{
+  "summary": "One validation gap found in user creation.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/users.ts",
+      "startLine": 34,
+      "endLine": 34
+    },
+    {
+      "relPath": "src/lib/validation.ts",
+      "startLine": 12,
+      "endLine": 20
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "findings",
+  "findings": [
+    {
+      "id": "F1",
+      "title": "age is not validated on user creation",
+      "severity": "high",
+      "category": "validation",
+      "description": "createUser stores body.age without checking that it is a non-negative integer.",
+      "sourceRefs": [
+        {
+          "relPath": "src/handlers/users.ts",
+          "startLine": 34,
+          "endLine": 34
+        },
+        {
+          "relPath": "src/lib/validation.ts",
+          "startLine": 12,
+          "endLine": 20
+        }
+      ]
+    }
+  ]
+}

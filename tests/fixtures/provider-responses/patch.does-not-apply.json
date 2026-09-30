@@ -1,0 +1,26 @@
+{
+  "summary": "Validates age in createUser with requireNonNegativeInteger.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "startLine": 31,
+      "endLine": 37
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "patch",
+  "files": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/handlers/user.ts\n+++ b/src/handlers/user.ts\n@@ -31,7 +31,7 @@ export function createUser(req: Request, res: ServerResponse): void {\n   const body = requireObject(req.body);\n   const name = requireString(body.name, 'name');\n   const email = requireEmail(body.email);\n-  const age = body.age;\n+  const age = requireNonNegativeInteger(body.age, 'age', 150);\n\n   const user: User = {\n     id: randomUUID(),\n"
+    }
+  ],
+  "testSuggestions": [
+    {
+      "relPath": "test/user.test.ts",
+      "description": "POST /users with age -1 returns 400 VALIDATION_FAILED."
+    }
+  ],
+  "notes": "Hunk context was generated against a different revision of user.ts and does not match the snapshot."
+}

@@ -1,0 +1,4 @@
+dist-test/
+coverage/
+*.log
+.DS_Store

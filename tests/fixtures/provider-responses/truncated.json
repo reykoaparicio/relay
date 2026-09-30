@@ -1,0 +1,15 @@
+{
+  "summary": "Three defects found: missing age validation, a swallowed order-store error, and a misleading duration comment.",
+  "sourceRefs": [
+    { "relPath": "src/handlers/user.ts", "startLine": 34, "endLine": 34 },
+    { "relPath": "src/handlers/orders.ts", "startLine": 54, "endLine": 57 }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "findings",
+  "findings": [
+    {
+      "id": "F1",
+      "title": "age is not validated on user creation",
+      "severity": "high",
+      "category": "validation",
+      "description": "createUser stores body.age without checking that it is a non-negative inte

@@ -1,0 +1,36 @@
+{
+  "summary": "Validates age in createUser with the existing helper, and adds a configurable maximum age to the server config.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "startLine": 34,
+      "endLine": 34
+    },
+    {
+      "relPath": "src/config.ts",
+      "startLine": 1,
+      "endLine": 24
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "patch",
+  "files": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/handlers/user.ts\n+++ b/src/handlers/user.ts\n@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';\n import type { ServerResponse } from 'node:http';\n import type { Request } from '../router.js';\n import { notFound, sendData } from '../errors.js';\n-import { requireEmail, requireObject, requireString } from '../lib/validate.js';\n+import { requireEmail, requireNonNegativeInteger, requireObject, requireString } from '../lib/validate.js';\n import { isoTimestamp } from '../lib/format.js';\n \n export interface User {\n@@ -31,7 +31,7 @@ export function createUser(req: Request, res: ServerResponse): void {\n   const body = requireObject(req.body);\n   const name = requireString(body['name'], 'name', 100);\n   const email = requireEmail(body['email']);\n-  const age = body['age'] as number;\n+  const age = requireNonNegativeInteger(body['age'], 'age', 150);\n \n   const user: User = {\n     id: randomUUID(),\n"
+    },
+    {
+      "relPath": "src/config.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/config.ts\n+++ b/src/config.ts\n@@ -3,6 +3,8 @@ export interface Config {\n   /** Bearer token required on write endpoints. Empty disables auth (local dev only). */\n   readonly apiToken: string;\n   readonly requestTimeoutMs: number;\n+  /** Upper bound for the user `age` field. */\n+  readonly maxUserAge: number;\n }\n \n function readInt(name: string, fallback: number): number {\n@@ -20,5 +22,6 @@ export function loadConfig(): Config {\n     port: readInt('PORT', 3000),\n     apiToken: process.env['SAMPLE_API_TOKEN'] ?? '',\n     requestTimeoutMs: readInt('REQUEST_TIMEOUT_MS', 5000),\n+    maxUserAge: readInt('MAX_USER_AGE', 150),\n   };\n }\n"
+    }
+  ],
+  "testSuggestions": [
+    {
+      "relPath": "test/user.test.ts",
+      "description": "POST /users with age -1 and 1.5 returns 400 VALIDATION_FAILED."
+    }
+  ],
+  "notes": "src/config.ts is not in the approved file scope; this patch must be rejected by patch validation."
+}
