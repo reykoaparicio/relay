@@ -6,8 +6,9 @@
 // `isAsyncEncryptionAvailable() → Promise<boolean>`; sync `encryptString`/`decryptString`/`isEncryptionAvailable`;
 // `getSelectedStorageBackend()` (Linux). `isTemporarilyUnavailable` does NOT exist in 44's typings, so it is
 // feature-detected like the async variants; when absent there is no temporary-unavailability signal.
-import { readFile, rm, writeFile, chmod } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { chmod, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { err, errors, ok, redactedLabel, vaultFileSchema } from '@relay/contracts';
 import type { AppError, CredentialStorageMode, IdGen, ProviderId, Result } from '@relay/contracts';
 
@@ -50,8 +51,18 @@ export interface CredentialVault {
   sessionLabel(providerId: ProviderId): string | null;
   /** Deletes a vault file by its relative path (validated). */
   deleteVaultFile(vaultFile: string): Promise<void>;
-  /** Rolls back one `save` (the runner failed to record its ref): deletes that file or that session entry. */
+  /**
+   * Rolls back one `save` (the runner failed to record its ref): deletes that file, and restores the session key the
+   * save replaced or removed (or drops the new session entry when there was none).
+   */
   discard(providerId: ProviderId, saved: SavedCredential): Promise<void>;
+  /** Marks one `save` as recorded by the runner: it is no longer in flight and can no longer be rolled back. */
+  commit(providerId: ProviderId, saved: SavedCredential): void;
+  /**
+   * Deletes every `secrets/crd_*.bin` not in `referenced` (the runner's credential refs) and not in flight (saved but
+   * neither committed nor discarded yet). Orphans come from replaced keys and from crashes mid-connect.
+   */
+  pruneUnreferenced(referenced: ReadonlySet<string>): Promise<void>;
 }
 
 /** Dependencies of {@link createCredentialVault}. */
@@ -62,9 +73,12 @@ export interface VaultDeps {
   readonly ids: IdGen;
   /** The provider's OS-protected vault file from the runner's credential refs (DB is the source of truth). */
   readonly lookupVaultFile: (providerId: ProviderId) => Promise<string | null>;
+  /** Test seam: the final rename of an atomic write (defaults to `fs.rename`). */
+  readonly rename?: (from: string, to: string) => Promise<void>;
 }
 
 const SECRET_FILE_MODE = 0o600;
+const VAULT_FILE_NAME = /^crd_[0-9A-HJKMNP-TV-Z]{26}\.bin$/;
 
 function temporarilyUnavailable(): AppError {
   return { ...errors.secureStorageUnavailable(), retryable: true };
@@ -101,9 +115,35 @@ export function createCredentialVault(deps: VaultDeps): CredentialVault {
     return parsed.success ? join(deps.userDataDir, ...parsed.data.split('/')) : null;
   };
 
+  const renameFile = deps.rename ?? rename;
+  /** saved-but-not-yet-committed vault files (never pruned). */
+  const inFlight = new Set<string>();
+  /** The session key a pending `save` replaced/removed (undefined: there was none), restored by `discard`. */
+  const priorSession = new Map<ProviderId, string | undefined>();
+
+  /**
+   * Encrypts first (nothing touches disk when the keychain refuses), then writes a 0600 temp file in the same
+   * directory, fsyncs it, and renames it over `file`: a crash at any point leaves either the old or the new file,
+   * never a truncated one. The temp file is removed on failure.
+   */
   const writeSecret = async (file: string, apiKey: string): Promise<void> => {
-    await writeFile(file, await encrypt(apiKey), { mode: SECRET_FILE_MODE, flag: 'w' });
-    await chmod(file, SECRET_FILE_MODE);
+    const data = await encrypt(apiKey);
+    const tmp = join(dirname(file), `.${randomBytes(6).toString('hex')}.tmp`);
+    try {
+      const fh = await open(tmp, 'wx', SECRET_FILE_MODE);
+      try {
+        await fh.writeFile(data);
+        await fh.chmod(SECRET_FILE_MODE);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await renameFile(tmp, file);
+    } catch (e) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw e;
+    }
+    await chmod(file, SECRET_FILE_MODE).catch(() => undefined);
   };
 
   const saveProtected = async (apiKey: string): Promise<Result<SavedCredential>> => {
@@ -113,7 +153,15 @@ export function createCredentialVault(deps: VaultDeps): CredentialVault {
     const vaultFile = `secrets/${deps.ids.next('credentialRef')}.bin`;
     const file = absVault(vaultFile);
     if (file === null) return err(errors.secureStorageUnavailable());
-    await writeSecret(file, apiKey);
+    inFlight.add(vaultFile);
+    try {
+      await writeSecret(file, apiKey);
+    } catch {
+      // Keychain denied/locked or the write failed: fail closed with the session-key alternative (never INTERNAL,
+      // never plaintext). writeSecret already removed its temp file.
+      inFlight.delete(vaultFile);
+      return err(errors.secureStorageUnavailable());
+    }
     return ok({ storageMode: 'os_protected', vaultFile, redactedLabel: redactedLabel(apiKey) });
   };
 
@@ -130,7 +178,8 @@ export function createCredentialVault(deps: VaultDeps): CredentialVault {
     if (!(await status()).available) return err(errors.secureStorageUnavailable());
     if (s.isTemporarilyUnavailable?.() === true) return err(temporarilyUnavailable());
     const { result, shouldReEncrypt } = await decrypt(buf);
-    if (shouldReEncrypt) await writeSecret(file, result);
+    // Best effort: the key was decrypted fine; a failed re-encrypt leaves the old (still readable) file intact.
+    if (shouldReEncrypt) await writeSecret(file, result).catch(() => undefined);
     return ok(result);
   };
 
@@ -144,12 +193,17 @@ export function createCredentialVault(deps: VaultDeps): CredentialVault {
     deleteVaultFile,
     async save(providerId, apiKey, mode) {
       const key = apiKey.trim();
+      const prior = session.get(providerId);
       if (mode === 'session') {
+        priorSession.set(providerId, prior);
         session.set(providerId, key);
         return ok({ storageMode: 'session', vaultFile: null, redactedLabel: redactedLabel(key) });
       }
       const saved = await saveProtected(key);
-      if (saved.ok) session.delete(providerId);
+      if (saved.ok) {
+        priorSession.set(providerId, prior);
+        session.delete(providerId);
+      }
       return saved;
     },
     async get(providerId) {
@@ -162,8 +216,32 @@ export function createCredentialVault(deps: VaultDeps): CredentialVault {
       if (vaultFile !== null) await deleteVaultFile(vaultFile);
     },
     async discard(providerId, saved) {
-      if (saved.vaultFile !== null) await deleteVaultFile(saved.vaultFile);
-      else session.delete(providerId);
+      if (saved.vaultFile !== null) {
+        await deleteVaultFile(saved.vaultFile);
+        inFlight.delete(saved.vaultFile);
+      }
+      const prior = priorSession.get(providerId);
+      priorSession.delete(providerId);
+      if (prior !== undefined) session.set(providerId, prior);
+      else if (saved.vaultFile === null) session.delete(providerId);
+    },
+    commit(providerId, saved) {
+      if (saved.vaultFile !== null) inFlight.delete(saved.vaultFile);
+      priorSession.delete(providerId);
+    },
+    async pruneUnreferenced(referenced) {
+      let names: string[];
+      try {
+        names = await readdir(join(deps.userDataDir, 'secrets'));
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!VAULT_FILE_NAME.test(name)) continue;
+        const vaultFile = `secrets/${name}`;
+        if (referenced.has(vaultFile) || inFlight.has(vaultFile)) continue;
+        await deleteVaultFile(vaultFile);
+      }
     },
     hasSession: (providerId) => session.has(providerId),
     sessionLabel(providerId) {

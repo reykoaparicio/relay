@@ -134,6 +134,47 @@ describe('boot @m1', () => {
     expect(calls.filter((c) => c === 'supervisor.shutdown')).toHaveLength(1);
   });
 
+  it('F6: a quit during boot stops it at the next await — no IPC, no window, no runner fork', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    let finishLayout: () => void = () => undefined;
+    services.ensureLayout = () => {
+      calls.push('layout');
+      return new Promise<void>((r) => (finishLayout = r));
+    };
+    const booting = boot({ app, env: {}, createServices: () => services });
+    await flush();
+
+    const quit = app.fire('before-quit');
+    finishLayout();
+    finishShutdown();
+    await booting;
+    await flush();
+
+    expect(quit.prevented).toBe(true);
+    expect(calls).not.toContain('ipc.register');
+    expect(calls).not.toContain('createMainWindow');
+    expect(calls).not.toContain('supervisor.start');
+    expect(calls).toContain('quit');
+  });
+
+  it('F6: a quit before whenReady resolves never creates services', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    let ready: () => void = () => undefined;
+    app.whenReady = () => new Promise<void>((r) => (ready = r));
+    const create = vi.fn();
+    const booting = boot({ app, env: {}, createServices: create });
+
+    const quit = app.fire('before-quit');
+    ready();
+
+    await expect(booting).resolves.toBeNull();
+    expect(quit.prevented).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('second-instance focuses the existing window', async () => {
     const calls: string[] = [];
     const app = fakeApp(calls);

@@ -24,6 +24,7 @@ export const runnerRequestSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('credential.response'),
     id: z.string().min(1),
+    providerId: providerIdSchema, // echoed so the runner rejects an answer for a different provider (08 audit F2)
     result: z.discriminatedUnion('ok', [
       z.object({ ok: z.literal(true), apiKey: z.string() }), // in-memory only; the runner never persists/logs it
       z.object({ ok: z.literal(false), error: appErrorSchema }),

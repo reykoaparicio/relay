@@ -67,6 +67,25 @@ describe('dialog service', () => {
     expect(!expired.ok && expired.error.code).toBe('NOT_FOUND');
   });
 
+  it('prunes expired, never-resolved selection tokens on each new selection', async () => {
+    const project = join(dir, 'proj');
+    await mkdir(project);
+    const svc = createDialogService({
+      dialogs: native({ showOpenDialog: () => Promise.resolve({ canceled: false, filePaths: [project] }) }),
+      clock, ids, homeDir: HOME, userDataDir: join(dir, 'ud'), e2e: false,
+    });
+
+    await svc.pickDirectory();
+    now += 1_000;
+    await svc.pickDirectory();
+    expect(svc.pendingSelections()).toBe(2);
+    now += 10 * 60 * 1000;
+    const fresh = await svc.pickDirectory();
+
+    expect(svc.pendingSelections()).toBe(1);
+    expect(fresh.ok && fresh.value !== null && svc.resolveSelection(fresh.value.selectionId).ok).toBe(true);
+  });
+
   it('consumeSelection makes the token unusable', async () => {
     const svc = createDialogService({ dialogs: native(), clock, ids, homeDir: HOME, userDataDir: join(dir, 'ud'), e2e: true, seamTarget: {} });
     const target: Record<string, unknown> = {};

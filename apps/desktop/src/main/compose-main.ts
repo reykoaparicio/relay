@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, MessageChannelMain, app, dialog, ipcMain, safeStorage, session, shell, utilityProcess } from 'electron';
+import { BrowserWindow, MessageChannelMain, app, dialog, ipcMain, powerMonitor, safeStorage, session, shell, utilityProcess } from 'electron';
 import type { OpenDialogOptions, SaveDialogOptions } from 'electron';
 import { EVENTS_CHANNEL, createIdGen, systemClock, toDisplayPath } from '@relay/contracts';
 import type { AppInfo, PushEvent } from '@relay/contracts';
@@ -70,6 +70,7 @@ export function createProductionServices(cfg: BootConfig): BootServices {
       e2e: cfg.e2e, crashAt: process.env['RELAY_CRASH_AT'], nodeEnv: process.env['NODE_ENV'],
     }),
     now: Date.now,
+    monotonicNow: () => performance.now(), // heartbeat staleness never uses the wall clock
     timers: {
       setTimeout: (cb, ms) => setTimeout(cb, ms),
       clearTimeout: (h) => {
@@ -85,6 +86,10 @@ export function createProductionServices(cfg: BootConfig): BootServices {
     broadcast,
   });
   supervisor = sup;
+  // A Mac asleep longer than RUNNER_STALE_AFTER_MS must not look like a hung runner on wake (08 H6).
+  powerMonitor.on('resume', () => {
+    sup.notifyResume();
+  });
 
   const nativeDialogs: NativeDialogs = {
     showOpenDialog: (opts) => (win === null ? dialog.showOpenDialog(opts as OpenDialogOptions) : dialog.showOpenDialog(win as unknown as BrowserWindow, opts as OpenDialogOptions)),

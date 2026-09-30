@@ -65,9 +65,10 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
     app.quit();
   });
   app.on('before-quit', (e) => {
-    if (quitting || services === null) return; // second call: never prevent, never re-enter
+    if (quitting) return; // second call: never prevent, never re-enter
+    quitting = true; // boot stops at its next await: no window, no runner fork after quit began
+    if (services === null) return; // nothing started yet: let the quit proceed
     e.preventDefault();
-    quitting = true;
     const s = services;
     void (async () => {
       try {
@@ -80,11 +81,18 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
     })();
   });
 
+  // `quitting` is re-read after every await (a function call keeps TS from narrowing it to its initial value).
+  const quitRequested = (): boolean => quitting;
   await app.whenReady();
+  if (quitRequested()) return null;
   const s = deps.createServices(cfg);
   services = s;
   s.applySessionPolicy();
   await s.ensureLayout();
+  if (quitRequested()) {
+    s.logger.info({ event: 'app.boot_aborted', reason: 'quitting', outcome: 'ok' });
+    return s;
+  }
   s.registerIpc();
   s.createMainWindow();
   s.logger.info({ event: 'app.boot', providerMode: cfg.providerMode, e2e: cfg.e2e, outcome: 'ok' });

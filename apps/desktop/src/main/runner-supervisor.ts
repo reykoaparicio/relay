@@ -56,6 +56,13 @@ export interface SupervisorConfig {
   readonly maxRestarts: number;
   /** Extra time after the grace period before a non-exiting runner is killed. */
   readonly shutdownKillSlackMs: number;
+  /**
+   * After a system resume (or a watchdog tick that observes a gap of at least `sleepGapTicks` tick intervals), the
+   * heartbeat clock restarts and staleness is not judged for this long.
+   */
+  readonly resumeGraceMs: number;
+  /** A watchdog gap this many intervals long is treated as a suspend/resume. */
+  readonly sleepGapTicks: number;
 }
 
 /** 08 H6 defaults. */
@@ -69,6 +76,8 @@ export const DEFAULT_SUPERVISOR_CONFIG: SupervisorConfig = {
   restartWindowMs: 60_000,
   maxRestarts: 3,
   shutdownKillSlackMs: 1_000,
+  resumeGraceMs: 2 * RUNNER_STALE_AFTER_MS,
+  sleepGapTicks: 3,
 };
 
 /** Dependencies of {@link createRunnerSupervisor}. */
@@ -78,8 +87,13 @@ export interface SupervisorDeps {
   readonly entryPath: string;
   /** From {@link minimalEnv}; never contains secrets. */
   readonly env: Record<string, string>;
-  /** Wall-clock epoch ms. */
+  /** Wall-clock epoch ms (restart-window bookkeeping and the diagnostics timestamp only). */
   readonly now: () => number;
+  /**
+   * Monotonic ms (`performance.now`) for heartbeat staleness. Wall clock jumps (NTP, manual changes, sleep) must
+   * never make a healthy runner look stale. Defaults to `performance.now()`.
+   */
+  readonly monotonicNow?: () => number;
   readonly timers: SupervisorTimers;
   readonly logger: MainLogger;
   /** Answers `credential.request` (vault.get). */
@@ -104,6 +118,8 @@ export interface RunnerSupervisor extends RunnerRequester {
   shutdown(opts: { graceMs: number }): Promise<void>;
   state(): SupervisorSnapshot;
   request<C extends RunnerChannel>(channel: C, input: RunnerInputOf<C>, opts?: RunnerRequestOptions): Promise<IpcResult<C>>;
+  /** Call on `powerMonitor` 'resume': restarts the heartbeat clock with a grace period (no kill for sleeping). */
+  notifyResume(): void;
 }
 
 /** Inputs of {@link minimalEnv}. */
@@ -142,6 +158,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
   const cfg: SupervisorConfig = { ...DEFAULT_SUPERVISOR_CONFIG, ...deps.config };
   const t = deps.timers;
   const log = deps.logger;
+  const mono = deps.monotonicNow ?? (() => performance.now());
 
   let state: RunnerState = 'starting';
   let child: UtilityChildLike | null = null;
@@ -149,13 +166,22 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
   let generation = 0;
   let startupTimer: unknown = null;
   let watchdog: unknown = null;
+  /** Wall-clock time of the last heartbeat (diagnostics only). */
   let lastHeartbeatAt: number | undefined;
+  /** Monotonic time of the last heartbeat (or of ready / resume): the staleness reference. */
+  let lastBeatMono: number | undefined;
+  /** Monotonic time until which staleness is not judged (after a resume). */
+  let graceUntilMono = 0;
+  /** Monotonic time of the previous watchdog tick (sleep-gap detection). */
+  let lastTickMono: number | undefined;
+  let everShutdown = false;
   let restarts = 0;
   let restartTimes: number[] = [];
   let started: Promise<void> | null = null;
   let shuttingDown = false;
   let fatal = false;
   let seq = 0;
+  let killRequestedGen = -1;
   const pending = new Map<string, Pending>();
   let readyWaiters: ((ready: boolean) => void)[] = [];
   let exitWaiters: (() => void)[] = [];
@@ -203,38 +229,80 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     });
   };
 
+  /** Restarts the staleness clock and opens a grace window (system resume or an observed sleep gap). */
+  const restartHeartbeatClock = (reason: string): void => {
+    if (state !== 'ready' || watchdog === null) return;
+    const n = mono();
+    lastBeatMono = n;
+    lastTickMono = n;
+    graceUntilMono = n + cfg.resumeGraceMs;
+    log.info({ event: 'runner.heartbeat_clock_reset', reason, graceMs: cfg.resumeGraceMs });
+  };
+
   const kill = (reason: string): void => {
     log.warn({ event: 'runner.kill', reason, pid: child?.pid, outcome: 'error' });
     child?.kill();
   };
 
   const onReady = (gen: number, msg: Extract<RunnerMessage, { kind: 'ready' }>): void => {
+    // A duplicate `ready` (or one arriving after the watchdog already condemned this child) must not start a second
+    // watchdog interval nor resurrect a child that is being killed.
+    if (watchdog !== null || (state !== 'starting' && state !== 'restarting') || killRequestedGen === gen) {
+      log.warn({ event: 'runner.duplicate_ready', generation: gen, outcome: 'error' });
+      return;
+    }
     if (startupTimer !== null) t.clearTimeout(startupTimer);
     startupTimer = null;
     lastHeartbeatAt = deps.now();
+    lastBeatMono = mono();
+    lastTickMono = lastBeatMono;
+    graceUntilMono = 0;
     log.info({ event: 'runner.ready', schemaVersion: msg.schemaVersion, pid: msg.pid, outcome: 'ok' });
     setState('ready');
-    // Heartbeat staleness applies only after ready (never during startup: migrations may be slow).
+    // Heartbeat staleness applies only after ready (never during startup: migrations may be slow). It is judged on
+    // the monotonic clock; a tick gap much longer than the interval means the process was suspended (system sleep),
+    // so the clock restarts with a grace period instead of killing a healthy runner.
     watchdog = t.setInterval(() => {
-      if (gen !== generation || state !== 'ready' || lastHeartbeatAt === undefined) return;
-      if (deps.now() - lastHeartbeatAt <= cfg.staleAfterMs) return;
+      if (gen !== generation || state !== 'ready' || lastBeatMono === undefined) return;
+      const n = mono();
+      const gap = lastTickMono === undefined ? 0 : n - lastTickMono;
+      lastTickMono = n;
+      if (gap >= cfg.sleepGapTicks * cfg.watchdogIntervalMs) {
+        restartHeartbeatClock('tick_gap');
+        return;
+      }
+      if (n < graceUntilMono) return;
+      if (n - lastBeatMono <= cfg.staleAfterMs) return;
       if (watchdog !== null) t.clearInterval(watchdog);
       watchdog = null;
+      killRequestedGen = gen;
       setState('restarting');
       kill('heartbeat_stale');
     }, cfg.watchdogIntervalMs);
     settleReadyWaiters(true);
   };
 
-  const answerCredential = async (msg: Extract<RunnerMessage, { kind: 'credential.request' }>): Promise<void> => {
+  const answerCredential = async (gen: number, msg: Extract<RunnerMessage, { kind: 'credential.request' }>): Promise<void> => {
     log.info({ event: 'runner.credential_request', providerId: msg.providerId, purpose: msg.purpose, attemptId: msg.attemptId });
+    const askedOn = port;
     let r: Result<string>;
     try {
       r = await deps.getCredential(msg.providerId);
     } catch {
       r = { ok: false, error: errors.authRequired(msg.providerId) };
     }
-    post({ kind: 'credential.response', id: msg.id, result: r.ok ? { ok: true, apiKey: r.value } : { ok: false, error: r.error } });
+    // The runner that asked may have exited and been replaced while the vault was answering: its request id could
+    // collide with one of the new generation's. Never hand a key to a runner generation that did not ask for it.
+    if (gen !== generation || askedOn === null || port !== askedOn) {
+      log.warn({ event: 'runner.credential_dropped', providerId: msg.providerId, reason: 'generation_changed', outcome: 'error' });
+      return;
+    }
+    // `providerId` is echoed so the runner can verify the answer is for the provider it asked about.
+    const response: Extract<RunnerRequest, { kind: 'credential.response' }> & { providerId: ProviderId } = {
+      kind: 'credential.response', id: msg.id, providerId: msg.providerId,
+      result: r.ok ? { ok: true, apiKey: r.value } : { ok: false, error: r.error },
+    };
+    post(response);
     log.info({ event: 'runner.credential_response', providerId: msg.providerId, outcome: r.ok ? 'ok' : 'error', ...(r.ok ? {} : { code: r.error.code }) });
   };
 
@@ -252,6 +320,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
         return;
       case 'heartbeat':
         lastHeartbeatAt = deps.now();
+        lastBeatMono = mono();
         return;
       case 'op.result': {
         const p = pending.get(msg.id);
@@ -262,7 +331,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
         return;
       }
       case 'credential.request':
-        void answerCredential(msg);
+        void answerCredential(gen, msg);
         return;
       case 'event':
         deps.broadcast(msg.event);
@@ -315,6 +384,8 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     port = null;
     child = null;
     lastHeartbeatAt = undefined;
+    lastBeatMono = undefined;
+    lastTickMono = undefined;
     failPending('runner_exited');
     log.info({ event: 'runner.exit', code, outcome: code === 0 ? 'ok' : 'error' });
     const waiters = exitWaiters;
@@ -349,6 +420,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     startupTimer = t.setTimeout(() => {
       if (gen !== generation || state === 'ready') return;
       startupTimer = null;
+      killRequestedGen = gen;
       kill('startup_timeout');
     }, cfg.startupTimeoutMs);
   };
@@ -384,6 +456,8 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
 
   return {
     start() {
+      // After shutdown() the supervisor is finished for good (app quit): never fork a runner that nobody will stop.
+      if (everShutdown) return Promise.reject(new Error('runner supervisor is shut down'));
       if (started !== null) return started;
       shuttingDown = false;
       started = new Promise<void>((resolve, reject) => {
@@ -402,7 +476,12 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       return send(channel, input, opts);
     },
 
+    notifyResume() {
+      restartHeartbeatClock('power_resume');
+    },
+
     async shutdown({ graceMs }) {
+      everShutdown = true;
       shuttingDown = true;
       clearTimers();
       settleReadyWaiters(false);

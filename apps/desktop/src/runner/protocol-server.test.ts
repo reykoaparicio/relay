@@ -108,10 +108,38 @@ describe('runner protocol server (H7)', () => {
 
     const p = server.requestCredential({ providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
     const req = port.sent[0] as { kind: string; id: string };
-    port.deliver({ kind: 'credential.response', id: req.id, result: { ok: true, apiKey: 'k' } });
+    port.deliver({ kind: 'credential.response', id: req.id, providerId: 'anthropic', result: { ok: true, apiKey: 'k' } });
 
     expect(req.kind).toBe('credential.request');
     await expect(p).resolves.toEqual({ ok: true, value: 'k' });
+  });
+
+  it('F2: credential request ids carry a per-process boot id, so two runner generations never collide', () => {
+    const a = setup();
+    const b = setup();
+
+    void a.server.requestCredential({ providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
+    void b.server.requestCredential({ providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
+
+    const idA = (a.port.sent[0] as { id: string }).id;
+    const idB = (b.port.sent[0] as { id: string }).id;
+    expect(idA).toMatch(/^cred-[0-9a-f]{16}-1$/);
+    expect(idA).not.toBe(idB);
+  });
+
+  it('F2: rejects an answer for a different (or unnamed) provider instead of using that key', async () => {
+    const { port, server, logger } = setup();
+
+    const p1 = server.requestCredential({ providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
+    const p2 = server.requestCredential({ providerId: 'openai', purpose: 'dispatch', attemptId: null });
+    const [r1, r2] = port.sent as { id: string }[];
+    port.deliver({ kind: 'credential.response', id: r1?.id, providerId: 'openai', result: { ok: true, apiKey: 'sk-openai-key' } });
+    port.deliver({ kind: 'credential.response', id: r2?.id, result: { ok: true, apiKey: 'sk-unnamed' } });
+
+    await expect(p1).resolves.toMatchObject({ ok: false, error: { code: 'RUNNER_UNAVAILABLE', details: { reason: 'credential_mismatch' } } });
+    await expect(p2).resolves.toMatchObject({ ok: false, error: { code: 'RUNNER_UNAVAILABLE' } });
+    expect(logger.warn).toHaveBeenCalledWith('protocol.credential_mismatch', expect.anything());
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('sk-openai-key');
   });
 
   it('posts validated events and ready + heartbeats', async () => {

@@ -46,9 +46,29 @@ function degradedDiagnostics(): Omit<Diagnostics, 'runner' | 'secureStorage'> {
   return { db: { schemaVersion: 0, migrationsPending: 0, sizeBytes: 0 }, unresolvedAttempts: 0, catalog: { version: null, models: 0 }, prompts: { loaded: 0 } };
 }
 
+/** A keyed async mutex: `run(key, fn)` runs `fn` after every earlier `fn` for the same key settled. */
+export function createKeyedMutex(): { run<T>(key: string, fn: () => Promise<T>): Promise<T> } {
+  const tails = new Map<string, Promise<unknown>>();
+  return {
+    run(key, fn) {
+      const prev = tails.get(key) ?? Promise.resolve();
+      const next = prev.then(fn, fn);
+      const tail = next.catch(() => undefined);
+      tails.set(key, tail);
+      void tail.then(() => {
+        if (tails.get(key) === tail) tails.delete(key);
+      });
+      return next;
+    },
+  };
+}
+
 /** Creates the composite handler table. */
 export function createCompositeHandlers(d: CompositeDeps): HandlerTable<CompositeChannel> {
   const display = (p: string): string => toDisplayPath(p, d.homeDir);
+  // connect/disconnect of one provider never interleave (two connects would otherwise both read the same
+  // `previous` ref and orphan one vault file).
+  const providerLock = createKeyedMutex();
 
   const lookupRef = async (providerId: ProviderId): Promise<CredentialRef | undefined> => {
     const refs = await d.runner.request('relay/v1/providers.listCredentialRefs', {});
@@ -79,21 +99,33 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
 
   const saveTo = async (defaultName: string, filters: FileFilter[]): Promise<Result<string | null>> => d.dialogs.pickSaveFile(defaultName, filters);
 
-  const connect = async (input: ParsedIn<'relay/v1/providers.connect'>): Promise<IpcEnvelope<ProviderStatus>> => {
-    const previous = await lookupRef(input.providerId);
-    const saved = await d.vault.save(input.providerId, input.apiKey, input.storage);
-    if (!saved.ok) return fail(saved.error);
-    const rec = await d.runner.request('relay/v1/providers.recordCredentialRef', {
-      providerId: input.providerId, storageMode: saved.value.storageMode, vaultFile: saved.value.vaultFile, redactedLabel: saved.value.redactedLabel,
-    });
-    if (!rec.ok) {
-      await d.vault.discard(input.providerId, saved.value);
-      return rec;
-    }
-    if (previous?.vaultFile != null && previous.vaultFile !== saved.value.vaultFile) await d.vault.deleteVaultFile(previous.vaultFile);
-    d.notifyProvidersChanged();
-    return statusOf(input.providerId);
+  /** Deletes every vault file no credential ref points at (best effort: a failed listing prunes nothing). */
+  const pruneOrphans = async (): Promise<void> => {
+    const refs = await d.runner.request('relay/v1/providers.listCredentialRefs', {});
+    if (!refs.ok) return;
+    const referenced = new Set<string>();
+    for (const r of refs.data) if (r.vaultFile !== null) referenced.add(r.vaultFile);
+    await d.vault.pruneUnreferenced(referenced).catch(() => undefined);
   };
+
+  const connect = (input: ParsedIn<'relay/v1/providers.connect'>): Promise<IpcEnvelope<ProviderStatus>> =>
+    providerLock.run(input.providerId, async () => {
+      const previous = await lookupRef(input.providerId);
+      const saved = await d.vault.save(input.providerId, input.apiKey, input.storage);
+      if (!saved.ok) return fail(saved.error);
+      const rec = await d.runner.request('relay/v1/providers.recordCredentialRef', {
+        providerId: input.providerId, storageMode: saved.value.storageMode, vaultFile: saved.value.vaultFile, redactedLabel: saved.value.redactedLabel,
+      });
+      if (!rec.ok) {
+        await d.vault.discard(input.providerId, saved.value); // also restores a session key the save removed
+        return rec;
+      }
+      d.vault.commit(input.providerId, saved.value);
+      if (previous?.vaultFile != null && previous.vaultFile !== saved.value.vaultFile) await d.vault.deleteVaultFile(previous.vaultFile);
+      await pruneOrphans();
+      d.notifyProvidersChanged();
+      return statusOf(input.providerId);
+    });
 
   const exportDiagnostics = async (input: ParsedIn<'relay/v1/app.exportDiagnostics'>) => {
     const diag = await getDiagnostics();
@@ -186,13 +218,14 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
     'relay/v1/providers.list': listProviders,
     'relay/v1/providers.connect': connect,
 
-    'relay/v1/providers.disconnect': async (input) => {
-      await d.vault.remove(input.providerId);
-      const r = await d.runner.request('relay/v1/providers.deleteCredentialRef', { providerId: input.providerId });
-      if (!r.ok) return r;
-      d.notifyProvidersChanged();
-      return statusOf(input.providerId);
-    },
+    'relay/v1/providers.disconnect': (input) =>
+      providerLock.run(input.providerId, async () => {
+        await d.vault.remove(input.providerId);
+        const r = await d.runner.request('relay/v1/providers.deleteCredentialRef', { providerId: input.providerId });
+        if (!r.ok) return r;
+        d.notifyProvidersChanged();
+        return statusOf(input.providerId);
+      }),
 
     'relay/v1/providers.test': async (input) => {
       if (!d.vault.hasSession(input.providerId)) {

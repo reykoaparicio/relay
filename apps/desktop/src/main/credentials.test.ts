@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename as fsRename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,8 +22,11 @@ describe('credential vault (H5)', () => {
   let dir = '';
   let refs: Map<ProviderId, string>;
   const ids = createIdGen({ now: () => epochMs(1_700_000_000_000) }, (n) => new Uint8Array(n).map(() => Math.floor(Math.random() * 256)));
-  const make = (safeStorage: SafeStorageLike, platform: NodeJS.Platform = 'darwin') =>
-    createCredentialVault({ safeStorage, userDataDir: dir, platform, ids, lookupVaultFile: (p) => Promise.resolve(refs.get(p) ?? null) });
+  const make = (safeStorage: SafeStorageLike, platform: NodeJS.Platform = 'darwin', rename?: (from: string, to: string) => Promise<void>) =>
+    createCredentialVault({
+      safeStorage, userDataDir: dir, platform, ids, lookupVaultFile: (p) => Promise.resolve(refs.get(p) ?? null),
+      ...(rename === undefined ? {} : { rename }),
+    });
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'relay-vault-'));
@@ -107,6 +110,69 @@ describe('credential vault (H5)', () => {
     const r = await v.save(P, KEY, 'os_protected');
 
     expect(!r.ok && r.error).toMatchObject({ code: 'SECURE_STORAGE_UNAVAILABLE', retryable: true });
+  });
+
+  it('F3: a keychain that refuses to encrypt (denied/locked) → SECURE_STORAGE_UNAVAILABLE/use_session_key, nothing written', async () => {
+    const denied = make({ ...syncStorage(), encryptString: () => { throw new Error('User interaction is not allowed.'); } });
+    const deniedAsync = make({
+      ...syncStorage(), isAsyncEncryptionAvailable: () => Promise.resolve(true),
+      encryptStringAsync: () => Promise.reject(new Error('keychain locked')), decryptStringAsync: () => Promise.reject(new Error('x')),
+    });
+
+    for (const v of [denied, deniedAsync]) {
+      const r = await v.save(P, KEY, 'os_protected');
+      expect(!r.ok && r.error).toMatchObject({ code: 'SECURE_STORAGE_UNAVAILABLE', nextAction: 'use_session_key' });
+    }
+    expect(await readdir(join(dir, 'secrets'))).toEqual([]);
+  });
+
+  it('F3: a failed vault write → SECURE_STORAGE_UNAVAILABLE (not INTERNAL), no plaintext and no temp file left', async () => {
+    await rm(join(dir, 'secrets'), { recursive: true }); // the write itself fails (ENOENT)
+    const noDir = await make(syncStorage()).save(P, KEY, 'os_protected');
+    await mkdir(join(dir, 'secrets'));
+    const noRename = await make(syncStorage(), 'darwin', () => Promise.reject(new Error('EIO'))).save(P, KEY, 'os_protected');
+
+    expect(!noDir.ok && noDir.error.code).toBe('SECURE_STORAGE_UNAVAILABLE');
+    expect(!noRename.ok && noRename.error).toMatchObject({ code: 'SECURE_STORAGE_UNAVAILABLE', nextAction: 'use_session_key' });
+    expect(await readdir(join(dir, 'secrets'))).toEqual([]);
+  });
+
+  it('F4: a crash between the temp write and the rename during re-encrypt leaves the old vault file intact', async () => {
+    let crash = false;
+    const storage: SafeStorageLike = {
+      ...syncStorage(),
+      isAsyncEncryptionAvailable: () => Promise.resolve(true),
+      encryptStringAsync: (x) => Promise.resolve(Buffer.concat([Buffer.from(crash ? 'G2' : 'G1'), enc(x)])),
+      decryptStringAsync: (b) => Promise.resolve({ result: dec(b.subarray(2)), shouldReEncrypt: true }),
+    };
+    const v = make(storage, 'darwin', (from, to) => (crash ? Promise.reject(new Error('process killed')) : fsRename(from, to)));
+    const r = await v.save(P, KEY, 'os_protected');
+    if (!r.ok || r.value.vaultFile === null) throw new Error('save failed');
+    refs.set(P, r.value.vaultFile);
+    const file = join(dir, r.value.vaultFile);
+    const before = await readFile(file);
+    crash = true;
+
+    expect(await v.get(P)).toEqual({ ok: true, value: KEY }); // the re-encrypt failure never fails the read
+
+    expect((await readFile(file)).equals(before)).toBe(true);
+    expect(await readdir(join(dir, 'secrets'))).toEqual([r.value.vaultFile.slice('secrets/'.length)]);
+  });
+
+  it('F5: pruneUnreferenced deletes unreferenced vault files but never in-flight ones or foreign files', async () => {
+    const v = make(syncStorage());
+    const kept = await v.save(P, KEY, 'os_protected');
+    const orphan = await v.save('openai', KEY, 'os_protected');
+    const inFlight = await v.save('gemini', KEY, 'os_protected');
+    if (!kept.ok || !orphan.ok || !inFlight.ok || kept.value.vaultFile === null) throw new Error('save failed');
+    v.commit(P, kept.value);
+    v.commit('openai', orphan.value);
+    await writeFile(join(dir, 'secrets', 'README'), 'not a vault file');
+
+    await v.pruneUnreferenced(new Set([kept.value.vaultFile]));
+
+    const left = (await readdir(join(dir, 'secrets'))).sort();
+    expect(left).toEqual(['README', kept.value.vaultFile, inFlight.value.vaultFile].map((f) => f?.replace('secrets/', '') ?? '').sort());
   });
 
   it('answers AUTH_REQUIRED when nothing is stored', async () => {

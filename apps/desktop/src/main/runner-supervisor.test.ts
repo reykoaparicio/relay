@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errors, ok } from '@relay/contracts';
-import type { PushEvent } from '@relay/contracts';
+import type { PushEvent, Result } from '@relay/contracts';
 import type { LogFields, MainLogger } from './logger.js';
 import { createRunnerSupervisor, minimalEnv } from './runner-supervisor.js';
 import type { SupervisorDeps } from './runner-supervisor.js';
@@ -72,6 +72,7 @@ function setup(over: Partial<SupervisorDeps> = {}, opts: { skipPortStart?: boole
     entryPath: '/out/main/runner.js',
     env: { RELAY_USER_DATA_DIR: '/ud' },
     now: () => Date.now(),
+    monotonicNow: () => Date.now(), // vi fake timers fake Date; tests with a wall/monotonic split inject their own
     timers: { setTimeout, clearTimeout: (h) => { clearTimeout(h as NodeJS.Timeout); }, setInterval, clearInterval: (h) => { clearInterval(h as NodeJS.Timeout); } },
     logger,
     getCredential: () => Promise.resolve(ok('sk-test-key')),
@@ -233,7 +234,7 @@ describe('runner supervisor (H6)', () => {
     latest().port.deliver({ kind: 'credential.request', id: 'c2', providerId: 'openai', purpose: 'connection_test', attemptId: null });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(latest().port.sent).toContainEqual({ kind: 'credential.response', id: 'c1', result: { ok: true, apiKey: 'sk-key-123' } });
+    expect(latest().port.sent).toContainEqual({ kind: 'credential.response', id: 'c1', providerId: 'anthropic', result: { ok: true, apiKey: 'sk-key-123' } });
     const c2 = latest().port.sent.find((m) => (m as { id: string }).id === 'c2') as { result: { ok: boolean; error: { code: string } } };
     expect(c2.result.error.code).toBe('AUTH_REQUIRED');
     expect(JSON.stringify(lines)).not.toContain('sk-key-123');
@@ -262,6 +263,161 @@ describe('runner supervisor (H6)', () => {
     latest().emit('exit', 0);
 
     await expect(done).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * Injected clocks + a manual scheduler (no vi fake timers): `wall` and `mono` are driven independently so a system
+ * sleep (wall jumps; the process is suspended, so no timer fires) can be simulated exactly.
+ */
+function manualClock() {
+  let wall = 1_700_000_000_000;
+  let mono = 0;
+  let nextId = 1;
+  const tasks = new Map<number, { at: number; cb: () => void; every?: number }>();
+  const timers: SupervisorDeps['timers'] = {
+    setTimeout: (cb, ms) => (tasks.set(nextId, { at: mono + ms, cb }), nextId++),
+    clearTimeout: (h) => { tasks.delete(h as number); },
+    setInterval: (cb, ms) => (tasks.set(nextId, { at: mono + ms, cb, every: ms }), nextId++),
+    clearInterval: (h) => { tasks.delete(h as number); },
+  };
+  /** Runs time forward, firing due timers in order. */
+  const advance = (ms: number) => {
+    const end = mono + ms;
+    for (;;) {
+      let due: [number, { at: number; cb: () => void; every?: number }] | undefined;
+      for (const e of tasks) if (e[1].at <= end && (due === undefined || e[1].at < due[1].at)) due = e;
+      if (due === undefined) break;
+      const [id, task] = due;
+      const fireAt = Math.max(task.at, mono); // overdue after a suspension: fires once, now (no replay)
+      wall += fireAt - mono;
+      mono = fireAt;
+      if (task.every === undefined) tasks.delete(id);
+      else task.at = fireAt + task.every;
+      task.cb();
+    }
+    wall += end - mono;
+    mono = end;
+  };
+  /** The process is suspended for `ms`: nothing fires; `monoAdvances` says whether the monotonic clock ran. */
+  const sleep = (ms: number, monoAdvances: boolean) => {
+    wall += ms;
+    if (monoAdvances) mono += ms; // else: timers are relative to mono, which did not move
+
+  };
+  return { timers, advance, sleep, now: () => wall, monotonicNow: () => mono, intervals: () => [...tasks.values()].filter((x) => x.every !== undefined).length };
+}
+
+describe('runner supervisor — sleep/resume and races (injected clocks)', () => {
+  const beat = (c: FakeChild, at: number) => { c.port.deliver({ kind: 'heartbeat', at, activeRunId: null }); };
+
+  it('F1: a system sleep longer than the stale window (wall clock jumps) never kills a healthy runner', () => {
+    const clk = manualClock();
+    const { sup, children, ready } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+    void sup.start().catch(() => undefined);
+    ready();
+    clk.advance(2_000);
+    beat(children[0] as FakeChild, clk.now());
+
+    clk.sleep(10 * 60_000, false); // macOS: mach time stops while asleep; the wall clock jumps 10 min
+    clk.advance(1_000);
+    beat(children[0] as FakeChild, clk.now());
+    clk.advance(2_000);
+
+    expect(children[0]?.killed).toBe(false);
+    expect(sup.state().state).toBe('ready');
+  });
+
+  it('F1: a watchdog tick gap (monotonic clock ran during suspension) restarts the clock with a grace period', () => {
+    const clk = manualClock();
+    const { sup, children, ready, lines } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+    void sup.start().catch(() => undefined);
+    ready();
+    clk.advance(2_000);
+
+    clk.sleep(60_000, true); // no ticks for 60 s, then the first tick sees the gap
+    clk.advance(1_000);
+    expect(lines.some((l) => l.event === 'runner.heartbeat_clock_reset' && l['reason'] === 'tick_gap')).toBe(true);
+    clk.advance(3_000); // the runner's heartbeat arrives a little late after wake
+    beat(children[0] as FakeChild, clk.now());
+    clk.advance(5_000);
+
+    expect(children[0]?.killed).toBe(false);
+  });
+
+  it('F1: genuinely missing heartbeats after resume still kill — after the 2× stale grace period', () => {
+    const clk = manualClock();
+    const { sup, children, ready } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+    void sup.start().catch(() => undefined);
+    ready();
+    clk.advance(2_000);
+    beat(children[0] as FakeChild, clk.now());
+
+    clk.sleep(30 * 60_000, false);
+    sup.notifyResume(); // powerMonitor 'resume'
+    clk.advance(19_000); // still inside the 20 s grace (2 × RUNNER_STALE_AFTER_MS), no heartbeat at all
+    expect(children[0]?.killed).toBe(false);
+    clk.advance(2_000);
+
+    expect(children[0]?.killed).toBe(true);
+    expect(sup.state().state).toBe('restarting');
+  });
+
+  it('F1: after a tick gap, a runner that never heartbeats again is killed once the grace period ends', () => {
+    const clk = manualClock();
+    const { sup, children, ready } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+    void sup.start().catch(() => undefined);
+    ready();
+
+    clk.sleep(120_000, true);
+    clk.advance(1_000);
+    expect(children[0]?.killed).toBe(false);
+    clk.advance(21_000);
+
+    expect(children[0]?.killed).toBe(true);
+  });
+
+  it('a duplicate ready does not start a second watchdog interval', () => {
+    const clk = manualClock();
+    const { sup, ready, lines } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+    void sup.start().catch(() => undefined);
+
+    ready();
+    ready();
+
+    expect(clk.intervals()).toBe(1);
+    expect(lines.filter((l) => l.event === 'runner.ready')).toHaveLength(1);
+  });
+
+  it('F2: a credential answer for a runner generation that has since exited is dropped, not sent to the new one', async () => {
+    const clk = manualClock();
+    let release: (v: Result<string>) => void = () => undefined;
+    const getCredential = vi.fn(() => new Promise<Result<string>>((r) => (release = r)));
+    const { sup, children, ready, lines } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers, getCredential });
+    void sup.start().catch(() => undefined);
+    ready();
+    const old = children[0] as FakeChild;
+    old.port.deliver({ kind: 'credential.request', id: 'cred-1', providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
+
+    old.emit('exit', 1); // restart: generation 2 forks with a fresh port
+    const fresh = children[1] as FakeChild;
+    ready(fresh);
+    release(ok('sk-late-key'));
+    await new Promise((r) => setImmediate(r));
+
+    expect(fresh.port.sent.some((m) => (m as { kind: string }).kind === 'credential.response')).toBe(false);
+    expect(old.port.sent.some((m) => (m as { kind: string }).kind === 'credential.response')).toBe(false);
+    expect(lines.some((l) => l.event === 'runner.credential_dropped')).toBe(true);
+  });
+
+  it('F6: start() refuses after shutdown() and forks nothing', async () => {
+    const clk = manualClock();
+    const { sup, children } = setup({ now: clk.now, monotonicNow: clk.monotonicNow, timers: clk.timers });
+
+    await sup.shutdown({ graceMs: 1_000 });
+
+    await expect(sup.start()).rejects.toThrow(/shut down/);
+    expect(children).toHaveLength(0);
   });
 });
 

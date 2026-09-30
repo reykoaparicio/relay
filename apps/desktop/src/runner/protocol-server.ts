@@ -2,7 +2,8 @@
 // (public runner-routed and internal channels alike) to the engine, answers with `op.result`, forwards engine push
 // events, requests credentials from main, and heartbeats every 2 s after `ready`.
 import { RUNNER_HEARTBEAT_MS, appError, epochMs, errors, runnerMessageSchema, runnerRequestSchema } from '@relay/contracts';
-import type { CorrelationId, ErrorCode, IpcEnvelope, PushEvent, Result, RunnerChannel, RunnerMessage } from '@relay/contracts';
+import { randomBytes } from 'node:crypto';
+import type { CorrelationId, ErrorCode, IpcEnvelope, ProviderId, PushEvent, Result, RunnerChannel, RunnerMessage } from '@relay/contracts';
 import type { CredentialRequest, EngineApi, Logger, Timers } from '@relay/engine';
 
 /** The part of `MessagePortMain` the runner uses. */
@@ -31,6 +32,11 @@ export interface ProtocolServerDeps {
   readonly correlationId: () => CorrelationId;
   /** How long a credential request may wait for main (default 30 s). */
   readonly credentialTimeoutMs?: number;
+  /**
+   * Random per-process id prefixed to credential request ids so they never collide with a previous runner
+   * generation's (main may still be answering one of those). Defaults to 8 random bytes (hex).
+   */
+  readonly bootId?: string;
 }
 
 /** The protocol server. */
@@ -52,7 +58,8 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
   let runtime: ServedRuntime | null = null;
   let heartbeat: unknown = null;
   let seq = 0;
-  const credentialWaiters = new Map<string, { resolve: (r: Result<string>) => void; timer: unknown }>();
+  const bootId = deps.bootId ?? randomBytes(8).toString('hex');
+  const credentialWaiters = new Map<string, { providerId: ProviderId; resolve: (r: Result<string>) => void; timer: unknown }>();
 
   const post = (msg: RunnerMessage): void => {
     const checked = runnerMessageSchema.safeParse(msg);
@@ -96,6 +103,17 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
     const parsed = runnerRequestSchema.safeParse(e.data);
     if (!parsed.success) {
       logger.warn('protocol.invalid_message', { outcome: 'error' });
+      // A malformed answer to a pending credential request fails that request now (never waits for the timeout).
+      const raw: unknown = e.data;
+      if (typeof raw === 'object' && raw !== null && (raw as { kind?: unknown }).kind === 'credential.response') {
+        const id = (raw as { id?: unknown }).id;
+        const w = typeof id === 'string' ? credentialWaiters.get(id) : undefined;
+        if (w !== undefined && typeof id === 'string') {
+          credentialWaiters.delete(id);
+          timers.clearTimeout(w.timer);
+          w.resolve({ ok: false, error: appError('RUNNER_UNAVAILABLE', { details: { reason: 'credential_mismatch' } }) });
+        }
+      }
       return;
     }
     const msg = parsed.data;
@@ -106,6 +124,12 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
       if (w === undefined) return;
       credentialWaiters.delete(msg.id);
       timers.clearTimeout(w.timer);
+      // Main echoes the providerId it answered for: a key for any other provider is rejected, never used.
+      if (msg.providerId !== w.providerId) {
+        logger.warn('protocol.credential_mismatch', { providerId: w.providerId, outcome: 'error', code: 'RUNNER_UNAVAILABLE' });
+        w.resolve({ ok: false, error: appError('RUNNER_UNAVAILABLE', { details: { reason: 'credential_mismatch' } }) });
+        return;
+      }
       w.resolve(msg.result.ok ? { ok: true, value: msg.result.apiKey } : { ok: false, error: msg.result.error });
     }
   });
@@ -114,13 +138,13 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
   return {
     requestCredential(req) {
       seq += 1;
-      const id = `cred-${String(seq)}`;
+      const id = `cred-${bootId}-${String(seq)}`;
       return new Promise<Result<string>>((resolve) => {
         const timer = timers.setTimeout(() => {
           credentialWaiters.delete(id);
           resolve({ ok: false, error: appError('RUNNER_UNAVAILABLE', { details: { reason: 'credential_timeout' } }) });
         }, deps.credentialTimeoutMs ?? DEFAULT_CREDENTIAL_TIMEOUT_MS);
-        credentialWaiters.set(id, { resolve, timer });
+        credentialWaiters.set(id, { providerId: req.providerId, resolve, timer });
         post({ kind: 'credential.request', id, providerId: req.providerId, purpose: req.purpose, attemptId: req.attemptId });
       });
     },

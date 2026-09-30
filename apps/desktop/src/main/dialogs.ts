@@ -112,7 +112,7 @@ async function realpathOrNull(p: string): Promise<string | null> {
 const DIFF_FILTERS: FileFilter[] = [{ name: 'Diff or patch', extensions: ['diff', 'patch'] }];
 
 /** Creates the dialog service (and the E2E seam when `deps.e2e`). */
-export function createDialogService(deps: DialogDeps): DialogService {
+export function createDialogService(deps: DialogDeps): DialogService & { pendingSelections(): number } {
   const selections = new Map<SelectionId, ResolvedSelection & { expiresAt: number }>();
   let stub: DialogStub = {};
   const caseInsensitive = deps.caseInsensitive ?? process.platform === 'darwin';
@@ -152,6 +152,8 @@ export function createDialogService(deps: DialogDeps): DialogService {
       }
       const valid = validateProjectRoot(real, await policy());
       if (!valid.ok) return valid;
+      const nowMs = deps.clock.now();
+      for (const [id, sel] of selections) if (sel.expiresAt <= nowMs) selections.delete(id); // unused tokens never pile up
       const selectionId = deps.ids.next('selection');
       const expiresAt = epochMs(deps.clock.now() + SELECTION_TTL_MS);
       const displayPath = toDisplayPath(real, deps.homeDir);
@@ -172,6 +174,8 @@ export function createDialogService(deps: DialogDeps): DialogService {
     consumeSelection(id) {
       selections.delete(id);
     },
+
+    pendingSelections: () => selections.size,
 
     async pickDiffFile() {
       const chosen = stub.diffFile ?? (await openOne(['openFile'], DIFF_FILTERS));

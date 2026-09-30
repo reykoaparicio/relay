@@ -19,6 +19,7 @@ describe('runnerRequestSchema', () => {
       runnerRequestSchema.safeParse({
         kind: 'credential.response',
         id: 'c1',
+        providerId: 'anthropic',
         result: { ok: true, apiKey: 'k' },
       }).success,
     ).toBe(true);
@@ -26,9 +27,13 @@ describe('runnerRequestSchema', () => {
       runnerRequestSchema.safeParse({
         kind: 'credential.response',
         id: 'c1',
+        providerId: 'openai',
         result: { ok: false, error: appError('AUTH_REQUIRED') },
       }).success,
     ).toBe(true);
+    expect(
+      runnerRequestSchema.safeParse({ kind: 'credential.response', id: 'c1', result: { ok: true, apiKey: 'k' } }).success,
+    ).toBe(false); // providerId is required (08 audit F2)
     expect(runnerRequestSchema.safeParse({ kind: 'shutdown', graceMs: 10_001 }).success).toBe(false);
     expect(runnerRequestSchema.safeParse({ kind: 'shutdown', graceMs: 5_000 }).success).toBe(true);
   });

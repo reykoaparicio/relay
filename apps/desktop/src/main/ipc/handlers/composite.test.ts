@@ -1,11 +1,15 @@
 /* eslint-disable @typescript-eslint/unbound-method -- asserting on vi.fn() members */
-import { describe, expect, it, vi } from 'vitest';
-import { epochMs, errors, err, ok } from '@relay/contracts';
-import type { ProviderStatus, SelectionId } from '@relay/contracts';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createIdGen, epochMs, errors, err, ok } from '@relay/contracts';
+import type { ProviderId, ProviderStatus, SelectionId } from '@relay/contracts';
+import { createCredentialVault } from '../../credentials.js';
 import type { CredentialVault } from '../../credentials.js';
 import type { DialogService } from '../../dialogs.js';
 import type { SampleService } from '../../samples.js';
-import { createCompositeHandlers } from './composite.js';
+import { createCompositeHandlers, createKeyedMutex } from './composite.js';
 import type { CompositeDeps } from './composite.js';
 
 vi.mock('electron', () => ({}));
@@ -44,6 +48,8 @@ function setup(runnerReplies: Record<string, unknown> = {}) {
     sessionLabel: vi.fn((p: string): string | null => (p === '' ? '' : null)),
     deleteVaultFile: vi.fn(() => Promise.resolve()),
     discard: vi.fn(() => Promise.resolve()),
+    commit: vi.fn(),
+    pruneUnreferenced: vi.fn(() => Promise.resolve()),
   } satisfies CredentialVault;
   const samples: SampleService = { copySample: vi.fn() };
   const deps: CompositeDeps = {
@@ -184,5 +190,130 @@ describe('composite handlers (H4)', () => {
 
     expect(r.ok && r.data.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0 });
     expect(r.ok && r.data.secureStorage).toEqual({ available: true, backend: 'keychain' });
+  });
+});
+
+describe('providers.connect with a real vault (F5 regressions)', () => {
+  let dir = '';
+  const ids = createIdGen({ now: () => epochMs(1_700_000_000_000) }, (n) => new Uint8Array(n).map(() => Math.floor(Math.random() * 256)));
+  const enc = (x: string) => Buffer.from(`ENC:${x}`);
+  const dec = (b: Buffer) => b.toString().slice(4);
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'relay-connect-'));
+    await mkdir(join(dir, 'secrets'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** A runner double holding credential refs; every call yields a few ticks so concurrent handlers can interleave. */
+  function world(opts: { failRecord?: boolean } = {}) {
+    const refs = new Map<ProviderId, { vaultFile: string | null; storageMode: string }>();
+    const yieldTicks = async () => {
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    };
+    const request = vi.fn(async (channel: string, input: unknown) => {
+      await yieldTicks();
+      const i = input as { providerId: ProviderId; vaultFile: string | null; storageMode: string };
+      switch (channel) {
+        case 'relay/v1/providers.listCredentialRefs':
+          return { ok: true, data: [...refs].map(([providerId, r]) => ({ providerId, ...r })) };
+        case 'relay/v1/providers.recordCredentialRef':
+          if (opts.failRecord === true) return { ok: false, error: errors.validationFailed([]) };
+          refs.set(i.providerId, { vaultFile: i.vaultFile, storageMode: i.storageMode });
+          return { ok: true, data: {} };
+        case 'relay/v1/providers.deleteCredentialRef':
+          refs.delete(i.providerId);
+          return { ok: true, data: {} };
+        case 'relay/v1/providers.list':
+          return { ok: true, data: [status()] };
+        default:
+          return { ok: true, data: {} };
+      }
+    });
+    const runner = { request } as unknown as CompositeDeps['runner'];
+    const vault = createCredentialVault({
+      safeStorage: { isEncryptionAvailable: () => true, encryptString: enc, decryptString: dec },
+      userDataDir: dir, platform: 'darwin', ids,
+      lookupVaultFile: (p) => Promise.resolve(refs.get(p)?.vaultFile ?? null),
+    });
+    const h = createCompositeHandlers({
+      runner, vault,
+      dialogs: {} as DialogService, samples: {} as SampleService,
+      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+    });
+    return { h, vault, refs };
+  }
+
+  it('two concurrent connects for one provider leave exactly one vault file — the recorded one', async () => {
+    const { h, refs } = world();
+    const input = (k: string) => ({ providerId: 'anthropic' as const, apiKey: `sk-ant-api03-${k}xxxxxxxxxxxxxxxxxxxx`, storage: 'os_protected' as const });
+
+    const [a, b] = await Promise.all([h['relay/v1/providers.connect'](input('a')), h['relay/v1/providers.connect'](input('b'))]);
+
+    expect(a.ok && b.ok).toBe(true);
+    const files = await readdir(join(dir, 'secrets'));
+    expect(files).toHaveLength(1);
+    expect(`secrets/${files[0] ?? ''}`).toBe(refs.get('anthropic')?.vaultFile);
+  });
+
+  it('prunes orphaned vault files (e.g., from a crash mid-connect) after a successful connect', async () => {
+    const { h, vault } = world();
+    const orphan = await vault.save('openai', 'sk-orphan-xxxxxxxxxxxxxxxxxxxx', 'os_protected'); // never recorded
+    if (!orphan.ok) throw new Error('save failed');
+    vault.commit('openai', orphan.value); // no longer in flight: a leftover nobody references
+
+    await h['relay/v1/providers.connect']({ providerId: 'anthropic', apiKey: 'sk-ant-api03-cxxxxxxxxxxxxxxxxxxxx', storage: 'os_protected' });
+
+    expect(await readdir(join(dir, 'secrets'))).toHaveLength(1);
+  });
+
+  it('a failed recordCredentialRef restores the session key the save removed, and leaves no file', async () => {
+    const { h, vault } = world({ failRecord: true });
+    await vault.save('anthropic', 'sk-session-old-xxxxxxxxxxxxxxxxxxxx', 'session');
+
+    const r = await h['relay/v1/providers.connect']({ providerId: 'anthropic', apiKey: 'sk-ant-api03-newxxxxxxxxxxxxxxxxxx', storage: 'os_protected' });
+
+    expect(r.ok).toBe(false);
+    expect(vault.hasSession('anthropic')).toBe(true);
+    expect(await vault.get('anthropic')).toEqual({ ok: true, value: 'sk-session-old-xxxxxxxxxxxxxxxxxxxx' });
+    expect(await readdir(join(dir, 'secrets'))).toEqual([]);
+  });
+
+  it('a failed record of a session key restores the previous session key', async () => {
+    const { h, vault } = world({ failRecord: true });
+    await vault.save('anthropic', 'sk-session-old-xxxxxxxxxxxxxxxxxxxx', 'session');
+
+    await h['relay/v1/providers.connect']({ providerId: 'anthropic', apiKey: 'sk-session-new-xxxxxxxxxxxxxxxxxx', storage: 'session' });
+
+    expect(await vault.get('anthropic')).toEqual({ ok: true, value: 'sk-session-old-xxxxxxxxxxxxxxxxxxxx' });
+  });
+});
+
+describe('createKeyedMutex', () => {
+  it('serializes per key (even after a rejection) and runs different keys concurrently', async () => {
+    const m = createKeyedMutex();
+    const log: string[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+
+    const a1 = m.run('a', async () => {
+      log.push('a1:start');
+      await gate;
+      log.push('a1:end');
+      throw new Error('a1');
+    });
+    const a2 = m.run('a', () => (log.push('a2'), Promise.resolve(2)));
+    const b1 = m.run('b', () => (log.push('b1'), Promise.resolve(1)));
+    await b1;
+    expect(log).toEqual(['a1:start', 'b1']);
+    release();
+
+    await expect(a1).rejects.toThrow('a1');
+    await expect(a2).resolves.toBe(2);
+    expect(log).toEqual(['a1:start', 'b1', 'a1:end', 'a2']);
   });
 });
