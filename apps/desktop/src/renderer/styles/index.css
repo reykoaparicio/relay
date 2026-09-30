@@ -1,0 +1,5 @@
+/* Renderer stylesheet entry (09 I1). main.tsx imports this file once. */
+@import "./fonts.css";
+@import "./theme.css";
+@import "./base.css";
+@import "./components.css";

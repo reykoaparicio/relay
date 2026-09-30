@@ -23,6 +23,7 @@ export default tseslint.config(
       '**/dist/**',
       '**/out/**',
       '**/.tsbuild/**',
+      '**/dist-scripts/**',
       '**/node_modules/**',
       'coverage/**',
       'playwright-report/**',
@@ -141,9 +142,13 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       ...jsxA11y.configs.strict.rules,
       'react/no-danger': 'error',
-      'no-restricted-imports': ['error', { patterns: [
+      // Bare built-in names go in `paths` (exact match): gitignore-style `patterns` would also match local
+      // folders that share a builtin's name, e.g. `./domain/` vs Node's `domain` module.
+      'no-restricted-imports': ['error', {
+        paths: builtinModules.map((name) => ({ name, message: 'Renderer must not import Node built-ins (§6.3).' })),
+        patterns: [
         PUBLIC_API_ONLY,
-        { group: ['node:*', 'electron', 'electron/*', ...builtinModules, ...builtinModules.map((m) => `${m}/*`)], message: 'Renderer must not import Node/Electron (§6.3).' },
+        { group: ['node:*', 'electron', 'electron/*'], message: 'Renderer must not import Node/Electron (§6.3).' },
         { group: ['@anthropic-ai/*', 'openai', '@google/genai'], message: 'Provider SDKs never enter the renderer (§13.4).' },
       ]}],
     },

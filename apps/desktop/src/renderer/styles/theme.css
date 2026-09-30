@@ -1,0 +1,27 @@
+/*
+ * Tailwind v4 theme (09 I1): maps the design tokens to utilities (bg-canvas, text-muted, font-mono, …).
+ * `inline` makes utilities reference the token variables directly, so switching `data-theme` on <html>
+ * restyles every utility without regenerating CSS.
+ */
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme inline {
+  --color-canvas: var(--color-canvas);
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-border: var(--color-border);
+  --color-text: var(--color-text);
+  --color-muted: var(--color-text-muted);
+  --color-accent: var(--color-accent);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+  --color-info: var(--color-info);
+  --color-unknown: var(--color-unknown);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+}
+
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
