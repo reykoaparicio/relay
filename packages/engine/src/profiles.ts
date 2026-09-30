@@ -2,6 +2,7 @@
 import { err, errors, ok } from '@relay/contracts';
 import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, Result } from '@relay/contracts';
 import type { ProfileRow, Repos } from '@relay/storage';
+import type { EngineCtx } from './ports.js';
 
 /** A capability warning code (02 `CAPABILITY_WARNING_CODES`). */
 export type CapabilityWarningCode = (typeof CAPABILITY_WARNING_CODES)[number];
@@ -45,13 +46,7 @@ function warning(p: ProfileRow, code: CapabilityWarningCode): CapabilityWarning 
 
 /** `profiles.list`: every profile with its capability warnings (empty = passes). The renderer never re-checks. */
 export function profilesWithWarnings(r: Repos): { profile: ModelProfile; warnings: CapabilityWarning[] }[] {
-  return r.profiles.list().map((p) => {
-    const warnings: CapabilityWarning[] = [];
-    const checked = checkProfile(p, r.catalog.get(p.providerId, p.modelId));
-    if (!checked.ok) warnings.push(warning(p, checked.error.details?.['reason'] as CapabilityWarningCode));
-    if (r.credentials.get(p.providerId) === undefined) warnings.push(warning(p, 'missing_credential'));
-    return { profile: toModelProfile(p), warnings };
-  });
+  return r.profiles.list().map((p) => ({ profile: toModelProfile(p), warnings: warningsFor(r, p) }));
 }
 
 /** Resolves a workflow `profile` reference (a profile name, compared case-insensitively). */
@@ -60,4 +55,67 @@ export function findProfileByName(r: Repos, name: string): ProfileRow | undefine
   if (exact !== undefined) return exact;
   const lower = name.toLowerCase();
   return r.profiles.list().find((p) => p.name.toLowerCase() === lower);
+}
+
+/** The user message of a capability warning code. */
+export function profileWarningMessage(code: CapabilityWarningCode): string {
+  return MESSAGES[code];
+}
+
+/** Warnings of one stored profile (`checkProfile` against its catalog entry + credential presence). */
+export function warningsFor(r: Repos, p: ProfileRow): CapabilityWarning[] {
+  const warnings: CapabilityWarning[] = [];
+  const checked = checkProfile(p, r.catalog.get(p.providerId, p.modelId));
+  if (!checked.ok) warnings.push(warning(p, checked.error.details?.['reason'] as CapabilityWarningCode));
+  if (r.credentials.get(p.providerId) === undefined) warnings.push(warning(p, 'missing_credential'));
+  return warnings;
+}
+
+/** Parsed `profiles.upsert` input. */
+export interface UpsertProfileInput {
+  readonly profile: Omit<ModelProfile, 'id' | 'revision' | 'updatedAt'> & { readonly id?: ModelProfile['id'] | undefined };
+  readonly expectedRevision?: number | undefined;
+}
+
+/**
+ * `profiles.upsert` (FR-03): validated against the catalog and the adapter's live capabilities (resolved before the
+ * tx); MODEL_UNSUPPORTED when `checkProfile` fails. The capability snapshot + catalog version are stored with it.
+ */
+export async function upsertProfile(ctx: EngineCtx, input: UpsertProfileInput): Promise<Result<{ profile: ModelProfile; warnings: CapabilityWarning[] }>> {
+  const p = input.profile;
+  const entry = ctx.db.repos.catalog.get(p.providerId, p.modelId);
+  let capabilities: ModelCapabilities | undefined;
+  try {
+    capabilities = await ctx.providers.get(p.providerId).capabilities(p.modelId);
+  } catch {
+    capabilities = undefined; // no adapter: the catalog snapshot decides
+  }
+  const checked = checkProfile(p, entry, capabilities);
+  if (!checked.ok) return checked;
+  if (entry === undefined) return err(errors.modelUnsupported({ providerId: p.providerId, modelId: p.modelId })); // narrowed above
+  return ctx.db.tx('immediate', (r) => {
+    const saved = r.profiles.upsert({ id: p.id ?? ctx.ids.next('profile'), name: p.name, providerId: p.providerId, modelId: p.modelId, params: p.params,
+      capabilitiesSnapshot: capabilities ?? entry.capabilities, catalogVersion: entry.catalogVersion }, input.expectedRevision);
+    return saved.ok ? ok({ profile: toModelProfile(saved.value), warnings: warningsFor(r, saved.value) }) : saved;
+  });
+}
+
+/** Workflow versions (drafts + latest validated) whose spec references the profile name (case-insensitive). */
+function referencingWorkflows(r: Repos, name: string): string[] {
+  const lower = name.toLowerCase();
+  return r.workflows.listWorkflows().flatMap((w) => {
+    const versions = [r.workflows.getVersion(w.id, 'draft'), r.workflows.latestValidated(w.id)];
+    return versions.some((v) => v?.spec.steps.some((s) => s.kind === 'model' && s.profile.toLowerCase() === lower) === true) ? [w.id] : [];
+  });
+}
+
+/** `profiles.delete`: CONFLICT while a draft or the latest validated workflow version references the profile. */
+export function deleteProfile(ctx: EngineCtx, profileId: ModelProfile['id']): Result<{ deleted: true }> {
+  return ctx.db.tx('immediate', (r) => {
+    const row = r.profiles.get(profileId);
+    if (row === undefined) return err(errors.notFound('profile'));
+    const users = referencingWorkflows(r, row.name);
+    if (users.length > 0) return err(errors.conflict({ reason: 'profile_in_use', workflowIds: users }));
+    return r.profiles.delete(profileId) ? ok({ deleted: true as const }) : err(errors.notFound('profile'));
+  });
 }

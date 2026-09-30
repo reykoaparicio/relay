@@ -1,9 +1,9 @@
 // 06 F6: dispatch policy (§3.3 "no provider call is dispatched without passing policy, credential, budget, and
 // capability checks"). Pure. Budget admission is NOT here: it happens inside the reservation tx (F4 step 2).
-// Wave 1: check #8 compares the approval against the current plan hash, run context hash, and provider; the live
-// input-file re-hash is performed by the context assembler's stale check (PROJECT_CHANGED) before this runs.
+// Check #8 binds an approval-bound step to the approved plan hash, the run context hash, the live input-file hashes
+// (skipped after `use_preserved_snapshot`), and the approved providers (R3-11).
 import { err, errors, ok } from '@relay/contracts';
-import type { AppError, EpochMs, ProviderId, Result, Sha256 } from '@relay/contracts';
+import type { AppError, AttemptPurpose, EpochMs, ProviderId, RelPath, Result, Sha256 } from '@relay/contracts';
 import type { ModelRequest, UsageEstimate } from '@relay/providers';
 import type { ApprovalRow, ProjectRow, RunRow, StepRow } from '@relay/storage';
 import { deadlineReached } from './deadline.js';
@@ -20,6 +20,10 @@ export interface ApprovalBinding {
    * (recorded as `run.snapshot_preserved` after the invalidation): that approval stays valid for the preserved inputs.
    */
   readonly preservedAfterProjectChange?: boolean | undefined;
+  /** Input files whose live hash differs from `run_input_files`; null when skipped (`use_preserved_snapshot`). */
+  readonly changedInputs?: readonly RelPath[] | null | undefined;
+  /** Intake (`before`) and live (`after`) hashes of the changed inputs (PROJECT_CHANGED details for the inspector). */
+  readonly inputHashes?: { readonly before: Readonly<Record<string, string>>; readonly after: Readonly<Record<string, string | null>> } | undefined;
 }
 
 /** Everything the pure policy check reads. */
@@ -33,6 +37,8 @@ export interface DispatchCheckInput {
   readonly binding: ApprovalBinding | null;
   readonly project: ProjectRow;
   readonly now: EpochMs;
+  /** Purpose of the attempt about to be dispatched (check #7 compares the matching counter). */
+  readonly purpose?: AttemptPurpose | undefined;
 }
 
 type Check = (i: DispatchCheckInput) => AppError | null;
@@ -68,12 +74,15 @@ const attemptsCheck: Check = (i) => (i.run.attemptCount < i.run.limits.maxAttemp
 
 const deadlineCheck: Check = (i) => (deadlineReached(i.run, i.now) ? errors.limitReached('deadline') : null);
 
+/** #7: the retry counter consumed by this purpose (F7) is within the snapshot `retryPolicy` (counters persist). */
 const retryCounterCheck: Check = (i) => {
   const p = i.stepSnap.retryPolicy;
   const s = i.step;
-  return s.transportRetriesUsed <= p.transport && s.schemaRepairsUsed <= p.schemaRepair && s.rateLimitWaitsUsed <= p.rateLimitWaits
-    ? null
-    : errors.limitReached('attempts');
+  const within =
+    s.rateLimitWaitsUsed <= p.rateLimitWaits &&
+    (i.purpose !== 'transport_retry' || s.transportRetriesUsed <= p.transport) &&
+    (i.purpose !== 'schema_repair' || s.schemaRepairsUsed <= p.schemaRepair);
+  return within ? null : errors.limitReached('attempts', { details: { reason: 'retry_policy', purpose: i.purpose ?? null } });
 };
 
 function approvalCheck(i: DispatchCheckInput): AppError | null {
@@ -85,13 +94,17 @@ function approvalCheck(i: DispatchCheckInput): AppError | null {
     return a.invalidatedReason === 'project_changed' ? errors.projectChanged([]) : errors.approvalStale(a.invalidatedReason ?? 'plan_changed');
   }
   if (b.currentPlanHash !== a.planHash || b.runContextHash !== a.contextHash) return errors.approvalStale('plan_changed');
+  if (b.changedInputs != null && b.changedInputs.length > 0) { // §11.2
+    return errors.projectChanged(b.changedInputs, b.inputHashes === undefined ? undefined : { details: { ...b.inputHashes } });
+  }
   const providers = (a.requestedPermissions as { providers?: unknown } | null)?.providers;
   if (!Array.isArray(providers) || !providers.includes(b.providerId)) return errors.approvalStale('provider_changed');
   return null;
 }
 
-// ADR-014: maxToolCalls is 0 in P0 and no tool call is ever made, so check #9 always passes; kept for the future.
-const toolCallCheck: Check = () => null;
+/** P0 makes no tool calls (ADR-014); the check is kept for the future. */
+const TOOL_CALLS_USED = 0;
+const toolCallCheck: Check = (i) => (TOOL_CALLS_USED <= i.run.limits.maxToolCalls ? null : errors.limitReached('tool_calls'));
 
 const CHECKS: readonly Check[] = [
   statusCheck,

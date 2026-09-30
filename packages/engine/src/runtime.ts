@@ -2,12 +2,13 @@
 // (lint override). H7's runner entry, K's crash child, D9b, and M's scripts all build the engine through it.
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createIdGen, systemClock } from '@relay/contracts';
+import { createIdGen, err, errors, ok, systemClock, toDisplayPath } from '@relay/contracts';
 import type { Clock, ModelCapabilities, PushEvent } from '@relay/contracts';
-import { createProviderRegistry, loadCatalogEntries } from '@relay/providers';
+import { connectionTestRequest, createProviderRegistry, loadCatalogEntries, supportsRequestLookupFor } from '@relay/providers';
 import type { FakeCallLog, FakeScenario, ProviderRegistry } from '@relay/providers';
-import { createMaintenance, openDb } from '@relay/storage';
+import { createBackup, createMaintenance, openDb } from '@relay/storage';
 import type { Db } from '@relay/storage';
 import { createTemplateRegistry } from '@relay/templates';
 import type { TemplateRegistry } from '@relay/templates';
@@ -16,7 +17,7 @@ import type { ArtifactStore } from '@relay/tools';
 import { globalTimers } from './clock.js';
 import { createContextAssembler } from './context.js';
 import { createMemoryService } from './memory.js';
-import type { CredentialResolver, EngineApi, EngineTestHooks, Logger, ProjectFsPort, Timers } from './ports.js';
+import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, Logger, ProjectFsPort, Timers } from './ports.js';
 import { createEngine } from './runner.js';
 import { seedDatabase } from './seed.js';
 
@@ -70,6 +71,21 @@ export function createProjectFs(userDataDir: string): ProjectFsPort {
   };
 }
 
+/** `app.createBackup` over storage `createBackup` (03 §C7); the directory is returned as a display path. */
+export function createBackupPort(o: { db: Db; userDataDir: string; clock: Clock; logger: Logger; homeDir?: string }): BackupPort {
+  return {
+    async create() {
+      try {
+        const b = await createBackup({ db: o.db, userDataDir: o.userDataDir, clock: o.clock });
+        return ok({ backupDisplayPath: toDisplayPath(b.dir, o.homeDir ?? homedir()), createdAt: b.manifest.createdAt, sizeBytes: b.sizeBytes });
+      } catch (e) {
+        o.logger.error('backup.failed', { err: e instanceof Error ? e.name : 'unknown' });
+        return err(errors.artifactWriteFailed());
+      }
+    },
+  };
+}
+
 /**
  * Composes db → seed → providers → artifacts → projectFs → memory → context → engine. Does NOT start the engine;
  * callers run `await runtime.engine.start()`.
@@ -104,6 +120,9 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
       db, providers, projectFs, artifacts, context, memory, templates, credentials: o.credentials, maintenance, clock, ids, logger,
       emit: o.emit ?? (() => undefined), timers, hooks: o.hooks, idleMs: o.idleMs,
       diagnostics: { dbSizeBytes: () => statSync(dbPath).size },
+      requestLookup: supportsRequestLookupFor,
+      connectionTestRequest,
+      backup: createBackupPort({ db, userDataDir: o.userDataDir, clock, logger }),
     });
     return {
       engine, db, projectFs, artifacts, providers,

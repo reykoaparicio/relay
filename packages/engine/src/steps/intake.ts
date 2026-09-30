@@ -72,6 +72,6 @@ export async function runIntake(ctx: EngineCtx, runId: RunId, stepRunId: StepRun
     });
     r.runs.setContextHash(runId, contextHash);
     applyStepEvent(r, fx, step, 'LOCAL_STEP_DONE');
-    appendRunEvent(r, fx, runId, 'context.assembled', { stepKey: step.stepKey, contextHash, files: rows.length });
+    appendRunEvent(r, fx, runId, 'context.assembled', { stepKey: step.stepKey, stepRunId: step.id, contextHash, files: rows.length });
   });
 }

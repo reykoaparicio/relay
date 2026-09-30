@@ -5,7 +5,7 @@ import { RUNNER_CHANNELS } from '@relay/contracts';
 import type { RunnerChannel, StepKey } from '@relay/contracts';
 import { tick } from './runner.js';
 import { createHandlers } from './services.js';
-import { createHarness } from './testing/harness.js';
+import { SAMPLE_FILES, createHarness } from './testing/harness.js';
 import type { Harness } from './testing/harness.js';
 
 let h: Harness | undefined;
@@ -26,7 +26,9 @@ describe('handler table (F1)', () => {
 
     expect(Object.keys(table).sort()).toEqual([...RUNNER_CHANNELS].sort());
     const res = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'resume-key-000001', runId: 'run_01J9ZZZZZZZZZZZZZZZZZZZZZ0', decision: { kind: 'continue' } });
-    expect(res.ok ? null : res.error).toMatchObject({ code: 'INTERNAL', details: { reason: 'not_implemented', channel: 'relay/v1/runs.resume' } });
+    const memory = await x.engine.handle('relay/v1/memory.list', { projectId: x.projectId });
+    expect(res.ok ? null : res.error.code).toBe('NOT_FOUND'); // implemented: the run does not exist
+    expect(memory.ok ? null : memory.error).toMatchObject({ code: 'INTERNAL', details: { reason: 'not_implemented', channel: 'relay/v1/memory.list' } });
   });
 
   it('rejects invalid input with VALIDATION_FAILED and unknown channels', async () => {
@@ -81,9 +83,9 @@ describe('projects', () => {
     expect(get.ok && get.data.stats.runs).toBe(0);
     expect(JSON.stringify(get)).not.toContain(x.projectRoot);
     expect(none.ok ? null : none.error.code).toBe('NOT_FOUND');
-    expect(byProject.ok && byProject.data.included.map((f) => f.relPath)).toEqual(['src/handlers/orders.ts', 'src/handlers/user.ts', 'src/lib/format.ts']);
+    expect(byProject.ok && byProject.data.included.map((f) => f.relPath)).toEqual(Object.keys(SAMPLE_FILES).sort());
     expect(byProject.ok && byProject.data.excluded).toEqual([{ relPath: 'node_modules', reason: 'dependency_dir' }]);
-    expect(byRoot.ok && byRoot.data.included.map((f) => f.relPath)).toEqual(['src/handlers/orders.ts', 'src/handlers/user.ts']);
+    expect(byRoot.ok && byRoot.data.included.map((f) => f.relPath)).toEqual(['src/errors.ts', 'src/handlers/health.ts', 'src/handlers/orders.ts', 'src/handlers/user.ts']);
     expect(unknownProject.ok ? null : unknownProject.error.code).toBe('NOT_FOUND');
   });
 });
@@ -117,7 +119,8 @@ describe('providers, profiles, workflows, settings, diagnostics', () => {
 
     expect(catalog.ok && catalog.data.every((m) => m.providerId === 'anthropic')).toBe(true);
     expect(before.ok && before.data.every((p) => p.warnings.map((w) => w.code).join() === 'missing_credential')).toBe(true);
-    expect(after.ok && after.data.every((p) => p.warnings.length === 0)).toBe(true);
+    expect(after.ok && after.data.filter((p) => p.profile.providerId === 'anthropic').every((p) => p.warnings.length === 0)).toBe(true);
+    expect(after.ok && after.data.find((p) => p.profile.providerId === 'openai')?.warnings.map((w) => w.code)).toEqual(['missing_credential']);
   });
 
   it('lists and gets workflows with the prompt snapshot', async () => {

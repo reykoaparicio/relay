@@ -1,6 +1,6 @@
 // 06 F2: run state machine — pure core (transitionRun, allowedRunActions) + the ONLY writer of runs.status
 // (applyRunEvent), plus post-commit effects that run only after the transaction commits.
-import { invariant, isTerminalRunStatus, redactDeep } from '@relay/contracts';
+import { appError, invariant, isTerminalRunStatus, redactDeep } from '@relay/contracts';
 import type {
   AppError,
   ApprovalId,
@@ -45,7 +45,12 @@ export type RunMachineEvent =
   | { readonly type: 'RUNNER_LOST'; readonly lastAliveAt?: EpochMs | undefined }
   | { readonly type: 'UNRECOVERABLE'; readonly error: AppError }
   | { readonly type: 'ACCEPTED' }
-  | { readonly type: 'REVISION_LIMIT'; readonly cause: 'revision_limit' | 'verifier_incomplete' }
+  | {
+      readonly type: 'REVISION_LIMIT';
+      readonly cause: 'revision_limit' | 'verifier_incomplete';
+      readonly revisionCycle?: number | undefined;
+      readonly maxRevisionCycles?: number | undefined;
+    }
   | { readonly type: 'CANCEL_REQUESTED' }
   | { readonly type: 'STOP_REQUESTED' }
   | { readonly type: 'WORK_STOPPED' }
@@ -247,7 +252,22 @@ function leaveRunningAt(ev: RunMachineEvent, now: EpochMs): EpochMs {
   return ev.type === 'RUNNER_LOST' && ev.lastAliveAt !== undefined && ev.lastAliveAt < now ? ev.lastAliveAt : now;
 }
 
+/**
+ * Why a run ended `incomplete` (the inspector must not claim "revision limit reached" for a verifier verdict):
+ * `details.incompleteCause` (+ the cycle counts for the limit case).
+ */
+export function incompleteDetail(ev: Extract<RunMachineEvent, { type: 'REVISION_LIMIT' }>): AppError {
+  const cycles = ev.cause === 'revision_limit' ? { revisionCycle: ev.revisionCycle ?? null, maxRevisionCycles: ev.maxRevisionCycles ?? null } : {};
+  return appError('LIMIT_REACHED', {
+    userMessage: ev.cause === 'revision_limit'
+      ? 'The reviewer still requested changes when the revision limit was reached.'
+      : 'The verifier marked the work incomplete.',
+    details: { limit: 'revisions', incompleteCause: ev.cause, ...cycles },
+  });
+}
+
 function statusDetailOf(ev: RunMachineEvent): AppError | null {
+  if (ev.type === 'REVISION_LIMIT') return incompleteDetail(ev);
   return 'error' in ev ? ev.error : null;
 }
 
@@ -282,6 +302,7 @@ export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: E
     pauseReason: t.pauseReason,
     trigger: ev.type,
     ...(detail === null ? {} : { code: detail.code }),
+    ...(ev.type === 'REVISION_LIMIT' ? { ...incompleteDetail(ev).details } : {}),
   });
   fx.push({ kind: 'emit', event: { type: 'run.status', runId: run.id, status: t.to, pauseReason: t.pauseReason, seq: event.seq } });
   if (t.to === 'running') fx.push({ kind: 'arm_deadline', runId: run.id });

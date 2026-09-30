@@ -43,7 +43,7 @@ describe('profilesWithWarnings', () => {
     const list = profilesWithWarnings(h.db.repos);
 
     const byName = Object.fromEntries(list.map((p) => [p.profile.name, p.warnings.map((w) => w.code)]));
-    expect(byName).toEqual({ Economy: [], Balanced: [], Capable: [], Broken: ['model_unknown', 'missing_credential'] });
+    expect(byName).toEqual({ Economy: [], Balanced: [], Capable: [], 'Balanced · OpenAI': ['missing_credential'], Broken: ['model_unknown', 'missing_credential'] });
     expect(findProfileByName(h.db.repos, 'economy')?.name).toBe('Economy');
     expect(findProfileByName(h.db.repos, 'Capable')?.name).toBe('Capable');
     expect(findProfileByName(h.db.repos, 'nobody')).toBeUndefined();

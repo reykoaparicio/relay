@@ -11,6 +11,7 @@ import type {
   IpcResult,
   MemoryId,
   MemoryScope,
+  ModelCapabilities,
   ModelOutputSchemaId,
   ProfileSnapshot,
   ProjectId,
@@ -26,7 +27,7 @@ import type {
   ProviderId,
 } from '@relay/contracts';
 import type { AttemptRow, Db, RunRow, StepRow } from '@relay/storage';
-import type { ProviderRegistry } from '@relay/providers';
+import type { ModelRequest, ProviderRegistry } from '@relay/providers';
 import type { ArtifactStore, LiveHash, ProjectRoot, ReadOptions, ScanOptions, ScanResult, SelectedFile } from '@relay/tools';
 import type { TemplateRegistry } from '@relay/templates';
 
@@ -160,6 +161,18 @@ export interface MaintenancePort {
   sweepRawResponses(now: EpochMs, retentionDays: number): Promise<unknown>;
 }
 
+/** Whether a request to `providerId` can be looked up after a crash (04 `supportsRequestLookupFor`). */
+export type RequestLookupPolicy = (
+  providerId: ProviderId,
+  capabilities: Pick<ModelCapabilities, 'supportsRequestLookup'>,
+  providerOptions?: ModelRequest['providerOptions'],
+) => boolean;
+
+/** One backup (03 §C7), with the path already converted for display (never an absolute home path). */
+export interface BackupPort {
+  create(): Promise<Result<{ readonly backupDisplayPath: string; readonly createdAt: EpochMs; readonly sizeBytes: number }>>;
+}
+
 /** Everything the engine needs (00b §2.4: dependency injection via factory params). */
 export interface EngineDeps {
   readonly db: Db;
@@ -179,6 +192,18 @@ export interface EngineDeps {
   readonly hooks?: EngineTestHooks | undefined;
   /** Diagnostics extras only the composition root knows (e.g. the DB file size). */
   readonly diagnostics?: { dbSizeBytes(): number } | undefined;
+  /**
+   * F9b: effective request-lookup support (providers `supportsRequestLookupFor`, injected by runtime.ts because the
+   * engine may not value-import providers). Absent → the capability flag alone.
+   */
+  readonly requestLookup?: RequestLookupPolicy | undefined;
+  /**
+   * F18: the exact request `testConnection` sends (providers `connectionTestRequest`, per-provider output allowance),
+   * used for N. Injected by runtime.ts; absent → the engine's 16-token equivalent.
+   */
+  readonly connectionTestRequest?: ((providerId: ProviderId, modelId: string) => ModelRequest) | undefined;
+  /** `app.createBackup` (storage `createBackup`, injected by runtime.ts). Absent → the op is unavailable. */
+  readonly backup?: BackupPort | undefined;
   /** Idle wait of the loop when there is no work (default 1 s; commands wake it earlier). */
   readonly idleMs?: number | undefined;
 }

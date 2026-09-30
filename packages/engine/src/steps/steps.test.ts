@@ -55,7 +55,7 @@ describe('intake (R4-6)', () => {
 });
 
 describe('finalize', () => {
-  it('maps the verifier verdict: accept → ACCEPTED, incomplete → verifier_incomplete, revise → revision_limit (Wave-1)', async () => {
+  it('maps the verifier verdict: accept → ACCEPTED, incomplete → verifier_incomplete, revise (at the limit) → revision_limit with the cycle counts', async () => {
     h = await createHarness();
     const run = h.db.repos.runs.get(await h.startRun());
     const verify = h.db.repos.steps.latestFor(run.id, 'verify' as StepKey);
@@ -65,7 +65,7 @@ describe('finalize', () => {
     setOutcome('incomplete');
     expect(finalEventFor(h.db.repos, run)).toEqual({ type: 'REVISION_LIMIT', cause: 'verifier_incomplete' });
     setOutcome('revise');
-    expect(finalEventFor(h.db.repos, run)).toEqual({ type: 'REVISION_LIMIT', cause: 'revision_limit' });
+    expect(finalEventFor(h.db.repos, run)).toEqual({ type: 'REVISION_LIMIT', cause: 'revision_limit', revisionCycle: 0, maxRevisionCycles: 2 });
   });
 
   it('logs memory failures without blocking completion, and does nothing for a run that is not running', async () => {

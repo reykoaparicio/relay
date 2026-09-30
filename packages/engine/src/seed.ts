@@ -15,11 +15,13 @@ export interface DefaultProfile {
   readonly params: ModelParams;
 }
 
-/** Economy / Balanced / Capable (§8.2). Workflow specs reference them by name, case-insensitively. */
+/** Economy / Balanced / Capable (§8.2) + Balanced · OpenAI. Workflow specs reference them by name, case-insensitively. */
 export const DEFAULT_PROFILES: readonly DefaultProfile[] = [
   { name: 'Economy', providerId: 'anthropic', modelId: 'claude-haiku-4-5', params: { maxOutputTokens: 8_000, refusalFallback: 'off' } },
   { name: 'Balanced', providerId: 'anthropic', modelId: 'claude-sonnet-5-5', params: { maxOutputTokens: 16_000, effort: 'medium', refusalFallback: 'off' } },
   { name: 'Capable', providerId: 'anthropic', modelId: 'claude-opus-5-5', params: { maxOutputTokens: 32_000, effort: 'high', refusalFallback: 'off' } },
+  // The OpenAI counterpart of Balanced (04 §D5 adapter); a run uses it only through a profile override or a switch.
+  { name: 'Balanced · OpenAI', providerId: 'openai', modelId: 'gpt-6.1-sol', params: { maxOutputTokens: 8_000, effort: 'medium', refusalFallback: 'off' } },
 ];
 
 /** Options of {@link seedDatabase}. */

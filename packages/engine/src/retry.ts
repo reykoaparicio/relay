@@ -25,7 +25,9 @@ export type OutcomeKind =
   | 'unknown'
   | 'invalid_output'
   | 'refused'
-  | 'artifact_failed';
+  | 'artifact_failed'
+  /** F10: a quality revision's patch left the approved scope (APPROVAL_STALE scope_changed). */
+  | 'scope_changed';
 
 /** Final attempt state an outcome maps to. */
 export type FinalAttemptState = 'succeeded' | 'failed' | 'failed_before_dispatch' | 'unknown';
@@ -49,8 +51,27 @@ export interface ClassifiedOutcome {
 /** Result of the F8 validation (null when no success result was validated). */
 export type Validation = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: AppError };
 
-const known = (usage: NormalizedUsage, fallback?: FallbackInfo): ChargeBasis =>
-  fallback === undefined || fallback.iterations.length === 0 ? { kind: 'known', usage } : { kind: 'known', usage, iterations: fallback.iterations };
+/** Optional result flags (04): absent ⇒ usage known, prices match (backward compatible). */
+export interface ResultFlags {
+  /** false: the provider did not report usage; the charge is settled at the reservation N (`estimated`). */
+  readonly usageKnown?: boolean | undefined;
+  /** true: billed at a price tier the snapshot prices do not describe (`estimated`). */
+  readonly priceTierMismatch?: boolean | undefined;
+}
+
+/** The optional 04 flags of a result (tolerates adapters that do not set them). */
+export function flagsOf(result: object): ResultFlags {
+  const f = result as ResultFlags;
+  return { usageKnown: f.usageKnown, priceTierMismatch: f.priceTierMismatch };
+}
+
+const known = (usage: NormalizedUsage, fallback?: FallbackInfo, flags: ResultFlags = {}): ChargeBasis => {
+  if (flags.usageKnown === false) return { kind: 'at_reservation' };
+  const estimated = flags.priceTierMismatch === true ? { estimated: true } : {};
+  return fallback === undefined || fallback.iterations.length === 0
+    ? { kind: 'known', usage, ...estimated }
+    : { kind: 'known', usage, iterations: fallback.iterations, ...estimated };
+};
 
 function base(result: ModelResult, abortReason: AbortReason | null): Omit<ClassifiedOutcome, 'kind' | 'attemptState' | 'charge' | 'error'> {
   const usage = result.kind === 'error' ? (result.usage ?? null) : result.usage;
@@ -66,8 +87,11 @@ function base(result: ModelResult, abortReason: AbortReason | null): Omit<Classi
 }
 
 function classifySuccess(result: ModelResult & { kind: 'success' }, validated: Validation | null, canonicalOk: boolean, b: ReturnType<typeof base>): ClassifiedOutcome {
-  const charge = known(result.usage, result.fallback);
-  if (validated !== null && !validated.ok) return { ...b, kind: 'invalid_output', attemptState: 'failed', charge, error: validated.error };
+  const charge = known(result.usage, result.fallback, flagsOf(result));
+  if (validated !== null && !validated.ok) {
+    const kind = validated.error.code === 'APPROVAL_STALE' ? 'scope_changed' : 'invalid_output';
+    return { ...b, kind, attemptState: 'failed', charge, error: validated.error };
+  }
   if (!canonicalOk) return { ...b, kind: 'artifact_failed', attemptState: 'failed', charge, error: errors.artifactWriteFailed() };
   return { ...b, kind: 'valid', attemptState: 'succeeded', charge, error: null };
 }
@@ -102,7 +126,7 @@ function classifyError(result: ModelResult & { kind: 'error' }, aborted: boolean
       error: errors.requestOutcomeUnknown(attemptId),
     };
   }
-  const charge: ChargeBasis = result.usage === undefined ? { kind: 'not_charged' } : known(result.usage);
+  const charge: ChargeBasis = result.usage === undefined ? { kind: 'not_charged' } : known(result.usage, undefined, flagsOf(result));
   return { ...b, kind, attemptState: 'failed', charge, error: result.error };
 }
 
@@ -122,11 +146,11 @@ export function classify(
         ...b,
         kind: 'invalid_output',
         attemptState: 'failed',
-        charge: known(result.usage, result.fallback),
+        charge: known(result.usage, result.fallback, flagsOf(result)),
         error: errors.outputInvalid([{ path: '', message: 'The response was cut off at the output allowance.', code: 'truncated' }]),
       };
     case 'refused':
-      return { ...b, kind: 'refused', attemptState: 'failed', charge: known(result.usage, result.fallback), error: errors.modelRefused() };
+      return { ...b, kind: 'refused', attemptState: 'failed', charge: known(result.usage, result.fallback, flagsOf(result)), error: errors.modelRefused() };
     case 'error':
       return classifyError(result, o.aborted, o.attemptId, b);
   }
@@ -177,6 +201,7 @@ export function nextAttemptPlan(
         { purpose, counter: 'rate_limit', notBeforeAt: (now + wait) as EpochMs }, { kind: 'hold', error });
     }
     case 'auth':
+    case 'scope_changed':
       return { kind: 'hold', error };
     case 'unknown':
       return { kind: 'unknown', error };
@@ -228,7 +253,9 @@ export function runEventFor(
         ? { type: 'LIMIT_REACHED', reason: 'deadline', error: errors.limitReached('deadline') }
         : { type: 'UNKNOWN_OUTCOME', attemptId, error: plan.error };
     case 'hold':
-      return outcome.kind === 'auth' ? { type: 'AUTH_FAILED', error: plan.error } : { type: 'RATE_LIMIT_EXHAUSTED', error: plan.error };
+      if (outcome.kind === 'auth') return { type: 'AUTH_FAILED', error: plan.error };
+      if (outcome.kind === 'scope_changed') return { type: 'APPROVAL_STALE', error: plan.error };
+      return { type: 'RATE_LIMIT_EXHAUSTED', error: plan.error };
     case 'fail':
       return eventForFailure(plan.error);
   }
@@ -253,6 +280,20 @@ export function eventForFailure(error: AppError): RunMachineEvent {
   return { type: 'TRANSPORT_EXHAUSTED', error };
 }
 
+/** F6 #5/#6/#7/#9 → the matching run event. */
+function eventForLimit(error: AppError): RunMachineEvent {
+  const limit = error.details?.['limit'];
+  if (limit === 'deadline') return { type: 'LIMIT_REACHED', reason: 'deadline', error };
+  if (limit === 'tool_calls') return { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error };
+  if (error.details?.['reason'] === 'retry_policy') {
+    const purpose = error.details['purpose'];
+    if (purpose === 'transport_retry') return { type: 'TRANSPORT_EXHAUSTED', error };
+    if (purpose === 'schema_repair') return { type: 'OUTPUT_INVALID_EXHAUSTED', error };
+    return { type: 'RATE_LIMIT_EXHAUSTED', error };
+  }
+  return { type: 'LIMIT_REACHED', reason: 'limit_attempts', error };
+}
+
 /** Maps a pre-dispatch error (context assembly, policy) to the run event; null = no event (the loop re-reads). */
 export function eventForError(error: AppError): RunMachineEvent | null {
   const code = error.code;
@@ -261,9 +302,7 @@ export function eventForError(error: AppError): RunMachineEvent | null {
     return { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error };
   }
   if (code === 'AUTH_REQUIRED') return { type: 'AUTH_FAILED', error };
-  if (code === 'LIMIT_REACHED') {
-    return { type: 'LIMIT_REACHED', reason: error.details?.['limit'] === 'deadline' ? 'deadline' : 'limit_attempts', error };
-  }
+  if (code === 'LIMIT_REACHED') return eventForLimit(error);
   if (code === 'APPROVAL_STALE' || code === 'PROJECT_CHANGED') return { type: 'APPROVAL_STALE', error };
   return { type: 'UNRECOVERABLE', error };
 }

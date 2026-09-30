@@ -71,8 +71,13 @@ async function staleCheck(deps: ContextAssemblerDeps, run: RunRow, files: readon
   const live = await deps.projectFs.hashFiles(root.value, files.map((f) => f.relPath));
   if (!live.ok) return errors.projectChanged(files.map((f) => f.relPath));
   const byPath = new Map<string, Sha256 | null>(live.value.map((h) => [h.relPath, h.sha256]));
-  const changed = files.filter((f) => byPath.get(f.relPath) !== f.sha256).map((f) => f.relPath);
-  return changed.length === 0 ? null : errors.projectChanged(changed);
+  const changed = files.filter((f) => byPath.get(f.relPath) !== f.sha256);
+  if (changed.length === 0) return null;
+  // before/after hashes feed the run inspector's PROJECT_CHANGED panel.
+  return errors.projectChanged(changed.map((f) => f.relPath), { details: {
+    before: Object.fromEntries(changed.map((f) => [f.relPath, f.sha256])),
+    after: Object.fromEntries(changed.map((f) => [f.relPath, byPath.get(f.relPath) ?? null])),
+  } });
 }
 
 /** The prompt of one model step (steps 1, 2, 4 + G3 blocks): shared by the assembler and preflight (B7). */

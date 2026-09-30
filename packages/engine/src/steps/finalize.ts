@@ -1,6 +1,5 @@
 // 06 F13 finalize: memory suggestions + the run summary (G, through the port), then ACCEPTED or REVISION_LIMIT.
-// Wave 1: a verifier `revise` verdict ends the run as incomplete (revision_limit); the F10 revision loop that
-// re-runs implement/verify within maxRevisionCycles lands in Wave 2.
+// A `revise` verdict reaching finalize means the F10 loop (revision.ts) hit maxRevisionCycles.
 import type { RunId, StepKey, StepRunId } from '@relay/contracts';
 import type { Repos, RunRow } from '@relay/storage';
 import type { EngineCtx } from '../ports.js';
@@ -19,7 +18,7 @@ export function finalEventFor(r: Repos, run: RunRow): RunMachineEvent {
   });
   const verdict = verifyKey === undefined ? null : (r.steps.latestFor(run.id, verifyKey as StepKey)?.outcome ?? null);
   if (verdict === 'incomplete') return { type: 'REVISION_LIMIT', cause: 'verifier_incomplete' };
-  if (verdict === 'revise') return { type: 'REVISION_LIMIT', cause: 'revision_limit' };
+  if (verdict === 'revise') return { type: 'REVISION_LIMIT', cause: 'revision_limit', revisionCycle: run.revisionCycle, maxRevisionCycles: run.limits.maxRevisionCycles };
   return { type: 'ACCEPTED' };
 }
 

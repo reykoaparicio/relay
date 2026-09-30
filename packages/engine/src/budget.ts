@@ -59,7 +59,11 @@ export type ChargeBasis =
       readonly usage: NormalizedUsage;
       /** ADR-016: set when a provider-side fallback served (part of) the turn; each iteration is priced on its own. */
       readonly iterations?: readonly PricedIteration[] | undefined;
+      /** The provider billed at a price tier the snapshot prices do not describe: the amount is `estimated`. */
+      readonly estimated?: boolean | undefined;
     }
+  /** The provider answered but did not report usage (`usageKnown: false`): settle at the reservation N, `estimated`. */
+  | { readonly kind: 'at_reservation' }
   | { readonly kind: 'not_charged' }
   | { readonly kind: 'unknown' };
 
@@ -87,20 +91,25 @@ export function settleAmount(
   outcome: { readonly charge: ChargeBasis },
   prices: ModelPrices,
   fallback?: FallbackPriceLookup & { readonly profileModelId: string },
+  reservation: Microusd = microusd(0),
 ): SettleAmount {
   const c = outcome.charge;
   switch (c.kind) {
     case 'known': {
+      const certainty = (computed: 'reported' | 'calculated' | 'estimated') => (c.estimated === true ? 'estimated' : computed);
       if (c.iterations !== undefined && c.iterations.length > 0) {
         const lookup: FallbackPriceLookup = {
           pricesFor: (id) => (id === fallback?.profileModelId ? prices : fallback?.pricesFor(id)),
           providerPrices: () => [prices, ...(fallback?.providerPrices() ?? [])],
         };
         const cost = computeIterationsCost(c.iterations, lookup);
-        return { kind: 'known', microusd: cost.microusd, certainty: cost.certainty };
+        return { kind: 'known', microusd: cost.microusd, certainty: certainty(cost.certainty) };
       }
-      return { kind: 'known', microusd: computeCost(c.usage, prices).microusd, certainty: 'calculated' };
+      return { kind: 'known', microusd: computeCost(c.usage, prices).microusd, certainty: certainty('calculated') };
     }
+    case 'at_reservation':
+      // FR-09: no usage reported → the upper bound is the recorded charge (never a $0 "calculated").
+      return { kind: 'known', microusd: reservation, certainty: 'estimated' };
     case 'not_charged':
       return { kind: 'not_charged' };
     case 'unknown':

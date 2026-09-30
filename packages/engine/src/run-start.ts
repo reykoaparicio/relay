@@ -49,7 +49,7 @@ const OP = 'runs.start';
 const INTAKE = RESERVED_STEP_KEYS[0] as StepKey;
 const FINALIZE = RESERVED_STEP_KEYS[1] as StepKey;
 
-async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKey: StepKey, ref: ModelProfile | undefined): Promise<Result<ProfileSnapshot>> {
+export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKey: StepKey, ref: ModelProfile | undefined): Promise<Result<ProfileSnapshot>> {
   if (ref === undefined) return err(errors.notFound('profile', {}, { details: { stepKey } }));
   if (!project.providerPolicy.allowedProviderIds.includes(ref.providerId)) {
     return err(errors.permissionDenied('provider_not_allowed', { details: { stepKey, providerId: ref.providerId } }));
@@ -204,7 +204,8 @@ async function estimateFirstReservation(
   if (!diff.ok) return diff;
   const ordered = [...files].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0)); // = inputFiles ORDER BY rel_path
   const prompt = renderStepPrompt({ roleText, schemaId: first.outputSchema, goal: input.goal, diffBlock: diff.value, files: ordered, repairBlock: '' });
-  const request = buildModelRequest(ctx.templates, first, prompt, { attemptId: 'preflight', runId: 'preflight', stepKey, purpose: 'initial' });
+  const request = buildModelRequest(ctx.templates, first, prompt, { attemptId: 'preflight', runId: 'preflight', stepKey, purpose: 'initial' },
+    p.project.providerPolicy.providerOptions);
   let adapter;
   try {
     adapter = ctx.providers.get(first.profile.providerId);

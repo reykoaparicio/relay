@@ -27,7 +27,7 @@ describe('createRuntime', () => {
     await rt.engine.start();
 
     expect(rt.db.schemaVersion()).toBeGreaterThanOrEqual(1);
-    expect(rt.db.repos.profiles.list()).toHaveLength(3);
+    expect(rt.db.repos.profiles.list()).toHaveLength(4);
     expect(rt.db.repos.workflows.listWorkflows()).toHaveLength(1);
     expect(rt.db.repos.lease.acquire('someone-else', 999_999, Date.now() as never, 10_000)).toBe('held_by_other');
     const diag = await rt.engine.handle('relay/v1/app.getDiagnostics', {});
@@ -44,7 +44,7 @@ describe('createRuntime', () => {
 
     rt = await createRuntime({ userDataDir: dir, providerMode: 'fake', credentials, logger: memoryLogger() });
 
-    expect(rt.db.repos.profiles.list()).toHaveLength(3);
+    expect(rt.db.repos.profiles.list()).toHaveLength(4);
   });
 
   it('fails to create with an unknown fake scenario and closes the DB', async () => {

@@ -114,4 +114,22 @@ describe('purposes and error mapping', () => {
     expect(eventForError(errors.projectChanged())?.type).toBe('APPROVAL_STALE');
     expect(eventForError(appError('INTERNAL'))?.type).toBe('UNRECOVERABLE');
   });
+
+  it('F6 #7 / #9: a spent retry counter maps to the matching exhausted event, tool calls to SETUP_BLOCKED', () => {
+    const policy = (purpose: string | null) => errors.limitReached('attempts', { details: { reason: 'retry_policy', purpose } });
+
+    expect(eventForError(policy('transport_retry'))?.type).toBe('TRANSPORT_EXHAUSTED');
+    expect(eventForError(policy('schema_repair'))?.type).toBe('OUTPUT_INVALID_EXHAUSTED');
+    expect(eventForError(policy('initial'))?.type).toBe('RATE_LIMIT_EXHAUSTED');
+    expect(eventForError(errors.limitReached('tool_calls'))).toEqual(expect.objectContaining({ type: 'SETUP_BLOCKED', reason: 'setup_blocked' }));
+  });
+
+  it('scope_changed (F10) holds the step and pauses approval_stale', () => {
+    const stale = errors.approvalStale('scope_changed');
+    const out = classify(success, { ok: false, error: stale }, true, o);
+    const plan = nextAttemptPlan(FRESH, out, POLICY, NOW, 'initial');
+
+    expect([out.kind, out.attemptState, plan.kind]).toEqual(['scope_changed', 'failed', 'hold']);
+    expect(runEventFor(out, plan, { kind: 'known', microusd: microusd(1), certainty: 'calculated' }, microusd(10), ID)).toEqual({ type: 'APPROVAL_STALE', error: stale });
+  });
 });

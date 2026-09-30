@@ -1,9 +1,9 @@
 // 06 F4: the checkpoint protocol (§7.4) — the single function that executes one model step attempt. Numbered
 // comments map 1:1 to §7.4. No `await` ever happens inside a db.tx callback (the storage types forbid it).
-import { redactDeep, redactString } from '@relay/contracts';
-import type { AppError, ApprovalId, ArtifactId, ArtifactKind, AttemptId, AttemptPurpose, EpochMs, Microusd, ProviderId, RunId, StepRunId, UsageView } from '@relay/contracts';
+import { STREAM_PROGRESS_THROTTLE_MS, redactDeep, redactString } from '@relay/contracts';
+import type { AppError, ArtifactId, ArtifactKind, AttemptId, AttemptPurpose, EpochMs, Microusd, RunId, StepRunId, UsageView } from '@relay/contracts';
 import type { ModelRequest, ModelResult, ProviderAdapter, UsageEstimate } from '@relay/providers';
-import type { ApprovalRow, ArtifactInsert, AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
+import type { ArtifactInsert, AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { TemplateRegistry } from '@relay/templates';
 import { logSafe } from './log-safe.js';
 import { reserveEntries, settleAmount, settlementEntries, isOverrun } from './budget.js';
@@ -13,13 +13,16 @@ import { deadlineReached } from './deadline.js';
 import { canonicalJson, sha256Hex, utf8 } from './hash.js';
 import type { ApprovalBinding } from './policy.js';
 import { checkDispatch } from './policy.js';
-import type { AbortReason, AssembledContext, CrashHookCtx, EngineCtx, ModelStepSnapshot, RunSnapshot } from './ports.js';
+import { invalidateApproval, loadApprovalBinding } from './approval-binding.js';
+import { planRevision } from './revision.js';
+import { loadValidationInputs } from './steps/validation-inputs.js';
+import type { AbortReason, AssembledContext, CrashHookCtx, EngineCtx, ModelStepSnapshot } from './ports.js';
 import { classify, eventForError, nextAttemptPlan, nextPurpose, retryOfFor, runEventFor } from './retry.js';
 import type { AttemptPlan, ClassifiedOutcome, OutcomeKind } from './retry.js';
 import { admit } from './budget.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
-import { effectiveStepSnapshot, hasSnapshotPreserved, requiresApproval, snapshotOf, ancestorsOf } from './snapshot.js';
+import { effectiveStepSnapshot, hasSnapshotPreserved, requiresApproval, snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
 import { validateOutput } from './steps/validate-output.js';
 import { errors } from '@relay/contracts';
@@ -30,7 +33,7 @@ export type AttemptOutcome =
   | { readonly kind: 'settled'; readonly attemptId: AttemptId; readonly outcome: OutcomeKind; readonly plan: AttemptPlan['kind'] };
 
 /** Result of one artifact write (5.). */
-type ArtifactPut =
+export type ArtifactPut =
   | { readonly ok: true; readonly meta: Omit<ArtifactInsert, 'stepRunId' | 'attemptId'> }
   | { readonly ok: false; readonly kind: ArtifactKind };
 
@@ -40,6 +43,7 @@ export function buildModelRequest(
   stepSnap: ModelStepSnapshot,
   assembled: Pick<AssembledContext, 'system' | 'user'>,
   metadata: ModelRequest['metadata'],
+  providerOptions?: ModelRequest['providerOptions'],
 ): ModelRequest {
   const { profile } = stepSnap;
   return {
@@ -51,6 +55,7 @@ export function buildModelRequest(
     maxOutputTokens: stepSnap.maxOutputTokens,
     ...(profile.params.effort === undefined ? {} : { effort: profile.params.effort }),
     refusalFallback: profile.params.refusalFallback,
+    ...(providerOptions === undefined ? {} : { providerOptions }),
     metadata,
   };
 }
@@ -58,50 +63,6 @@ export function buildModelRequest(
 /** sha256 of the normalized request without the per-attempt id (no secrets are ever in a request). */
 export function fingerprintRequest(request: ModelRequest): string {
   return sha256Hex(canonicalJson({ ...request, metadata: { ...request.metadata, attemptId: undefined } }));
-}
-
-/** F6 #8 inputs: the latest approved approval, the current plan artifact hash, and the run context hash. */
-export function loadApprovalBinding(r: Repos, run: RunRow, snapshot: RunSnapshot, stepKey: StepRow['stepKey'], providerId: ProviderId): ApprovalBinding {
-  const planKey = [...ancestorsOf(snapshot, stepKey)].find((k) => {
-    const s = snapshot.steps[k];
-    return s?.kind === 'model' && s.outputSchema === 'plan.v1';
-  });
-  const planStep = planKey === undefined ? undefined : r.steps.latestFor(run.id, planKey);
-  const planArtifact = planStep?.outputArtifactId == null ? undefined : r.artifacts.get(planStep.outputArtifactId);
-  const valid = r.approvals.latestApprovedForRun(run.id);
-  const preserved = valid === undefined ? preservedApproval(r, run.id) : undefined;
-  return {
-    approval: valid ?? preserved,
-    preservedAfterProjectChange: preserved !== undefined,
-    currentPlanHash: planArtifact?.sha256 ?? null,
-    runContextHash: run.contextHash,
-    providerId,
-  };
-}
-
-/** Event payload marker recording an approval invalidated because the project changed (B4). */
-const PROJECT_CHANGED_MARK = 'approval_invalidated';
-
-/**
- * B4: the approval invalidated as `project_changed` when the user afterwards chose `use_preserved_snapshot` (its
- * `run.snapshot_preserved` event follows the invalidation record), else undefined — a new approval is then required.
- */
-export function preservedApproval(r: Repos, runId: RunId): ApprovalRow | undefined {
-  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
-  const mark = events.findLast((e) => e.type === 'error.recorded' && e.payload['kind'] === PROJECT_CHANGED_MARK);
-  if (mark === undefined) return undefined;
-  if (!events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > mark.seq)) return undefined;
-  const id = mark.payload['approvalId'];
-  const a = typeof id === 'string' ? r.approvals.get(id as ApprovalId) : undefined;
-  return a?.decision === 'approved' && a.invalidatedReason === 'project_changed' ? a : undefined;
-}
-
-/** Invalidates `approvalId` with `reason` (caller's tx); a project change is also recorded on the run (B4). */
-function invalidateApproval(r: Repos, fx: PostCommitEffect[], runId: RunId, approvalId: ApprovalId, reason: 'plan_changed' | 'provider_changed' | 'project_changed', now: EpochMs): void {
-  if (!r.approvals.invalidate(approvalId, reason, now)) return;
-  if (reason === 'project_changed') {
-    appendRunEvent(r, fx, runId, 'error.recorded', { kind: PROJECT_CHANGED_MARK, code: 'PROJECT_CHANGED', approvalId, invalidatedReason: reason });
-  }
 }
 
 /** Applies `ev` (CAS from running) in its own tx; returns `blocked`. */
@@ -119,7 +80,8 @@ async function pauseRun(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent | null
   return { kind: 'blocked', why: 'paused' };
 }
 
-async function putArtifact(
+/** Writes one artifact file (5.); a failure is logged and returned, never thrown. */
+export async function putArtifact(
   ctx: EngineCtx,
   run: RunRow,
   a: { readonly kind: ArtifactKind; readonly bytes: Uint8Array; readonly mediaType: string; readonly schemaId?: string },
@@ -152,7 +114,7 @@ async function putArtifact(
   }
 }
 
-function isJsonText(text: string): boolean {
+export function isJsonText(text: string): boolean {
   try {
     JSON.parse(text);
     return true;
@@ -211,7 +173,7 @@ function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; st
         projectId: i.run.projectId, priceCatalogVersion: i.priceCatalogVersion, createdAt: now }));
       const s = r.steps.get(i.stepRunId);
       if (s.state === 'executing') applyStepEvent(r, fx, s, 'OUTCOME_UNKNOWN', { error: errors.requestOutcomeUnknown(i.attemptId) });
-      appendRunEvent(r, fx, i.run.id, 'attempt.unknown', { attemptId: i.attemptId });
+      appendRunEvent(r, fx, i.run.id, 'attempt.unknown', { attemptId: i.attemptId, stepRunId: i.stepRunId });
       const cur = r.runs.get(i.run.id);
       if (cur.status === 'running') {
         applyRunEvent(r, cur, { type: 'UNKNOWN_OUTCOME', attemptId: i.attemptId, error: errors.requestOutcomeUnknown(i.attemptId) }, now, fx);
@@ -224,7 +186,7 @@ function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; st
   return fx;
 }
 
-function outcomeLabel(value: unknown): string | null {
+export function outcomeLabel(value: unknown): string | null {
   const o = (value as { outcome?: unknown } | null)?.outcome;
   return typeof o === 'string' ? o : null;
 }
@@ -302,7 +264,7 @@ function reserve(
         : { L: project.monthlyAllowanceMicrousd, ...r.ledger.projectMonthBalances(cur.projectId, start, end) },
     });
     if (!decision.ok) {
-      appendRunEvent(r, fx, i.runId, 'ledger.blocked', { ...decision.breakdown });
+      appendRunEvent(r, fx, i.runId, 'ledger.blocked', { ...decision.breakdown, stepRunId: i.stepRunId });
       const scope = decision.breakdown.scope === 'project' ? 'project' : 'run';
       applyRunEvent(r, cur, { type: 'BUDGET_BLOCKED', scope, error: errors.budgetBlocked(decision.breakdown) }, now, fx);
       return { ok: false, why: 'paused' };
@@ -312,14 +274,16 @@ function reserve(
     r.attempts.insert({
       id: i.attemptId, runId: i.runId, stepRunId: i.stepRunId, seq, purpose: i.purpose, retryOfAttemptId: retryOfFor(i.purpose, i.prior),
       providerId: i.stepSnap.profile.providerId, modelId: i.stepSnap.profile.modelId, profileSnapshot: i.stepSnap.profile,
-      requestFingerprint: fingerprintRequest(i.request), state: 'reserved', reservationMicrousd: N, estimate: i.estimate,
+      requestFingerprint: fingerprintRequest(i.request), state: 'reserved', reservationMicrousd: N,
+      // N1: the provider options this request is sent with (OpenAI `store`) decide F9b eligibility later.
+      estimate: { ...i.estimate, providerOptions: i.request.providerOptions ?? null },
       priceCatalogVersion: pcv, createdAt: now,
     });
     r.ledger.append(reserveEntries({ N, attemptId: i.attemptId, runId: i.runId, projectId: cur.projectId, priceCatalogVersion: pcv, createdAt: now }));
     r.runs.incrementAttemptCount(i.runId);
     applyStepEvent(r, fx, step, 'RESERVED');
     appendRunEvent(r, fx, i.runId, 'attempt.created', { attemptId: i.attemptId, stepRunId: i.stepRunId, purpose: i.purpose, seq });
-    appendRunEvent(r, fx, i.runId, 'ledger.reserved', { attemptId: i.attemptId, N });
+    appendRunEvent(r, fx, i.runId, 'ledger.reserved', { attemptId: i.attemptId, stepRunId: i.stepRunId, N });
     return { ok: true, seq };
   });
 }
@@ -355,11 +319,13 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
     // B4: the stale check (PROJECT_CHANGED) of an approval-bound step invalidates its approval: a new approval is
     // required unless the user chooses use_preserved_snapshot.
     const binding = requiresApproval(snapshot, step.stepKey)
-      ? loadApprovalBinding(db.repos, run, snapshot, step.stepKey, stepSnap.profile.providerId) : null;
+      ? await loadApprovalBinding(ctx, run, snapshot, step.stepKey, stepSnap.profile.providerId) : null;
     return pauseRun(ctx, runId, eventForError(assembled.error), invalidateStale(runId, binding, assembled.error));
   }
   const attemptId = ctx.ids.next('attempt');
-  const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId, runId, stepKey: step.stepKey, purpose });
+  const project = db.repos.projects.get(run.projectId);
+  const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId, runId, stepKey: step.stepKey, purpose },
+    project.providerPolicy.providerOptions); // per-project data handling (e.g. OpenAI storeResponses)
   const providerId = stepSnap.profile.providerId;
   let adapter: ProviderAdapter;
   try {
@@ -372,9 +338,9 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
     ...(credential.ok ? { apiKey: credential.value } : {}),
     priceCatalogVersion: stepSnap.profile.priceCatalogVersion,
   });
-  const binding = requiresApproval(snapshot, step.stepKey) ? loadApprovalBinding(db.repos, run, snapshot, step.stepKey, providerId) : null;
+  const binding = requiresApproval(snapshot, step.stepKey) ? await loadApprovalBinding(ctx, run, snapshot, step.stepKey, providerId) : null;
   const policy = checkDispatch({ run: db.repos.runs.get(runId), step: db.repos.steps.get(stepRunId), stepSnap, request, estimate,
-    credentialOk: credential.ok, binding, project: db.repos.projects.get(run.projectId), now: ctx.clock.now() });
+    credentialOk: credential.ok, binding, project, now: ctx.clock.now(), purpose });
   if (!policy.ok) return pauseRun(ctx, runId, eventForError(policy.error), invalidateStale(runId, binding, policy.error));
   if (!credential.ok) return pauseRun(ctx, runId, eventForError(credential.error)); // unreachable: check #3
   return { run, step, stepSnap, purpose, prior, assembled: assembled.value, attemptId, request, adapter, apiKey: credential.value, estimate, hook };
@@ -398,6 +364,7 @@ async function dispatch(ctx: EngineCtx, p: Prepared, controller: AbortController
       apiKey: p.apiKey,
       signal: controller.signal,
       hooks: {
+        onProgress: progressReporter(ctx, p.run.id, p.attemptId, p.step.id),
         onResponseId: (seen) => {
           ctx.db.tx('immediate', (r) => {
             r.attempts.setProviderIds(p.attemptId, { requestId: seen.providerRequestId, responseId: seen.providerResponseId });
@@ -443,17 +410,23 @@ function settle(
     for (const put of i.puts) {
       if (put.ok) {
         r.artifacts.insertIfAbsent({ ...put.meta, stepRunId: p.step.id, attemptId });
-        appendRunEvent(r, fx, run.id, 'artifact.created', { artifactId: put.meta.id, kind: put.meta.kind, attemptId });
+        appendRunEvent(r, fx, run.id, 'artifact.created', { artifactId: put.meta.id, kind: put.meta.kind, attemptId, stepRunId: p.step.id });
       } else {
-        appendRunEvent(r, fx, run.id, 'artifact.write_failed', { kind: put.kind, attemptId });
+        appendRunEvent(r, fx, run.id, 'artifact.write_failed', { kind: put.kind, attemptId, stepRunId: p.step.id });
       }
     }
-    appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId, state: o.attemptState, cost: i.cost });
-    if (o.attemptState === 'unknown') appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId });
+    appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId, stepRunId: p.step.id, state: o.attemptState, cost: i.cost });
+    if (o.attemptState === 'unknown') appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId, stepRunId: p.step.id });
     const s = r.steps.get(p.step.id);
     const plan = nextAttemptPlan(s, o, p.stepSnap.retryPolicy, now, p.purpose);
     if (s.state === 'executing') applyStepOutcome(r, fx, s, plan, i.output);
-    if (isOverrun(i.cost, N)) appendRunEvent(r, fx, run.id, 'ledger.overrun', { attemptId, N, X: i.cost.kind === 'known' ? i.cost.microusd : N });
+    if (o.kind === 'scope_changed') {
+      // F10 approval reuse rule: a quality revision outside the approved scope needs a new approval.
+      const approval = r.approvals.latestApprovedForRun(run.id);
+      if (approval !== undefined) invalidateApproval(r, fx, run.id, approval.id, 'scope_changed', now);
+    }
+    if (plan.kind === 'succeed') planRevision(r, fx, ctx, r.steps.get(p.step.id), now); // F10: verify `revise` → next cycle
+    if (isOverrun(i.cost, N)) appendRunEvent(r, fx, run.id, 'ledger.overrun', { attemptId, stepRunId: p.step.id, N, X: i.cost.kind === 'known' ? i.cost.microusd : N });
     const cur = r.runs.get(run.id);
     const ev = runEventFor(o, plan, i.cost, N, attemptId);
     if (ev !== null && cur.status === 'running') applyRunEvent(r, cur, ev, now, fx);
@@ -480,7 +453,9 @@ async function persistAndClassify(ctx: EngineCtx, p: Prepared, result: ModelResu
       mediaType: isJsonText(raw) ? 'application/json' : 'text/plain' })); // redacted (R4-24)
   }
   puts.push(await putArtifact(ctx, p.run, { kind: 'context_manifest', bytes: utf8(canonicalJson(p.assembled.manifest)), mediaType: 'application/json' }));
-  const validated = result.kind === 'success' ? validateOutput(p.stepSnap, result.json, ctx.templates) : null;
+  // 6. F8 against the input SNAPSHOT (R4-6): contents pre-loaded outside any tx, then the pure validator.
+  const validated = result.kind === 'success'
+    ? validateOutput(p.stepSnap, result.json, ctx.templates, await loadValidationInputs(ctx, p.run, p.step.revisionIndex)) : null;
   let output: { id: ArtifactId; value: unknown } | null = null;
   let canonicalOk = true;
   if (validated?.ok === true) {
@@ -490,9 +465,37 @@ async function persistAndClassify(ctx: EngineCtx, p: Prepared, result: ModelResu
     canonicalOk = put.ok;
     if (put.ok) output = { id: put.meta.id, value: validated.value };
   }
-  const outcome = classify(result, validated, canonicalOk, { aborted: signal.aborted, abortReason: signal.reason as AbortReason | undefined, attemptId: p.attemptId });
-  const cost = settleAmount(outcome, p.stepSnap.profile.prices, fallbackLookup(ctx, p));
+  const classified = classify(result, validated, canonicalOk, { aborted: signal.aborted, abortReason: signal.reason as AbortReason | undefined, attemptId: p.attemptId });
+  const rawPut = puts.find((x) => x.ok && x.meta.kind === 'raw_response');
+  const outcome = withRepairDetails(classified, p, rawPut?.ok === true ? rawPut.meta.id : null);
+  const cost = settleAmount(outcome, p.stepSnap.profile.prices, fallbackLookup(ctx, p), p.estimate.upperAllowanceMicrousd);
   return { puts, output, outcome, cost };
+}
+
+/** OUTPUT_INVALID details the run inspector reads: `{ schemaId, repairsUsed, repairsMax, rawResponseArtifactId }`. */
+function withRepairDetails(o: ClassifiedOutcome, p: Prepared, rawResponseArtifactId: ArtifactId | null): ClassifiedOutcome {
+  if (o.error?.code !== 'OUTPUT_INVALID') return o;
+  return { ...o, error: { ...o.error, details: { ...o.error.details, schemaId: p.stepSnap.outputSchema,
+    repairsUsed: p.step.schemaRepairsUsed, repairsMax: p.stepSnap.retryPolicy.schemaRepair, rawResponseArtifactId } } };
+}
+
+/** `attempt.stream_progress` (≤ 1 per 500 ms, never content, §5.7): persisted in its own tiny tx, then pushed. */
+function progressReporter(ctx: EngineCtx, runId: RunId, attemptId: AttemptId, stepRunId: StepRunId): (pr: { outputTokensSoFar: number; elapsedMs: number }) => void {
+  let last: number | null = null;
+  return (pr) => {
+    const now = ctx.clock.now();
+    if (last !== null && now - last < STREAM_PROGRESS_THROTTLE_MS) return;
+    last = now;
+    try {
+      const fx: PostCommitEffect[] = [];
+      ctx.db.tx('immediate', (r) => {
+        appendRunEvent(r, fx, runId, 'attempt.stream_progress', { attemptId, stepRunId, outputTokensSoFar: pr.outputTokensSoFar, elapsedMs: pr.elapsedMs });
+      });
+      for (const e of fx) if (e.kind === 'emit') ctx.emit(e.event);
+    } catch (e) {
+      ctx.logger.warn('attempt.progress_failed', { runId, attemptId, err: logSafe(e) });
+    }
+  };
 }
 
 /** B3: whether this process still owns the runner lease (re-read at every use; `stop()` flips it concurrently). */
@@ -531,7 +534,7 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
       }
       r.attempts.transition(p.attemptId, ['reserved'], 'dispatching', { dispatchedAt: now });
       applyStepEvent(r, fx3, r.steps.get(stepRunId), 'DISPATCHING');
-      appendRunEvent(r, fx3, runId, 'attempt.dispatching', { attemptId: p.attemptId });
+      appendRunEvent(r, fx3, runId, 'attempt.dispatching', { attemptId: p.attemptId, stepRunId });
       return now;
     });
     dispatched = dispatchedAt !== null;

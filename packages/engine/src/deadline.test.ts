@@ -6,7 +6,7 @@ import { deadlineReached, executionMsAt, remainingExecutionMs } from './deadline
 import { stepsToPromote, tick } from './runner.js';
 import { snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
-import { createHarness } from './testing/harness.js';
+import { SAMPLE_FILES, createHarness } from './testing/harness.js';
 import type { Harness, HarnessOptions } from './testing/harness.js';
 
 let h: Harness | undefined;
@@ -23,7 +23,7 @@ async function runningRun(o: HarnessOptions = {}): Promise<{ harness: Harness; r
   const wf = harness.db.repos.workflows.listWorkflows()[0];
   const started = await harness.engine.handle('relay/v1/runs.start', {
     idempotencyKey: 'deadline-run-0001', projectId: harness.projectId, workflowId: wf?.id ?? '', workflowVersion: 1, goal: 'g',
-    input: { kind: 'files', relPaths: ['src/lib/format.ts'] }, limitOverrides: LIMITS,
+    input: { kind: 'files', relPaths: Object.keys(SAMPLE_FILES) }, limitOverrides: LIMITS,
   });
   if (!started.ok) throw new Error(started.error.code);
   await tick(harness.ctx);

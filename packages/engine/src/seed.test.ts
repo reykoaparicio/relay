@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe('seedDatabase', () => {
-  it('seeds the catalog, template v1 (validated, prompts resolvable), and 3 default profiles with capability snapshots', async () => {
+  it('seeds the catalog, template v1 (validated, prompts resolvable), and 4 default profiles (incl. Balanced · OpenAI) with capability snapshots', async () => {
     const clock = createManualClock();
     const ids = createIdGen(clock, (n) => new Uint8Array(randomBytes(n)));
     db = await openTestDb({ clock, ids });
@@ -23,7 +23,7 @@ describe('seedDatabase', () => {
 
     const first = seedDatabase(db, { catalog: loadCatalogEntries(), templates, ids, clock });
 
-    expect(first).toEqual({ catalogEntries: loadCatalogEntries().length, workflowVersions: 1, profiles: 3 });
+    expect(first).toEqual({ catalogEntries: loadCatalogEntries().length, workflowVersions: 1, profiles: 4 });
     const [wf] = db.repos.workflows.listWorkflows();
     const v1 = wf === undefined ? undefined : db.repos.workflows.getVersion(wf.id, 1);
     expect(v1?.status).toBe('validated');
@@ -31,6 +31,8 @@ describe('seedDatabase', () => {
     const profiles = db.repos.profiles.list();
     expect(profiles.map((p) => p.name).sort()).toEqual(DEFAULT_PROFILES.map((p) => p.name).sort());
     for (const p of profiles) expect(p.capabilitiesSnapshot.structuredOutput).toBe(true);
+    const openai = profiles.find((p) => p.name === 'Balanced · OpenAI');
+    expect([openai?.providerId, openai?.modelId, openai?.params.effort, openai?.params.maxOutputTokens]).toEqual(['openai', 'gpt-6.1-sol', 'medium', 8000]);
   });
 
   it('is idempotent: a second call writes nothing', async () => {

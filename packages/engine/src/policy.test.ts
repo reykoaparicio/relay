@@ -11,7 +11,7 @@ const approval = { decision: 'approved', invalidatedAt: null, planHash: 'p'.repe
 
 function input(over: Partial<DispatchCheckInput> = {}): DispatchCheckInput {
   return {
-    run: { status: 'running', attemptCount: 0, limits: { maxAttempts: 10, executionTimeoutSeconds: 60 }, executionMsUsed: 0, runningSince: epochMs(0) } as unknown as RunRow,
+    run: { status: 'running', attemptCount: 0, limits: { maxAttempts: 10, executionTimeoutSeconds: 60, maxToolCalls: 0 }, executionMsUsed: 0, runningSince: epochMs(0) } as unknown as RunRow,
     step: { state: 'ready', transportRetriesUsed: 0, schemaRepairsUsed: 0, rateLimitWaitsUsed: 0 } as unknown as StepRow,
     stepSnap: { profile: { providerId: 'anthropic', modelId: 'm', capabilities: caps }, retryPolicy: { transport: 1, schemaRepair: 1, rateLimitWaits: 3 } } as unknown as ModelStepSnapshot,
     request: { maxOutputTokens: 1_000 },
@@ -44,7 +44,38 @@ describe('checkDispatch (F6)', () => {
     expect(codeOf(input({ estimate: { inputTokens: 9_500 } }))?.[0]).toBe('CONTEXT_TOO_LARGE');
     expect(codeOf(input({ run: { ...input().run, attemptCount: 10 } }))).toEqual(['LIMIT_REACHED', 'attempts']);
     expect(codeOf(input({ now: epochMs(60_000) }))).toEqual(['LIMIT_REACHED', 'deadline']);
-    expect(codeOf(input({ step: { ...input().step, transportRetriesUsed: 2 } }))).toEqual(['LIMIT_REACHED', 'attempts']);
+    expect(codeOf(input({ step: { ...input().step, transportRetriesUsed: 2 }, purpose: 'transport_retry' }))).toEqual(['LIMIT_REACHED', 'retry_policy']);
+    expect(codeOf(input({ run: { ...input().run, limits: { ...input().run.limits, maxToolCalls: -1 } } }))).toEqual(['LIMIT_REACHED', 'tool_calls']);
+  });
+
+  it('#7 compares only the counter of the attempt purpose (limits from the snapshot retryPolicy)', () => {
+    const step = { ...input().step, transportRetriesUsed: 2, schemaRepairsUsed: 2 };
+
+    expect(checkDispatch(input({ step, purpose: 'initial' })).ok).toBe(true);
+    expect(codeOf(input({ step, purpose: 'schema_repair' }))).toEqual(['LIMIT_REACHED', 'retry_policy']);
+    expect(codeOf(input({ step: { ...step, rateLimitWaitsUsed: 4 }, purpose: 'initial' }))).toEqual(['LIMIT_REACHED', 'retry_policy']);
+  });
+
+  it('#8 re-hashes the input files: a changed file is PROJECT_CHANGED; skipped (null) after use_preserved_snapshot', () => {
+    const bind = (changedInputs: readonly string[] | null) =>
+      input({ binding: { approval, currentPlanHash: 'p'.repeat(64), runContextHash: 'c'.repeat(64), providerId: 'anthropic', changedInputs: changedInputs as never } });
+
+    expect(codeOf(bind(['src/a.ts']))?.[0]).toBe('PROJECT_CHANGED');
+    const changed = checkDispatch(bind(['src/a.ts']));
+    expect(changed.ok ? null : changed.error.details).toEqual({ changedPaths: ['src/a.ts'] });
+    expect(checkDispatch(bind(null)).ok).toBe(true);
+    expect(checkDispatch(bind([])).ok).toBe(true);
+  });
+
+  it('#8 an approval invalidated as project_changed stays valid only when preserved (B4)', () => {
+    const invalidated = { ...approval, invalidatedAt: 5, invalidatedReason: 'project_changed' } as unknown as ApprovalRow;
+    const bind = (preserved: boolean) =>
+      input({ binding: { approval: invalidated, currentPlanHash: 'p'.repeat(64), runContextHash: 'c'.repeat(64), providerId: 'anthropic', preservedAfterProjectChange: preserved, changedInputs: null } });
+
+    expect(codeOf(bind(false))?.[0]).toBe('PROJECT_CHANGED');
+    expect(checkDispatch(bind(true)).ok).toBe(true);
+    expect(codeOf(input({ binding: { approval: { ...approval, invalidatedAt: 5, invalidatedReason: 'scope_changed' } as unknown as ApprovalRow, currentPlanHash: 'p'.repeat(64),
+      runContextHash: 'c'.repeat(64), providerId: 'anthropic' } }))).toEqual(['APPROVAL_STALE', 'scope_changed']);
   });
 
   it('binds implement/verify to a valid approval: plan hash, context hash, and provider (R3-11)', () => {

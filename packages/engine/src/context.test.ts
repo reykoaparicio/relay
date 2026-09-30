@@ -64,7 +64,8 @@ describe('context assembler (Wave-1 stub: §10.2 steps 1, 2, 4, 6, 8)', () => {
     expect(m.memory).toEqual([]);
     expect(m.upstream).toEqual([]);
     expect(m.files.map((f) => [f.relPath, f.included, f.reason])).toEqual([
-      ['src/handlers/orders.ts', true, 'selected'], ['src/handlers/user.ts', true, 'selected'], ['src/lib/format.ts', true, 'selected'],
+      ['src/errors.ts', true, 'selected'], ['src/handlers/health.ts', true, 'selected'], ['src/handlers/orders.ts', true, 'selected'],
+      ['src/handlers/user.ts', true, 'selected'], ['src/lib/format.ts', true, 'selected'], ['src/lib/validate.ts', true, 'selected'],
     ]);
     expect(m.tokens.basis).toBe('local_estimate');
     expect(a.value.estimatedInputTokens).toBe(m.tokens.estimatedInput);
@@ -89,7 +90,15 @@ describe('context assembler (Wave-1 stub: §10.2 steps 1, 2, 4, 6, 8)', () => {
     const res = await assembler(harness).assemble(inputFor(harness, runId, 'review'));
 
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error).toEqual(expect.objectContaining({ code: 'PROJECT_CHANGED', details: { changedPaths: ['src/lib/format.ts'] } }));
+    if (!res.ok) {
+      expect(res.error.code).toBe('PROJECT_CHANGED');
+      expect(res.error.details?.['changedPaths']).toEqual(['src/lib/format.ts']);
+      const before = (res.error.details?.['before'] ?? {}) as Record<string, string>;
+      const after = (res.error.details?.['after'] ?? {}) as Record<string, string>;
+      expect(before['src/lib/format.ts']).toBe(harness.db.repos.runs.inputFiles(runId).find((f) => f.relPath === 'src/lib/format.ts')?.sha256);
+      expect(after['src/lib/format.ts']).toMatch(/^[0-9a-f]{64}$/);
+      expect(after['src/lib/format.ts']).not.toBe(before['src/lib/format.ts']);
+    }
   });
 
   it('keeps a hostile file inside exactly one untrusted block', async () => {

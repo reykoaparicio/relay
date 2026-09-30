@@ -2,20 +2,21 @@
 // the table exhaustive: a missing channel is a compile error. Channels whose feature lands in a later wave return a
 // typed INTERNAL error with `details.reason = 'not_implemented'` (never a silent success).
 import {
+  ARTIFACT_INLINE_MAX_BYTES,
   INPUT_CAPS,
   PROVIDER_IDS,
-  RAW_RESPONSE_RETENTION_DAYS,
-  SETUP_ALLOWANCE_MICROUSD,
   appError,
-  appSettingsSchema,
   err,
   errors,
   ok,
   providerPolicySchema,
 } from '@relay/contracts';
 import type {
-  AppSettings,
+  ArtifactContent,
   ArtifactId,
+  ArtifactMeta,
+  EpochMs,
+  Project,
   CredentialRef,
   INTERNAL_RUNNER_OPS,
   OPERATIONS,
@@ -24,24 +25,29 @@ import type {
   ProviderId,
   ProviderStatus,
   Result,
-  Role,
   RunId,
   RunnerChannel,
   RunnerOutputOf,
   StepDetail,
   StepKey,
 } from '@relay/contracts';
-import type { CredentialRefRow, Repos } from '@relay/storage';
+import type { ArtifactRow, CredentialRefRow, Repos } from '@relay/storage';
 import type { ProjectRoot } from '@relay/tools';
 import { decideApproval } from './approvals.js';
 import { monthWindow, monthWindowOf } from './clock.js';
 import { fromUtf8, requestHash } from './hash.js';
 import type { EngineCtx } from './ports.js';
-import { profilesWithWarnings } from './profiles.js';
+import { deleteProfile, profilesWithWarnings, upsertProfile } from './profiles.js';
+import { SETTINGS_KEY, readSettings } from './settings.js';
+
+export { readSettings } from './settings.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { applyRunEvent, runEffects } from './run-machine.js';
 import { preflightRun, startRun } from './run-start.js';
 import { skipOpenSteps } from './step-machine.js';
+import { decideUnknown, increaseAllowance, reevaluateProjectBudget, resumeRun, retryStep } from './run-actions.js';
+import { testProviderConnection } from './setup-calls.js';
+import { publishWorkflow, saveDraft, toWorkflowView, validateWorkflow } from './workflows.js';
 import {
   allLedgerEntries,
   attemptStepKeys,
@@ -64,7 +70,6 @@ export type Handler<C extends RunnerChannel> = (input: ParsedInputOf<C>) => Prom
 /** The exhaustive handler table (F1). */
 export type HandlerTable = { readonly [C in RunnerChannel]: Handler<C> };
 
-const SETTINGS_KEY = 'app_settings';
 /** Providers listed in Settings → Providers (the fake provider is test-only and never listed). */
 const LISTED_PROVIDERS: readonly ProviderId[] = PROVIDER_IDS.filter((p) => p !== 'fake');
 const DISPLAY_NAMES: Readonly<Record<ProviderId, string>> = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini', fake: 'Fake provider' };
@@ -95,17 +100,6 @@ function providerStatus(r: Repos, providerId: ProviderId): ProviderStatus {
     redactedLabel: ref?.redactedLabel ?? null,
     lastTest: test === null ? null : { at: test.at, ok: test.ok, ...(code === null || code === undefined ? {} : { code: code as NonNullable<ProviderStatus['lastTest']>['code'] & string }) },
   };
-}
-
-/** Current settings merged over the defaults (never fails: a malformed stored value falls back to defaults). */
-export function readSettings(r: Repos): AppSettings {
-  const defaults: AppSettings = {
-    theme: 'system', activeProjectId: null, onboardingCompletedAt: null,
-    rawResponseRetentionDays: RAW_RESPONSE_RETENTION_DAYS, setupAllowanceMicrousd: SETUP_ALLOWANCE_MICROUSD as AppSettings['setupAllowanceMicrousd'],
-  };
-  const stored = r.settings.get(SETTINGS_KEY);
-  const parsed = appSettingsSchema.safeParse({ ...defaults, ...(typeof stored === 'object' && stored !== null ? stored : {}) });
-  return parsed.success ? parsed.data : defaults;
 }
 
 async function openProjectRoot(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/projects.previewRoot'>): Promise<Result<{ root: ProjectRoot; exclusions: string[] }>> {
@@ -171,22 +165,7 @@ function projectDetail(ctx: EngineCtx, projectId: ParsedInputOf<'relay/v1/projec
 function workflowView(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/workflows.get'>) {
   const r = ctx.db.repos;
   const version = input.version === undefined ? r.workflows.latestValidated(input.workflowId) : r.workflows.getVersion(input.workflowId, input.version);
-  if (version === undefined) return err(errors.notFound('workflow_version'));
-  const prompts: Record<string, { instructionVersion: string; role: Role; text: string }> = {};
-  for (const s of version.spec.steps) {
-    const text = s.kind === 'model' ? version.prompts[s.instructionVersion] : undefined;
-    if (s.kind === 'model' && text !== undefined) prompts[s.instructionVersion] = { instructionVersion: s.instructionVersion, role: s.role, text };
-  }
-  return ok({
-    workflowId: version.workflowId,
-    version: version.status === 'draft' ? ('draft' as const) : version.version,
-    status: version.status,
-    draftRevision: version.status === 'draft' ? version.draftRevision : null,
-    spec: version.spec,
-    contentHash: version.contentHash,
-    prompts,
-    editable: { prompts: true, profiles: true, limits: true, maxOutputTokens: true, retryPolicy: true, memoryScope: true, structure: false as const },
-  });
+  return version === undefined ? err(errors.notFound('workflow_version')) : ok(toWorkflowView(version));
 }
 
 async function readJsonArtifact(ctx: EngineCtx, id: ArtifactId | null): Promise<{ schemaId: string | null; value: unknown } | null> {
@@ -305,6 +284,91 @@ function diagnostics(ctx: EngineCtx) {
   });
 }
 
+/** `projects.update` (optimistic on `updated_at`); an allowance edit re-evaluates `paused(budget_project)` runs. */
+async function updateProject(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/projects.update'>): Promise<Result<Project>> {
+  const { patch } = input;
+  const updated = ctx.db.tx('immediate', (r) => {
+    const cur = r.projects.find(input.projectId);
+    if (cur === undefined) return err(errors.notFound('project'));
+    const policyChanged = patch.allowedProviderIds !== undefined || patch.providerOptions !== undefined;
+    const providerPolicy = policyChanged
+      ? providerPolicySchema.parse({ allowedProviderIds: patch.allowedProviderIds ?? cur.providerPolicy.allowedProviderIds,
+        providerOptions: patch.providerOptions ?? cur.providerPolicy.providerOptions })
+      : undefined;
+    return r.projects.update(input.projectId, {
+      ...(patch.name === undefined ? {} : { name: patch.name }),
+      ...(patch.exclusions === undefined ? {} : { exclusions: patch.exclusions }),
+      ...(providerPolicy === undefined ? {} : { providerPolicy }),
+      ...(patch.monthlyAllowanceMicrousd === undefined ? {} : { monthlyAllowanceMicrousd: patch.monthlyAllowanceMicrousd }),
+    }, input.expectedUpdatedAt);
+  });
+  if (!updated.ok) return updated;
+  if (patch.monthlyAllowanceMicrousd !== undefined) await reevaluateProjectBudget(ctx, input.projectId);
+  return ok(ctx.db.repos.projects.get(input.projectId));
+}
+
+/** `projects.archive`: CONFLICT while the project has an active (non-terminal) run. */
+function archiveProject(ctx: EngineCtx, projectId: ParsedInputOf<'relay/v1/projects.archive'>['projectId']): Result<Project> {
+  return ctx.db.tx('immediate', (r) => {
+    const project = r.projects.find(projectId);
+    if (project === undefined) return err(errors.notFound('project'));
+    const active = r.runs.listActive().filter((run) => run.projectId === projectId).map((run) => run.id);
+    if (active.length > 0) return err(errors.conflict({ reason: 'active_run', runIds: active }));
+    if (!r.projects.archive(projectId)) return err(errors.conflict({ reason: 'already_archived' }));
+    return ok(r.projects.get(projectId));
+  });
+}
+
+/** Artifact row → ArtifactMeta DTO (no absolute paths). */
+function toArtifactMetaView(a: ArtifactRow): ArtifactMeta {
+  return { id: a.id, kind: a.kind, schemaId: a.schemaId, runId: a.runId, stepRunId: a.stepRunId, attemptId: a.attemptId, sha256: a.sha256,
+    sizeBytes: a.sizeBytes, mediaType: a.mediaType, createdAt: a.createdAt, purged: a.purgedAt !== null };
+}
+
+/**
+ * `artifacts.get`: JSON artifacts inline as `json` when they fit `maxBytes`, everything else as UTF-8 `text`
+ * (truncated at `maxBytes`). A purged file → NOT_FOUND with `details.purged = true` (the row and hash are kept).
+ */
+async function getArtifact(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/artifacts.get'>): Promise<Result<{ meta: ArtifactMeta; content: ArtifactContent }>> {
+  const row = ctx.db.repos.artifacts.get(input.artifactId);
+  if (row === undefined) return err(errors.notFound('artifact'));
+  if (row.purgedAt !== null) return err(errors.notFound('artifact', { purged: true }, { details: { purgedAt: row.purgedAt } }));
+  const maxBytes = input.maxBytes ?? ARTIFACT_INLINE_MAX_BYTES;
+  const bytes = await ctx.artifacts.read(row.relPath, Math.max(row.sizeBytes, 1));
+  if (!bytes.ok) return bytes;
+  const meta = toArtifactMetaView(row);
+  const truncated = bytes.value.byteLength > maxBytes;
+  const text = fromUtf8(truncated ? bytes.value.subarray(0, maxBytes) : bytes.value);
+  if (!truncated && row.mediaType.startsWith('application/json')) {
+    try {
+      return ok({ meta, content: { kind: 'json', value: JSON.parse(text) as unknown } });
+    } catch {
+      // not JSON after all: shown as text
+    }
+  }
+  return ok({ meta, content: { kind: 'text', text, truncated } });
+}
+
+/** `app.createBackup` (idempotent; storage `createBackup` through the injected port, §18.4). */
+async function createBackupOp(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/app.createBackup'>): Promise<Result<RunnerOutputOf<'relay/v1/app.createBackup'>>> {
+  const OP = 'app.createBackup';
+  const hash = requestHash({ ...input });
+  const stored = ctx.db.repos.idempotency.get(OP, input.idempotencyKey);
+  if (stored !== undefined) {
+    if (stored.requestHash !== hash) return err(errors.conflict({ reason: 'idempotency_key_reused', op: OP }));
+    const ids = stored.result.ids;
+    return ok({ backupDisplayPath: ids['backupDisplayPath'] ?? '', createdAt: Number(ids['createdAt']) as EpochMs, sizeBytes: Number(ids['sizeBytes']) });
+  }
+  if (ctx.backup === undefined) return err(notImplemented(ctx, 'relay/v1/app.createBackup'));
+  const made = await ctx.backup.create();
+  if (!made.ok) return made;
+  const b = made.value;
+  ctx.db.tx('immediate', (r) => {
+    r.idempotency.put(OP, input.idempotencyKey, hash, { ids: { backupDisplayPath: b.backupDisplayPath, createdAt: String(b.createdAt), sizeBytes: String(b.sizeBytes) } });
+  });
+  return ok({ backupDisplayPath: b.backupDisplayPath, createdAt: b.createdAt, sizeBytes: b.sizeBytes });
+}
+
 /** Builds the exhaustive handler table over the engine context. */
 export function createHandlers(ctx: EngineCtx): HandlerTable {
   const r = ctx.db.repos;
@@ -313,7 +377,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
   return {
     // app
     'relay/v1/app.getDiagnostics': () => sync(() => diagnostics(ctx)),
-    'relay/v1/app.createBackup': todo('relay/v1/app.createBackup'),
+    'relay/v1/app.createBackup': (input) => createBackupOp(ctx, input),
     'relay/v1/app.getSettings': () => sync(() => ok(readSettings(r))),
     'relay/v1/app.updateSettings': (patch) =>
       sync(() => ctx.db.tx('immediate', (tx) => {
@@ -327,14 +391,14 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     // projects
     'relay/v1/projects.list': (input) => sync(() => ok([...r.projects.list({ includeArchived: input.includeArchived ?? false })])),
     'relay/v1/projects.get': (input) => sync(() => projectDetail(ctx, input.projectId)),
-    'relay/v1/projects.update': todo('relay/v1/projects.update'),
-    'relay/v1/projects.archive': todo('relay/v1/projects.archive'),
+    'relay/v1/projects.update': (input) => updateProject(ctx, input),
+    'relay/v1/projects.archive': (input) => sync(() => archiveProject(ctx, input.projectId)),
     'relay/v1/projects.createFromRoot': (input) => createFromRoot(ctx, input),
     'relay/v1/projects.previewRoot': (input) => previewRoot(ctx, input),
     'relay/v1/projects.exportTo': todo('relay/v1/projects.exportTo'),
     // providers
     'relay/v1/providers.list': () => sync(() => ok(LISTED_PROVIDERS.map((p) => providerStatus(r, p)))),
-    'relay/v1/providers.test': todo('relay/v1/providers.test'),
+    'relay/v1/providers.test': (input) => testProviderConnection(ctx, input),
     'relay/v1/providers.catalog': (input) => sync(() => ok([...r.catalog.list(input.providerId)])),
     'relay/v1/providers.recordCredentialRef': (input) =>
       sync(() => ctx.db.tx('immediate', (tx) => {
@@ -346,8 +410,8 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/providers.listCredentialRefs': () => sync(() => ok(r.credentials.list().map(toCredentialRef))),
     // profiles
     'relay/v1/profiles.list': () => sync(() => ok(profilesWithWarnings(r))),
-    'relay/v1/profiles.upsert': todo('relay/v1/profiles.upsert'),
-    'relay/v1/profiles.delete': todo('relay/v1/profiles.delete'),
+    'relay/v1/profiles.upsert': (input) => upsertProfile(ctx, input),
+    'relay/v1/profiles.delete': (input) => sync(() => deleteProfile(ctx, input.profileId)),
     // workflows
     'relay/v1/workflows.list': () =>
       sync(() => ok(r.workflows.listWorkflows().map((w) => ({
@@ -356,9 +420,9 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
         draftVersion: r.workflows.getVersion(w.id, 'draft')?.version ?? null,
       })))),
     'relay/v1/workflows.get': (input) => sync(() => workflowView(ctx, input)),
-    'relay/v1/workflows.saveDraft': todo('relay/v1/workflows.saveDraft'),
-    'relay/v1/workflows.validate': todo('relay/v1/workflows.validate'),
-    'relay/v1/workflows.publish': todo('relay/v1/workflows.publish'),
+    'relay/v1/workflows.saveDraft': (input) => sync(() => saveDraft(ctx, input)),
+    'relay/v1/workflows.validate': (input) => validateWorkflow(ctx, input),
+    'relay/v1/workflows.publish': (input) => publishWorkflow(ctx, input),
     // runs
     'relay/v1/runs.preflight': (input) => preflightRun(ctx, input),
     'relay/v1/runs.start': (input) => startRun(ctx, input),
@@ -371,11 +435,11 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/runs.get': (input) => sync(() => ok(toRunDetail(r, r.runs.getInspectorProjection(input.runId)))),
     'relay/v1/runs.getStep': (input) => stepDetail(ctx, input),
     'relay/v1/runs.pause': (input) => sync(() => pauseRun(ctx, input.runId)),
-    'relay/v1/runs.resume': todo('relay/v1/runs.resume'),
+    'relay/v1/runs.resume': (input) => resumeRun(ctx, input),
     'relay/v1/runs.cancel': (input) => cancelRun(ctx, input.runId),
-    'relay/v1/runs.increaseAllowance': todo('relay/v1/runs.increaseAllowance'),
-    'relay/v1/runs.decideUnknown': todo('relay/v1/runs.decideUnknown'),
-    'relay/v1/runs.retryStep': todo('relay/v1/runs.retryStep'),
+    'relay/v1/runs.increaseAllowance': (input) => increaseAllowance(ctx, input),
+    'relay/v1/runs.decideUnknown': (input) => decideUnknown(ctx, input),
+    'relay/v1/runs.retryStep': (input) => retryStep(ctx, input),
     'relay/v1/runs.events': (input) =>
       sync(() => {
         const rows = r.events.list(input.runId, input.afterSeq, input.limit + 1);
@@ -383,7 +447,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
         const last = items.at(-1);
         return ok({ items: [...items], nextCursor: rows.length > input.limit && last !== undefined ? String(last.seq) : null });
       }),
-    // approvals (Wave-1 minimal F10)
+    // approvals (F10)
     'relay/v1/approvals.decide': (input) => decideApproval(ctx, input),
     // memory (G5, Wave 3)
     'relay/v1/memory.list': todo('relay/v1/memory.list'),
@@ -397,7 +461,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/memory.resolveConflict': todo('relay/v1/memory.resolveConflict'),
     'relay/v1/memory.purgeProjectHistory': todo('relay/v1/memory.purgeProjectHistory'),
     // artifacts
-    'relay/v1/artifacts.get': todo('relay/v1/artifacts.get'),
+    'relay/v1/artifacts.get': (input) => getArtifact(ctx, input),
     'relay/v1/artifacts.importDiffText': todo('relay/v1/artifacts.importDiffText'),
     'relay/v1/artifacts.exportTo': todo('relay/v1/artifacts.exportTo'),
     // ledger

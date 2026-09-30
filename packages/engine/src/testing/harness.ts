@@ -2,12 +2,14 @@
 // provider registry, the real artifact store + confined fs, the Wave-1 context/memory, and one shared EngineCtx.
 // Never exported from the barrel (R2-2).
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createIdGen, ok } from '@relay/contracts';
 import type { IdGen, ProjectId, PushEvent, RunId, RunStatus } from '@relay/contracts';
-import { createMemoryCallLog, createProviderRegistry, loadCatalogEntries } from '@relay/providers';
+import { connectionTestRequest, createMemoryCallLog, createProviderRegistry, loadCatalogEntries, supportsRequestLookupFor } from '@relay/providers';
 import type { FakeCallLog, FakeScenario, ProviderRegistry } from '@relay/providers';
 import { createMaintenance, openTestDb } from '@relay/storage';
 import type { TestDb } from '@relay/storage';
@@ -17,17 +19,19 @@ import { createContextAssembler } from '../context.js';
 import { createMemoryService } from '../memory.js';
 import type { ContextAssemblerPort, CredentialResolver, EngineApi, EngineCtx, EngineTestHooks, Logger } from '../ports.js';
 import { createEngineContext, createEngineFromContext } from '../runner.js';
-import { createProjectFs } from '../runtime.js';
+import { createBackupPort, createProjectFs } from '../runtime.js';
 import { seedDatabase } from '../seed.js';
 import { createManualClock, createManualTimers } from './manual-timers.js';
 import type { ManualClock, ManualTimers } from './manual-timers.js';
 
-/** A small project tree matching the fake fixtures' source refs. */
-export const SAMPLE_FILES: Readonly<Record<string, string>> = {
-  'src/handlers/user.ts': "export function createUser(body: { age: unknown }) {\n  const age = body['age'] as number;\n  return { age };\n}\n",
-  'src/handlers/orders.ts': 'export async function listOrders() {\n  try {\n    return [];\n  } catch {\n    return null;\n  }\n}\n',
-  'src/lib/format.ts': 'export function elapsed(startMs: number, endMs: number): number {\n  return Math.floor((endMs - startMs) / 1000);\n}\n',
-};
+/** The sample-api fixture project (tests/fixtures/sample-api): the fake provider's fixtures reference its files. */
+const SAMPLE_API_DIR = fileURLToPath(new URL('../../../../tests/fixtures/sample-api/', import.meta.url));
+
+/** The sample-api files the fake fixtures cite (F8 checks refs, line ranges, and that the patch applies). */
+export const SAMPLE_FILES: Readonly<Record<string, string>> = Object.fromEntries(
+  ['src/handlers/user.ts', 'src/handlers/orders.ts', 'src/lib/format.ts', 'src/lib/validate.ts', 'src/errors.ts', 'src/handlers/health.ts']
+    .map((rel) => [rel, readFileSync(join(SAMPLE_API_DIR, rel), 'utf8')]),
+);
 
 /** A logger that records entries (tests assert on it) and prints nothing. */
 export function memoryLogger(): Logger & { entries: { level: string; event: string; fields?: Readonly<Record<string, unknown>> }[] } {
@@ -48,6 +52,8 @@ export interface HarnessOptions {
   readonly monthlyAllowanceMicrousd?: number | null;
   readonly context?: (base: ContextAssemblerPort) => ContextAssemblerPort;
   readonly providers?: (base: ProviderRegistry) => ProviderRegistry;
+  /** Extra fake success fixtures keyed by name (scenario steps reference them by `fixture`). */
+  readonly extraFixtures?: Readonly<Record<string, unknown>>;
 }
 
 /** A composed test engine. */
@@ -101,7 +107,8 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   seedDatabase(db, { catalog: loadCatalogEntries(), templates, ids, clock });
   const callLog = createMemoryCallLog();
   const logger = memoryLogger();
-  const baseProviders = createProviderRegistry({ mode: 'fake', fakeScenario: o.scenario ?? 'happy-path', clock, timers, callLog });
+  const baseProviders = createProviderRegistry({ mode: 'fake', fakeScenario: o.scenario ?? 'happy-path', clock, timers, callLog,
+    ...(o.extraFixtures === undefined ? {} : { extraFixtures: o.extraFixtures }) });
   const providers = o.providers?.(baseProviders) ?? baseProviders;
   const artifacts = createArtifactStore({ userDataDir, clock });
   const projectFs = createProjectFs(userDataDir);
@@ -112,6 +119,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     db, providers, projectFs, artifacts, context: o.context?.(baseContext) ?? baseContext, memory, templates,
     credentials: o.credentials ?? OK_CREDENTIALS, maintenance: createMaintenance({ db, artifacts, clock }), clock, ids, logger,
     emit: (e) => events.push(e), timers, hooks: o.hooks, idleMs: 60_000,
+    requestLookup: supportsRequestLookupFor, connectionTestRequest, backup: createBackupPort({ db, userDataDir, clock, logger, homeDir: userDataDir }),
   });
   const engine = createEngineFromContext(ctx);
   const created = await engine.handle('relay/v1/projects.createFromRoot', {

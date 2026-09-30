@@ -1,7 +1,7 @@
 // 06 F13 + F1: the runner loop (one active run, §9.1 concurrency 1) and the engine factory. The loop is the queue:
 // running/cancelling first, else the oldest queued run. Waits use the injected timers; commands wake the loop.
 import { RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
-import type { EpochMs, IpcResult, RunId, RunnerChannel, RunnerInputOf, StepKey } from '@relay/contracts';
+import type { EpochMs, IpcResult, RunId, RunnerChannel, RunnerInputOf, StepKey, ValidationIssue } from '@relay/contracts';
 import type { Repos, RunRow, StepRow } from '@relay/storage';
 import { logSafe, redactingLogger } from './log-safe.js';
 import { createCancellationRegistry, onWorkStopped } from './cancellation.js';
@@ -9,7 +9,7 @@ import { executeModelAttempt } from './checkpoints.js';
 import { createWakeSignal } from './clock.js';
 import { createDeadlineWatcher } from './deadline.js';
 import type { DeadlineWatcher, EngineApi, EngineCtx, EngineDeps, RunSnapshot } from './ports.js';
-import { recoverOnStart } from './recovery.js';
+import { reconcileUnknownAttempts, recoverOnStart } from './recovery.js';
 import { generateReport } from './report.js';
 import { eventForFailure } from './retry.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
@@ -161,6 +161,17 @@ export async function tick(ctx: EngineCtx): Promise<boolean> {
   return true;
 }
 
+/**
+ * Input issues of a runner channel. A workflow draft patch is strict (P0 edits only): an unknown key there is a
+ * structural edit, reported as `structural_edit_p1` (02 §B5, §5.3).
+ */
+export function inputIssues(channel: RunnerChannel, issues: Parameters<typeof toValidationIssues>[0]): ValidationIssue[] {
+  const mapped = toValidationIssues(issues);
+  return channel === 'relay/v1/workflows.saveDraft'
+    ? mapped.map((i) => (i.code === 'unrecognized_keys' ? { ...i, code: 'structural_edit_p1' } : i))
+    : mapped;
+}
+
 /** Builds the engine-internal context (EngineDeps + cancellation, deadlines, wake, terminal effect). */
 export function createEngineContext(deps: EngineDeps): EngineCtx {
   let deadlines: DeadlineWatcher | undefined;
@@ -194,6 +205,8 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
   let stopping = false;
   let started = false;
   let loopDone: Promise<void> = Promise.resolve();
+  let reconcileDone: Promise<unknown> = Promise.resolve();
+  let reconcileAbort = new AbortController();
   const intervals: unknown[] = [];
 
   const loop = async (): Promise<void> => {
@@ -213,7 +226,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       const def = getRunnerOperation(channel);
       if (def === undefined) return { ok: false, error: errors.validationFailed([{ path: 'channel', message: 'Unknown channel.', code: 'unknown_channel' }]) };
       const parsed = def.input.safeParse(input);
-      if (!parsed.success) return { ok: false, error: errors.validationFailed(toValidationIssues(parsed.error.issues)) };
+      if (!parsed.success) return { ok: false, error: errors.validationFailed(inputIssues(channel, parsed.error.issues)) };
       const handler: Handler<C> = handlers[channel];
       try {
         return toIpc(await handler(parsed.data as ParsedInputOf<C>));
@@ -241,16 +254,22 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       loopDone = loop().catch((e: unknown) => {
         ctx.logger.error('loop.crashed', { err: logSafe(e) });
       });
+      // F9b: after start, look up unknown attempts whose provider supports it (never blocks the loop).
+      reconcileAbort = new AbortController();
+      reconcileDone = reconcileUnknownAttempts(ctx, reconcileAbort.signal).catch((e: unknown) => {
+        ctx.logger.error('reconcile.crashed', { err: logSafe(e) });
+      });
     },
     async stop({ graceMs }) {
       if (!started) return;
       stopping = true;
+      reconcileAbort.abort();
       ctx.wake.signal();
       let timer: unknown;
       const grace = new Promise<void>((resolve) => {
         timer = ctx.timers.setTimeout(resolve, graceMs);
       });
-      await Promise.race([loopDone, grace]);
+      await Promise.race([Promise.all([loopDone, reconcileDone]), grace]);
       ctx.timers.clearTimeout(timer);
       for (const h of intervals.splice(0)) ctx.timers.clearInterval(h);
       ctx.deadlines.disarmAll();

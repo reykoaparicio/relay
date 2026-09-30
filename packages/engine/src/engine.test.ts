@@ -52,7 +52,7 @@ describe('engine @m2-lite', () => {
     expect(r.ledger.settledByCertainty(runId).calculated).toBe(expected);
     await h.waitFor(() => r.artifacts.listForRun(runId, ['report']).length === 1);
     expect(h.logger.entries.filter((e) => e.level === 'error')).toEqual([]);
-    expect(r.runs.inputFiles(runId)).toHaveLength(3);
+    expect(r.runs.inputFiles(runId)).toHaveLength(6);
 
     const summary = await h.engine.handle('relay/v1/ledger.runSummary', { runId });
     expect(summary.ok && summary.data.settledCalculated).toBe(expected);
