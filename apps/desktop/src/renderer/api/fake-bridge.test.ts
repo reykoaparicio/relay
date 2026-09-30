@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OPERATIONS, PAUSE_REASONS, runDetailSchema } from '@relay/contracts';
 import type { OperationKey } from '@relay/contracts';
-import { createFakeBridge, FAKE_HANDLED_OPERATIONS, FAKE_SCENARIOS, fakeScenarioFromUrl } from './fake-bridge';
+import { createFakeBridge, FAKE_HANDLED_OPERATIONS, FAKE_SCENARIOS, FAKE_WORKFLOW_ID, fakeScenarioFromUrl } from './fake-bridge';
 import { allowedRunActions } from './fake-scenarios/allowed-actions';
 
 const PROJECT = 'prj_00000000000000000000000001';
@@ -28,19 +28,24 @@ describe('fake bridge', () => {
 
   it.each(FAKE_SCENARIOS)('scenario %s serves schema-valid query outputs', async (scenario) => {
     const bridge = createFakeBridge(scenario);
+    const hasProject = bridge.world.projects.some((p) => p.id === PROJECT);
     const queries = [
       bridge.invoke('relay/v1/app.getInfo', {}),
       bridge.invoke('relay/v1/app.getSettings', {}),
       bridge.invoke('relay/v1/app.getDiagnostics', {}),
       bridge.invoke('relay/v1/projects.list', {}),
-      bridge.invoke('relay/v1/projects.get', { projectId: PROJECT }),
       bridge.invoke('relay/v1/providers.list', {}),
       bridge.invoke('relay/v1/providers.catalog', {}),
       bridge.invoke('relay/v1/profiles.list', {}),
       bridge.invoke('relay/v1/workflows.list', {}),
-      bridge.invoke('relay/v1/memory.list', { projectId: PROJECT }),
-      bridge.invoke('relay/v1/ledger.projectSummary', { projectId: PROJECT }),
-      bridge.invoke('relay/v1/runs.list', { projectId: PROJECT }),
+      ...(hasProject
+        ? [
+            bridge.invoke('relay/v1/projects.get', { projectId: PROJECT }),
+            bridge.invoke('relay/v1/ledger.projectSummary', { projectId: PROJECT }),
+            bridge.invoke('relay/v1/runs.list', { projectId: PROJECT }),
+          ]
+        : []),
+      ...(bridge.world.notImplemented.has('memory.list') ? [] : [bridge.invoke('relay/v1/memory.list', { projectId: PROJECT })]),
     ];
     for (const res of await Promise.all(queries)) expect(res.ok).toBe(true);
     for (const run of bridge.world.runs) {
@@ -106,6 +111,35 @@ describe('fake bridge', () => {
       decision: 'approved',
     });
     expect(res.ok ? null : res.error.code).toBe('APPROVAL_STALE');
+  });
+
+  it('answers stubbed channels like the M1 runner: INTERNAL with details.reason not_implemented', async () => {
+    const bridge = createFakeBridge('backend-stubs');
+    const res = await bridge.invoke('relay/v1/providers.test', { providerId: 'anthropic' });
+    expect(res.ok ? null : res.error).toMatchObject({ code: 'INTERNAL', details: { reason: 'not_implemented' } });
+    expect(bridge.world.projects).toEqual([]);
+  });
+
+  it('runs.start fails with the preflight issues (validation-errors) and with BUDGET_BLOCKED until the allowance admits N', async () => {
+    const invalid = createFakeBridge('validation-errors');
+    const input = {
+      projectId: PROJECT,
+      workflowId: FAKE_WORKFLOW_ID,
+      workflowVersion: 3,
+      goal: 'x',
+      input: { kind: 'files' as const, relPaths: ['src/app.ts'] },
+    };
+    const a = await invalid.invoke('relay/v1/runs.start', { ...input, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZX' });
+    expect(a.ok ? null : a.error.code).toBe('VALIDATION_FAILED');
+    const blocked = createFakeBridge('budget-blocked');
+    const b = await blocked.invoke('relay/v1/runs.start', { ...input, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZW' });
+    expect(b.ok ? null : b.error.code).toBe('BUDGET_BLOCKED');
+    const c = await blocked.invoke('relay/v1/runs.start', {
+      ...input,
+      idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZV',
+      limitOverrides: { budgetMicrousd: 3_200_000 },
+    });
+    expect(c.ok).toBe(true);
   });
 
   it('reads the scenario from ?fake= in the search or the hash query', () => {

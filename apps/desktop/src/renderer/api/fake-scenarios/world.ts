@@ -47,6 +47,7 @@ import type {
   RunStatus,
   StepDetail,
   StepState,
+  ValidationIssue,
   WorkflowSummary,
   WorkflowVersionView,
 } from '@relay/contracts';
@@ -96,6 +97,10 @@ export interface FakeWorld {
   preview: PreviewResult;
   /** `runs.preflight` answers with a blocked budget (new-run `budget-blocked`). */
   preflightBlocked: boolean;
+  /** `runs.preflight` issues (new-run `validation-errors`); `runs.start` fails with them while non-empty. */
+  preflightIssues: ValidationIssue[];
+  /** Operation keys (e.g. `providers.test`) answered like the real runner's stubs: INTERNAL `not_implemented`. */
+  notImplemented: Set<string>;
   /** `artifacts.export` fails with ARTIFACT_WRITE_FAILED (report `export-failed`). */
   exportFails: boolean;
   /** Providers whose `providers.test` fails with AUTH_REQUIRED. */
@@ -836,6 +841,10 @@ export interface WorldOptions {
   readonly preflightBlocked?: boolean;
   readonly projectAllowance?: number | null;
   readonly providerMode?: 'fake' | 'live';
+  /** A fresh install: no project, no connected provider, onboarding not completed. */
+  readonly fresh?: boolean;
+  readonly preflightIssues?: readonly ValidationIssue[];
+  readonly notImplemented?: readonly string[];
   readonly scenario: string;
 }
 
@@ -844,8 +853,10 @@ export function buildWorld(o: WorldOptions): FakeWorld {
   const built = o.runs.map((r) => buildRun(now, r));
   const secure = o.secureStorage ?? true;
   const authFailed = new Set<string>(o.authFailed ?? []);
-  const provider = (providerId: 'anthropic' | 'openai' | 'gemini', displayName: string, label: string | null) =>
-    providerStatusSchema.parse({
+  const fresh = o.fresh ?? false;
+  const provider = (providerId: 'anthropic' | 'openai' | 'gemini', displayName: string, connectedLabel: string | null) => {
+    const label = fresh ? null : connectedLabel;
+    return providerStatusSchema.parse({
       providerId,
       displayName,
       connected: label !== null,
@@ -858,6 +869,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
             ? { at: now - HOUR, ok: false, code: 'AUTH_REQUIRED' }
             : { at: now - DAY, ok: true },
     });
+  };
   const world: FakeWorld = {
     info: appInfoSchema.parse({
       version: '0.1.0',
@@ -872,8 +884,8 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     }),
     settings: appSettingsSchema.parse({
       theme: 'dark',
-      activeProjectId: PROJECT_ID,
-      onboardingCompletedAt: now - 30 * DAY,
+      activeProjectId: fresh ? null : PROJECT_ID,
+      onboardingCompletedAt: fresh ? null : now - 30 * DAY,
       rawResponseRetentionDays: 30,
       setupAllowanceMicrousd: 50_000,
     }),
@@ -885,7 +897,9 @@ export function buildWorld(o: WorldOptions): FakeWorld {
       catalog: { version: '2026-09-25', models: 3 },
       prompts: { loaded: 4 },
     }),
-    projects: [
+    projects: fresh
+      ? []
+      : [
       projectSchema.parse({
         id: PROJECT_ID,
         name: 'Example API',
@@ -898,7 +912,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
         updatedAt: now - 40 * DAY,
         archivedAt: null,
       }),
-    ],
+        ],
     providers: [
       provider('anthropic', 'Anthropic', 'sk-ant-…a1F9'),
       provider('openai', 'OpenAI', 'sk-…Q7d2'),
@@ -914,10 +928,12 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     steps: new Map(built.flatMap((b) => b.steps.map((s) => [s.step.id as string, s] as const))),
     events: new Map(built.map((b) => [b.run.id as string, b.events])),
     ledger: new Map(built.map((b) => [b.run.id as string, b.ledger])),
-    memory: buildMemory(now, o.memory, o.memoryConflict ?? false),
+    memory: fresh ? [] : buildMemory(now, o.memory, o.memoryConflict ?? false),
     artifacts: new Map(built.flatMap((b) => b.artifacts)),
     preview: buildPreview(),
     preflightBlocked: o.preflightBlocked ?? false,
+    preflightIssues: [...(o.preflightIssues ?? [])],
+    notImplemented: new Set(o.notImplemented ?? []),
     exportFails: false,
     authFailing: authFailed,
     idempotency: new Map(),

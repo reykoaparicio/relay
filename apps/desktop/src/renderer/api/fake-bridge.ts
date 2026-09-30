@@ -3,6 +3,7 @@
 // and tests only: main.tsx imports it dynamically behind `import.meta.env.DEV || MODE === 'test'`, so production
 // bundles never contain it.
 import {
+  appError,
   appSettingsSchema,
   errors,
   getOperation,
@@ -192,6 +193,16 @@ function redactKey(key: string): string {
   const dash = trimmed.indexOf('-', 3);
   const prefix = trimmed.startsWith('sk-ant-') ? 'sk-ant-' : dash > 0 && dash < 8 ? trimmed.slice(0, dash + 1) : trimmed.slice(0, 3);
   return `${prefix}…${trimmed.slice(-4)}`;
+}
+
+/** Admission breakdown of the first reservation (§9.3). `preflightBlocked` worlds carry prior usage over L. */
+function fakeBudget(w: FakeWorld, allowance: number | undefined) {
+  const N = w.preflightBlocked ? 1_500_000 : 540_000;
+  const C = w.preflightBlocked ? 1_200_000 : 0;
+  const R = w.preflightBlocked ? 400_000 : 0;
+  const L = allowance ?? 3_000_000;
+  const total = C + R + N;
+  return { L, C, R, U: 0, N, scope: 'run' as const, total, allowed: total <= L };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -404,11 +415,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   // ---------- runs ----------
   'runs.preflight': (w, input) => {
     const files = input.input.kind === 'files' ? input.input.relPaths.length : 1;
-    const N = w.preflightBlocked ? 1_500_000 : 540_000;
-    const C = w.preflightBlocked ? 1_200_000 : 0;
-    const R = w.preflightBlocked ? 400_000 : 0;
-    const L = input.limitOverrides?.budgetMicrousd ?? 3_000_000;
-    const total = C + R + N;
+    const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
     return {
       inputSummary: {
         files,
@@ -419,15 +426,15 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
           .map((m) => ({ id: m.id, revision: m.currentRevision, type: m.type, title: m.title, pinned: m.pinned })),
         providersReceivingContext: ['anthropic', 'openai'],
       },
-      firstReservation: { N, basis: 'local_estimate' as const },
-      budget: { L, C, R, U: 0, N, scope: 'run' as const, total, allowed: total <= L },
-      issues: [],
+      firstReservation: { N: budget.N, basis: 'local_estimate' as const },
+      budget,
+      issues: w.preflightIssues,
     };
   },
   'runs.start': (w, input, ctx) => {
-    if (w.preflightBlocked) {
-      fail(errors.budgetBlocked({ L: 3_000_000, C: 1_200_000, R: 400_000, U: 0, N: 1_500_000, scope: 'run', total: 3_100_000, allowed: false } as never));
-    }
+    if (w.preflightIssues.length > 0) fail(errors.validationFailed(w.preflightIssues));
+    const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
+    if (!budget.allowed) fail(errors.budgetBlocked(budget as never));
     const n = w.nextId++;
     const built = buildRun(ctx.now(), {
       n,
@@ -803,6 +810,16 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
       return { ok: true, data: world.idempotency.get(idemKey) } as IpcResult<C>;
     }
     const key = channel.slice(CHANNEL_PREFIX.length) as OperationKey;
+    if (world.notImplemented.has(key)) {
+      // Mirrors the real runner's stubbed channels (engine services.ts `notImplemented`).
+      return {
+        ok: false,
+        error: appError('INTERNAL', {
+          userMessage: 'This feature is not available in this build yet.',
+          details: { reason: 'not_implemented', channel },
+        }),
+      };
+    }
     const handler = HANDLERS[key] as (w: FakeWorld, i: unknown, c: HandlerContext) => unknown;
     let raw: unknown;
     try {

@@ -23,5 +23,8 @@ export const qk = {
   workflows: () => ['workflows'] as const,
   workflow: (id: string, v: number | 'draft') => ['workflow', id, v] as const,
   diagnostics: () => ['diagnostics'] as const,
+  /** File preview of a directory selection or a project (`projects.previewFiles`). */
+  preview: (target: string, extraExclusions: string = '') => ['preview', target, extraExclusions] as const,
+  preflight: (fingerprint: string) => ['preflight', fingerprint] as const,
   info: () => ['app-info'] as const,
 };

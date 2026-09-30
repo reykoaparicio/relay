@@ -25,12 +25,26 @@ const CASES: readonly PageCase[] = [
   { name: 'Runs filtered', path: `${P}/runs?status=attention`, scenario: 'budget-paused', ready: /Runs in Example API/ },
   { name: 'Runs empty', path: `${P}/runs`, scenario: 'empty', ready: 'No runs yet' },
   { name: 'Memory placeholder', path: `${P}/memory`, scenario: 'completed', ready: 'Coming soon' },
+  { name: 'Onboarding welcome', path: '/onboarding', scenario: 'first-launch', ready: 'Welcome to Relay' },
+  { name: 'Onboarding start-point', path: '/onboarding/start-point', scenario: 'first-launch', ready: 'Choose a starting point' },
+  { name: 'Onboarding connect-provider', path: '/onboarding/connect-provider', scenario: 'first-launch', ready: 'Where to keep the key' },
+  { name: 'Onboarding select-project', path: '/onboarding/select-project', scenario: 'first-launch', ready: 'Choose folder…' },
+  { name: 'Onboarding add-rule (missing project)', path: '/onboarding/add-rule', scenario: 'first-launch', ready: 'Choose a project first' },
+  { name: 'Onboarding choose-template', path: '/onboarding/choose-template', scenario: 'first-launch', ready: /Review & propose a fix · v3/ },
+  { name: 'New run ready', path: `${P}/runs/new`, scenario: 'awaiting-approval', ready: 'All checks passed. Ready to start.' },
+  { name: 'New run validation-errors', path: `${P}/runs/new`, scenario: 'validation-errors', ready: 'Fix 3 problems to start.' },
+  { name: 'New run budget-blocked', path: `${P}/runs/new`, scenario: 'budget-blocked', ready: '$3.10 > $3.00 → blocked' },
+  { name: 'Settings providers', path: '/settings/providers', scenario: 'awaiting-approval', ready: /Model catalog, version/ },
+  { name: 'Settings no-secure-storage', path: '/settings/providers', scenario: 'no-secure-storage', ready: 'OS credential protection is unavailable' },
+  { name: 'Settings auth-failed', path: '/settings/providers', scenario: 'auth-failed', ready: 'OpenAI rejected the stored key' },
+  { name: 'Settings diagnostics', path: '/settings/diagnostics', scenario: 'awaiting-approval', ready: 'Runner heartbeat' },
+  { name: 'Settings coming soon', path: '/settings/data', scenario: 'awaiting-approval', ready: 'Coming soon.' },
 ];
 
 describe('page accessibility (axe, J11)', () => {
   it.each(CASES)('$name has no axe violations, a skip link, and exactly one h1', async ({ path, scenario, ready }) => {
     const { container } = renderApp(path, { scenario });
-    await screen.findAllByText(ready);
+    await screen.findAllByText(ready, {}, { timeout: 3000 });
     // Let secondary queries (badges, provider line) settle so axe sees the final DOM.
     await waitFor(() => {
       expect(screen.queryAllByText(/providers? connected/).length).toBeGreaterThan(0);

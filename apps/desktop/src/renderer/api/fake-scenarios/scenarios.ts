@@ -35,6 +35,9 @@ export const FAKE_SCENARIOS = [
   'incomplete-report',
   'memory-conflict',
   'no-secure-storage',
+  'first-launch',
+  'backend-stubs',
+  'validation-errors',
 ] as const;
 export type FakeScenarioName = (typeof FAKE_SCENARIOS)[number];
 
@@ -64,6 +67,26 @@ const HISTORY: readonly RunSpec[] = [
     steps: { intake: 'succeeded', review: 'succeeded', plan: 'succeeded', approve: 'skipped' },
     cost: { reported: 120_000, estimated: 70_000 },
   },
+];
+
+/** Runner channels still stubbed in the M1 build (engine services.ts `todo(...)`), used by `backend-stubs`. */
+export const BACKEND_STUBS: readonly string[] = [
+  'providers.test',
+  'profiles.upsert',
+  'profiles.delete',
+  'projects.update',
+  'artifacts.importDiff',
+  'memory.list',
+  'memory.get',
+  'memory.create',
+  'memory.update',
+];
+
+/** Preflight problems of the new-run `validation-errors` state (paths point at form fields). */
+const PREFLIGHT_ISSUES = [
+  { path: 'profileOverrides.plan', message: 'Planner: no working credential for OpenAI.', code: 'AUTH_REQUIRED' },
+  { path: 'profileOverrides.implement', message: 'Implementer: max output exceeds the model limit.', code: 'MODEL_UNSUPPORTED' },
+  { path: 'input', message: 'The selected context is too large for the Reviewer profile.', code: 'CONTEXT_TOO_LARGE' },
 ];
 
 const DONE_TO_APPROVAL = { intake: 'succeeded', review: 'succeeded', plan: 'succeeded' } as const;
@@ -252,6 +275,13 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(focus('incomplete', null, { steps: ALL_DONE, revisionCycle: 2, cost: { reported: 1_370_000 } }));
     case 'no-secure-storage':
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { secureStorage: false });
+    case 'first-launch':
+      return { runs: [], memory: 'setup-only', fresh: true };
+    case 'backend-stubs':
+      // A fresh install against the M1 runner: these channels still answer INTERNAL `not_implemented`.
+      return { runs: [], memory: 'setup-only', fresh: true, notImplemented: BACKEND_STUBS };
+    case 'validation-errors':
+      return { runs: [...HISTORY], memory: 'full', preflightIssues: PREFLIGHT_ISSUES };
   }
 }
 
