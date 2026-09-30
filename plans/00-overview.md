@@ -284,20 +284,22 @@ ADRs 001–010 are copied from spec §24.1. New ADRs:
 
 ## 9. Status tracker (the orchestrator updates this table)
 
-**M1 reached 2026-09-30** (checkpoint due Oct 6): `pnpm e2e --grep @m1` → 5/5 green against the real Electron app with the fake provider; 1,728 unit/integration tests green; every committed layer audited (Bug Hunter → Referee) with fixes + regression tests.
+**M1 reached 2026-09-30.** **M2 functionally complete 2026-09-30** (fake providers): approve → implement → verify → completed in the real app; e2e 25/25 (M1–M4 + a11y), 2,155 unit, 70 integration (crash matrix 7/7 ×3). **M2 sign-off pending:** live two-provider workflow test (D9b, ~$1.50 cap) — needs founder approval + API keys.
 
-| Plan | Status | Gate | Audit | Notes |
-|---|---|---|---|---|
-| 01 Foundation | done | green | fixed F1–F7 | |
-| 02 Contracts / API | done | green | fixed B1–B16 | patch.v1 narrowed to modify/delete |
-| 03 Storage | done (C1–C8) | green | fixed B1–B5 | |
-| 04 Providers | partial: D1–D4, D7–D8 | green | fixed F1–F3, F5, F6 | D5 OpenAI, D6, D9, D10 Gemini pending (Wave 2); F4 price-verification flag pending |
-| 05 Tools | done (E1–E7) | green | fixed B1–B12 (security) | |
-| 06 Engine | Wave 1 slice | green | fixed B1–B9 | many handlers still not_implemented (Wave 2–4) |
-| 07 Context/Memory/Templates | G6 + Wave-1 stub | green | fixed BH-1..7 | G1–G5 pending (Wave 3) |
-| 08 Desktop host | H1–H8, H10 | green | fixed F1–F6 | H9 packaging verify pending (Wave 5) |
-| 09 Design system | I1–I4, I6 + follow-ups | green | fixed B1–B13 | |
-| 10 Renderer | J1–J4, J6, J7, J10 partial | green | fixed B1–B8 (J1–J4) | inspector, memory, workflow editor, report pending; J6/J7/J10 audit pending |
-| 11 Integration | K1–K2 | – | – | K3+ pending; fixture .env blocked by user permission rule |
-| 12 E2E | L1–L3 + @m1 specs | 5/5 ×3 | – | |
-| 13 Release/Demo/Eval | not started | – | – | |
+| Plan | Status | Audit | Open items |
+|---|---|---|---|
+| 01 Foundation | done | fixed F1–F7 | |
+| 02 Contracts / API | done | fixed B1–B16 | |
+| 03 Storage | done | fixed B1–B5 + replaceInputFiles | |
+| 04 Providers | D1–D9b done (Anthropic, OpenAI, fake, live tests) | fixed (Anthropic F1–F6, OpenAI B1–B9) | D10 Gemini; Anthropic price verification vs official page |
+| 05 Tools | done | fixed B1–B12 (security) | |
+| 06 Engine | Waves 1–2 done | fixed B1–B9, BH-1..7 | interrupted-run overrun must require acknowledgement; memory.*, artifacts.exportTo/importDiffText, projects.exportTo, ledger.exportTo still not_implemented |
+| 07 Context/Memory/Templates | G6 + stub | fixed BH-1..7 | G1–G5 (Wave 3) |
+| 08 Desktop host | H1–H8, H10 | fixed F1–F6 | H9 package verify (Wave 5) |
+| 09 Design system | done for current pages | fixed B1–B13 | |
+| 10 Renderer | J1–J8, J10 partial | fixed (J1–J4 B1–B8, J6/7/10 B1–B12, J8 B1–B6) | J9 Memory page, J10 Profiles/Projects/Data, workflow editor |
+| 11 Integration | K1–K7 | – | memory/export suites auto-enable in Wave 3 |
+| 12 E2E | M1–M4 + a11y (25) | – | memory.spec (Wave 3) |
+| 13 Release/Demo/Eval | not started | – | Wave 5–6 |
+
+Incident log: 2026-09-30 18:27 a test helper recursively deleted the contents of the user's `$TMPDIR` (path computed one level too high). Fixed with ownership-guarded delete helpers in tests/helpers and tests/e2e; recorded as a standing rule.
