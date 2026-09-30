@@ -41,7 +41,7 @@ import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserv
 import type { Snapshotted } from './steps/intake.js';
 import { inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
-import { costSummaryOf, toRunDetail } from './views.js';
+import { allLedgerEntries, attemptsOverran, costSummaryOf, toRunDetail } from './views.js';
 
 // ---------------------------------------------------------------- shared helpers
 
@@ -357,7 +357,7 @@ export interface IncreaseAllowanceInput {
 }
 
 function costNow(r: Repos, runId: RunId): CostSummary {
-  return costSummaryOf(r.ledger.runBalances(runId), r.ledger.settledByCertainty(runId));
+  return costSummaryOf(r.ledger.runBalances(runId), r.ledger.settledByCertainty(runId), attemptsOverran(allLedgerEntries(r, runId)));
 }
 
 /**

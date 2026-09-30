@@ -23,8 +23,31 @@ import { remaining } from './budget.js';
 import { allowedRunActions } from './run-machine.js';
 import { SnapshotError, effectiveStepSnapshot } from './snapshot.js';
 
+/**
+ * True when any attempt settled more than it reserved (§9.5 "actual usage exceeds the estimate"). `overrun` in the cost
+ * summary means this — or the run being over its allowance — not only `remaining < 0`.
+ */
+export function attemptsOverran(entries: readonly LedgerEntryRow[]): boolean {
+  const reserved = new Map<string, number>();
+  const settled = new Map<string, number>();
+  for (const e of entries) {
+    if (e.attemptId === null) continue;
+    if (e.type === 'reserve') reserved.set(e.attemptId, (reserved.get(e.attemptId) ?? 0) + e.deltaMicrousd);
+    else if (e.type === 'settle') settled.set(e.attemptId, (settled.get(e.attemptId) ?? 0) + e.deltaMicrousd);
+  }
+  for (const [attemptId, x] of settled) {
+    const n = reserved.get(attemptId);
+    if (n !== undefined && x > n) return true;
+  }
+  return false;
+}
+
 /** Cost summary from balances + settled-by-certainty (02 `costSummarySchema`). */
-export function costSummaryOf(b: Balances, settled: Readonly<Record<CostCertainty, Microusd>>): CostSummary {
+export function costSummaryOf(
+  b: Balances,
+  settled: Readonly<Record<CostCertainty, Microusd>>,
+  attemptOverran = false,
+): CostSummary {
   const rem = remaining(b);
   return {
     allowance: b.L,
@@ -34,7 +57,7 @@ export function costSummaryOf(b: Balances, settled: Readonly<Record<CostCertaint
     reserved: b.R,
     unknown: b.U,
     remaining: rem,
-    overrun: rem < 0,
+    overrun: rem < 0 || attemptOverran,
   };
 }
 
@@ -52,7 +75,7 @@ export function costOfEntries(entries: readonly LedgerEntryRow[]): CostSummary {
   }
   const C = settled.reported + settled.calculated + settled.estimated + settled.unknown;
   const b = { L: L as Microusd, C: C as Microusd, R: R as Microusd, U: U as Microusd };
-  return costSummaryOf(b, settled as Record<CostCertainty, Microusd>);
+  return costSummaryOf(b, settled as Record<CostCertainty, Microusd>, attemptsOverran(entries));
 }
 
 /** Every ledger entry of a run (keyset pages, oldest first). */
@@ -164,6 +187,7 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const latest = latestPerKey(p.steps);
   return {
     ...toRunSummary(p),
+    cost: costSummaryOf(p.balances, p.settledByCertainty, attemptsOverran(allLedgerEntries(r, p.run.id))),
     limits: p.run.limits,
     input: p.run.input,
     contextHash: p.run.contextHash,
