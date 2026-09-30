@@ -39,7 +39,7 @@ function instructions(db: Db, run: RunRow, instructionVersion: string): Result<s
 }
 
 /** The system prompt: role instructions + the output contract. No dynamic content (cache-stable). */
-function systemPrompt(roleText: string, schemaId: string): string {
+export function systemPrompt(roleText: string, schemaId: string): string {
   return `${roleText.trimEnd()}\n\nOutput contract: respond with one JSON object that matches the "${schemaId}" schema supplied with this request.`;
 }
 
@@ -75,8 +75,26 @@ async function staleCheck(deps: ContextAssemblerDeps, run: RunRow, files: readon
   return changed.length === 0 ? null : errors.projectChanged(changed);
 }
 
+/** The prompt of one model step (steps 1, 2, 4 + G3 blocks): shared by the assembler and preflight (B7). */
+export function renderStepPrompt(i: {
+  readonly roleText: string;
+  readonly schemaId: string;
+  readonly goal: string;
+  readonly diffBlock: string | null;
+  readonly files: readonly { readonly relPath: string; readonly sha256: string; readonly content: string }[];
+  readonly repairBlock: string;
+}): { system: string; user: string } {
+  return {
+    system: systemPrompt(i.roleText, i.schemaId),
+    user: renderTaskDocument([renderGoal(i.goal), renderConstraints(), i.diffBlock ?? '', ...i.files.map(renderFileBlock), i.repairBlock]),
+  };
+}
+
 /** The imported diff for review/plan steps (07 G3), or null. */
-async function diffBlock(deps: ContextAssemblerDeps, input: AssembleInput): Promise<Result<string | null>> {
+export async function diffBlock(
+  deps: Pick<ContextAssemblerDeps, 'db' | 'artifacts'>,
+  input: { readonly run: Pick<RunRow, 'input'>; readonly stepSpec: { readonly outputSchema: string } },
+): Promise<Result<string | null>> {
   const { run, stepSpec } = input;
   if (run.input.kind !== 'diff' || (stepSpec.outputSchema !== 'findings.v1' && stepSpec.outputSchema !== 'plan.v1')) return ok(null);
   const row = deps.db.repos.artifacts.get(run.input.diffArtifactId);
@@ -108,7 +126,6 @@ async function assemble(deps: ContextAssemblerDeps, estimator: TokenEstimator, i
   const { run, step, stepSpec, snapshot: profile } = input;
   const role = instructions(deps.db, run, stepSpec.instructionVersion); // 1
   if (!role.ok) return role;
-  const system = systemPrompt(role.value, stepSpec.outputSchema);
   const files = await readSnapshots(deps, run); // 4
   if (!files.ok) return files;
   if (!input.preservedSnapshot) {
@@ -117,13 +134,9 @@ async function assemble(deps: ContextAssemblerDeps, estimator: TokenEstimator, i
   }
   const diff = await diffBlock(deps, input);
   if (!diff.ok) return diff;
-  const user = renderTaskDocument([ // 2 + 4 (+ G3 blocks)
-    renderGoal(run.goal),
-    renderConstraints(),
-    diff.value ?? '',
-    ...files.value.map(renderFileBlock),
-    repairBlock(input),
-  ]);
+  const { system, user } = renderStepPrompt({ // 1 + 2 + 4 (+ G3 blocks)
+    roleText: role.value, schemaId: stepSpec.outputSchema, goal: run.goal, diffBlock: diff.value, files: files.value, repairBlock: repairBlock(input),
+  });
   const count = await estimator.count({ system, user, profile }); // 6
   const budget = inputBudget(profile, stepSpec.maxOutputTokens);
   if (count.tokens > budget) return err(tooLarge(files.value, count.tokens, budget)); // never truncate a file

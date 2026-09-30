@@ -72,8 +72,8 @@ const TABLE: readonly Row[] = [
   ['running', { type: 'REVISION_LIMIT', cause: 'revision_limit' }, 'incomplete', null],
   ['running', { type: 'REVISION_LIMIT', cause: 'verifier_incomplete' }, 'incomplete', null],
   ['running', SAMPLES.CANCEL_REQUESTED, 'cancelling', null],
-  ['awaiting_approval', SAMPLES.APPROVED_MATCHING, 'running', null],
-  ['awaiting_approval', SAMPLES.REVISION_REQUESTED, 'running', null],
+  ['awaiting_approval', SAMPLES.APPROVED_MATCHING, 'queued', null], // ruling B2: the loop's CHECKS_PASSED starts it
+  ['awaiting_approval', SAMPLES.REVISION_REQUESTED, 'queued', null],
   ['awaiting_approval', SAMPLES.REJECTED, 'cancelled', null],
   ['awaiting_approval', SAMPLES.APPROVAL_STALE, 'paused', 'approval_stale'],
   ['awaiting_approval', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
@@ -138,8 +138,9 @@ describe('§7.2 clarifications (one it() each)', () => {
   it('1: queued → cancelled on CANCEL_REQUESTED (nothing in flight)', () => {
     expect(transitionRun('queued', SAMPLES.CANCEL_REQUESTED)).toEqual({ to: 'cancelled', pauseReason: null });
   });
-  it('2: awaiting_approval → running on REVISION_REQUESTED', () => {
-    expect(transitionRun('awaiting_approval', SAMPLES.REVISION_REQUESTED)).toEqual({ to: 'running', pauseReason: null });
+  it('2: awaiting_approval → queued on REVISION_REQUESTED (and APPROVED_MATCHING), never directly to running (B2)', () => {
+    expect(transitionRun('awaiting_approval', SAMPLES.REVISION_REQUESTED)).toEqual({ to: 'queued', pauseReason: null });
+    expect(transitionRun('awaiting_approval', SAMPLES.APPROVED_MATCHING)).toEqual({ to: 'queued', pauseReason: null });
   });
   it('3: awaiting_approval → paused(approval_stale) on APPROVAL_STALE', () => {
     expect(transitionRun('awaiting_approval', SAMPLES.APPROVAL_STALE)).toEqual({ to: 'paused', pauseReason: 'approval_stale' });
@@ -321,5 +322,28 @@ describe('applyRunEvent', () => {
     expect(fx.some((e) => e.kind === 'terminal')).toBe(true);
     expect(h.logger.entries.some((e) => e.event === 'effect.failed')).toBe(true);
     await h.waitFor(() => h!.db.repos.artifacts.listForRun(runId, ['report']).length === 1);
+  });
+
+  it('B1: RUNNER_LOST closes the running segment at lastAliveAt, never at now (downtime never counts)', async () => {
+    h = await createHarness();
+    const runId = await h.startRun();
+    h.db.tx('immediate', (tx) => applyRunEvent(tx, tx.runs.get(runId), SAMPLES.CHECKS_PASSED, h!.clock.now(), []));
+    h.clock.advance(2_000);
+    const alive = h.clock.now();
+    h.clock.advance(3 * 3_600_000);
+
+    h.db.tx('immediate', (tx) => applyRunEvent(tx, tx.runs.get(runId), { type: 'RUNNER_LOST', lastAliveAt: alive }, h!.clock.now(), []));
+
+    expect(h.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'interrupted', executionMsUsed: 2_000, runningSince: null }));
+  });
+
+  it('B2 guard: nothing enters running while another run is running (invariant)', async () => {
+    h = await createHarness();
+    const a = await h.startRun();
+    const b = await h.startRun();
+    h.db.tx('immediate', (tx) => applyRunEvent(tx, tx.runs.get(a), SAMPLES.CHECKS_PASSED, h!.clock.now(), []));
+
+    expect(() => h!.db.tx('immediate', (tx) => applyRunEvent(tx, tx.runs.get(b), SAMPLES.CHECKS_PASSED, h!.clock.now(), []))).toThrow(/cannot enter running/);
+    expect(h.db.repos.runs.get(b).status).toBe('queued');
   });
 });

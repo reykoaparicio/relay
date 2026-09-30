@@ -15,6 +15,7 @@ import type {
   RunStatus,
 } from '@relay/contracts';
 import type { Repos, RunRow } from '@relay/storage';
+import { logSafe } from './log-safe.js';
 import type { EngineCtx } from './ports.js';
 
 /** Every event that can move a run (F2). */
@@ -40,7 +41,8 @@ export type RunMachineEvent =
   | { readonly type: 'TRANSPORT_EXHAUSTED'; readonly error: AppError }
   | { readonly type: 'MODEL_REFUSED'; readonly error: AppError }
   | { readonly type: 'UNKNOWN_OUTCOME'; readonly attemptId: AttemptId; readonly error: AppError }
-  | { readonly type: 'RUNNER_LOST' }
+  /** `lastAliveAt`: the runner's last sign of life (B1); the open running segment is closed there, never at `now`. */
+  | { readonly type: 'RUNNER_LOST'; readonly lastAliveAt?: EpochMs | undefined }
   | { readonly type: 'UNRECOVERABLE'; readonly error: AppError }
   | { readonly type: 'ACCEPTED' }
   | { readonly type: 'REVISION_LIMIT'; readonly cause: 'revision_limit' | 'verifier_incomplete' }
@@ -104,8 +106,10 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
     CANCEL_REQUESTED: always(to('cancelling')),
   },
   awaiting_approval: {
-    APPROVED_MATCHING: always(to('running')),
-    REVISION_REQUESTED: always(to('running')), // clarification 2
+    // Ruling B2: a decision re-queues the run; the loop's CHECKS_PASSED moves it to running once it is the next
+    // eligible run, so a decision can never create a second running run (§9.1 concurrency 1). Clarification 2.
+    APPROVED_MATCHING: always(to('queued')),
+    REVISION_REQUESTED: always(to('queued')),
     REJECTED: always(to('cancelled')),
     APPROVAL_STALE: always(paused('approval_stale')), // clarification 3
     CANCEL_REQUESTED: always(to('cancelled')), // clarification 4
@@ -220,7 +224,7 @@ export async function runEffects(ctx: EffectsCtx, fx: readonly PostCommitEffect[
           break;
       }
     } catch (err) {
-      ctx.logger.error('effect.failed', { kind: e.kind, err: err instanceof Error ? err.message : String(err) });
+      ctx.logger.error('effect.failed', { kind: e.kind, err: logSafe(err) });
     }
   }
 }
@@ -238,6 +242,11 @@ export function appendRunEvent(
   return event;
 }
 
+/** F12/B1: where a running segment closes — the last sign of life for RUNNER_LOST (downtime never counts), else now. */
+function leaveRunningAt(ev: RunMachineEvent, now: EpochMs): EpochMs {
+  return ev.type === 'RUNNER_LOST' && ev.lastAliveAt !== undefined && ev.lastAliveAt < now ? ev.lastAliveAt : now;
+}
+
 function statusDetailOf(ev: RunMachineEvent): AppError | null {
   return 'error' in ev ? ev.error : null;
 }
@@ -251,6 +260,11 @@ function statusDetailOf(ev: RunMachineEvent): AppError | null {
 export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: EpochMs, fx: PostCommitEffect[]): boolean {
   const t = transitionRun(run.status, ev);
   invariant(!('error' in t), `illegal run transition ${run.status} + ${ev.type}`);
+  if (t.to === 'running') {
+    // §9.1 concurrency 1 (B2 guard): nothing moves a run to running while another run is running or cancelling.
+    const other = r.runs.listActive().find((x) => x.id !== run.id && (x.status === 'running' || x.status === 'cancelling'));
+    invariant(other === undefined, `run ${run.id} cannot enter running while ${other?.id ?? ''} is ${other?.status ?? ''}`);
+  }
   const changed = r.runs.updateStatus(run.id, [run.status], t.to, {
     pauseReason: t.pauseReason,
     statusDetail: statusDetailOf(ev),
@@ -258,7 +272,7 @@ export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: E
   });
   if (!changed) return false;
   if (t.to === 'running') r.runs.enterRunning(run.id, now);
-  if (run.status === 'running' && t.to !== 'running') r.runs.leaveRunning(run.id, now);
+  if (run.status === 'running' && t.to !== 'running') r.runs.leaveRunning(run.id, leaveRunningAt(ev, now));
   const terminal = isTerminal(t.to);
   if (ev.type === 'USER_PAUSE' || ev.type === 'RESUME_RESOLVED' || terminal) r.runs.setPauseRequested(run.id, false);
   const detail = statusDetailOf(ev);

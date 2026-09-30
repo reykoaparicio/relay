@@ -3,6 +3,7 @@
 import { errors } from '@relay/contracts';
 import type { EpochMs, RunId } from '@relay/contracts';
 import type { RunRow } from '@relay/storage';
+import { logSafe } from './log-safe.js';
 import type { DeadlineWatcher, EngineCtx } from './ports.js';
 import { applyRunEvent, runEffects } from './run-machine.js';
 import type { PostCommitEffect } from './run-machine.js';
@@ -60,7 +61,7 @@ export function createDeadlineWatcher(ctx: Pick<EngineCtx, 'db' | 'clock' | 'tim
       const ms = remainingExecutionMs(run, ctx.clock.now());
       armed.set(runId, ctx.timers.setTimeout(() => {
         fire(runId).catch((e: unknown) => {
-          ctx.logger.error('deadline.fire_failed', { runId, err: e instanceof Error ? e.message : String(e) });
+          ctx.logger.error('deadline.fire_failed', { runId, err: logSafe(e) });
         });
       }, ms));
     },

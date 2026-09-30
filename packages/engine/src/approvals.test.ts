@@ -42,7 +42,7 @@ describe('approvals.decide (F10, Wave-1 minimal)', () => {
     expect(harness.db.repos.steps.latestFor(runId, 'approve' as StepKey)?.state).toBe('awaiting_approval');
   });
 
-  it('approves: step succeeded, run running, afterApprovalCommit fires after commit, and a replay returns the stored result', async () => {
+  it('approves: step succeeded, run queued (B2), afterApprovalCommit fires after commit, and a replay returns the stored result', async () => {
     const calls: CrashHookCtx[] = [];
     const { harness, runId, approval } = await awaitingApproval({ hooks: { afterApprovalCommit: (c) => calls.push(c) } });
     let hashCalls = 0;
@@ -55,7 +55,7 @@ describe('approvals.decide (F10, Wave-1 minimal)', () => {
     const reused = await decideApproval(ctx, { ...input, decision: 'rejected' });
     const otherKey = await decideApproval(ctx, { ...input, idempotencyKey: 'decide-key-000002' });
 
-    expect(first.ok && first.value).toEqual({ approval: expect.objectContaining({ decision: 'approved' }) as unknown, runStatus: 'running' });
+    expect(first.ok && first.value).toEqual({ approval: expect.objectContaining({ decision: 'approved' }) as unknown, runStatus: 'queued' });
     expect(replay).toEqual(first);
     expect(hashCalls).toBe(1); // the idempotency lookup happens before any hashing
     expect(reused.ok ? null : reused.error.details?.['reason']).toBe('idempotency_key_reused');
@@ -124,7 +124,7 @@ describe('approvals.decide (F10, Wave-1 minimal)', () => {
     const res = await decide(harness, approval, { decision: 'revision_requested', note: 'Keep the public response fields.' });
     for (let i = 0; i < 10 && harness.db.repos.runs.get(runId).status !== 'awaiting_approval'; i += 1) await tick(harness.ctx);
 
-    expect(res.ok && res.data.runStatus).toBe('running');
+    expect(res.ok && res.data.runStatus).toBe('queued');
     const plans = harness.db.repos.steps.listForRun(runId).filter((s) => s.stepKey === 'plan');
     expect(plans.map((s) => [s.revisionIndex, s.state])).toEqual([[0, 'succeeded'], [1, 'succeeded']]);
     expect(harness.db.repos.runs.get(runId).status).toBe('awaiting_approval');
@@ -140,5 +140,23 @@ describe('approvals.decide (F10, Wave-1 minimal)', () => {
 
     expect(unknown.ok ? null : unknown.error.code).toBe('NOT_FOUND');
     expect(late.ok ? null : late.error.code).toBe('CONFLICT');
+  });
+
+  it('B2: a run approved while another run is running is queued; only one run is ever running', async () => {
+    const { harness, runId: a, approval } = await awaitingApproval();
+    const b = await harness.startRun();
+    await tick(harness.ctx); // B: queued → running (A is awaiting approval, so the slot is free)
+    expect(harness.db.repos.runs.get(b).status).toBe('running');
+
+    const res = await decide(harness, approval);
+
+    expect(res.ok && res.data.runStatus).toBe('queued');
+    const slotHolders = () => harness.db.repos.runs.listActive().filter((x) => x.status === 'running' || x.status === 'cancelling').map((x) => x.id);
+    expect(slotHolders()).toEqual([b]);
+    for (let i = 0; i < 30; i += 1) {
+      await tick(harness.ctx);
+      expect(slotHolders().length).toBeLessThanOrEqual(1);
+    }
+    expect(harness.db.repos.runs.get(a).status).not.toBe('awaiting_approval');
   });
 });

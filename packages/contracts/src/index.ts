@@ -35,6 +35,7 @@ export * from './ipc/runs.js';
 export * from './ipc/workflows.js';
 export * from './money.js';
 export * from './outputs/index.js';
+export * from './pricing.js';
 export * from './primitives.js';
 export * from './redaction.js';
 export * from './result.js';

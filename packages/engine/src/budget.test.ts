@@ -1,22 +1,22 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { computeCost as providersComputeCost, upperBound as providersUpperBound } from '@relay/providers';
-import { epochMs, microusd, usd } from '@relay/contracts';
+import * as providers from '@relay/providers';
+import * as contracts from '@relay/contracts';
+import { computeCost, epochMs, microusd, usd } from '@relay/contracts';
 import type { AttemptId, Microusd, ModelPrices, ProjectId, RunId } from '@relay/contracts';
 import type { SettleAmount } from './budget.js';
 import {
   admit,
   admitSetup,
   allowanceSetEntries,
-  computeCost,
   isOverrun,
   remaining,
   reserveEntries,
   resolveUnknownEntries,
   settleAmount,
   settlementEntries,
-  upperBound,
 } from './budget.js';
+import * as budget from './budget.js';
 import { monthWindow, monthWindowOf } from './clock.js';
 import { createHarness } from './testing/harness.js';
 import type { Harness } from './testing/harness.js';
@@ -128,7 +128,7 @@ describe('settlement (F5 table)', () => {
   });
 
   it('settleAmount prices known usage (calculated) and passes unknown / not charged through', () => {
-    expect(settleAmount({ charge: { kind: 'known', usage: USAGE } }, PRICES)).toEqual({ kind: 'known', microusd: computeCost(USAGE, PRICES), certainty: 'calculated' });
+    expect(settleAmount({ charge: { kind: 'known', usage: USAGE } }, PRICES)).toEqual({ kind: 'known', microusd: computeCost(USAGE, PRICES).microusd, certainty: 'calculated' });
     expect(settleAmount({ charge: { kind: 'unknown' } }, PRICES)).toEqual({ kind: 'unknown' });
     expect(settleAmount({ charge: { kind: 'not_charged' } }, PRICES)).toEqual({ kind: 'not_charged' });
   });
@@ -138,17 +138,64 @@ describe('settlement (F5 table)', () => {
   });
 });
 
-describe('pricing mirrors @relay/providers', () => {
-  it('computeCost and upperBound equal the providers implementation; the bound covers any usage split', () => {
+describe('pricing is shared through @relay/contracts (no mirrored copy)', () => {
+  it('the engine budget module no longer defines its own computeCost / upperBound; providers re-exports the contracts functions', () => {
+    expect('computeCost' in budget).toBe(false);
+    expect('upperBound' in budget).toBe(false);
+    expect(providers.computeCost).toBe(contracts.computeCost);
+    expect(providers.upperBound).toBe(contracts.upperBound);
+  });
+
+  it('settleAmount without fallback iterations equals contracts computeCost for any usage (property)', () => {
     fc.assert(fc.property(
       fc.record({ a: fc.integer({ min: 0, max: 200_000 }), b: fc.integer({ min: 0, max: 200_000 }), c: fc.integer({ min: 0, max: 200_000 }), o: fc.integer({ min: 0, max: 64_000 }) }),
       ({ a, b, c, o }) => {
         const usage = { uncachedInputTokens: a, cacheReadInputTokens: b, cacheWriteInputTokens: c, outputTokens: o };
-        expect(computeCost(usage, PRICES)).toBe(providersComputeCost(usage, PRICES).microusd);
-        expect(upperBound(a + b + c, o, PRICES)).toBe(providersUpperBound(a + b + c, o, PRICES));
-        expect(upperBound(a + b + c, o, PRICES)).toBeGreaterThanOrEqual(computeCost(usage, PRICES));
+        const s = settleAmount({ charge: { kind: 'known', usage } }, PRICES);
+        return s.kind === 'known' && s.microusd === contracts.computeCost(usage, PRICES).microusd;
       },
     ));
+  });
+});
+
+describe('settleAmount with ADR-016 fallback iterations (B5)', () => {
+  const OTHER: ModelPrices = { input: m(3_000_000), output: m(15_000_000), cacheRead: m(300_000), cacheWrite: m(3_750_000) };
+  const use = (input: number, output: number) => ({ uncachedInputTokens: input, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: output });
+  const lookup = {
+    profileModelId: 'profile-model',
+    pricesFor: (id: string) => (id === 'fallback-model' ? OTHER : undefined),
+    providerPrices: () => [OTHER],
+  };
+
+  it('prices every served iteration with its own model (calculated)', () => {
+    const iterations = [{ modelId: 'profile-model', usage: use(1000, 10) }, { modelId: 'fallback-model', usage: use(1000, 200) }];
+    const total = use(2000, 210);
+
+    const cost = settleAmount({ charge: { kind: 'known', usage: total, iterations } }, PRICES, lookup);
+
+    const expected = computeCost(iterations[0]!.usage, PRICES).microusd + computeCost(iterations[1]!.usage, OTHER).microusd;
+    expect(cost).toEqual({ kind: 'known', microusd: expected, certainty: 'calculated' });
+    expect(expected).toBeGreaterThan(computeCost(total, PRICES).microusd); // the old single-price settlement under-charged
+  });
+
+  it('prices an unknown fallback model at the provider maximum and marks the amount estimated', () => {
+    const iterations = [{ modelId: 'profile-model', usage: use(100, 1) }, { modelId: 'future-model', usage: use(1000, 200) }];
+
+    const cost = settleAmount({ charge: { kind: 'known', usage: use(1100, 201), iterations } }, PRICES, lookup);
+
+    const max = contracts.maxPrices([PRICES, OTHER])!;
+    expect(cost).toEqual({
+      kind: 'known',
+      microusd: computeCost(iterations[0]!.usage, PRICES).microusd + computeCost(iterations[1]!.usage, max).microusd,
+      certainty: 'estimated',
+    });
+    expect(settlementEntries({ ...REFS, reservation: m(1), cost })[1]).toEqual(expect.objectContaining({ type: 'settle', certainty: 'estimated' }));
+  });
+
+  it('without a lookup every iteration is priced at the snapshot prices and marked estimated', () => {
+    const iterations = [{ modelId: 'x', usage: use(10, 10) }];
+    expect(settleAmount({ charge: { kind: 'known', usage: use(10, 10), iterations } }, PRICES))
+      .toEqual({ kind: 'known', microusd: computeCost(use(10, 10), PRICES).microusd, certainty: 'estimated' });
   });
 });
 

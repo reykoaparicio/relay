@@ -1,5 +1,5 @@
 // 06 F5: budget admission (§9.3) and settlement (§9.5). Pure: integer µUSD only, never floats (ADR-017).
-import { addMicrousd, microusd, mulDivCeil, subMicrousd } from '@relay/contracts';
+import { addMicrousd, computeCost, computeIterationsCost, microusd, subMicrousd } from '@relay/contracts';
 import type {
   AttemptId,
   Balances,
@@ -8,6 +8,7 @@ import type {
   EpochMs,
   Microusd,
   ModelPrices,
+  PricedIteration,
   ProjectId,
   RunId,
 } from '@relay/contracts';
@@ -51,47 +52,55 @@ export function admitSetup(i: { readonly setup: Outstanding; readonly L: Microus
   return { ok: b.allowed, breakdown: b };
 }
 
-/** Σ ceil(tokens × price / 1M) over the disjoint usage categories (§8.4; mirrors providers `computeCost`). */
-export function computeCost(usage: NormalizedUsage, prices: ModelPrices): Microusd {
-  return addMicrousd(
-    mulDivCeil(usage.uncachedInputTokens, prices.input),
-    mulDivCeil(usage.cacheReadInputTokens, prices.cacheRead),
-    mulDivCeil(usage.cacheWriteInputTokens, prices.cacheWrite),
-    mulDivCeil(usage.outputTokens, prices.output),
-  );
-}
-
-/** Rounding slack of the conservative bound (providers `INPUT_SPLIT_ROUNDING_SLACK_MICROUSD`). */
-const INPUT_SPLIT_SLACK = 2;
-
-/** Conservative N for display (preflight): every input token at the highest input-side rate + the full output allowance. */
-export function upperBound(inputTokens: number, maxOutputTokens: number, prices: ModelPrices): Microusd {
-  const inputRate = Math.max(prices.input, prices.cacheWrite, prices.cacheRead);
-  return addMicrousd(
-    mulDivCeil(inputTokens, inputRate),
-    mulDivCeil(maxOutputTokens, prices.output),
-    microusd(inputTokens > 0 ? INPUT_SPLIT_SLACK : 0),
-  );
-}
-
 /** What is known about an attempt's charge (from F7 `classify`). */
 export type ChargeBasis =
-  | { readonly kind: 'known'; readonly usage: NormalizedUsage }
+  | {
+      readonly kind: 'known';
+      readonly usage: NormalizedUsage;
+      /** ADR-016: set when a provider-side fallback served (part of) the turn; each iteration is priced on its own. */
+      readonly iterations?: readonly PricedIteration[] | undefined;
+    }
   | { readonly kind: 'not_charged' }
   | { readonly kind: 'unknown' };
 
 /** Settlement amount of one attempt. */
 export type SettleAmount =
-  | { readonly kind: 'known'; readonly microusd: Microusd; readonly certainty: 'reported' | 'calculated' }
+  | { readonly kind: 'known'; readonly microusd: Microusd; readonly certainty: 'reported' | 'calculated' | 'estimated' }
   | { readonly kind: 'not_charged' }
   | { readonly kind: 'unknown' };
 
-/** Maps an outcome's charge basis to an amount at the snapshot prices (FR-09 certainty `calculated`). */
-export function settleAmount(outcome: { readonly charge: ChargeBasis }, prices: ModelPrices): SettleAmount {
+/** Price sources for fallback iterations served by another model than the profile's (ADR-016). */
+export interface FallbackPriceLookup {
+  /** Prices of `modelId` of the attempt's provider, or undefined when the catalog does not know it. */
+  readonly pricesFor: (modelId: string) => ModelPrices | undefined;
+  /** Every catalog price of the attempt's provider (the unknown-model maximum). */
+  readonly providerPrices: () => readonly ModelPrices[];
+}
+
+/**
+ * Maps an outcome's charge basis to an amount at the snapshot prices (FR-09 certainty `calculated`). When a
+ * provider-side fallback served the turn, every served iteration is priced with its own model (contracts
+ * `computeIterationsCost`); an iteration of a model without a known price is priced at the provider maximum and the
+ * amount becomes `estimated`. `profileModelId` always prices at the snapshot `prices`.
+ */
+export function settleAmount(
+  outcome: { readonly charge: ChargeBasis },
+  prices: ModelPrices,
+  fallback?: FallbackPriceLookup & { readonly profileModelId: string },
+): SettleAmount {
   const c = outcome.charge;
   switch (c.kind) {
-    case 'known':
-      return { kind: 'known', microusd: computeCost(c.usage, prices), certainty: 'calculated' };
+    case 'known': {
+      if (c.iterations !== undefined && c.iterations.length > 0) {
+        const lookup: FallbackPriceLookup = {
+          pricesFor: (id) => (id === fallback?.profileModelId ? prices : fallback?.pricesFor(id)),
+          providerPrices: () => [prices, ...(fallback?.providerPrices() ?? [])],
+        };
+        const cost = computeIterationsCost(c.iterations, lookup);
+        return { kind: 'known', microusd: cost.microusd, certainty: cost.certainty };
+      }
+      return { kind: 'known', microusd: computeCost(c.usage, prices).microusd, certainty: 'calculated' };
+    }
     case 'not_charged':
       return { kind: 'not_charged' };
     case 'unknown':

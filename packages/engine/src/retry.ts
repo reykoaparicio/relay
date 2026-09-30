@@ -2,7 +2,7 @@
 // outcome causes. Limits come from the step snapshot's retryPolicy, never from constants (R3-9).
 import { MAX_BACKOFF_MS, appError, errors } from '@relay/contracts';
 import type { AppError, AttemptId, AttemptPurpose, EpochMs, Microusd, RetryPolicy } from '@relay/contracts';
-import type { ModelResult, NormalizedUsage } from '@relay/providers';
+import type { FallbackInfo, ModelResult, NormalizedUsage } from '@relay/providers';
 import type { AttemptRow, StepRow } from '@relay/storage';
 import type { ChargeBasis, SettleAmount } from './budget.js';
 import { isOverrun } from './budget.js';
@@ -49,7 +49,8 @@ export interface ClassifiedOutcome {
 /** Result of the F8 validation (null when no success result was validated). */
 export type Validation = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: AppError };
 
-const known = (usage: NormalizedUsage): ChargeBasis => ({ kind: 'known', usage });
+const known = (usage: NormalizedUsage, fallback?: FallbackInfo): ChargeBasis =>
+  fallback === undefined || fallback.iterations.length === 0 ? { kind: 'known', usage } : { kind: 'known', usage, iterations: fallback.iterations };
 
 function base(result: ModelResult, abortReason: AbortReason | null): Omit<ClassifiedOutcome, 'kind' | 'attemptState' | 'charge' | 'error'> {
   const usage = result.kind === 'error' ? (result.usage ?? null) : result.usage;
@@ -65,7 +66,7 @@ function base(result: ModelResult, abortReason: AbortReason | null): Omit<Classi
 }
 
 function classifySuccess(result: ModelResult & { kind: 'success' }, validated: Validation | null, canonicalOk: boolean, b: ReturnType<typeof base>): ClassifiedOutcome {
-  const charge = known(result.usage);
+  const charge = known(result.usage, result.fallback);
   if (validated !== null && !validated.ok) return { ...b, kind: 'invalid_output', attemptState: 'failed', charge, error: validated.error };
   if (!canonicalOk) return { ...b, kind: 'artifact_failed', attemptState: 'failed', charge, error: errors.artifactWriteFailed() };
   return { ...b, kind: 'valid', attemptState: 'succeeded', charge, error: null };
@@ -121,11 +122,11 @@ export function classify(
         ...b,
         kind: 'invalid_output',
         attemptState: 'failed',
-        charge: known(result.usage),
+        charge: known(result.usage, result.fallback),
         error: errors.outputInvalid([{ path: '', message: 'The response was cut off at the output allowance.', code: 'truncated' }]),
       };
     case 'refused':
-      return { ...b, kind: 'refused', attemptState: 'failed', charge: known(result.usage), error: errors.modelRefused() };
+      return { ...b, kind: 'refused', attemptState: 'failed', charge: known(result.usage, result.fallback), error: errors.modelRefused() };
     case 'error':
       return classifyError(result, o.aborted, o.attemptId, b);
   }

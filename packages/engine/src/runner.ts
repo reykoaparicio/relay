@@ -3,6 +3,7 @@
 import { RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
 import type { EpochMs, IpcResult, RunId, RunnerChannel, RunnerInputOf, StepKey } from '@relay/contracts';
 import type { Repos, RunRow, StepRow } from '@relay/storage';
+import { logSafe, redactingLogger } from './log-safe.js';
 import { createCancellationRegistry, onWorkStopped } from './cancellation.js';
 import { executeModelAttempt } from './checkpoints.js';
 import { createWakeSignal } from './clock.js';
@@ -56,9 +57,12 @@ export function selectNextStep(latest: readonly StepRow[], now: EpochMs): NextSt
   return { kind: 'none' };
 }
 
+/** A run that holds the single execution slot (§9.1 concurrency 1). */
+const holdsSlot = (x: RunRow): boolean => x.status === 'running' || x.status === 'cancelling';
+
 /** Pick the one active run: running or cancelling first, else the oldest queued (§9.1). */
 export function pickNext(r: Repos): RunRow | undefined {
-  return r.runs.listActive().find((x) => x.status === 'running' || x.status === 'cancelling') ?? r.runs.nextQueued();
+  return r.runs.listActive().find(holdsSlot) ?? r.runs.nextQueued();
 }
 
 async function applyTx(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent, from: RunRow['status'][]): Promise<void> {
@@ -85,7 +89,14 @@ export async function runChecks(ctx: EngineCtx, run: RunRow): Promise<void> {
       return applyTx(ctx, run.id, { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error }, ['queued']);
     }
   }
-  return applyTx(ctx, run.id, { type: 'CHECKS_PASSED' }, ['queued']);
+  // B2 guard (in the tx): CHECKS_PASSED never moves a run to running while another run holds the slot.
+  const fx: PostCommitEffect[] = [];
+  ctx.db.tx('immediate', (r) => {
+    const cur = r.runs.get(run.id);
+    if (cur.status !== 'queued' || r.runs.listActive().some((x) => x.id !== run.id && holdsSlot(x))) return;
+    applyRunEvent(r, cur, { type: 'CHECKS_PASSED' }, ctx.clock.now(), fx);
+  });
+  await runEffects(ctx, fx);
 }
 
 /** Promotes pending steps whose dependencies succeeded (one tx), then returns the latest rows. */
@@ -144,7 +155,7 @@ export async function tick(ctx: EngineCtx): Promise<boolean> {
   } catch (e) {
     const correlationId = ctx.ids.next('correlation');
     ctx.logger.error('loop.handler_threw', { runId: run.id, correlationId, code: isRelayError(e) ? e.appError.code : 'INTERNAL',
-      err: e instanceof Error ? e.message : String(e) });
+      err: logSafe(e) });
     await applyTx(ctx, run.id, { type: 'UNRECOVERABLE', error: toAppError(e, correlationId) }, ['running']);
   }
   return true;
@@ -155,15 +166,17 @@ export function createEngineContext(deps: EngineDeps): EngineCtx {
   let deadlines: DeadlineWatcher | undefined;
   const ctx: EngineCtx = {
     ...deps,
+    logger: redactingLogger(deps.logger), // B6: nothing reaches the log sink unredacted
     cancellation: createCancellationRegistry(),
     wake: createWakeSignal(deps.timers),
+    lease: { owned: true },
     get deadlines(): DeadlineWatcher {
       deadlines ??= createDeadlineWatcher(ctx);
       return deadlines;
     },
     onTerminal: async (runId) => {
       const res = await generateReport(ctx, runId);
-      if (!res.ok) deps.logger.warn('report.failed', { runId, code: res.error.code });
+      if (!res.ok) ctx.logger.warn('report.failed', { runId, code: res.error.code });
     },
   };
   return ctx;
@@ -185,7 +198,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
 
   const loop = async (): Promise<void> => {
     const isStopping = (): boolean => stopping;
-    while (!isStopping()) {
+    while (!isStopping() && ctx.lease.owned) {
       const worked = await tick(ctx);
       if (!worked && !isStopping()) await ctx.wake.wait(ctx.idleMs ?? IDLE_MS);
     }
@@ -206,7 +219,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
         return toIpc(await handler(parsed.data as ParsedInputOf<C>));
       } catch (e) {
         const correlationId = ctx.ids.next('correlation');
-        if (!isRelayError(e)) ctx.logger.error('handler.threw', { channel, correlationId, err: e instanceof Error ? e.message : String(e) });
+        if (!isRelayError(e)) ctx.logger.error('handler.threw', { channel, correlationId, err: logSafe(e) });
         return { ok: false, error: toAppError(e, correlationId) };
       }
     },
@@ -216,16 +229,17 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       if (lease === 'held_by_other') throw new RelayError(errors.runnerUnavailable({ userMessage: 'Another Relay runner is already using this data folder.' }));
       started = true;
       stopping = false;
+      ctx.lease.owned = true;
       intervals.push(ctx.timers.setInterval(() => {
-        ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now());
+        if (!ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now())) ctx.lease.owned = false; // taken over: stop dispatching
       }, RUNNER_HEARTBEAT_MS));
       await recoverOnStart(ctx);
       for (const run of ctx.db.repos.runs.listActive().filter((x) => x.status === 'running')) ctx.deadlines.arm(run.id);
       await sweep().catch((e: unknown) => {
-        ctx.logger.warn('retention.sweep_failed', { err: e instanceof Error ? e.message : String(e) });
+        ctx.logger.warn('retention.sweep_failed', { err: logSafe(e) });
       });
       loopDone = loop().catch((e: unknown) => {
-        ctx.logger.error('loop.crashed', { err: e instanceof Error ? e.message : String(e) });
+        ctx.logger.error('loop.crashed', { err: logSafe(e) });
       });
     },
     async stop({ graceMs }) {
@@ -240,6 +254,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       ctx.timers.clearTimeout(timer);
       for (const h of intervals.splice(0)) ctx.timers.clearInterval(h);
       ctx.deadlines.disarmAll();
+      ctx.lease.owned = false; // B3: before the release, so an attempt still in flight never dispatches or settles
       ctx.db.repos.lease.release(ownerId);
       started = false;
     },

@@ -1,6 +1,6 @@
 // 04 §D2: versioned price + capability catalog. Files are static JSON imports (no runtime fs reads, R2-20).
 // Adding a catalog version = adding a JSON file under ../catalog AND its import line + CATALOG_FILES entry below.
-import { catalogFileSchema } from '@relay/contracts';
+import { catalogFileSchema, maxPrices } from '@relay/contracts';
 import type { CatalogModel, ModelPrices, ProviderId } from '@relay/contracts';
 import catalog20260925 from '../catalog/2026-09-25.json' with { type: 'json' };
 
@@ -57,18 +57,7 @@ export function cheapestCatalogModel(providerId: ProviderId): CatalogModel | und
  * @returns `undefined` only when neither the catalog nor `extra` carries a price.
  */
 export function maxProviderPrices(providerId: ProviderId, ...extra: readonly ModelPrices[]): ModelPrices | undefined {
-  const all = [...loadCatalogEntries().filter((e) => e.providerId === providerId).map((e) => e.prices), ...extra];
-  const [first, ...rest] = all;
-  if (first === undefined) return undefined;
-  return rest.reduce<ModelPrices>(
-    (max, p) => ({
-      input: p.input > max.input ? p.input : max.input,
-      output: p.output > max.output ? p.output : max.output,
-      cacheRead: p.cacheRead > max.cacheRead ? p.cacheRead : max.cacheRead,
-      cacheWrite: p.cacheWrite > max.cacheWrite ? p.cacheWrite : max.cacheWrite,
-    }),
-    first,
-  );
+  return maxPrices([...loadCatalogEntries().filter((e) => e.providerId === providerId).map((e) => e.prices), ...extra]);
 }
 
 const samePrices = (a: ModelPrices, b: ModelPrices): boolean =>

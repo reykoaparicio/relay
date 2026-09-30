@@ -15,6 +15,11 @@ export interface ApprovalBinding {
   readonly currentPlanHash: Sha256 | null;
   readonly runContextHash: Sha256 | null;
   readonly providerId: ProviderId;
+  /**
+   * B4: true when the approval was invalidated as `project_changed` and the user then chose `use_preserved_snapshot`
+   * (recorded as `run.snapshot_preserved` after the invalidation): that approval stays valid for the preserved inputs.
+   */
+  readonly preservedAfterProjectChange?: boolean | undefined;
 }
 
 /** Everything the pure policy check reads. */
@@ -75,7 +80,10 @@ function approvalCheck(i: DispatchCheckInput): AppError | null {
   const b = i.binding;
   if (b === null) return null;
   const a = b.approval;
-  if (a?.decision !== 'approved' || a.invalidatedAt !== null) return errors.approvalStale('plan_changed');
+  if (a?.decision !== 'approved') return errors.approvalStale('plan_changed');
+  if (a.invalidatedAt !== null && !(a.invalidatedReason === 'project_changed' && b.preservedAfterProjectChange === true)) {
+    return a.invalidatedReason === 'project_changed' ? errors.projectChanged([]) : errors.approvalStale(a.invalidatedReason ?? 'plan_changed');
+  }
   if (b.currentPlanHash !== a.planHash || b.runContextHash !== a.contextHash) return errors.approvalStale('plan_changed');
   const providers = (a.requestedPermissions as { providers?: unknown } | null)?.providers;
   if (!Array.isArray(providers) || !providers.includes(b.providerId)) return errors.approvalStale('provider_changed');

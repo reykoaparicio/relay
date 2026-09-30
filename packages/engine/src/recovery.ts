@@ -30,13 +30,33 @@ function recoverAttempt(r: Repos, fx: PostCommitEffect[], a: AttemptRow, now: Ep
   }
 }
 
+/**
+ * B1: the run's last sign of life before the crash — the latest of its running-segment start, its row update, its
+ * attempts' timestamps, and its last event (the runner lease row is overwritten by the new owner's acquire, so its
+ * heartbeat is not readable here). Never later than `now`: downtime never counts toward the deadline (F12).
+ */
+export function lastAliveAt(r: Repos, runId: RunId, now: EpochMs): EpochMs {
+  const run = r.runs.get(runId);
+  const times: number[] = [run.updatedAt];
+  if (run.runningSince !== null) times.push(run.runningSince);
+  for (const a of r.attempts.listForRun(runId)) {
+    times.push(a.createdAt);
+    for (const t of [a.dispatchedAt, a.firstByteAt, a.finishedAt]) if (t !== null) times.push(t);
+  }
+  const lastSeq = r.events.lastSeq(runId);
+  const last = lastSeq > 0 ? r.events.list(runId, lastSeq - 1, 1)[0] : undefined;
+  if (last !== undefined) times.push(last.at);
+  return Math.min(now, Math.max(...times)) as EpochMs;
+}
+
 function recoverRun(ctx: EngineCtx, runId: RunId, attempts: readonly AttemptRow[]): PostCommitEffect[] {
   const fx: PostCommitEffect[] = [];
   ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
+    const aliveAt = lastAliveAt(r, runId, now); // before recovery writes anything
     for (const a of attempts) recoverAttempt(r, fx, a, now);
     const run = r.runs.get(runId);
-    if (run.status === 'running') applyRunEvent(r, run, { type: 'RUNNER_LOST' }, now, fx);
+    if (run.status === 'running') applyRunEvent(r, run, { type: 'RUNNER_LOST', lastAliveAt: aliveAt }, now, fx);
     if (run.status === 'cancelling') {
       skipOpenSteps(r, fx, runId);
       applyRunEvent(r, run, { type: 'RUNNER_LOST' }, now, fx);

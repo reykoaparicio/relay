@@ -5,6 +5,7 @@ import { DEFAULT_LIMITS, RESERVED_STEP_KEYS, err, errors, ok, runLimitsSchema, t
 import type {
   AppError,
   EpochMs,
+  Microusd,
   ModelProfile,
   ProfileId,
   ProfileSnapshot,
@@ -18,10 +19,13 @@ import type {
   StepKey,
   WorkflowSpec,
 } from '@relay/contracts';
+import type { UsageEstimate } from '@relay/providers';
 import type { ProjectRow, Repos, StepInsert, WorkflowVersionRow } from '@relay/storage';
-import { admit, allowanceSetEntries, upperBound } from './budget.js';
+import { admit, allowanceSetEntries } from './budget.js';
+import { buildModelRequest } from './checkpoints.js';
 import type { Outstanding } from './budget.js';
 import { monthWindow } from './clock.js';
+import { diffBlock, renderStepPrompt } from './context.js';
 import { requestHash } from './hash.js';
 import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './ports.js';
 import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
@@ -180,28 +184,62 @@ export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Re
 
 const ZERO: Outstanding = { C: 0 as Outstanding['C'], R: 0 as Outstanding['R'], U: 0 as Outstanding['U'] };
 
-/** `runs.preflight`: the same resolution as start (dryRun), plus a local estimate of the first reservation. */
+/**
+ * B7: N of the first model step built exactly like dispatch (F4): the same prompt rendering (role instructions,
+ * output contract, goal, constraints, diff, file blocks in `run_input_files` order), `buildModelRequest` (output
+ * schema, maxOutputTokens, refusalFallback), and `adapter.estimate` (request overhead, billed hops, allowance prices).
+ * Without a key the adapter's local estimate is used.
+ */
+async function estimateFirstReservation(
+  ctx: EngineCtx,
+  p: PreparedRun,
+  input: StartInput,
+  first: ModelStepSnapshot,
+  stepKey: StepKey,
+  files: readonly { relPath: string; sha256: string; content: string }[],
+): Promise<Result<UsageEstimate>> {
+  const roleText = p.version.prompts[first.instructionVersion];
+  if (roleText === undefined) return err(errors.modelUnsupported({ reason: 'instructions_missing' }));
+  const diff = await diffBlock(ctx, { run: { input: input.input }, stepSpec: first });
+  if (!diff.ok) return diff;
+  const ordered = [...files].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0)); // = inputFiles ORDER BY rel_path
+  const prompt = renderStepPrompt({ roleText, schemaId: first.outputSchema, goal: input.goal, diffBlock: diff.value, files: ordered, repairBlock: '' });
+  const request = buildModelRequest(ctx.templates, first, prompt, { attemptId: 'preflight', runId: 'preflight', stepKey, purpose: 'initial' });
+  let adapter;
+  try {
+    adapter = ctx.providers.get(first.profile.providerId);
+  } catch {
+    return err(errors.modelUnsupported({ providerId: first.profile.providerId, reason: 'no_adapter' }));
+  }
+  return ok(await adapter.estimate(request, first.profile.prices, { priceCatalogVersion: first.profile.priceCatalogVersion }));
+}
+
+/** `runs.preflight`: the same resolution as start (dryRun), plus the estimate of the first reservation (B7). */
 export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<Result<RunPreflight>> {
   const prepared = await prepareRun(ctx, input);
   if (!prepared.ok) return prepared;
   const p = prepared.value;
-  let files = 0;
-  let bytes = 0;
-  let chars = 0;
+  let files: { relPath: string; sha256: string; content: string; size: number }[] = [];
   if (input.input.kind === 'files') {
     const project = ctx.db.repos.projects.getWithRoot(p.project.id);
     const root = await ctx.projectFs.openRoot(project.rootRealpath);
     if (!root.ok) return root;
     const read = await ctx.projectFs.readSelected(root.value, input.input.relPaths, { exclusions: project.exclusions });
     if (!read.ok) return read;
-    files = read.value.files.length;
-    bytes = read.value.files.reduce((n, f) => n + f.size, 0);
-    chars = read.value.files.reduce((n, f) => n + f.content.length, 0);
+    files = read.value.files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, content: f.content, size: f.size }));
   }
-  const estimatedInputTokens = Math.ceil((chars * 23) / 64);
-  const models = Object.values(p.snapshot.steps).filter((s): s is ModelStepSnapshot => s.kind === 'model');
+  const models = Object.entries(p.snapshot.steps).flatMap(([k, s]) => (s.kind === 'model' ? [{ key: k as StepKey, snap: s }] : []));
   const first = models[0];
-  const N = first === undefined ? (0 as ReturnType<typeof upperBound>) : upperBound(estimatedInputTokens, first.maxOutputTokens, first.profile.prices);
+  let N = 0 as Microusd;
+  let estimatedInputTokens = 0;
+  let basis: UsageEstimate['basis'] = 'local_estimate';
+  if (first !== undefined) {
+    const estimate = await estimateFirstReservation(ctx, p, input, first.snap, first.key, files);
+    if (!estimate.ok) return estimate;
+    N = estimate.value.upperAllowanceMicrousd;
+    estimatedInputTokens = estimate.value.inputTokens;
+    basis = estimate.value.basis;
+  }
   const { start, end } = monthWindow(ctx.clock.now());
   const L = p.project.monthlyAllowanceMicrousd;
   const budget = admit({
@@ -209,10 +247,10 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     project: L === null ? null : { L, ...ctx.db.repos.ledger.projectMonthBalances(p.project.id, start, end) },
     N,
   }).breakdown;
-  const providers: ProviderId[] = [...new Set(models.map((m) => m.profile.providerId))];
+  const providers: ProviderId[] = [...new Set(models.map((m) => m.snap.profile.providerId))];
   return ok({
-    inputSummary: { files, bytes, estimatedInputTokens, memoryRecords: [], providersReceivingContext: providers },
-    firstReservation: { N, basis: 'local_estimate' },
+    inputSummary: { files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), estimatedInputTokens, memoryRecords: [], providersReceivingContext: providers },
+    firstReservation: { N, basis },
     budget,
     issues: [],
   });

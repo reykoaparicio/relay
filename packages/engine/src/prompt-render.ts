@@ -3,18 +3,24 @@
 // <untrusted_*> blocks; nothing rendered here can change permissions or budgets (those are typed checks, F5/F6).
 import type { ValidationIssue } from '@relay/contracts';
 
-/** Tags whose closing sequence must never appear raw inside block content. */
-const STRUCTURAL_TAGS = ['untrusted_[a-z_]*', 'relay_task', 'goal', 'constraints', 'project_rules', 'rule', 'previous_output_issues'];
-const CLOSING_RE = new RegExp(`</(?=\\s*(?:${STRUCTURAL_TAGS.join('|')})\\b)`, 'gi');
-const OPENING_RE = new RegExp(`<(?=\\s*(?:${STRUCTURAL_TAGS.join('|')})\\b)`, 'gi');
+/** Tags whose opening/closing sequence must never appear raw inside block content (every `untrusted_*` tag). */
+const STRUCTURAL_TAGS = ['untrusted_', '(?:relay_task|goal|constraints|project_rules|rule|previous_output_issues)\\b'];
+/**
+ * Characters a hostile file can put between `<`, `/`, and the tag name that a reader may ignore: whitespace and the
+ * zero-width space / non-joiner / joiner (U+200B–U+200D), BOM (U+FEFF), and word joiner (U+2060).
+ */
+const IGNORABLE = '[\\s\\u200B-\\u200D\\uFEFF\\u2060]*';
+/** `<` + ignorable* + optional `/` + ignorable* + a structural tag name (case-insensitive). */
+const TAG_START_RE = new RegExp(`<(?=${IGNORABLE}/?${IGNORABLE}(?:${STRUCTURAL_TAGS.join('|')}))`, 'gi');
 
 /**
  * Neutralizes structural tag sequences inside block content so a hostile file cannot close its block or open a new
- * one: `</untrusted_file` → `&lt;/untrusted_file`, `<relay_task` → `&lt;relay_task`. Everything else is untouched,
- * so diffs still reproduce the original text (the prompts tell the model to diff against the unescaped file).
+ * one: `</untrusted_file` → `&lt;/untrusted_file`, `< /\u200Buntrusted_x` → `&lt; /\u200Buntrusted_x`,
+ * `<relay_task` → `&lt;relay_task`. Everything else is untouched, so diffs still reproduce the original text (the
+ * prompts tell the model to diff against the unescaped file).
  */
 export function escapeForBlock(text: string): string {
-  return text.replace(CLOSING_RE, '&lt;/').replace(OPENING_RE, '&lt;');
+  return text.replace(TAG_START_RE, '&lt;');
 }
 
 /** Escapes an attribute value (double-quoted). */

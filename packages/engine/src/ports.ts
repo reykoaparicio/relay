@@ -222,6 +222,12 @@ export interface EngineCtx extends EngineDeps {
   readonly cancellation: CancellationRegistry;
   readonly deadlines: DeadlineWatcher;
   readonly wake: WakeSignal;
+  /**
+   * Runner-lease ownership (B3). `owned` turns false when `stop()` releases the lease (or a heartbeat finds it taken);
+   * from then on no attempt is dispatched or settled by this process — the next owner's recovery handles them.
+   * True for a context that never started (direct `tick` in tests).
+   */
+  readonly lease: { owned: boolean };
   /** Post-commit effect of every terminal transition (F17 report). */
   onTerminal(runId: RunId): Promise<void>;
 }

@@ -269,12 +269,15 @@ async function cancelRun(ctx: EngineCtx, runId: RunId) {
 }
 
 function pauseRun(ctx: EngineCtx, runId: RunId) {
-  return ctx.db.tx('immediate', (r) => {
+  const res = ctx.db.tx('immediate', (r) => {
     const run = r.runs.get(runId);
     if (run.status !== 'running') return err(errors.conflict({ reason: 'run_not_running', status: run.status }));
     r.runs.setPauseRequested(runId, true);
     return ok({ status: run.status, inFlight: ctx.cancellation.hasInFlight(runId) ? ('waiting' as const) : ('none' as const) });
   });
+  // B9: wake the loop (after commit) so a backoff / idle sleep ends now and the next iteration applies USER_PAUSE.
+  if (res.ok) ctx.wake.signal();
+  return res;
 }
 
 function runSummaryCost(ctx: EngineCtx, runId: RunId) {

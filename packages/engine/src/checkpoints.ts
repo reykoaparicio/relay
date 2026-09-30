@@ -1,10 +1,11 @@
 // 06 F4: the checkpoint protocol (§7.4) — the single function that executes one model step attempt. Numbered
 // comments map 1:1 to §7.4. No `await` ever happens inside a db.tx callback (the storage types forbid it).
 import { redactDeep, redactString } from '@relay/contracts';
-import type { AppError, ArtifactId, ArtifactKind, AttemptId, AttemptPurpose, EpochMs, Microusd, ProviderId, RunId, StepRunId, UsageView } from '@relay/contracts';
+import type { AppError, ApprovalId, ArtifactId, ArtifactKind, AttemptId, AttemptPurpose, EpochMs, Microusd, ProviderId, RunId, StepRunId, UsageView } from '@relay/contracts';
 import type { ModelRequest, ModelResult, ProviderAdapter, UsageEstimate } from '@relay/providers';
-import type { ArtifactInsert, AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
+import type { ApprovalRow, ArtifactInsert, AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { TemplateRegistry } from '@relay/templates';
+import { logSafe } from './log-safe.js';
 import { reserveEntries, settleAmount, settlementEntries, isOverrun } from './budget.js';
 import type { SettleAmount } from './budget.js';
 import { monthWindow } from './clock.js';
@@ -67,23 +68,51 @@ export function loadApprovalBinding(r: Repos, run: RunRow, snapshot: RunSnapshot
   });
   const planStep = planKey === undefined ? undefined : r.steps.latestFor(run.id, planKey);
   const planArtifact = planStep?.outputArtifactId == null ? undefined : r.artifacts.get(planStep.outputArtifactId);
+  const valid = r.approvals.latestApprovedForRun(run.id);
+  const preserved = valid === undefined ? preservedApproval(r, run.id) : undefined;
   return {
-    approval: r.approvals.latestApprovedForRun(run.id),
+    approval: valid ?? preserved,
+    preservedAfterProjectChange: preserved !== undefined,
     currentPlanHash: planArtifact?.sha256 ?? null,
     runContextHash: run.contextHash,
     providerId,
   };
 }
 
+/** Event payload marker recording an approval invalidated because the project changed (B4). */
+const PROJECT_CHANGED_MARK = 'approval_invalidated';
+
+/**
+ * B4: the approval invalidated as `project_changed` when the user afterwards chose `use_preserved_snapshot` (its
+ * `run.snapshot_preserved` event follows the invalidation record), else undefined — a new approval is then required.
+ */
+export function preservedApproval(r: Repos, runId: RunId): ApprovalRow | undefined {
+  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
+  const mark = events.findLast((e) => e.type === 'error.recorded' && e.payload['kind'] === PROJECT_CHANGED_MARK);
+  if (mark === undefined) return undefined;
+  if (!events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > mark.seq)) return undefined;
+  const id = mark.payload['approvalId'];
+  const a = typeof id === 'string' ? r.approvals.get(id as ApprovalId) : undefined;
+  return a?.decision === 'approved' && a.invalidatedReason === 'project_changed' ? a : undefined;
+}
+
+/** Invalidates `approvalId` with `reason` (caller's tx); a project change is also recorded on the run (B4). */
+function invalidateApproval(r: Repos, fx: PostCommitEffect[], runId: RunId, approvalId: ApprovalId, reason: 'plan_changed' | 'provider_changed' | 'project_changed', now: EpochMs): void {
+  if (!r.approvals.invalidate(approvalId, reason, now)) return;
+  if (reason === 'project_changed') {
+    appendRunEvent(r, fx, runId, 'error.recorded', { kind: PROJECT_CHANGED_MARK, code: 'PROJECT_CHANGED', approvalId, invalidatedReason: reason });
+  }
+}
+
 /** Applies `ev` (CAS from running) in its own tx; returns `blocked`. */
-async function pauseRun(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent | null, extra?: (r: Repos, now: EpochMs) => void): Promise<AttemptOutcome> {
+async function pauseRun(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent | null, extra?: (r: Repos, now: EpochMs, fx: PostCommitEffect[]) => void): Promise<AttemptOutcome> {
   if (ev === null) return { kind: 'blocked', why: 'conflict' };
   const fx: PostCommitEffect[] = [];
   ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     const cur = r.runs.get(runId);
     if (cur.status !== 'running') return;
-    extra?.(r, now);
+    extra?.(r, now, fx);
     applyRunEvent(r, cur, ev, now, fx);
   });
   await runEffects(ctx, fx);
@@ -118,7 +147,7 @@ async function putArtifact(
       },
     };
   } catch (e) {
-    ctx.logger.warn('artifact.write_failed', { runId: run.id, kind: a.kind, err: e instanceof Error ? e.message : String(e) });
+    ctx.logger.warn('artifact.write_failed', { runId: run.id, kind: a.kind, err: logSafe(e) });
     return { ok: false, kind: a.kind };
   }
 }
@@ -189,7 +218,7 @@ function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; st
       }
     });
   } catch (e) {
-    ctx.logger.error('attempt.force_unknown_failed', { runId: i.run.id, attemptId: i.attemptId, err: e instanceof Error ? e.message : String(e) });
+    ctx.logger.error('attempt.force_unknown_failed', { runId: i.run.id, attemptId: i.attemptId, err: logSafe(e) });
     return [];
   }
   return fx;
@@ -322,7 +351,13 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
   const hook: CrashHookCtx = { stepKey: step.stepKey, purpose, attemptSeq: prior.length + 1 };
   const assembled = await ctx.context.assemble({ run, step, snapshot: stepSnap.profile, stepSpec: stepSnap,
     preservedSnapshot: hasSnapshotPreserved(db.repos, runId), purpose, priorAttempts: prior });
-  if (!assembled.ok) return pauseRun(ctx, runId, eventForError(assembled.error));
+  if (!assembled.ok) {
+    // B4: the stale check (PROJECT_CHANGED) of an approval-bound step invalidates its approval: a new approval is
+    // required unless the user chooses use_preserved_snapshot.
+    const binding = requiresApproval(snapshot, step.stepKey)
+      ? loadApprovalBinding(db.repos, run, snapshot, step.stepKey, stepSnap.profile.providerId) : null;
+    return pauseRun(ctx, runId, eventForError(assembled.error), invalidateStale(runId, binding, assembled.error));
+  }
   const attemptId = ctx.ids.next('attempt');
   const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId, runId, stepKey: step.stepKey, purpose });
   const providerId = stepSnap.profile.providerId;
@@ -340,17 +375,18 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
   const binding = requiresApproval(snapshot, step.stepKey) ? loadApprovalBinding(db.repos, run, snapshot, step.stepKey, providerId) : null;
   const policy = checkDispatch({ run: db.repos.runs.get(runId), step: db.repos.steps.get(stepRunId), stepSnap, request, estimate,
     credentialOk: credential.ok, binding, project: db.repos.projects.get(run.projectId), now: ctx.clock.now() });
-  if (!policy.ok) return pauseRun(ctx, runId, eventForError(policy.error), invalidateStale(binding, policy.error));
+  if (!policy.ok) return pauseRun(ctx, runId, eventForError(policy.error), invalidateStale(runId, binding, policy.error));
   if (!credential.ok) return pauseRun(ctx, runId, eventForError(credential.error)); // unreachable: check #3
   return { run, step, stepSnap, purpose, prior, assembled: assembled.value, attemptId, request, adapter, apiKey: credential.value, estimate, hook };
 }
 
-function invalidateStale(binding: ApprovalBinding | null, error: AppError): ((r: Repos, now: EpochMs) => void) | undefined {
+/** F6 #8 / B4: the invalidation that goes with an APPROVAL_STALE or PROJECT_CHANGED pause (none otherwise). */
+function invalidateStale(runId: RunId, binding: ApprovalBinding | null, error: AppError): ((r: Repos, now: EpochMs, fx: PostCommitEffect[]) => void) | undefined {
   const approval = binding?.approval;
-  if (error.code !== 'APPROVAL_STALE' || approval === undefined) return undefined;
-  const reason = error.details?.['reason'] === 'provider_changed' ? 'provider_changed' : 'plan_changed';
-  return (r, now) => {
-    r.approvals.invalidate(approval.id, reason, now);
+  if ((error.code !== 'APPROVAL_STALE' && error.code !== 'PROJECT_CHANGED') || approval === undefined || approval.invalidatedAt !== null) return undefined;
+  const reason = error.code === 'PROJECT_CHANGED' ? 'project_changed' : error.details?.['reason'] === 'provider_changed' ? 'provider_changed' : 'plan_changed';
+  return (r, now, fx) => {
+    invalidateApproval(r, fx, runId, approval.id, reason, now);
   };
 }
 
@@ -370,7 +406,7 @@ async function dispatch(ctx: EngineCtx, p: Prepared, controller: AbortController
       },
     });
   } catch (err) {
-    ctx.logger.error('adapter.threw', { runId: p.run.id, attemptId: p.attemptId, err: err instanceof Error ? err.message : String(err) });
+    ctx.logger.error('adapter.threw', { runId: p.run.id, attemptId: p.attemptId, err: logSafe(err, [p.apiKey]) });
     return outcomeUnknown();
   }
 }
@@ -380,18 +416,28 @@ interface Settled {
   readonly plan: AttemptPlan;
 }
 
-/** 7. One tx: ledger moves (one group) + attempt final state + artifact rows ALWAYS; step and run conditionally. */
+/**
+ * 7. One tx: the attempt CAS `dispatching → final` FIRST; only when it wins: ledger moves (one group) + artifact rows +
+ * the completion event ALWAYS, step and run conditionally. When the CAS loses (recovery or another runner already
+ * moved the attempt to unknown / settled it), NOTHING is written and `null` is returned — an attempt settles once.
+ */
 function settle(
   ctx: EngineCtx,
   fx: PostCommitEffect[],
   p: Prepared,
   i: { outcome: ClassifiedOutcome; cost: SettleAmount; puts: readonly ArtifactPut[]; output: { id: ArtifactId; value: unknown } | null;
     firstByteAt: EpochMs | null },
-): Settled {
+): Settled | null {
   const N = p.estimate.upperAllowanceMicrousd;
-  return ctx.db.tx('immediate', (r): Settled => {
+  return ctx.db.tx('immediate', (r): Settled | null => {
     const now = ctx.clock.now();
     const { run, attemptId } = p;
+    const o = i.outcome;
+    const won = r.attempts.transition(attemptId, ['dispatching'], o.attemptState, {
+      usage: usageView(o), rawUsage: redactDeep(o.rawUsage), stopReason: o.stopReason, error: o.error,
+      providerRequestId: o.providerRequestId, firstByteAt: i.firstByteAt, finishedAt: now,
+    });
+    if (!won) return null;
     r.ledger.append(settlementEntries({ reservation: N, cost: i.cost, attemptId, runId: run.id, projectId: run.projectId,
       priceCatalogVersion: p.estimate.priceCatalogVersion, createdAt: now }));
     for (const put of i.puts) {
@@ -402,11 +448,6 @@ function settle(
         appendRunEvent(r, fx, run.id, 'artifact.write_failed', { kind: put.kind, attemptId });
       }
     }
-    const o = i.outcome;
-    r.attempts.transition(attemptId, ['dispatching'], o.attemptState, {
-      usage: usageView(o), rawUsage: redactDeep(o.rawUsage), stopReason: o.stopReason, error: o.error,
-      providerRequestId: o.providerRequestId, firstByteAt: i.firstByteAt, finishedAt: now,
-    });
     appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId, state: o.attemptState, cost: i.cost });
     if (o.attemptState === 'unknown') appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId });
     const s = r.steps.get(p.step.id);
@@ -418,6 +459,16 @@ function settle(
     if (ev !== null && cur.status === 'running') applyRunEvent(r, cur, ev, now, fx);
     return { outcome: o, plan };
   });
+}
+
+/** B5: prices for fallback iterations — the attempt's provider catalog in the DB (latest version per model). */
+function fallbackLookup(ctx: EngineCtx, p: Prepared) {
+  const { providerId, modelId } = p.stepSnap.profile;
+  return {
+    profileModelId: modelId,
+    pricesFor: (id: string) => ctx.db.repos.catalog.get(providerId, id)?.prices,
+    providerPrices: () => ctx.db.repos.catalog.list(providerId).map((e) => e.prices),
+  };
 }
 
 /** 5–6. Persist raw response + manifest (+ canonical output when valid), then classify and price the result. */
@@ -440,8 +491,13 @@ async function persistAndClassify(ctx: EngineCtx, p: Prepared, result: ModelResu
     if (put.ok) output = { id: put.meta.id, value: validated.value };
   }
   const outcome = classify(result, validated, canonicalOk, { aborted: signal.aborted, abortReason: signal.reason as AbortReason | undefined, attemptId: p.attemptId });
-  const cost = settleAmount(outcome, p.stepSnap.profile.prices);
+  const cost = settleAmount(outcome, p.stepSnap.profile.prices, fallbackLookup(ctx, p));
   return { puts, output, outcome, cost };
+}
+
+/** B3: whether this process still owns the runner lease (re-read at every use; `stop()` flips it concurrently). */
+function ownsLease(ctx: Pick<EngineCtx, 'lease'>): boolean {
+  return ctx.lease.owned;
 }
 
 /**
@@ -466,6 +522,7 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
   let committed = false;
   try {
     const fx3: PostCommitEffect[] = [];
+    if (!ownsLease(ctx)) return { kind: 'blocked', why: 'not_running' }; // stop() released the lease: recovery owns it now
     const dispatchedAt = db.tx('immediate', (r): EpochMs | null => {
       const now = clock.now();
       if (r.runs.get(runId).status !== 'running' || controller.signal.aborted) {
@@ -487,9 +544,18 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
 
     const persisted = await persistAndClassify(ctx, p, result, controller.signal);
     const firstByteAt = result.kind === 'success' && result.firstByteMs !== undefined ? ((dispatchedAt + result.firstByteMs) as EpochMs) : null;
+    if (!ownsLease(ctx)) {
+      // B3: the lease was released while the call was in flight; the next owner's recovery settles this attempt.
+      ctx.logger.warn('attempt.settle_skipped', { runId, attemptId: p.attemptId, reason: 'lease_released' });
+      return { kind: 'blocked', why: 'not_running' };
+    }
     const fx7: PostCommitEffect[] = [];
     const final = settle(ctx, fx7, p, { ...persisted, firstByteAt });
     committed = true;
+    if (final === null) {
+      ctx.logger.warn('attempt.settle_skipped', { runId, attemptId: p.attemptId, reason: 'attempt_already_moved' });
+      return { kind: 'blocked', why: 'conflict' };
+    }
     await runEffects(ctx, fx7);
     ctx.hooks?.afterStepCommit?.(hook);
 
@@ -498,7 +564,7 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
     return { kind: 'settled', attemptId: p.attemptId, outcome: final.outcome.kind, plan: final.plan.kind };
   } finally {
     ctx.cancellation.unregister(controller);
-    if (dispatched && !committed) {
+    if (dispatched && !committed && ownsLease(ctx)) {
       await runEffects(ctx, forceUnknown(ctx, { run: p.run, attemptId: p.attemptId, stepRunId, N, priceCatalogVersion: p.estimate.priceCatalogVersion }));
     }
   }

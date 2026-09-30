@@ -94,7 +94,7 @@ export type RunMachineEvent =
   | { type: 'SETUP_BLOCKED'; reason: 'setup_blocked' | 'auth_required' | 'budget_run' | 'budget_project'; error: AppError }
   | { type: 'PLAN_READY'; approvalId: ApprovalId }
   | { type: 'APPROVED_MATCHING' } | { type: 'REJECTED' }
-  | { type: 'REVISION_REQUESTED' }                                     // approval → running (planner re-runs)
+  | { type: 'REVISION_REQUESTED' }                                     // approval → queued (planner re-runs once the run holds the slot; ruling B2)
   | { type: 'BUDGET_BLOCKED'; scope: 'run' | 'project'; error: AppError }
   | { type: 'BUDGET_OVERRUN'; attemptId: AttemptId; error: AppError }  // X > N after settlement, regardless of L (§9.5)
   | { type: 'USER_PAUSE' }
@@ -106,7 +106,7 @@ export type RunMachineEvent =
   | { type: 'TRANSPORT_EXHAUSTED'; error: AppError }                   // transport retries spent / non-retryable provider error
   | { type: 'MODEL_REFUSED'; error: AppError }
   | { type: 'UNKNOWN_OUTCOME'; attemptId: AttemptId; error: AppError } // live ambiguous result (F7)
-  | { type: 'RUNNER_LOST' }
+  | { type: 'RUNNER_LOST'; lastAliveAt?: EpochMs }                    // recovery passes the last sign of life (B1)
   | { type: 'UNRECOVERABLE'; error: AppError }                         // invariant violation / internal error only
   | { type: 'ACCEPTED' }
   | { type: 'REVISION_LIMIT'; cause: 'revision_limit' | 'verifier_incomplete' }
@@ -123,7 +123,8 @@ export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: E
 ```
 
 `applyRunEvent` computes `transitionRun`, then does a CAS `runs.updateStatus(id, [run.status], to, { pauseReason, statusDetail: ev.error ?? null, endedAt })`. In the same transaction it:
-- calls `runs.enterRunning(id, now)` when `to === 'running'` and `runs.leaveRunning(id, now)` when leaving `running` (F12 accrual);
+- calls `runs.enterRunning(id, now)` when `to === 'running'` and `runs.leaveRunning(id, now)` when leaving `running` (F12 accrual); for `RUNNER_LOST` the segment closes at `min(ev.lastAliveAt, now)`, never at `now` (ruling B1);
+- asserts (invariant) that no other run is `running` or `cancelling` when `to === 'running'` (§9.1 concurrency 1, ruling B2);
 - clears `pause_requested` on `USER_PAUSE`, `RESUME_RESOLVED`, and every terminal transition;
 - appends `run.status_changed`.
 
@@ -154,8 +155,8 @@ Transition table (every row is one `it()` in `run-machine.test.ts`; all other pa
 | running | ACCEPTED | completed | – |
 | running | REVISION_LIMIT | incomplete | – |
 | running | CANCEL_REQUESTED | cancelling | – |
-| awaiting_approval | APPROVED_MATCHING | running | – |
-| awaiting_approval | REVISION_REQUESTED | running | – |
+| awaiting_approval | APPROVED_MATCHING | queued | – (ruling B2: the loop's CHECKS_PASSED moves it to running when it is the next eligible run) |
+| awaiting_approval | REVISION_REQUESTED | queued | – (ruling B2, same as above) |
 | awaiting_approval | REJECTED | cancelled | – |
 | awaiting_approval | APPROVAL_STALE | paused | approval_stale |
 | awaiting_approval | CANCEL_REQUESTED | cancelled | – |
@@ -206,7 +207,7 @@ Run status `failed` is reachable **only** through `UNRECOVERABLE` (invariant vio
 
 *Edges not drawn in §7.2:*
 1. `queued → cancelled` (CANCEL_REQUESTED): nothing is in flight, so there is no `cancelling` phase.
-2. `awaiting_approval → running` (REVISION_REQUESTED): the user asks for a plan revision and the planner re-runs (§11.3).
+2. `awaiting_approval → queued` (APPROVED_MATCHING, REVISION_REQUESTED; **ruling B2**): an approval decision re-queues the run instead of moving it straight to `running`, so a decision made while another run is running can never create a second running run (§9.1 concurrency 1). The loop's `CHECKS_PASSED` moves it to `running` once it is the next eligible run (running/cancelling first, else the oldest queued). After `REVISION_REQUESTED` the planner then re-runs (§11.3). `allowedRunActions` is unaffected (`queued` → cancel).
 3. `awaiting_approval → paused(approval_stale)` (APPROVAL_STALE): a stale plan, context, or input file is detected while waiting (§11.2).
 4. `awaiting_approval → cancelled` (CANCEL_REQUESTED): §7.2 labels this edge "reject"; cancel reuses it.
 5. `paused → cancelled` (CANCEL_REQUESTED / STOP_REQUESTED): §4.3 "stop with existing artifacts".
@@ -386,7 +387,9 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
     const outcomeFx: PostCommitEffect[] = [];
     const final = db.tx('immediate', (r) => {
       const now = clock.now();
-      // ALWAYS: ledger moves (one group_id) + the attempt's final state + artifact rows.
+      // B3: the attempt CAS (dispatching → final) goes FIRST. If it loses (recovery or another owner already moved the
+      // attempt to unknown / settled it), NOTHING is written (no ledger entries), the skip is logged, and the call returns.
+      // Otherwise ALWAYS: ledger moves (one group_id) + the attempt's final state + artifact rows.
       r.ledger.append(settlementEntries({ reservation: N, cost, attemptId, runId, projectId: run.projectId,
         priceCatalogVersion: estimate.priceCatalogVersion, createdAt: now }));
       for (const p of puts) if (p.ok) r.artifacts.insertIfAbsent({ ...p.meta, runId, projectId: run.projectId, stepRunId, attemptId });  // (attempt, kind, sha)
@@ -420,6 +423,7 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
 ```
 
 Helpers:
+- **Lease ownership (ruling B3).** `ctx.lease.owned` turns false when `stop()` releases the lease (before the release) or a heartbeat finds the lease taken. From then on `executeModelAttempt` neither writes the step-3 dispatch intent, nor settles (step 7), nor runs `forceUnknown`: the next owner's recovery (F9) handles the attempt. The loop exits when it no longer owns the lease.
 - `forceUnknown` runs one best-effort transaction (try/catch, logged): `move_to_unknown N`, attempt `dispatching → unknown`, step `executing → unknown`, and `UNKNOWN_OUTCOME` if the run is still `running`. If that transaction also fails, recovery (F9) performs the same move at the next start.
 - `releaseNotSent` writes `release −N` and moves the attempt to `failed_before_dispatch` and the step to `ready`, in the caller's transaction.
 - `putArtifact` calls `ArtifactStore.put` and returns `{ ok, meta }`. A failed `raw_response` or manifest put is logged and emits `artifact.write_failed`, and the step outcome is unaffected. A failed canonical-output put classifies the attempt as a known failure with `ARTIFACT_WRITE_FAILED` (usage still settled): the step goes → `failed` and the run → `paused(output_invalid)`, so `retry_step` is available.
@@ -430,6 +434,7 @@ Invariants (asserted in `checkpoints.test.ts`):
 - A missing credential never creates an attempt row. The provider call is made only after the `dispatching` row is committed.
 - The `reserve` ledger entry, the attempt row (with `seq` and `request_fingerprint` computed in the same tx), and the attempt count increment are in one transaction.
 - The step-2 tx re-reads the run and requires `status === 'running' && !pause_requested && attemptCount < maxAttempts`.
+- The step-7 tx settles an attempt at most once: a lost `dispatching → final` CAS writes no ledger entries (R never goes negative).
 - `settle` and the `release` of the reservation share one `group_id`, and the step-7 transaction always commits the ledger moves and the attempt's final state, even when the step transition is skipped.
 - After `executeModelAttempt` returns or throws, no attempt it created is in `reserved` or `dispatching`.
 - Artifact rows are idempotent by `(attempt_id, kind, sha256)` (§7.5 last bullet; 03 R4-5).
@@ -480,10 +485,14 @@ Ledger movements (each row is one transaction and one `group_id`; `LedgerRepo.ap
 | User increases allowance | `allowance_change: allowance +(L′ − L)` (a model can never call this; it is only reachable through the IPC op `runs.increaseAllowance`) |
 | Setup call (F18) | the same reserve / release / settle / move_to_unknown moves with `scope='setup'`, `run_id` and `attempt_id` NULL, `certainty` set on settle |
 
+**Pricing is shared (dedup).** `computeCost`, `upperBound` (max(input, cacheWrite, cacheRead) + 2 µUSD slack), `maxPrices`, and `computeIterationsCost` live in `@relay/contracts` (`pricing.ts`, pure). `@relay/providers` re-exports them (binding the unknown-model maximum to its bundled catalog); the engine imports them from contracts and has no mirrored copy.
+
+**Fallback iterations (ruling B5).** When a result carries `fallback.iterations` (ADR-016 refusal fallback), `settleAmount` prices every served iteration with its own model via contracts `computeIterationsCost`: the profile model at the snapshot prices, other models at their `model_catalog` prices; an iteration whose model has no known price is priced at the component-wise maximum of every catalog price of the provider (and the known iteration prices), and the settle entry is then `certainty: 'estimated'`.
+
 Certainty rules (FR-09):
 - `reported`: the provider returned a cost figure directly. Neither provider does this for Messages/Responses today, so this is reserved for future use.
 - `calculated`: provider-reported token usage × the snapshot's catalog price. This is the normal case.
-- `estimated`: no usage was reported, and the upper bound or estimate was used.
+- `estimated`: no usage was reported, and the upper bound or estimate was used; or a fallback iteration's model had no known price (B5).
 - `unknown`: the bucket `unknown`.
 
 ## F6: Policy (`src/policy.ts`) — pure; "no provider call is dispatched without passing policy, credential, budget, and capability checks" (§3.3)
@@ -502,6 +511,7 @@ Certainty rules (FR-09):
 | 8 | For approval-bound steps (implement/verify): a **valid approval** exists whose `plan_hash` equals the current plan artifact hash, **and** `context_hash` equals `run.context_hash`, **and** the current input file hashes equal `run_input_files` (§11.2; skipped when the run chose `use_preserved_snapshot`), **and** the step's effective provider ∈ the approval's `requested_permissions_json.providers` (R3-11) | `APPROVAL_STALE` (`invalidated_reason`: `plan_changed` / `provider_changed`) / `PROJECT_CHANGED` (`project_changed`) | `APPROVAL_STALE`; the approval is invalidated with that reason |
 | 9 | Tool call count ≤ `maxToolCalls` (0 in P0; the check is kept for the future) | `LIMIT_REACHED` | `SETUP_BLOCKED(setup_blocked)` |
 
+- **PROJECT_CHANGED before implement (ruling B4).** When the context assembler's stale check (or check 8) fails with `PROJECT_CHANGED` for an approval-bound step, the pause transaction also invalidates the approval with reason `project_changed` and records it on the run (`error.recorded` with `{ kind: 'approval_invalidated', approvalId }`). A new approval is then required, **unless** the user chooses `use_preserved_snapshot`: its `run.snapshot_preserved` event (recorded after the invalidation) keeps that approval valid for the preserved inputs (`ApprovalBinding.preservedAfterProjectChange`; plan hash, context hash, and provider are still checked). `APPROVAL_STALE` failures invalidate with `plan_changed` / `provider_changed` as before.
 - Check 8's inputs are computed by the caller before the pure check (`loadApprovalBinding`: plan artifact hash, `projectFs.hashFiles` over `run_input_files`, and the approval row).
 - Whether the run chose `use_preserved_snapshot` is read from its `run.snapshot_preserved` event (`hasSnapshotPreserved(repos, runId)`, also used by F4 for the context port's `preservedSnapshot`).
 - Budget admission is **not** in `checkDispatch`. It happens inside the reservation transaction (F4 step 2), so there is no race between the check and the use. Preflight calls `admit()` read-only for display.
@@ -577,7 +587,7 @@ Inside a single transaction per run:
 |---|---|
 | attempt `created` / `reserved` | `release` the reservation. attempt → `failed_before_dispatch`. step `reserved` → `ready` (§7.5 "if no dispatch occurred, release the reservation and return the step to ready"). A `reserved` step is treated like `ready` after the release |
 | attempt `dispatching` (**every** one, with or without a response id) | `move_to_unknown` N. attempt → `unknown`. step `executing` → `unknown` (R4-3) |
-| run `running` | `leaveRunning(id, lastHeartbeatAt)` (downtime never counts toward the deadline), then `RUNNER_LOST` → `interrupted` |
+| run `running` | `RUNNER_LOST { lastAliveAt }` → `interrupted`; `applyRunEvent` closes the segment with `leaveRunning(id, lastAliveAt)`, never `now` (downtime never counts toward the deadline; ruling B1). `lastAliveAt` = the lease `heartbeat_at` when readable, else the latest of the run's `running_since` / `updated_at`, its attempts' timestamps, and its last event `at` (computed before recovery writes), capped at `now`. The current `LeaseRepo` has no read of the previous owner's heartbeat (acquire overwrites it), so the engine uses the latter |
 | run `cancelling` | `RUNNER_LOST` → `cancelled`. Non-terminal steps → `skipped`. The report is generated after commit (F17) |
 | run `awaiting_approval`, `paused`, `queued` | unchanged. Waiting for approval is durable state (§7.3) |
 | step `succeeded` | **never touched**. Completed steps are not re-executed (FR-07) |
@@ -609,7 +619,7 @@ The run stays `interrupted` until the user chooses `runs.resume` (`review_recove
   1. **Idempotency lookup first**, before any hashing: a stored result for the key is replayed.
   2. Load the approval. Compare the input `planHash` and `contextHash` to the stored values *and* to the current plan artifact hash and `run.context_hash`.
   3. Re-hash the input files (`projectFs.hashFiles`, outside any tx). A mismatch → `PROJECT_CHANGED`, and the approval is invalidated (`project_changed`).
-  4. In one decide transaction: CAS-decide the approval, apply the run transition, append `approval.decided`, and **store the idempotency result**. `revision_requested` creates a new `plan` step row (`revision_index + 1`) with the user's note as structured input, and the planner then re-runs. **This consumes a planner attempt and counts against `maxAttempts`, not against the quality revision count.**
+  4. In one decide transaction: CAS-decide the approval, apply the run transition (`approved` / `revision_requested` → `queued`, ruling B2; `rejected` → `cancelled`), append `approval.decided`, and **store the idempotency result**. `revision_requested` creates a new `plan` step row (`revision_index + 1`) with the user's note as structured input, and the planner then re-runs. **This consumes a planner attempt and counts against `maxAttempts`, not against the quality revision count.**
   5. After commit: `hooks.afterApprovalCommit({ stepKey, purpose: null, attemptSeq: 0 })` with `stepKey` = the approval step id (`approve` in `workflow.json`), so the crash spec is `afterApprovalCommit@approve` (F13).
   - **Concurrent duplicates:** two in-flight calls with the same key can both miss the lookup in step 1. The first commits. The second's CAS in step 4 finds the approval already decided and returns `CONFLICT` (`details.reason: 'duplicate_in_flight'`). A later retry with that key replays the stored result via step 1.
 - **The planner can never approve its own plan (M2 checklist).** The approval step has no model handler. Only `approvals.decide` from IPC advances it, and the IPC op is only reachable from the renderer.
@@ -630,7 +640,7 @@ The run stays `interrupted` until the user chooses `runs.resume` (`review_recove
 
   Then the **WORK_STOPPED handler** (`onWorkStopped`, run by the loop once no attempt is in flight) runs **after** settlement. In one tx it sets all non-terminal steps → `skipped` (unknown steps included; their attempts keep the liability), and applies `WORK_STOPPED` → `cancelled`. The report follows (F17). **No new step is dispatched after the cancel request** (the F4 step-2 and step-3 transactions re-read the run status). After cancellation the run's R = 0.
 - `runs.cancel` returns `unresolvedCharges`, which lists every attempt with unknown liability.
-- `runs.pause` sets the durable **`runs.pause_requested`** column (`RunRepo.setPauseRequested(id, true)`, 03 R2-12). The loop checks it at the top of every iteration, and the F4 step-2 tx checks it before every reservation, applying `USER_PAUSE` → `paused(user)`. An in-flight call completes normally first. The response `inFlight` is `'waiting'` when `hasInFlight(runId)`, else `'none'`. The flag is cleared by `applyRunEvent` on `USER_PAUSE`, `RESUME_RESOLVED`, and terminal transitions.
+- `runs.pause` sets the durable **`runs.pause_requested`** column and, after commit, **wakes the loop** (ruling B9: a backoff `wait_until` or idle sleep ends immediately; every loop sleep is interruptible by the wake signal) (`RunRepo.setPauseRequested(id, true)`, 03 R2-12). The loop checks it at the top of every iteration, and the F4 step-2 tx checks it before every reservation, applying `USER_PAUSE` → `paused(user)`. An in-flight call completes normally first. The response `inFlight` is `'waiting'` when `hasInFlight(runId)`, else `'none'`. The flag is cleared by `applyRunEvent` on `USER_PAUSE`, `RESUME_RESOLVED`, and terminal transitions.
 
 ## F12: Deadline (`src/deadline.ts`) — §9.1 "elapsed execution time"
 
@@ -673,7 +683,9 @@ async function loop() {
 }
 ```
 
-- The loop is woken by commands (start, resume, approval decided, cancel) through an in-process `Signal`, so it doesn't wait out the full idle sleep. All waits use `deps.timers`.
+- `pickNext` / `runChecks` never move a run to `running` while another run is `running` or `cancelling`: `runChecks` re-checks inside its tx and skips `CHECKS_PASSED` otherwise, and `applyRunEvent` asserts it (ruling B2).
+- Every logged error or message passes through contracts redaction (ruling B6): `logSafe(err, knownSecrets?)` (`src/log-safe.ts`) renders an error with `redactString` plus exact replacement of the resolved API key, and the engine context wraps `deps.logger` so every event name and field goes through `redactString` / `redactDeep`.
+- The loop is woken by commands (start, pause, resume, approval decided, cancel) through an in-process `Signal`, so it doesn't wait out the full idle sleep. All waits use `deps.timers`.
 - `runChecks` performs dry-run checks for the next model step: providers permitted, credential refs present, snapshot capabilities, and a read-only `admit` of the step's estimate. It applies `CHECKS_PASSED` or `SETUP_BLOCKED` with the matching reason.
 - `eventForFailedStep` maps the failed step's `error_json.code`:
   - `OUTPUT_INVALID` / `ARTIFACT_WRITE_FAILED` → `OUTPUT_INVALID_EXHAUSTED`
@@ -750,7 +762,7 @@ Each issue carries a field path (`steps[3].maxOutputTokens`) matching the mock's
 4. Write the `allowance_set` ledger entry `+L`.
 5. Store the idempotency key and append `run.created`.
 
-Then signal the loop. Preflight uses the same code path with `dryRun: true` and stops before the transaction.
+Then signal the loop. Preflight uses the same code path with `dryRun: true` and stops before the transaction. **Its first-reservation N (ruling B7)** is computed exactly like dispatch: the same prompt rendering as the context assembler (`renderStepPrompt`: role instructions + output contract, goal, constraints, diff block, file blocks in `run_input_files` order), `buildModelRequest` (output schema, `maxOutputTokens`, `refusalFallback`), and `adapter.estimate` (request overhead, billed hops, allowance prices). Without a key the adapter's local estimate is used, so preflight N equals the first attempt's reservation for the same inputs.
 
 **Config revisions (R3-13).** The snapshot is revision 0 and is never mutated. Every later profile change (`switch_profile`, `runs.retryStep{profileId}`) appends a `run_config_revisions` row and emits `run.config_revised`. `effectiveStepSnapshot` = the latest revision for that step key, else the snapshot entry. Historical attempts keep their own `profile_snapshot_json`.
 
@@ -852,6 +864,7 @@ It does **not** start the engine. Callers run `await runtime.engine.start()`. `d
 | `report.test.ts` | A `report.v1` artifact for each terminal status (completed, incomplete, cancelled, failed). Idempotent. Missing report regenerated at start. Markdown renderer snapshot (byte stability) |
 | `setup-calls.test.ts` | Admission over `scope='setup'` entries for the month. `BUDGET_BLOCKED` without a call when exhausted. Settle / release / unknown entries carry `attempt_id` NULL and `certainty` |
 | `crash-hooks.test.ts` | Grammar: `afterStepCommit@plan`, `afterDispatchIntent@review#2`, invalid hook / step key / `#0` rejected. The n-th matching invocation calls the injected `exit(137)`. `crashHooksFromEnv` returns `undefined` without `RELAY_E2E=1` |
+| `referee-fixes.test.ts` | Referee rulings: B3 lost settlement CAS writes nothing and the stop/restart race settles an attempt once (R never negative); B4 PROJECT_CHANGED at implement invalidates the approval (`project_changed`) unless `use_preserved_snapshot`; B5 fallback iterations priced per model (unknown → provider max, `estimated`); B6 no API key reaches the logger; B7 preflight N = first attempt reservation; B9 `runs.pause` and any wake end a `wait_until` sleep |
 | `engine.test.ts` (tagged `@m2`) | Full template on the fake `happy-path` scenario: final statuses, **4 model attempts** (review, plan, implement, verify), synthetic intake/finalize rows succeeded, ledger totals equal fake prices × fixture usage, and the report artifact exists |
 
 ## Success Criteria (gate)

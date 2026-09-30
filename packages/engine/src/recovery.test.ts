@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { microusd } from '@relay/contracts';
 import type { RunId, StepKey, StepRunId } from '@relay/contracts';
 import { reserveEntries } from './budget.js';
-import { recoverOnStart } from './recovery.js';
+import { lastAliveAt, recoverOnStart } from './recovery.js';
 import { applyRunEvent } from './run-machine.js';
 import { stepsToPromote, tick } from './runner.js';
 import { effectiveStepSnapshot, snapshotOf } from './snapshot.js';
@@ -103,5 +103,32 @@ describe('recovery (F9 Wave-1 subset)', () => {
     expect(recovered).toEqual([running]);
     expect(harness.db.repos.runs.get(running).status).toBe('interrupted');
     expect(harness.db.repos.runs.get(queued).status).toBe('queued');
+  });
+
+  it('B1: downtime never counts — 3 h between the crash and the restart add ~0 to execution_ms_used', async () => {
+    const { harness, runId } = await crashedAttempt('dispatching');
+    harness.clock.advance(1_000); // the runner was alive for 1 s after the dispatch intent…
+    harness.db.tx('immediate', (r) => {
+      r.attempts.setProviderIds(r.attempts.listForRun(runId)[0]!.id, { requestId: 'req_1' });
+    });
+    const before = harness.db.repos.runs.get(runId);
+    harness.clock.advance(3 * 3_600_000); // …then crashed; the app restarts 3 h later
+
+    await recoverOnStart(harness.ctx);
+
+    const after = harness.db.repos.runs.get(runId);
+    expect(after.status).toBe('interrupted');
+    expect(after.runningSince).toBeNull();
+    expect(after.executionMsUsed - before.executionMsUsed).toBeLessThan(60_000);
+    expect(after.executionMsUsed).toBeLessThan(60_000);
+  });
+
+  it('B1: lastAliveAt is the latest run/attempt/event timestamp, capped at now', async () => {
+    const { harness, runId } = await crashedAttempt('reserved');
+    const t = harness.clock.now();
+    harness.clock.advance(5_000);
+
+    expect(harness.db.tx('immediate', (r) => lastAliveAt(r, runId, harness.clock.now()))).toBe(t);
+    expect(harness.db.tx('immediate', (r) => lastAliveAt(r, runId, (t - 1) as never))).toBe(t - 1);
   });
 });
