@@ -1,10 +1,11 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId } from 'react';
 import { ChevronDown, Play, Activity } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { runStatusSchema, TERMINAL_RUN_STATUSES } from '@relay/contracts';
 import type { RunStatus, RunSummary } from '@relay/contracts';
 import {
   Button,
+  ButtonLink,
   Card,
   DataTable,
   EmptyState,
@@ -20,6 +21,7 @@ import { toViewError } from '../api/errors';
 import { runLabel, RunCost } from '../features/runs/run-display';
 import { href, paths } from '../features/shell/paths';
 import { markHistoryLoaded, resetHistoryLoaded, useNavPerf } from '../hooks/useNavPerf';
+import { NOW_IDLE_INTERVAL_MS, NOW_RUNNING_INTERVAL_MS, useNow } from '../hooks/useNow';
 import { useProject } from '../hooks/useProject';
 import { useRuns } from '../hooks/useRuns';
 
@@ -50,8 +52,12 @@ function resolveFilter(param: string | null): ResolvedFilter {
   return { key: 'all', ...RUN_FILTERS.all };
 }
 
+function isAccruing(r: RunSummary): boolean {
+  return r.endedAt === null && r.startedAt !== null && (r.status === 'running' || r.status === 'cancelling');
+}
+
 /** Wall time of a finished run, or elapsed time of one in progress. Paused/interrupted runs show "—" (not accruing). */
-function durationOf(r: RunSummary, now: number): string {
+export function durationOf(r: RunSummary, now: number): string {
   if (r.startedAt === null) return '—';
   if (r.endedAt !== null) return formatDuration(r.endedAt - r.startedAt);
   return r.status === 'running' || r.status === 'cancelling' ? formatDuration(now - r.startedAt) : '—';
@@ -68,11 +74,12 @@ export function RunsPage() {
   const { projectId = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const filter = resolveFilter(searchParams.get('status'));
-  const [now] = useState(() => Date.now());
   const historyTitleId = useId();
   const project = useProject(projectId);
   const runs = useRuns(projectId, { ...(filter.statuses === undefined ? {} : { status: filter.statuses }), filterKey: filter.key });
   const rows = runs.data?.pages.flatMap((p) => p.items);
+  // Running durations tick every second; otherwise relative times refresh every minute and on every refetch.
+  const now = useNow(rows?.some(isAccruing) === true ? NOW_RUNNING_INTERVAL_MS : NOW_IDLE_INTERVAL_MS, runs.dataUpdatedAt);
 
   useEffect(() => {
     resetHistoryLoaded();
@@ -128,10 +135,9 @@ export function RunsPage() {
         title="No runs yet"
         body="Start the review-to-patch template on selected files. Each run keeps its steps, approvals, artifacts and tracked cost here."
         actions={
-          <Link className="btn primary" to={paths.newRun(projectId)}>
-            <Play aria-hidden="true" />
+          <ButtonLink as={Link} variant="primary" icon={Play} to={paths.newRun(projectId)}>
             Start a workflow
-          </Link>
+          </ButtonLink>
         }
       />
     );
@@ -187,7 +193,7 @@ export function RunsPage() {
             { key: 'duration', header: 'Duration', numeric: true, cell: (r) => durationOf(r, now) },
           ]}
         />
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="pager">
           <p className="subtle">
             {runs.hasNextPage
               ? `Showing ${String(rows.length)} runs, newest first.`
@@ -214,24 +220,23 @@ export function RunsPage() {
         title="Runs"
         breadcrumbs={projectName === undefined ? [] : [{ label: projectName }, { label: 'All workflows' }]}
         actions={
-          <Link className="btn primary" to={paths.newRun(projectId)}>
-            <Play aria-hidden="true" />
+          <ButtonLink as={Link} variant="primary" icon={Play} to={paths.newRun(projectId)}>
             Start a workflow
-          </Link>
+          </ButtonLink>
         }
       />
       <Card labelledBy={historyTitleId}>
         <h2 id={historyTitleId} className="sr-only">
           Run history
         </h2>
-        <ul className="flex list-none flex-wrap gap-4 p-0 text-xs text-muted" aria-label="Cost labels">
+        <ul className="cost-legend m-0 list-none p-0" aria-label="Cost labels">
           <li>
-            <span className="tag">reported</span> provider-reported usage
+            <span className="tag certainty-reported">reported</span> provider-reported usage
           </li>
           <li>
-            <span className="tag">est.</span> Relay estimate from the price catalog
+            <span className="tag certainty-estimated">est.</span> Relay estimate from the price catalog
           </li>
-          <li className="inline-flex items-center gap-1">
+          <li>
             <StatusBadge kind="certainty" value="unknown" /> request outcome unknown
           </li>
           <li>Costs are tracked by Relay, not your provider bill.</li>

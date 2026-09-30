@@ -1,8 +1,48 @@
 import { useCallback, useLayoutEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
+import { appError } from '@relay/contracts';
 import type { Channel, InputOf, OutputOf } from '@relay/contracts';
-import { call } from '../api/client';
+import { AppErrorException, call } from '../api/client';
 import { newIdempotencyKey } from '../api/idempotency';
+
+/** User-facing text when a different request is submitted while another is still in flight. */
+export const INTENT_IN_FLIGHT_MESSAGE = 'Another request is still in progress. Wait for it to finish, then try again.';
+
+/**
+ * Rejection for a submit whose input differs from the request in flight on the same channel. It is never resolved
+ * with the other request's result (that would report a different action as done).
+ */
+export class IntentInFlightError extends AppErrorException {
+  constructor(channel?: Channel) {
+    super(
+      appError('CONFLICT', {
+        userMessage: INTENT_IN_FLIGHT_MESSAGE,
+        details: { reason: 'intent_in_flight', ...(channel === undefined ? {} : { channel }) },
+      }),
+    );
+    this.name = 'IntentInFlightError';
+  }
+}
+
+/** True for {@link IntentInFlightError}. */
+export function isIntentInFlightError(e: unknown): e is IntentInFlightError {
+  return e instanceof IntentInFlightError;
+}
+
+/** Stable JSON of a value with object keys sorted (the intent fingerprint; `undefined` fields are dropped). */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_k, v: unknown) => {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return v;
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(v).sort()) sorted[k] = (v as Record<string, unknown>)[k];
+    return sorted;
+  });
+}
+
+/** The intent a submit belongs to: (channel, canonical input). */
+export function intentFingerprint(channel: Channel, input: unknown): string {
+  return `${channel}\u0000${canonicalJson(input)}`;
+}
 
 /** Channels whose input carries an `idempotencyKey` (02 §B0 `Idem` commands). */
 export type IdemChannel = {
@@ -19,9 +59,12 @@ export interface IdempotentMutationOptions<C extends IdemChannel> {
 }
 
 export interface IdempotentMutation<C extends IdemChannel> {
-  /** Fire-and-forget submit. A second submit while one is in flight is ignored (no double start). */
+  /** Fire-and-forget submit. A second submit of the same intent while one is in flight is deduped (no double start). */
   readonly mutate: (input: IntentInput<C>) => void;
-  /** Awaitable submit. While in flight, returns the in-flight promise. */
+  /**
+   * Awaitable submit. The same intent (equal canonical input) while in flight returns the in-flight promise; a
+   * different input while another is in flight rejects with {@link IntentInFlightError} (never A's result).
+   */
   readonly mutateAsync: (input: IntentInput<C>) => Promise<OutputOf<C>>;
   readonly isPending: boolean;
   readonly error: unknown;
@@ -33,16 +76,17 @@ export interface IdempotentMutation<C extends IdemChannel> {
 }
 
 /**
- * Mutation for an idempotent command (10 J2). One `idempotencyKey` per user intent: generated on the first submit,
- * reused by retries of the same intent (after an error), and reset after success or by {@link newIntent}. A
- * double-click therefore sends one request, and a retry never double-starts (02 §B0).
+ * Mutation for an idempotent command (10 J2). One `idempotencyKey` per user intent, where the intent is
+ * (channel, canonical input): generated on the first submit, reused by retries of the same intent (after an error),
+ * and reset after success, by {@link newIntent}, or when the input changes. A double-click therefore sends one
+ * request, a retry never double-starts (02 §B0), and a different request never reuses another request's key.
  */
 export function useIdempotentMutation<C extends IdemChannel>(
   channel: C,
   options: IdempotentMutationOptions<C> = {},
 ): IdempotentMutation<C> {
-  const keyRef = useRef<string | null>(null);
-  const inFlight = useRef<Promise<OutputOf<C>> | null>(null);
+  const intentRef = useRef<{ readonly fingerprint: string; readonly key: string } | null>(null);
+  const inFlight = useRef<{ readonly fingerprint: string; readonly promise: Promise<OutputOf<C>> } | null>(null);
   const optionsRef = useRef(options);
   useLayoutEffect(() => {
     optionsRef.current = options;
@@ -54,12 +98,16 @@ export function useIdempotentMutation<C extends IdemChannel>(
 
   const mutateAsync = useCallback(
     (input: IntentInput<C>): Promise<OutputOf<C>> => {
-      if (inFlight.current !== null) return inFlight.current;
-      keyRef.current ??= newIdempotencyKey();
-      const full = { ...input, idempotencyKey: keyRef.current } as unknown as InputOf<C>;
+      const fingerprint = intentFingerprint(channel, input);
+      if (inFlight.current !== null) {
+        if (inFlight.current.fingerprint === fingerprint) return inFlight.current.promise;
+        return Promise.reject(new IntentInFlightError(channel));
+      }
+      if (intentRef.current?.fingerprint !== fingerprint) intentRef.current = { fingerprint, key: newIdempotencyKey() };
+      const full = { ...input, idempotencyKey: intentRef.current.key } as unknown as InputOf<C>;
       const promise = rawMutateAsync(full).then(
         (data) => {
-          keyRef.current = null;
+          intentRef.current = null;
           inFlight.current = null;
           optionsRef.current.onSuccess?.(data, input);
           return data;
@@ -71,10 +119,10 @@ export function useIdempotentMutation<C extends IdemChannel>(
           throw error;
         },
       );
-      inFlight.current = promise;
+      inFlight.current = { fingerprint, promise };
       return promise;
     },
-    [rawMutateAsync],
+    [channel, rawMutateAsync],
   );
 
   const mutate = useCallback(
@@ -85,9 +133,9 @@ export function useIdempotentMutation<C extends IdemChannel>(
   );
 
   const newIntent = useCallback(() => {
-    if (inFlight.current === null) keyRef.current = null;
+    if (inFlight.current === null) intentRef.current = null;
   }, []);
-  const currentKey = useCallback(() => keyRef.current, []);
+  const currentKey = useCallback(() => intentRef.current?.key ?? null, []);
 
   return {
     mutate,

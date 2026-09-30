@@ -7,6 +7,7 @@ import type { OutputOf, ProjectDetail, RunAction, RunDetail, RunSummary, Workflo
 import {
   BudgetMeter,
   Button,
+  ButtonLink,
   Card,
   CardHeader,
   DataTable,
@@ -25,6 +26,7 @@ import { stepKeyLabel } from '../../lib/format';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
+import { RUNS_MAX_PAGE } from '../../hooks/useRuns';
 import { useRunActions } from '../run-inspector/useRunActions';
 import { runLabel, RunCost } from '../runs/run-display';
 import { href, paths } from '../shell/paths';
@@ -32,8 +34,8 @@ import type { DisconnectedProvider } from './overview-model';
 
 function SafeNote() {
   return (
-    <p className="inline-flex items-start gap-2 text-sm text-accent">
-      <ShieldCheck aria-hidden="true" width={16} height={16} className="mt-0.5 flex-none" />
+    <p className="safe-note">
+      <ShieldCheck aria-hidden="true" />
       No project files have been modified.
     </p>
   );
@@ -49,6 +51,8 @@ function monthName(now: number): string {
 export interface OverviewStatsProps {
   readonly project: ProjectDetail;
   readonly activeCount: number;
+  /** More active runs exist than one page counts: shown as "100+". */
+  readonly activeCapped?: boolean;
   readonly activeHint: string;
   readonly tracked: OutputOf<'relay/v1/ledger.projectSummary'> | undefined;
   readonly latestRunId: string | undefined;
@@ -56,19 +60,24 @@ export interface OverviewStatsProps {
 }
 
 /** Active runs · Usage tracked by Relay · Project memory (§5.2). */
-export function OverviewStats({ project, activeCount, activeHint, tracked, latestRunId, now }: OverviewStatsProps) {
+export function OverviewStats({ project, activeCount, activeCapped = false, activeHint, tracked, latestRunId, now }: OverviewStatsProps) {
   const suggestions = project.stats.suggestions;
+  const approved = project.stats.approvedMemory;
   return (
     <section className="grid grid-cols-3 gap-5" aria-label="Project summary">
-      <StatTile label="Active runs" value={<span className="num">{activeCount}</span>} hint={activeHint} />
+      <StatTile
+        label="Active runs"
+        value={<span className="num">{activeCapped ? `${String(RUNS_MAX_PAGE)}+` : activeCount}</span>}
+        hint={activeHint}
+      />
       <StatTile
         label="Usage tracked by Relay"
+        labelAside={monthName(now)}
         value={tracked === undefined ? '…' : <Money value={tracked.trackedMicrousd} />}
         hint={
           <>
-            {monthName(now)} ·{' '}
             {tracked === undefined || tracked.reservedMicrousd === 0 ? (
-              'nothing reserved in flight'
+              'Nothing reserved in flight'
             ) : (
               <>
                 <Money value={tracked.reservedMicrousd} /> reserved in flight
@@ -82,17 +91,23 @@ export function OverviewStats({ project, activeCount, activeHint, tracked, lates
             <span className="mt-1 block">Only calls made through Relay. Your provider account bill may be higher.</span>
           </>
         }
-        {...(latestRunId === undefined ? {} : { href: href(paths.run(project.id, latestRunId, { tab: 'ledger' })) })}
+        {...(latestRunId === undefined
+          ? {}
+          : { secondaryAction: <Link to={paths.run(project.id, latestRunId, { tab: 'ledger' })}>Open usage ledger</Link> })}
       />
       <StatTile
         label="Project memory"
-        value={<span className="num">{project.stats.approvedMemory}</span>}
-        hint={
-          suggestions > 0
-            ? `approved record${project.stats.approvedMemory === 1 ? '' : 's'} · ${String(suggestions)} suggestion${suggestions === 1 ? '' : 's'} to review`
-            : `approved record${project.stats.approvedMemory === 1 ? '' : 's'} · manage memory`
+        value={<span className="num">{approved}</span>}
+        hint={`approved record${approved === 1 ? '' : 's'}`}
+        secondaryAction={
+          suggestions > 0 ? (
+            <Link to={paths.memory(project.id, { tab: 'suggested' })}>
+              {suggestions} suggestion{suggestions === 1 ? '' : 's'} to review
+            </Link>
+          ) : (
+            <Link to={paths.memory(project.id)}>Manage memory</Link>
+          )
         }
-        href={href(paths.memory(project.id, suggestions > 0 ? { tab: 'suggested' } : {}))}
       />
     </section>
   );
@@ -115,10 +130,14 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
       tone="warning"
       title={title}
       actions={
-        <Link className="btn primary" to={paths.run(projectId, run.id, unknownStep === undefined ? {} : { step: unknownStep })}>
-          <ArrowRight aria-hidden="true" />
+        <ButtonLink
+          as={Link}
+          variant="primary"
+          icon={ArrowRight}
+          to={paths.run(projectId, run.id, unknownStep === undefined ? {} : { step: unknownStep })}
+        >
           Review recovery options
-        </Link>
+        </ButtonLink>
       }
     >
       <p>
@@ -146,13 +165,12 @@ export function ProviderBanner({ provider }: { readonly provider: DisconnectedPr
       title={`Authentication failed for ${provider.displayName}`}
       actions={
         <>
-          <Link className="btn danger" to={paths.settings('providers')}>
-            <Plug aria-hidden="true" />
+          <ButtonLink as={Link} variant="danger" icon={Plug} to={paths.settings('providers')}>
             Reconnect {provider.displayName}
-          </Link>
-          <Link className="btn ghost" to={paths.settings('providers')}>
+          </ButtonLink>
+          <ButtonLink as={Link} variant="ghost" to={paths.settings('providers')}>
             Open provider settings
-          </Link>
+          </ButtonLink>
         </>
       }
     >
@@ -201,12 +219,12 @@ export function ApprovalAttentionCard({ projectId, run }: { readonly projectId: 
         <SafeNote />
       </div>
       <div className="row">
-        <Link className="btn primary" to={stepPath}>
+        <ButtonLink as={Link} variant="primary" to={stepPath}>
           Inspect plan
-        </Link>
-        <Link className="btn" to={paths.run(projectId, run.id)}>
+        </ButtonLink>
+        <ButtonLink as={Link} to={paths.run(projectId, run.id)}>
           View {runLabel(run.id).toLowerCase()}
-        </Link>
+        </ButtonLink>
       </div>
     </Card>
   );
@@ -215,7 +233,7 @@ export function ApprovalAttentionCard({ projectId, run }: { readonly projectId: 
 /** A running run with no approval pending. */
 export function ActiveRunCard({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const titleId = useId();
-  const actions = useRunActions();
+  const actions = useRunActions({ runId: run.id, projectId });
   const current = run.steps.find((s) => s.state === 'executing' || s.state === 'validating' || s.state === 'reserved' || s.state === 'ready');
   const index = current === undefined ? -1 : run.steps.indexOf(current);
   return (
@@ -243,12 +261,13 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
         <ErrorView error={toViewError(actions.error)} onAction={actions.clearError} />
       )}
       <div className="row">
-        <Link className="btn primary" to={paths.run(projectId, run.id, current === undefined ? {} : { step: current.id })}>
+        <ButtonLink as={Link} variant="primary" to={paths.run(projectId, run.id, current === undefined ? {} : { step: current.id })}>
           Open current step
-        </Link>
+        </ButtonLink>
         {run.availableActions.includes('pause') ? (
           <Button
             pending={actions.pending === 'pause'}
+            disabled={actions.busy && actions.pending !== 'pause'}
             onClick={() => {
               void actions.dispatch({ action: 'pause', runId: run.id });
             }}
@@ -264,7 +283,7 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
 /** Interrupted or unknown-outcome run: RecoveryPanel (§4.4). Decisions that need the inspector go there. */
 export function RecoveryAttention({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const navigate = useNavigate();
-  const actions = useRunActions();
+  const actions = useRunActions({ runId: run.id, projectId });
   const onDecide = (action: RunAction) => {
     const stepId = run.unresolvedAttempts[0]?.stepRunId;
     if (action === 'stop' || action === 'cancel' || action === 'review_recovery') {
@@ -330,9 +349,9 @@ export function StartCard({ project, templateVersion }: { readonly project: Proj
             drafted.
           </p>
           <div>
-            <Link className="btn primary" to={paths.newRun(project.id)}>
+            <ButtonLink as={Link} variant="primary" to={paths.newRun(project.id)}>
               Start: Review &amp; propose a fix
-            </Link>
+            </ButtonLink>
           </div>
         </div>
       </div>
@@ -361,9 +380,9 @@ export function RunControlsCard({ project, focusRun, workflowLimits, workflowId 
         titleId={titleId}
         actions={
           workflowId === undefined ? undefined : (
-            <Link className="btn ghost sm" to={paths.workflow(project.id, workflowId)}>
+            <ButtonLink as={Link} variant="ghost" size="sm" to={paths.workflow(project.id, workflowId)}>
               Edit limits
-            </Link>
+            </ButtonLink>
           )
         }
       />

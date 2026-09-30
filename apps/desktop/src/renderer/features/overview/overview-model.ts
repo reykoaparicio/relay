@@ -1,22 +1,31 @@
 // Pure derivation of the Overview's mock state from real data (10 J5 "Overview" rows).
-import type { ProjectDetail, ProviderId, ProviderStatus, RunDetail, RunSummary } from '@relay/contracts';
+import type { ProjectDetail, ProviderId, ProviderStatus, RunDetail, RunStatus, RunSummary } from '@relay/contracts';
 import { providerIdSchema } from '@relay/contracts';
 import { isActiveRun } from '../runs/run-display';
 
-/** Statuses the Overview watches for attention (one query). */
-export const OVERVIEW_WATCHED_STATUSES = [
-  'queued',
-  'running',
-  'awaiting_approval',
-  'cancelling',
-  'paused',
-  'interrupted',
-] as const;
+/** Statuses counted as "Active runs" (in progress, not paused or finished; `isActiveRun`). */
+export const OVERVIEW_ACTIVE_STATUSES = ['queued', 'running', 'awaiting_approval', 'cancelling'] as const satisfies readonly RunStatus[];
+
+/** Status-filtered heads the Overview derives from (each its own `runs.list` query, never a truncated mixed list). */
+export interface OverviewRunHeads {
+  /** `runs.list({ status: ['awaiting_approval'], limit: 1 })`. */
+  readonly awaiting: readonly RunSummary[];
+  /** `runs.list({ status: ['running', 'queued'], limit: 1 })`. */
+  readonly running: readonly RunSummary[];
+  /** `runs.list({ status: ['interrupted'], limit: 1 })`. */
+  readonly interrupted: readonly RunSummary[];
+  /** `runs.list({ status: ['paused'], limit: 100 })` (pause reasons are not filterable server-side). */
+  readonly paused: readonly RunSummary[];
+  /** `runs.list({ status: OVERVIEW_ACTIVE_STATUSES, limit: 100 })` and whether more exist (`nextCursor`). */
+  readonly active: { readonly items: readonly RunSummary[]; readonly more: boolean };
+}
 
 export interface OverviewModel {
   /** `projects.get().stats.runs === 0`. */
   readonly empty: boolean;
   readonly activeCount: number;
+  /** True when there are more active runs than one page shows ("100+"). */
+  readonly activeCapped: boolean;
   /** Any run awaiting approval (attention card: the exact pending step). */
   readonly awaiting: RunSummary | undefined;
   /** A running run when no approval is pending. */
@@ -29,21 +38,21 @@ export interface OverviewModel {
   readonly focus: RunSummary | undefined;
 }
 
-export function deriveOverview(project: ProjectDetail, watched: readonly RunSummary[]): OverviewModel {
-  const awaiting = watched.find((r) => r.status === 'awaiting_approval');
-  const running = awaiting === undefined ? watched.find((r) => r.status === 'running' || r.status === 'queued') : undefined;
-  const interrupted = watched.find(
-    (r) => r.status === 'interrupted' || (r.status === 'paused' && r.pauseReason === 'unknown_outcome'),
-  );
-  const authPaused = watched.find((r) => r.status === 'paused' && r.pauseReason === 'auth_required');
+export function deriveOverview(project: ProjectDetail, heads: OverviewRunHeads): OverviewModel {
+  const awaiting = heads.awaiting[0];
+  const running = awaiting === undefined ? heads.running[0] : undefined;
+  const interrupted = heads.interrupted[0] ?? heads.paused.find((r) => r.pauseReason === 'unknown_outcome');
+  const authPaused = heads.paused.find((r) => r.pauseReason === 'auth_required');
+  const active = heads.active.items.filter(isActiveRun);
   return {
     empty: project.stats.runs === 0,
-    activeCount: watched.filter(isActiveRun).length,
+    activeCount: active.length,
+    activeCapped: heads.active.more,
     awaiting,
     running,
     interrupted,
     authPaused,
-    focus: awaiting ?? running ?? interrupted ?? authPaused ?? watched[0],
+    focus: awaiting ?? running ?? interrupted ?? authPaused ?? heads.paused[0] ?? active[0],
   };
 }
 

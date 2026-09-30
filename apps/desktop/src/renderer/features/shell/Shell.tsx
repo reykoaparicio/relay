@@ -53,11 +53,8 @@ function ProviderStatusLine() {
   const { text, ok } = providerStatusText(providers.data);
   const Icon = ok ? CircleCheck : TriangleAlert;
   return (
-    <a
-      className={`inline-flex items-center gap-2 text-sm no-underline ${ok ? 'text-muted' : 'text-warning'}`}
-      href={href(paths.settings('providers'))}
-    >
-      <Icon aria-hidden="true" width={16} height={16} />
+    <a className={ok ? 'provider-status no-underline' : 'provider-status warn no-underline'} href={href(paths.settings('providers'))}>
+      <Icon aria-hidden="true" />
       {text}
     </a>
   );

@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { FAKE_PROJECT_ID } from '../api/fake-bridge';
+import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
+import { buildRun, DAY } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 
 const OVERVIEW = `/p/${FAKE_PROJECT_ID}`;
@@ -30,9 +31,14 @@ describe('OverviewPage', () => {
     const { bridge } = renderApp(OVERVIEW, { scenario: 'awaiting-approval' });
     await ready();
     const latest = bridge.world.runs[0];
-    const usage = await screen.findByRole('link', { name: /usage tracked by relay/i });
-    expect(usage.getAttribute('href')).toBe(`#/p/${FAKE_PROJECT_ID}/runs/${latest?.id ?? ''}?tab=ledger`);
-    expect(usage).toHaveTextContent('Your provider account bill may be higher');
+    const usage = await screen.findByRole('link', { name: 'Open usage ledger' });
+    expect(usage.getAttribute('href')).toBe(`/p/${FAKE_PROJECT_ID}/runs/${latest?.id ?? ''}?tab=ledger`);
+    const tile = usage.closest('.stat');
+    expect(tile).not.toBeNull();
+    expect(tile).toHaveTextContent('Usage tracked by Relay');
+    expect(tile).toHaveTextContent('Your provider account bill may be higher');
+    // Memory tile: the suggestions link is a secondary action (never nested in another link).
+    expect(screen.getByRole('link', { name: /suggestions? to review/ }).getAttribute('href')).toMatch(/\/memory\?tab=suggested$/);
 
     const table = await screen.findByRole('table', { name: /most recent runs/i });
     const ledgerLinks = within(table).getAllByRole('link', { name: /open the ledger/i });
@@ -120,5 +126,63 @@ describe('OverviewPage', () => {
   it('shows the fake provider badge in fake mode', async () => {
     renderApp(OVERVIEW, { scenario: 'completed' });
     expect(await screen.findByText('Fake provider: no real model calls')).toBeInTheDocument();
+  });
+
+  describe('B7: counts and attention come from status-filtered queries (more than one page of runs)', () => {
+    it('finds the awaiting run behind 30 newer running runs and counts all active runs', async () => {
+      const bridge = createFakeBridge('completed');
+      const now = Date.now();
+      const running = Array.from({ length: 30 }, (_, i) =>
+        buildRun(now, { n: 200 + i, goal: `Running ${String(i)}`, status: 'running', agoMs: 60_000 + i, durationMs: 0, steps: {}, cost: {} }).run,
+      );
+      const awaiting = buildRun(now, {
+        n: 300,
+        goal: 'Old approval',
+        status: 'awaiting_approval',
+        agoMs: 5 * DAY,
+        durationMs: 0,
+        steps: { plan: 'succeeded', approve: 'awaiting_approval' },
+        cost: {},
+      }).run;
+      bridge.world.runs = [...running, ...bridge.world.runs, awaiting];
+      renderApp(OVERVIEW, { bridge });
+      const summary = await screen.findByRole('region', { name: 'Project summary' });
+      await waitFor(() => {
+        expect(within(summary).getByText('31')).toBeInTheDocument();
+      });
+      expect(within(summary).getByText('Waiting for your approval')).toBeInTheDocument();
+      const lists = bridge.callsTo('relay/v1/runs.list').map((c) => c.input as { status?: string[]; limit?: number });
+      expect(lists).toContainEqual(expect.objectContaining({ status: ['awaiting_approval'], limit: 1 }));
+    });
+
+    it('shows "100+" when more active runs exist than one page', async () => {
+      const bridge = createFakeBridge('completed');
+      const now = Date.now();
+      const running = Array.from({ length: 120 }, (_, i) =>
+        buildRun(now, { n: 400 + i, goal: `Running ${String(i)}`, status: 'running', agoMs: 60_000 + i, durationMs: 0, steps: {}, cost: {} }).run,
+      );
+      bridge.world.runs = [...running, ...bridge.world.runs];
+      renderApp(OVERVIEW, { bridge });
+      const summary = await screen.findByRole('region', { name: 'Project summary' });
+      expect(await within(summary).findByText('100+')).toBeInTheDocument();
+    });
+  });
+
+  describe('B6: the clock is live', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('the usage month label follows the current month', async () => {
+      vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+      vi.setSystemTime(new Date(2026, 8, 30, 23, 59, 30));
+      renderApp(OVERVIEW, { scenario: 'completed' });
+      const summary = await screen.findByRole('region', { name: 'Project summary' });
+      expect(await within(summary).findByText('September')).toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(within(summary).getByText('October')).toBeInTheDocument();
+    });
   });
 });

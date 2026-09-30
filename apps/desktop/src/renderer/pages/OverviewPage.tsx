@@ -1,8 +1,7 @@
-import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { Play } from 'lucide-react';
 import { Link, useParams } from 'react-router';
-import { ErrorView, PageHeader, Skeleton } from '../components/ui';
+import { ButtonLink, ErrorView, PageHeader, Skeleton } from '../components/ui';
 import { toViewError } from '../api/errors';
 import {
   ActiveRunCard,
@@ -15,15 +14,16 @@ import {
   RunControlsCard,
   StartCard,
 } from '../features/overview/OverviewCards';
-import { deriveOverview, disconnectedProviders, OVERVIEW_WATCHED_STATUSES } from '../features/overview/overview-model';
+import { deriveOverview, disconnectedProviders, OVERVIEW_ACTIVE_STATUSES } from '../features/overview/overview-model';
 import type { OverviewModel } from '../features/overview/overview-model';
 import { paths } from '../features/shell/paths';
 import { useNavPerf } from '../hooks/useNavPerf';
+import { NOW_IDLE_INTERVAL_MS, useNow } from '../hooks/useNow';
 import { useProject } from '../hooks/useProject';
 import { useProjectCost } from '../hooks/useProjectCost';
 import { useProviders } from '../hooks/useProviders';
 import { useRun } from '../hooks/useRun';
-import { useRuns } from '../hooks/useRuns';
+import { RUNS_MAX_PAGE, useRuns, useRunsHead } from '../hooks/useRuns';
 import { useWorkflow, useWorkflows } from '../hooks/useWorkflow';
 
 const RECENT_RUNS = 3;
@@ -42,10 +42,15 @@ function activeHint(model: OverviewModel): string {
 /** Project overview (10 J4, §5.2). Mock states: awaiting-approval, active-run, empty, interrupted, provider-disconnected. */
 export function OverviewPage() {
   const { projectId = '' } = useParams();
-  const [now] = useState(() => Date.now());
   const project = useProject(projectId);
   const recent = useRuns(projectId, { limit: RECENT_RUNS });
-  const watched = useRuns(projectId, { status: OVERVIEW_WATCHED_STATUSES, filterKey: 'overview-watched' });
+  // Status-filtered queries: counts and attention never come from a truncated mixed list.
+  const awaitingQ = useRunsHead(projectId, ['awaiting_approval'], 1, 'awaiting');
+  const runningQ = useRunsHead(projectId, ['running', 'queued'], 1, 'running');
+  const interruptedQ = useRunsHead(projectId, ['interrupted'], 1, 'interrupted');
+  const pausedQ = useRunsHead(projectId, ['paused'], RUNS_MAX_PAGE, 'paused');
+  const activeQ = useRunsHead(projectId, OVERVIEW_ACTIVE_STATUSES, RUNS_MAX_PAGE, 'active');
+  const heads = [awaitingQ, runningQ, interruptedQ, pausedQ, activeQ] as const;
   const cost = useProjectCost(projectId);
   const providers = useProviders();
   const workflows = useWorkflows();
@@ -53,13 +58,26 @@ export function OverviewPage() {
   const workflowVersion = useWorkflow(workflow?.id, workflow?.latestValidatedVersion);
 
   const model =
-    project.data === undefined || watched.data === undefined
+    project.data === undefined ||
+    awaitingQ.data === undefined ||
+    runningQ.data === undefined ||
+    interruptedQ.data === undefined ||
+    pausedQ.data === undefined ||
+    activeQ.data === undefined
       ? undefined
-      : deriveOverview(project.data, watched.data.pages.flatMap((p) => p.items));
+      : deriveOverview(project.data, {
+          awaiting: awaitingQ.data.items,
+          running: runningQ.data.items,
+          interrupted: interruptedQ.data.items,
+          paused: pausedQ.data.items,
+          active: { items: activeQ.data.items, more: activeQ.data.nextCursor !== null },
+        });
   const focusDetail = useRun(model?.focus?.id);
   const interruptedDetail = useRun(model?.interrupted?.id);
   const authDetail = useRun(model?.authPaused?.id);
   const recentRuns = recent.data?.pages[0]?.items;
+  // A live clock: relative times tick, and the month label follows the current month (refreshed on refetch).
+  const now = useNow(NOW_IDLE_INTERVAL_MS, recent.dataUpdatedAt);
 
   useNavPerf('overview', project.data !== undefined && recentRuns !== undefined);
 
@@ -68,15 +86,14 @@ export function OverviewPage() {
       title="Project overview"
       breadcrumbs={project.data === undefined ? [] : [{ label: project.data.name }, { label: project.data.rootDisplayPath }]}
       actions={
-        <Link className="btn primary" to={paths.newRun(projectId)}>
-          <Play aria-hidden="true" />
+        <ButtonLink as={Link} variant="primary" icon={Play} to={paths.newRun(projectId)}>
           Start a workflow
-        </Link>
+        </ButtonLink>
       }
     />
   );
 
-  const loadError = project.error ?? watched.error ?? recent.error;
+  const loadError = project.error ?? heads.find((q) => q.error !== null)?.error ?? recent.error;
   if (loadError !== null) {
     return (
       <>
@@ -85,7 +102,7 @@ export function OverviewPage() {
           error={toViewError(loadError)}
           onAction={() => {
             void project.refetch();
-            void watched.refetch();
+            for (const q of heads) void q.refetch();
             void recent.refetch();
           }}
         />
@@ -127,6 +144,7 @@ export function OverviewPage() {
       <OverviewStats
         project={p}
         activeCount={model.activeCount}
+        activeCapped={model.activeCapped}
         activeHint={activeHint(model)}
         tracked={cost.data}
         latestRunId={recentRuns?.[0]?.id}

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import { buildRun, DAY } from '../api/fake-scenarios/world';
@@ -91,6 +91,28 @@ describe('RunsPage', () => {
       expect(performance.getEntriesByName('relay:nav:runs', 'measure')).toHaveLength(1);
       expect(performance.getEntriesByName('relay:history-loaded', 'mark')).toHaveLength(1);
       expect(performance.getEntriesByName('relay:history-loaded', 'measure')).toHaveLength(1);
+    });
+  });
+
+  describe('B6: durations are live', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('a running run duration ticks (not frozen at mount)', async () => {
+      vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+      const { bridge } = renderApp(RUNS, { scenario: 'active-run' });
+      const table = await screen.findByRole('table');
+      const running = bridge.world.runs.find((r) => r.status === 'running');
+      expect(running).toBeDefined();
+      const index = bridge.world.runs.indexOf(running as (typeof bridge.world.runs)[number]);
+      const row = within(table).getAllByRole('row').slice(1)[index] as HTMLElement;
+      const durationCell = () => within(row).getAllByRole('cell').at(-1)?.textContent;
+      const before = durationCell();
+      act(() => {
+        vi.advanceTimersByTime(65_000);
+      });
+      expect(durationCell()).not.toBe(before);
     });
   });
 });

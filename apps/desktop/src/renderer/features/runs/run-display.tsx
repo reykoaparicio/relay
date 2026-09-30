@@ -44,7 +44,9 @@ export function RunCost({ cost, ledgerPath, detailed = false }: RunCostProps) {
             <span className="sr-only">, open the ledger</span>
           </Link>
         )}
-        {total > 0 && certainty !== 'estimated' ? <span className="tag font-sans">{certainty}</span> : null}
+        {total > 0 && certainty !== 'estimated' ? (
+          <span className={certainty === 'reported' ? 'tag certainty-reported' : 'tag font-sans'}>{certainty}</span>
+        ) : null}
       </span>
       {detailed && cost.reserved > 0 ? (
         <span className="subtle whitespace-nowrap font-sans">
