@@ -194,6 +194,7 @@ async function stepDetail(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/runs.ge
   const manifestRow = latest === undefined ? undefined : r.artifacts.listForRun(run.id, ['context_manifest']).filter((a) => a.attemptId === latest.id).at(-1);
   const manifest = manifestRow === undefined ? null : await readJsonArtifact(ctx, manifestRow.id);
   const attemptIds = new Set<string>(attempts.map((a) => a.id));
+  const runEntries = allLedgerEntries(r, run.id);
   const events = r.events.list(run.id, 0, Number.MAX_SAFE_INTEGER).filter((e) => {
     const p = e.payload;
     return p['stepRunId'] === step.id || (typeof p['attemptId'] === 'string' && attemptIds.has(p['attemptId']));
@@ -202,7 +203,7 @@ async function stepDetail(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/runs.ge
     step: view,
     output: output === null ? null : toStepOutput(output.schemaId, output.value),
     manifest: manifest === null ? null : toManifest(manifest.value),
-    attempts: attempts.map((a) => toAttemptView(r, a, step.stepKey)),
+    attempts: attempts.map((a) => toAttemptView(r, a, step.stepKey, runEntries)),
     events,
   });
 }

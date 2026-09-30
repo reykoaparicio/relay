@@ -23,21 +23,6 @@ interface AxeViolation {
   readonly nodes: AxeNode[];
 }
 
-/**
- * KNOWN APP BUG (design system): ErrorView renders "Error code … · reference …" as `.subtle` text inside a
- * `.banner.danger` InlineAlert: #5b6b80 on #fee2e2 = 4.45:1 (< 4.5:1, WCAG 1.4.3). On New run it shows because the
- * memory picker's memory.* call is still a not_implemented notice (Wave 3). Tracked by its own expected-fail test
- * below; excluded here only for exactly that node so every other violation still fails the page.
- */
-function isKnownErrorViewContrast(v: AxeViolation, n: AxeNode): boolean {
-  return (
-    v.id === 'color-contrast' &&
-    /#5b6b80/.test(n.summary ?? '') &&
-    /#fee2e2/.test(n.summary ?? '') &&
-    /Error code|<code>/.test(n.html)
-  );
-}
-
 async function axeViolations(page: Page): Promise<AxeViolation[]> {
   // Legacy mode runs axe in-page: the default mode opens a helper page, which Electron does not support.
   const res = await new AxeBuilder({ page }).withTags(WCAG).setLegacyMode(true).analyze();
@@ -53,25 +38,14 @@ async function axeViolations(page: Page): Promise<AxeViolation[]> {
   }));
 }
 
-/** Runs axe on the current page; attaches the result and asserts 0 violations (minus the one tracked known bug). */
+/** Runs axe on the current page; attaches the result and asserts 0 violations. */
 async function expectNoViolations(page: Page, name: string, testInfo: TestInfo): Promise<void> {
   const all = await axeViolations(page);
   await testInfo.attach(`axe-${name}`, {
     body: JSON.stringify(all, null, 2),
     contentType: 'application/json',
   });
-  const known = all.flatMap((v) =>
-    v.nodes.filter((n) => isKnownErrorViewContrast(v, n)).map((n) => n.target),
-  );
-  if (known.length > 0)
-    testInfo.annotations.push({
-      type: 'known-bug:errorview-contrast',
-      description: `${name}: ${known.join(', ')}`,
-    });
-  const rest = all
-    .map((v) => ({ ...v, nodes: v.nodes.filter((n) => !isKnownErrorViewContrast(v, n)) }))
-    .filter((v) => v.nodes.length > 0);
-  expect.soft(rest, `axe violations on ${name}`).toEqual([]);
+  expect.soft(all, `axe violations on ${name}`).toEqual([]);
 }
 
 /** Onboarding with axe on step 3 (Connect a model provider), then the rest of setup. */
@@ -259,7 +233,6 @@ test.describe('accessibility', { tag: '@a11y' }, () => {
     stubDialogs,
     project,
   }) => {
-    test.fail(true, 'app bug: ErrorView .subtle text on .banner.danger is 4.45:1 (#5b6b80 on #fee2e2)');
     await setupWithAxe(page, stubDialogs, project.dir, test.info());
     await new Shell(page).nav('Runs');
     await new Runs(page).startWorkflow();

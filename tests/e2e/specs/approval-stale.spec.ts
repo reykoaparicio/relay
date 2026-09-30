@@ -61,11 +61,9 @@ test.describe('approval stale', { tag: '@m3' }, () => {
     ).toBeVisible();
   });
 
-  // KNOWN APP BUG: the engine sends PROJECT_CHANGED `details.before` / `details.after` as { relPath: sha256 } maps
-  // (engine approval-binding.ts projectChangedError, context.ts staleCheck), but the StatusBanner reads them with
-  // stringDetail(detail, 'before'|'after') (strings only), so the before → after hashes are never shown.
+  // Regression: the engine sends PROJECT_CHANGED `details.before` / `details.after` as { relPath: sha256 } maps
+  // (engine approval-binding.ts projectChangedError, context.ts staleCheck); the StatusBanner shows them per path.
   test('the stale banner shows the before → after file hashes', async ({ page, stubDialogs, project }) => {
-    test.fail(true, 'app bug: StatusBanner expects string before/after; engine sends per-path hash maps');
     await setupOwnProject(page, stubDialogs, project);
     await startRunViaNewRun(page, GOAL);
     const inspector = new RunInspector(page);

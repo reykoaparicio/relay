@@ -118,14 +118,43 @@ export function toStepView(s: StepRow, model: { providerId: ProviderId; modelId:
   };
 }
 
-/** One attempt → AttemptView (cost from the attempt's ledger balances). */
-export function toAttemptView(r: Repos, a: AttemptRow, stepKey: StepKey): AttemptView {
+/** Weakest first: a total mixing certainties is only as certain as its least certain part. */
+const CERTAINTY_WEAKEST_FIRST: readonly CostCertainty[] = ['unknown', 'estimated', 'calculated', 'reported'];
+
+/**
+ * The certainty of one attempt's settled cost, from its own `settle` ledger entries (reported / calculated /
+ * estimated; the weakest when mixed — e.g. `accept_estimated_charge` settles an unknown liability as `estimated`).
+ * `unknown` when the attempt only has unknown-bucket entries; null when it has neither (nothing charged).
+ */
+export function attemptCostCertainty(entries: readonly LedgerEntryRow[], attemptId: AttemptRow['id']): CostCertainty | null {
+  const seen = new Set<CostCertainty>();
+  let hasUnknownBucket = false;
+  for (const e of entries) {
+    if (e.attemptId !== attemptId) continue;
+    if (e.bucket === 'settled') seen.add(e.certainty ?? 'calculated');
+    else if (e.bucket === 'unknown') hasUnknownBucket = true;
+  }
+  const weakest = CERTAINTY_WEAKEST_FIRST.find((c) => seen.has(c));
+  if (weakest !== undefined) return weakest;
+  return hasUnknownBucket ? 'unknown' : null;
+}
+
+/**
+ * One attempt → AttemptView (cost from the attempt's ledger balances and settle entries). `runEntries` are the run's
+ * ledger entries when the caller already has them (avoids re-reading the ledger per attempt).
+ */
+export function toAttemptView(
+  r: Repos,
+  a: AttemptRow,
+  stepKey: StepKey,
+  runEntries: readonly LedgerEntryRow[] = allLedgerEntries(r, a.runId),
+): AttemptView {
   const bal = r.ledger.attemptBalances(a.id);
   const liability = a.state === 'unknown' || a.state === 'abandoned';
   const cost = liability
     ? { microusd: bal.unknown, certainty: 'unknown' as const }
     : a.usage !== null || bal.settled > 0
-      ? { microusd: bal.settled, certainty: 'calculated' as const }
+      ? { microusd: bal.settled, certainty: attemptCostCertainty(runEntries, a.id) ?? ('calculated' as const) }
       : null;
   const providerLatencyMs = a.firstByteAt !== null && a.finishedAt !== null ? Math.max(0, a.finishedAt - a.firstByteAt) : null;
   return {
@@ -185,15 +214,16 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const stepKeyOf = new Map(p.steps.map((s) => [s.id, s.stepKey]));
   const unresolved = p.attempts.filter((a) => a.state === 'unknown');
   const latest = latestPerKey(p.steps);
+  const entries = allLedgerEntries(r, p.run.id);
   return {
     ...toRunSummary(p),
-    cost: costSummaryOf(p.balances, p.settledByCertainty, attemptsOverran(allLedgerEntries(r, p.run.id))),
+    cost: costSummaryOf(p.balances, p.settledByCertainty, attemptsOverran(entries)),
     limits: p.run.limits,
     input: p.run.input,
     contextHash: p.run.contextHash,
     steps: p.steps.map((s) => toStepView(s, modelInfo(r, p, s.stepKey))),
     pendingApproval: p.pendingApproval === null ? null : toApprovalView(p.pendingApproval),
-    unresolvedAttempts: unresolved.map((a) => toAttemptView(r, a, stepKeyOf.get(a.stepRunId) ?? ('unknown' as StepKey))),
+    unresolvedAttempts: unresolved.map((a) => toAttemptView(r, a, stepKeyOf.get(a.stepRunId) ?? ('unknown' as StepKey), entries)),
     executionMsUsed: p.run.executionMsUsed,
     revisionCycle: p.run.revisionCycle,
     statusDetail: p.run.statusDetail,

@@ -53,6 +53,20 @@ function Tokens({ n, basis }: { readonly n: number | null; readonly basis: strin
   );
 }
 
+/**
+ * App time (R3-20): the attempt's total elapsed time (`appElapsedMs`, reserve → finish) minus provider time
+ * (`providerLatencyMs`, first byte → finish) — the same split as the streaming attempt card. With no provider time
+ * (no first byte), the whole elapsed time is app time.
+ */
+export function attemptAppTimeMs(a: Pick<AttemptView, 'appElapsedMs' | 'providerLatencyMs'>): number | null {
+  if (a.appElapsedMs === null) return null;
+  return a.providerLatencyMs === null ? a.appElapsedMs : Math.max(0, a.appElapsedMs - a.providerLatencyMs);
+}
+
+function durationCell(ms: number | null) {
+  return <span className="num">{ms === null ? '–' : formatDuration(ms)}</span>;
+}
+
 const COLUMNS: ReadonlyArray<DataTableColumn<AttemptView>> = [
   { key: 'seq', header: 'Attempt', cell: (a) => <span className="num">#{a.seq}</span> },
   { key: 'step', header: 'Step', cell: (a) => `${stepKeyLabel(a.stepKey)} · ${ATTEMPT_PURPOSE_LABELS[a.purpose]}` },
@@ -80,13 +94,13 @@ const COLUMNS: ReadonlyArray<DataTableColumn<AttemptView>> = [
     key: 'provider-latency',
     header: 'Provider time',
     numeric: true,
-    cell: (a) => <span className="num">{a.providerLatencyMs === null ? '–' : formatDuration(a.providerLatencyMs)}</span>,
+    cell: (a) => durationCell(a.providerLatencyMs),
   },
   {
     key: 'app-time',
     header: 'App time',
     numeric: true,
-    cell: (a) => <span className="num">{a.appElapsedMs === null ? '–' : formatDuration(a.appElapsedMs)}</span>,
+    cell: (a) => durationCell(attemptAppTimeMs(a)),
   },
 ];
 

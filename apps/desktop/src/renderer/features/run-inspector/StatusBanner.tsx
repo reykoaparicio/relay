@@ -25,6 +25,7 @@ import {
   bannerActions,
   blockedStep,
   breakdownOf,
+  hashMapDetail,
   incompleteCauseOf,
   incompleteTitle,
   issuesOf,
@@ -138,6 +139,28 @@ function UsefulArtifacts({ run, projectId }: { readonly run: RunDetail; readonly
 function ReportLink({ run, projectId }: { readonly run: RunDetail; readonly projectId: string }) {
   if (run.reportArtifactId === null) return null;
   return <Link to={paths.report(projectId, run.id)}>Open the run report</Link>;
+}
+
+/** " (hash 6f4a…b18c → 9e21…04aa)" for one changed path; full values stay copyable through `Hash`. */
+function FileHashChange({
+  path,
+  before,
+  after,
+  hasAfter,
+}: {
+  readonly path: string;
+  readonly before: string | null | undefined;
+  readonly after: string | null | undefined;
+  readonly hasAfter: boolean;
+}) {
+  if (typeof before !== 'string' || !hasAfter) return null;
+  return (
+    <>
+      {' '}
+      (hash <Hash value={before} label={`previous hash of ${path}`} /> →{' '}
+      {typeof after === 'string' ? <Hash value={after} label={`current hash of ${path}`} /> : 'file missing or unreadable'})
+    </>
+  );
 }
 
 interface BannerContent {
@@ -360,9 +383,10 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
         ),
       };
     case 'approval_stale': {
-      const changed = stringListDetail(detail, 'changedPaths');
-      const before = stringDetail(detail, 'before');
-      const after = stringDetail(detail, 'after');
+      const listed = stringListDetail(detail, 'changedPaths');
+      const before = hashMapDetail(detail, 'before');
+      const after = hashMapDetail(detail, 'after');
+      const changed = listed.length > 0 ? listed : [...new Set([...before.keys(), ...after.keys()])];
       return {
         title: 'Project files changed after the plan was proposed',
         body: (
@@ -374,12 +398,7 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
                 {changed.map((p) => (
                   <li key={p}>
                     <span className="mono">{p}</span> changed since the context snapshot
-                    {before !== null && after !== null ? (
-                      <>
-                        {' '}
-                        (hash <Hash value={before} label="previous file hash" /> → <Hash value={after} label="current file hash" />)
-                      </>
-                    ) : null}
+                    <FileHashChange path={p} before={before.get(p)} after={after.get(p)} hasAfter={after.has(p)} />
                   </li>
                 ))}
               </ul>

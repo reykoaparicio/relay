@@ -31,7 +31,9 @@ export const attemptViewSchema = z.object({
   usage: usageViewSchema.nullable(),
   cost: costWithCertaintySchema.nullable(), // settled, or for unknown/abandoned the liability with certainty 'unknown'
   providerLatencyMs: z.number().int().nonnegative().nullable(), // provider time (first byte → finish)
-  appElapsedMs: z.number().int().nonnegative().nullable(), // app wall time (reserve → finish), shown separately (R3-20)
+  // Total wall time (reserve → finish), provider time included. UIs show app time = appElapsedMs − providerLatencyMs
+  // (R3-20: provider time and app time shown separately).
+  appElapsedMs: z.number().int().nonnegative().nullable(),
   providerRequestId: z.string().nullable(),
   startedAt: epochMsSchema,
   finishedAt: epochMsSchema.nullable(),

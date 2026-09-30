@@ -263,7 +263,11 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
         focus('paused', 'approval_stale', {
           steps: { ...DONE_TO_APPROVAL, approve: 'succeeded' },
           statusDetail: appError('PROJECT_CHANGED', {
-            details: { changedPaths: ['src/routes/users.ts'], before: 'a1'.repeat(32), after: 'b2'.repeat(32) },
+            details: {
+              changedPaths: ['src/routes/users.ts'],
+              before: { 'src/routes/users.ts': 'a1'.repeat(32) },
+              after: { 'src/routes/users.ts': 'b2'.repeat(32) },
+            },
           }),
         }),
       );

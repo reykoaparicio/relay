@@ -140,6 +140,15 @@ const PAIRS: ReadonlyArray<readonly [fg: string, bg: string]> = [
  * Pairs read from the actual rules in components.css: the foreground is that rule's `color`, the
  * background is a token or (for `rule-tint`) that rule's own `background` tint over a base token.
  */
+/** Tinted InlineAlert kinds (`.banner.<kind>`) and the background token each rule paints. */
+const BANNER_KINDS: ReadonlyArray<readonly [kind: string, bgToken: string]> = [
+  ['danger', 'color-danger-bg'],
+  ['warning', 'color-warning-bg'],
+  ['info', 'color-info-bg'],
+  ['unknown', 'color-unknown-bg'],
+  ['success', 'color-success-bg'],
+];
+
 type CssBackground = { readonly token: string } | { readonly ruleTintOver: string };
 const CSS_PAIRS: ReadonlyArray<readonly [name: string, selector: string, bg: CssBackground]> = [
   ['selected choice description', '.choice:has(input:checked) .subtle', { token: 'color-surface-selected' }],
@@ -178,6 +187,11 @@ const CSS_PAIRS: ReadonlyArray<readonly [name: string, selector: string, bg: Css
   ['stat-style label outside a stat tile (card)', '.stat-main .label', { token: 'color-surface' }],
   ['stat-style hint outside a stat tile (canvas)', '.stat-main .hint', { token: 'color-canvas' }],
   ['stat-style hint on a block-link hover', '.stat-main .hint', { token: 'color-surface-raised' }],
+  // InlineAlert secondary text (e.g. ErrorView's "Error code … · reference …") on every tinted banner kind.
+  ...BANNER_KINDS.flatMap(([kind, token]) => [
+    [`banner.${kind} subtle text`, '.banner .subtle', { token }] as const,
+    [`banner.${kind} muted text`, '.muted', { token }] as const,
+  ]),
 ];
 
 function cssPairColors(palette: Palette, selector: string, bg: CssBackground): readonly [string, string] {
@@ -208,6 +222,12 @@ describe.each([
     const [fg, background] = cssPairColors(palette, selector, bg);
 
     expect(contrast(fg, background)).toBeGreaterThanOrEqual(WCAG_AA);
+  });
+});
+
+describe('banner backgrounds', () => {
+  it.each(BANNER_KINDS)('.banner.%s paints var(--%s)', (kind, token) => {
+    expect(declaration(`.banner.${kind}`, 'background')).toBe(`var(--${token})`);
   });
 });
 

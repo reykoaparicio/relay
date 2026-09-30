@@ -268,6 +268,9 @@
   .banner.success { background: var(--color-success-bg); border-color: var(--color-accent-border); }
   .banner.success > svg { color: var(--color-success); }
   .banner.neutral > svg { color: var(--color-neutral); }
+  /* Secondary text on a tinted banner: --color-text-subtle drops below 4.5:1 on the status tints (e.g. 4.45:1 on the
+     light danger tint), so banners use --color-text-muted (proved in contrast.test.ts for every banner kind). */
+  .banner .subtle { color: var(--color-text-muted); }
 
   /* ---------- StepTimeline ---------- */
   .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }

@@ -90,14 +90,13 @@ test.describe('unknown outcome', { tag: '@m3' }, () => {
     });
   });
 
-  // KNOWN APP BUG (engine views.ts toAttemptView): an attempt settled by accept_estimated_charge is labelled
-  // certainty 'calculated', so the Attempts tab shows "$0.38" instead of "≈ $0.38 est.". Expected to fail until fixed.
+  // Regression (engine views.ts toAttemptView): an attempt settled by accept_estimated_charge derives its certainty
+  // from its settle entries ('estimated'), so the Attempts tab labels the charge "est.".
   test('the accepted attempt row in the Attempts tab shows the "est." label', async ({
     page,
     stubDialogs,
     project,
   }) => {
-    test.fail(true, 'app bug: AttemptView.cost.certainty is "calculated" after accept_estimated_charge');
     const inspector = await reachUnknown(page, stubDialogs, project);
     await inspector.decideUnknown(ACCEPT);
     await expect(await inspector.ledgerRow('Unknown liability')).toHaveText('$0.00');

@@ -225,6 +225,22 @@ export function stringListDetail(error: AppError | null | undefined, key: string
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
+/**
+ * A `{ relPath: sha256 }` map from PROJECT_CHANGED `details.before` / `details.after` (engine `projectChangedError`,
+ * context stale check). A `null` hash means the file is now missing or unreadable. Entries with any other value shape
+ * are dropped; a detail that is not a plain object yields an empty map.
+ */
+export function hashMapDetail(error: AppError | null | undefined, key: string): ReadonlyMap<string, string | null> {
+  const v = error?.details?.[key];
+  const out = new Map<string, string | null>();
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return out;
+  for (const [path, hash] of Object.entries(v as Record<string, unknown>)) {
+    if (path === '') continue;
+    if (hash === null || (typeof hash === 'string' && hash !== '')) out.set(path, hash);
+  }
+  return out;
+}
+
 /** The latest `ledger.overrun` event (06 F4 payload `{ attemptId, N, X }`): reserved N vs actual X, in µUSD. */
 export function lastOverrun(events: readonly RunEvent[]): { readonly reserved: number; readonly actual: number; readonly attemptId: string | null } | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {

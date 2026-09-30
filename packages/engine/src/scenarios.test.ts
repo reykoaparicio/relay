@@ -6,6 +6,7 @@ import type { Repos } from '@relay/storage';
 import { createHarness } from './testing/harness.js';
 import type { Harness, HarnessOptions } from './testing/harness.js';
 import { drive, driveThroughApproval } from './testing/drive.js';
+import { toAttemptView } from './views.js';
 
 let h: Harness | undefined;
 afterEach(async () => {
@@ -173,6 +174,8 @@ describe('runs.decideUnknown (§7.5)', () => {
     expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ U: 0, C: a.reservationMicrousd }));
     expect(r.ledger.settledByCertainty(runId).estimated).toBe(a.reservationMicrousd);
     expect(ledgerTypes(r, runId).filter((e) => e.attemptId === a.id).map((e) => e.type)).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown', 'resolve_unknown', 'settle']);
+    // The attempt's own view derives certainty from its settle entries: the accepted charge is an estimate.
+    expect(toAttemptView(r, r.attempts.get(a.id), 'review' as StepKey).cost).toEqual({ microusd: a.reservationMicrousd, certainty: 'estimated' });
   });
 
   it('rejects a second decision (CONFLICT), an unknown attempt id (NOT_FOUND), and a run that is not waiting on unknowns', async () => {
