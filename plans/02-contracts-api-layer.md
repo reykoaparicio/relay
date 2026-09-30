@@ -1156,7 +1156,7 @@ B11 depends on B1/B2 only and must land in Wave 1 with the rest of contracts, be
 
 ## Success Criteria (gate)
 - [ ] `pnpm typecheck` → exit 0
-- [ ] `pnpm test:unit packages/contracts --coverage` → all green; coverage ≥ 95% lines
+- [ ] `pnpm test:unit packages/contracts --coverage --coverage.include='packages/contracts/src/**'` → all green; coverage ≥ 95% lines
 - [ ] `pnpm lint` → exit 0 (contracts imports only `zod`)
 - [ ] `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "import('@relay/contracts').then(m => console.log(Object.keys(m.OPERATIONS).length, Object.keys(m.INTERNAL_RUNNER_OPS).length))"` prints `≥ 55` and `9`
 - [ ] `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "import('@relay/contracts').then(m => console.log(Object.keys(m.OUTPUT_SCHEMAS).join(',')))"` prints `findings.v1,plan.v1,patch.v1,review.v1,report.v1`

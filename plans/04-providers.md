@@ -409,7 +409,7 @@ SSE fixtures live in D-owned `packages/providers/src/__fixtures__/{anthropic,ope
 | `catalog.test.ts` | `loadCatalogEntries()` parses every statically imported catalog file with the contracts schema. Entries are unique per version. Every entry's `source` starts with `https://` and has ISO `sourceRetrievedAt` and `effectiveDate`; non-fake sources are official provider pricing URLs. Prices are integers. Every fake fixture in `FAKE_FIXTURES` parses with its contracts output schema |
 
 ## Success Criteria (gate)
-- [ ] `pnpm typecheck && pnpm test:unit packages/providers --coverage` → green, ≥ 85% lines
+- [ ] `pnpm typecheck && pnpm test:unit packages/providers --coverage --coverage.include='packages/providers/src/**'` → green, ≥ 85% lines
 - [ ] `pnpm lint` → exit 0 (SDK imports confined to this package)
 - [ ] `grep -rn "maxRetries: 0" packages/providers/src/{anthropic,openai}.ts | wc -l` → 2
 - [ ] `grep -rn "thinking" packages/providers/src/anthropic.ts` shows no request field set (comment only)

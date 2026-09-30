@@ -9,8 +9,8 @@ const NO_NETWORK = 'tests/helpers/no-network.ts';
 // 00 §6 coverage floors (lines). Enforced when run with --coverage.
 const COVERAGE = {
   provider: 'v8' as const,
-  // No `include`: only files loaded by the run are measured, so filtered runs (pnpm test:unit packages/x --coverage)
-  // gate just that package. The full `pnpm test:unit --coverage` run gates every package.
+  // Full `pnpm test:unit --coverage` gates every package. Per-package gates scope measurement explicitly:
+  // pnpm test:unit packages/x --coverage --coverage.include='packages/x/src/**'
   exclude: ['**/*.test.{ts,tsx}', '**/testing/**', '**/__fixtures__/**', '**/fake-fixtures/**', '**/src/scripts/**'],
   thresholds: {
     'packages/contracts/src/**': { lines: 95 },

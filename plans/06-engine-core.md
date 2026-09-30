@@ -854,7 +854,7 @@ It does **not** start the engine. Callers run `await runtime.engine.start()`. `d
 | `engine.test.ts` (tagged `@m2`) | Full template on the fake `happy-path` scenario: final statuses, **4 model attempts** (review, plan, implement, verify), synthetic intake/finalize rows succeeded, ledger totals equal fake prices × fixture usage, and the report artifact exists |
 
 ## Success Criteria (gate)
-- [ ] `pnpm typecheck && pnpm test:unit packages/engine --coverage` → green, ≥ 90% lines on F files
+- [ ] `pnpm typecheck && pnpm test:unit packages/engine --coverage --coverage.include='packages/engine/src/**'` → green, ≥ 90% lines on F files
 - [ ] `pnpm lint` → exit 0 (no electron/sqlite imports; no value imports of storage/providers/tools outside `runtime.ts`, tests, and `src/testing/**`)
 - [ ] `grep -rn "tx('immediate', async" packages/engine/src | wc -l` → 0
 - [ ] `grep -rn "vi.useFakeTimers" packages/engine/src | wc -l` → 0 (only injected timers)
