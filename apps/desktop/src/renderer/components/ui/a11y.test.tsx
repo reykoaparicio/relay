@@ -234,18 +234,23 @@ const CASES = SCENARIOS.map(([name, build, opts]) => ({ name, build, bare: opts?
 
 afterEach(() => { setWidth(1024); });
 
-describe.each(['dark', 'light'] as const)('axe (%s theme) @a11y', (theme) => {
+/*
+ * Structure only: axe checks roles, names, labels, landmarks, and ARIA here. jsdom computes no colors,
+ * so `color-contrast` is disabled (test-utils `axe`) and the markup is identical in both themes; running
+ * these again with data-theme="light" would test nothing new. The dark AND light contrast guarantee
+ * comes from styles/contrast.test.ts, which resolves every rendered text/background pair per palette.
+ */
+describe('axe structure (theme-independent; contrast lives in styles/contrast.test.ts) @a11y', () => {
   it.each(CASES)('$name has no violations', async ({ build, bare }) => {
     const ui = bare ? build() : <main>{build()}</main>;
-    const { baseElement } = renderWithProviders(ui, { theme });
+    const { baseElement } = renderWithProviders(ui);
 
-    expect(document.documentElement.dataset['theme']).toBe(theme);
     expect(describeViolations(await axe(baseElement))).toEqual([]);
   });
 
   it.each([1100, 1440])('ResponsivePanels at %ipx has no violations', async (width) => {
     setWidth(width);
-    const { baseElement } = renderWithProviders(<main>{panels}</main>, { theme });
+    const { baseElement } = renderWithProviders(<main>{panels}</main>);
 
     expect(describeViolations(await axe(baseElement))).toEqual([]);
   });
@@ -253,10 +258,17 @@ describe.each(['dark', 'light'] as const)('axe (%s theme) @a11y', (theme) => {
   it('open ConfirmDialog has no violations', async () => {
     const { baseElement } = renderWithProviders(
       <ConfirmDialog open onOpenChange={noop} title="Stop this run?" consequences="Finished steps are kept." confirmLabel="Stop run" onConfirm={noop} />,
-      { theme },
     );
     await screen.findByRole('dialog');
 
     expect(describeViolations(await axe(baseElement))).toEqual([]);
+  });
+});
+
+describe('theme switching', () => {
+  it.each(['dark', 'light'] as const)('ThemeProvider stamps data-theme="%s" on the root element', (theme) => {
+    renderWithProviders(<main><p>Body</p></main>, { theme });
+
+    expect(document.documentElement.dataset['theme']).toBe(theme);
   });
 });

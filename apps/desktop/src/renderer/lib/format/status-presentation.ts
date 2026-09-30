@@ -140,8 +140,9 @@ const PAUSE: Record<PauseReason, StatusPresentation> = {
     label: 'Paused: model declined', tone: 'warning', icon: ShieldX, detail: 'Choose another profile or edit the goal',
   },
   unknown_outcome: {
+    // Stays true after the unknown attempt is resolved but before the run resumes (no stale "possible charge").
     label: 'Paused: unknown request outcome', tone: 'unknown', icon: CircleQuestionMark,
-    detail: 'Decide how to handle the possible charge',
+    detail: 'Resolve any unknown request, then retry or stop',
   },
 };
 

@@ -75,6 +75,13 @@ describe('statusPresentation', () => {
     expectComplete(statusPresentation('certainty', s));
   });
 
+  it('keeps the unknown_outcome pause detail true after the unknown request is resolved', () => {
+    const detail = statusPresentation('run', 'paused', 'unknown_outcome').detail;
+
+    expect(detail).toBe('Resolve any unknown request, then retry or stop');
+    expect(detail).not.toMatch(/possible charge/);
+  });
+
   it('labels estimated cost "est." and unknown cost "Unknown charge"', () => {
     expect(statusPresentation('certainty', 'estimated').label).toBe('est.');
     expect(statusPresentation('certainty', 'unknown').label).toBe('Unknown charge');

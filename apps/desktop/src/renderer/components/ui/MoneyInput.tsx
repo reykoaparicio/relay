@@ -3,7 +3,8 @@ import { usd } from '@relay/contracts';
 import type { Microusd } from '@relay/contracts';
 import { Field } from './Field';
 
-const DOLLAR_PATTERN = /^\d{1,9}(\.\d{1,6})?$/;
+/** Plain digits ("1000.50") or comma thousands groups ("1,000.50"); a comma anywhere else ("3,50") is rejected. */
+const DOLLAR_PATTERN = /^(?:\d{1,9}|\d{1,3}(?:,\d{3}){1,2})(?:\.\d{1,6})?$/;
 
 export type MoneyParseResult = { readonly ok: true; readonly value: Microusd } | { readonly ok: false; readonly message: string };
 
@@ -12,13 +13,18 @@ export type MoneyParseResult = { readonly ok: true; readonly value: Microusd } |
  * which never uses floats (§9.2). Returns a plain-language message on failure.
  */
 export function parseDollarInput(text: string): MoneyParseResult {
-  const trimmed = text.trim().replace(/^\$/, '').replaceAll(',', '');
+  const trimmed = text.trim().replace(/^\$/, '');
   if (trimmed === '') return { ok: false, message: 'Enter an amount in US dollars, for example 3.50.' };
   if (!DOLLAR_PATTERN.test(trimmed)) {
-    return { ok: false, message: 'Use a positive amount with at most 6 decimal places, for example 3.50.' };
+    return {
+      ok: false,
+      message: 'Use a positive amount with at most 6 decimal places and commas only between thousands, for example 1,000.50.',
+    };
   }
+  // Commas are validated as thousands separators above, so removing them cannot change the amount.
+  const digits = trimmed.replaceAll(',', '');
   try {
-    return { ok: true, value: usd(trimmed as `${number}`) };
+    return { ok: true, value: usd(digits as `${number}`) };
   } catch {
     return { ok: false, message: 'That amount is too large.' };
   }

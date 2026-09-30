@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { planV1Schema } from '@relay/contracts';
+import type { ApprovalDecision } from '@relay/contracts';
 import { approval, plan } from '../test-fixtures';
 import { ApprovalCard } from './ApprovalCard';
 
@@ -82,5 +84,40 @@ describe('ApprovalCard', () => {
 
     expect(screen.getByRole('button', { name: 'Approve plan' })).toHaveAttribute('aria-busy', 'true');
     expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled();
+  });
+
+  it('keeps focus in the card (not <body>) after confirming a reject that disables the opener @a11y', async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [pending, setPending] = useState<ApprovalDecision | null>(null);
+      return <ApprovalCard approval={approval()} plan={plan()} onDecide={(d) => { setPending(d.decision); }} pendingDecision={pending} />;
+    }
+    render(<Harness />);
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(await screen.findByRole('button', { name: 'Reject plan' }));
+
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull(); });
+    await waitFor(() => { expect(document.activeElement).not.toBe(document.body); });
+    expect(screen.getByRole('heading', { name: 'Proposed plan' })).toHaveFocus();
+  });
+
+  it('moves focus to the heading when the decision turns pending only after focus returned', async () => {
+    const user = userEvent.setup();
+    let setPendingLater: (d: ApprovalDecision) => void = () => undefined;
+    function Harness() {
+      const [pending, setPending] = useState<ApprovalDecision | null>(null);
+      setPendingLater = setPending;
+      return <ApprovalCard approval={approval()} plan={plan()} onDecide={vi.fn()} pendingDecision={pending} />;
+    }
+    render(<Harness />);
+    const reject = screen.getByRole('button', { name: 'Reject' });
+    await user.click(reject);
+    await user.click(await screen.findByRole('button', { name: 'Reject plan' }));
+    await waitFor(() => { expect(reject).toHaveFocus(); });
+
+    act(() => { setPendingLater('rejected'); });
+
+    expect(screen.getByRole('heading', { name: 'Proposed plan' })).toHaveFocus();
   });
 });

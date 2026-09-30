@@ -54,11 +54,15 @@ export function BudgetLedger({ cost, byStep, caption = 'Run usage' }: BudgetLedg
         </tbody>
         <tfoot>
           <tr>
-            <th scope="row">{cost.overrun ? 'Remaining (over allowance)' : 'Remaining'}</th>
+            {/* "Over allowance" follows the arithmetic (remaining < 0), not `overrun` (actual > reservation, §9.5). */}
+            <th scope="row">{cost.remaining < 0 ? 'Remaining (over allowance)' : 'Remaining'}</th>
             <td className="num"><Money value={cost.remaining} /></td>
           </tr>
         </tfoot>
       </table>
+      {cost.overrun ? (
+        <p className="small">Actual cost exceeded the reservation for at least one request. The extra is included above.</p>
+      ) : null}
       {byStep && byStep.length > 0 ? (
         <table className="ledger">
           <caption>Settled usage by step</caption>

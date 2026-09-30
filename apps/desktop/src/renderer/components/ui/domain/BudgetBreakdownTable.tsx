@@ -1,5 +1,5 @@
 import type { BudgetBreakdown, BudgetScope } from '@relay/contracts';
-import { formatMoney } from '../../../lib/format/money';
+import { formatMoneyPair } from '../../../lib/format/money';
 import { Money } from '../Money';
 
 const SCOPE_LABEL: Readonly<Record<BudgetScope, string>> = {
@@ -12,11 +12,13 @@ export interface BudgetBreakdownTableProps {
   readonly breakdown: BudgetBreakdown;
 }
 
-/** §9.3 admission arithmetic, with the inequality spelled out: "$3.10 > $3.00 → blocked". */
+/**
+ * §9.3 admission arithmetic, with the inequality spelled out: "$3.10 > $3.00 → blocked". When both sides
+ * round to the same cents, the verdict adds decimals ("$3.004 > $3.000") so it never reads "$3.00 > $3.00".
+ */
 export function BudgetBreakdownTable({ breakdown: b }: BudgetBreakdownTableProps) {
-  const verdict = b.allowed
-    ? `${formatMoney(b.total)} ≤ ${formatMoney(b.L)} → allowed`
-    : `${formatMoney(b.total)} > ${formatMoney(b.L)} → blocked`;
+  const [total, limit] = formatMoneyPair(b.total, b.L);
+  const verdict = b.allowed ? `${total} ≤ ${limit} → allowed` : `${total} > ${limit} → blocked`;
   return (
     <div className="stack">
       <table className="arith">

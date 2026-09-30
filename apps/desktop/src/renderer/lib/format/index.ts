@@ -1,4 +1,4 @@
-export { formatMoney } from './money';
+export { formatMoney, formatMoneyPair, formatUsdAtPrecision } from './money';
 export { formatTokens, formatTokensExact } from './tokens';
 export { formatHash } from './hash';
 export { formatDuration } from './duration';

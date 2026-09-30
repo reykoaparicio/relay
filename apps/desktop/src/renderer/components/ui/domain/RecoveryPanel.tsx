@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { RunAction, RunDetail } from '@relay/contracts';
 import { DESTRUCTIVE_RUN_ACTIONS, RUN_ACTION_LABELS } from '../../../lib/format/actions';
 import { stepKeyLabel } from '../../../lib/format/labels';
@@ -6,6 +6,7 @@ import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
 import { Money } from '../Money';
 import { StatusBadge } from '../StatusBadge';
+import { useFocusRescue } from '../useFocusRescue';
 
 export interface RecoveryPanelProps {
   readonly run: RunDetail;
@@ -23,15 +24,19 @@ const CONFIRM_TEXT: Partial<Record<RunAction, string>> = {
 /** Interrupted / unknown-outcome recovery (§4.4): what finished, what is unresolved, and the allowed choices. */
 export function RecoveryPanel({ run, onDecide, pendingAction = null }: RecoveryPanelProps) {
   const headingId = useId();
+  const sectionRef = useRef<HTMLElement>(null);
+  // Focus lands here when a chosen action disables or removes the button that had it (never on <body>).
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useFocusRescue(sectionRef, headingRef);
   const [confirming, setConfirming] = useState<RunAction | null>(null);
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
   // The server decides which actions apply (06 F2); the UI never re-derives the rules.
   const actions = run.availableActions.filter((a) => a !== 'export_report' && a !== 'export_patch');
 
   return (
-    <section className="card" aria-labelledby={headingId}>
+    <section ref={sectionRef} className="card" aria-labelledby={headingId}>
       <div className="card-header">
-        <h2 id={headingId}>Recovery</h2>
+        <h2 id={headingId} ref={headingRef} tabIndex={-1}>Recovery</h2>
         <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail />
       </div>
       <p>
@@ -88,6 +93,7 @@ export function RecoveryPanel({ run, onDecide, pendingAction = null }: RecoveryP
         title={confirming ? `${RUN_ACTION_LABELS[confirming]}?` : ''}
         consequences={confirming ? (CONFIRM_TEXT[confirming] ?? '') : ''}
         confirmLabel={confirming ? RUN_ACTION_LABELS[confirming] : 'Confirm'}
+        returnFocusFallback={headingRef}
         onConfirm={() => {
           const action = confirming;
           setConfirming(null);

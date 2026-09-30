@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import * as RadixDialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { Button } from './Button';
@@ -14,10 +14,20 @@ export interface DialogProps {
   readonly trigger?: ReactNode;
   readonly footer?: ReactNode;
   readonly children?: ReactNode;
+  /**
+   * Where focus goes on close when the opener can no longer take it (it was disabled by a pending
+   * action or unmounted by the decision). Typically the owning card's heading with `tabIndex={-1}`.
+   */
+  readonly returnFocusFallback?: RefObject<HTMLElement | null>;
 }
 
-/** Radix Dialog: focus trap, Esc closes, focus returns to the opener (09 I3 `.dialog`). */
-export function Dialog({ open, onOpenChange, title, description, trigger, footer, children }: DialogProps) {
+/** True when `el` is still in the document and can take focus (not disabled, not inside `inert`). */
+export function canReceiveFocus(el: HTMLElement | null | undefined): el is HTMLElement {
+  return el?.isConnected === true && !el.matches(':disabled') && el.closest('[inert]') === null;
+}
+
+/** Radix Dialog: focus trap, Esc closes, focus returns to the opener or a fallback (09 I3 `.dialog`). */
+export function Dialog({ open, onOpenChange, title, description, trigger, footer, children, returnFocusFallback }: DialogProps) {
   const returnFocusTo = useRef<HTMLElement | null>(null);
   // Remember the opener when the dialog opens (Radix only restores focus to its own Trigger).
   // Layout effects run before Radix's FocusScope moves focus into the dialog.
@@ -33,12 +43,14 @@ export function Dialog({ open, onOpenChange, title, description, trigger, footer
           className="dialog"
           {...(description === undefined ? { 'aria-describedby': undefined } : {})}
           onCloseAutoFocus={(event) => {
-            const target = returnFocusTo.current;
+            const opener = returnFocusTo.current;
             returnFocusTo.current = null;
-            if (trigger === undefined && target?.isConnected) {
-              event.preventDefault();
-              target.focus();
-            }
+            // Never drop focus to <body>: a confirmed action often disables or removes its opener.
+            const fallback = returnFocusFallback?.current;
+            const destination = canReceiveFocus(opener) ? opener : canReceiveFocus(fallback) ? fallback : null;
+            if (destination === null) return;
+            event.preventDefault();
+            destination.focus();
           }}
         >
           <div className="card-header">
@@ -74,6 +86,8 @@ export interface ConfirmDialogProps {
   readonly pending?: boolean;
   readonly onConfirm: () => void;
   readonly trigger?: ReactNode;
+  /** See {@link DialogProps.returnFocusFallback}. */
+  readonly returnFocusFallback?: RefObject<HTMLElement | null>;
 }
 
 /** For destructive actions only (§5.7: no confirmations for read-only actions). */
@@ -88,6 +102,7 @@ export function ConfirmDialog({
   pending = false,
   onConfirm,
   trigger,
+  returnFocusFallback,
 }: ConfirmDialogProps) {
   return (
     <Dialog
@@ -96,6 +111,7 @@ export function ConfirmDialog({
       title={title}
       description={consequences}
       {...(trigger === undefined ? {} : { trigger })}
+      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       footer={
         <>
           <RadixDialog.Close asChild>

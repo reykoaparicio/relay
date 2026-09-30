@@ -3,26 +3,60 @@ import type { CostCertainty, Microusd } from '@relay/contracts';
 
 /** Amounts below one cent are shown with 4 decimals so small calls do not read as "$0.00". */
 const FOUR_DP_BELOW_MICROUSD = 10_000; // $0.01
-/** Smallest amount 4 decimals can express ($0.0001). Anything non-zero below it is "< $0.0001". */
+/** Smallest amount 4 decimals can express ($0.0001). Anything non-zero below it reads "< $0.0001". */
 const SMALLEST_FOUR_DP_MICROUSD = 100;
+/** Half of one 4-dp step ($0.00005): 4-dp display rounds half up, so the cent threshold is checked after rounding. */
+const HALF_FOUR_DP_STEP_MICROUSD = SMALLEST_FOUR_DP_MICROUSD / 2;
+/** µUSD has 6 decimal places, so 6 dp always shows two different amounts differently. */
+const MAX_PRECISION = 6;
 
-function formatMagnitude(abs: number): string {
+/** Signed magnitude text. Tiny amounts use an inequality that stays true: "< $0.0001" and "> -$0.0001". */
+function formatSigned(m: number): string {
+  const abs = Math.abs(m);
   if (abs === 0) return formatUsd(0 as Microusd, { precision: 2 });
-  if (abs < SMALLEST_FOUR_DP_MICROUSD) return '< $0.0001';
-  const precision = abs < FOUR_DP_BELOW_MICROUSD ? 4 : 2;
-  return formatUsd(abs as Microusd, { precision });
+  if (abs < SMALLEST_FOUR_DP_MICROUSD) return m < 0 ? '> -$0.0001' : '< $0.0001';
+  // 9_950 µUSD rounds to "$0.0100" at 4 dp, which is one cent: show it as "$0.01" instead.
+  const roundsBelowOneCent = abs + HALF_FOUR_DP_STEP_MICROUSD < FOUR_DP_BELOW_MICROUSD;
+  return formatUsd(m as Microusd, { precision: roundsBelowOneCent ? 4 : 2 });
 }
 
 /**
- * Formats integer micro-USD for display (§9.2). Integer-only: the sign is split off and the
- * magnitude goes through contracts `formatUsd`, so no float arithmetic touches money.
+ * Formats integer micro-USD for display (§9.2). Integer-only: rounding goes through contracts
+ * `formatUsd`, so no float arithmetic touches money.
  * Estimated amounts read "≈ $0.48 est."; unknown liabilities read "$0.48 unknown".
  */
 export function formatMoney(m: Microusd, certainty?: CostCertainty | null): string {
-  const isNegative = m < 0;
-  const magnitude = formatMagnitude(Math.abs(m));
-  const amount = isNegative ? `-${magnitude}` : magnitude;
+  const amount = formatSigned(m);
   if (certainty === 'estimated') return `≈ ${amount} est.`;
   if (certainty === 'unknown') return `${amount} unknown`;
   return amount;
+}
+
+/** Dollars at an explicit precision (0–6 dp), rounding half away from zero with BigInt only. */
+export function formatUsdAtPrecision(m: Microusd, precision: number): string {
+  const digits = Math.min(MAX_PRECISION, Math.max(0, Math.trunc(precision)));
+  const abs = BigInt(Math.abs(m));
+  const step = 10n ** BigInt(MAX_PRECISION - digits);
+  const units = (abs + step / 2n) / step;
+  const scale = 10n ** BigInt(digits);
+  const whole = (units / scale).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const frac = digits === 0 ? '' : `.${(units % scale).toString().padStart(digits, '0')}`;
+  const sign = m < 0 && units !== 0n ? '-' : '';
+  return `${sign}$${whole}${frac}`;
+}
+
+/**
+ * Formats two amounts for a side-by-side comparison ("$3.004 > $3.000"). If the normal display of two
+ * different amounts is identical, precision grows (up to 6 dp, which is exact for µUSD) until they differ,
+ * so an inequality never reads "$3.00 > $3.00".
+ */
+export function formatMoneyPair(a: Microusd, b: Microusd): readonly [string, string] {
+  const first = formatMoney(a);
+  const second = formatMoney(b);
+  if (a === b || first !== second) return [first, second];
+  for (let precision = 3; precision <= MAX_PRECISION; precision++) {
+    const pair = [formatUsdAtPrecision(a, precision), formatUsdAtPrecision(b, precision)] as const;
+    if (pair[0] !== pair[1]) return pair;
+  }
+  return [formatUsdAtPrecision(a, MAX_PRECISION), formatUsdAtPrecision(b, MAX_PRECISION)];
 }

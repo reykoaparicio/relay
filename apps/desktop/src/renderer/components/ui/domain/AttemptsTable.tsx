@@ -23,11 +23,32 @@ function tokenBasis(a: AttemptView): string {
   return a.cost?.certainty === 'estimated' ? 'est.' : 'reported';
 }
 
+/**
+ * Compact count ("12.4k") with the exact count reachable without hover (00b §5: nothing tooltip-only):
+ * screen readers hear the exact number in the disclosure's name, and keyboard or pointer users open it.
+ */
 function Tokens({ n, basis }: { readonly n: number | null; readonly basis: string }) {
   if (n === null) return <span className="subtle">none</span>;
+  const compact = formatTokens(n);
+  const exact = formatTokensExact(n);
+  const tag = <span className="tag">{basis}</span>;
+  if (compact === exact) {
+    return (
+      <span>
+        <span className="num">{exact}</span> {tag}
+      </span>
+    );
+  }
   return (
-    <span title={formatTokensExact(n)}>
-      <span className="num">{formatTokens(n)}</span> <span className="tag">{basis}</span>
+    <span className="tokens">
+      <details className="token-exact">
+        <summary>
+          <span className="num" aria-hidden="true">{compact}</span>
+          <span className="sr-only">{`${exact} tokens`}</span>
+        </summary>
+        <span className="num">{`${exact} exact`}</span>
+      </details>{' '}
+      {tag}
     </span>
   );
 }

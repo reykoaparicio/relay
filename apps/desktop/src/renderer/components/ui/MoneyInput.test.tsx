@@ -18,6 +18,20 @@ describe('parseDollarInput', () => {
     expect(parseDollarInput('1.0000001').ok).toBe(false);
     expect(parseDollarInput('').ok).toBe(false);
   });
+
+  it('accepts commas only as thousands separators (1,000.50 → 1_000_500_000 µUSD)', () => {
+    expect(parseDollarInput('1,000.50')).toEqual({ ok: true, value: 1_000_500_000 });
+    expect(parseDollarInput('$12,345,678.9')).toEqual({ ok: true, value: 12_345_678_900_000 });
+  });
+
+  it.each(['3,50', '1,2,3', '1,0000', ',100', '1,000,', '1000,000'])(
+    'rejects %s instead of silently dropping the comma',
+    (text) => {
+      const result = parseDollarInput(text);
+
+      expect(result.ok).toBe(false);
+    },
+  );
 });
 
 describe('MoneyInput', () => {

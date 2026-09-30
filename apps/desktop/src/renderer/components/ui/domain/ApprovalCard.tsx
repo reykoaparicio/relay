@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Check, MessageSquareText, ShieldCheck, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalView, PlanV1 } from '@relay/contracts';
 import { PROVIDER_LABELS } from '../../../lib/format/labels';
@@ -8,6 +8,7 @@ import { Field } from '../Field';
 import { Hash } from '../Hash';
 import { InlineAlert } from '../InlineAlert';
 import { Textarea } from '../Textarea';
+import { useFocusRescue } from '../useFocusRescue';
 
 /** approvals.decide input minus the idempotency key (02 B5): the hashes the user saw are echoed back. */
 export interface ApprovalDecisionInput {
@@ -46,6 +47,10 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
   const [note, setNote] = useState('');
   const [confirmReject, setConfirmReject] = useState(false);
   const headingId = useId();
+  const sectionRef = useRef<HTMLElement>(null);
+  // Focus lands here when a decision disables or removes the button that had it (never on <body>).
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useFocusRescue(sectionRef, headingRef);
   const recorded = approval.decision;
   const isBusy = pendingDecision !== null;
 
@@ -61,9 +66,9 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
   };
 
   return (
-    <section className="card" aria-labelledby={headingId}>
+    <section ref={sectionRef} className="card" aria-labelledby={headingId}>
       <div className="card-header">
-        <h2 id={headingId}>Proposed plan</h2>
+        <h2 id={headingId} ref={headingRef} tabIndex={-1}>Proposed plan</h2>
       </div>
       <p>{plan.goalRestatement}</p>
       <ol className="list">
@@ -187,6 +192,7 @@ export function ApprovalCard({ approval, plan, onDecide, pendingDecision = null 
         confirmLabel="Reject plan"
         cancelLabel="Keep reviewing"
         pending={pendingDecision === 'rejected'}
+        returnFocusFallback={headingRef}
         onConfirm={() => {
           setConfirmReject(false);
           decide('rejected');
