@@ -67,6 +67,51 @@ describe('createTemplateRegistry', () => {
     }
   });
 
+  it('prompts explain the schema-repair block and the field limits the strict schema only describes', () => {
+    const registry = createTemplateRegistry();
+    const byVersion = Object.fromEntries(
+      modelSteps().map((s) => [s.instructionVersion, registry.prompt(s.instructionVersion)]),
+    );
+    const shared = [
+      '1 to 1200 characters', // summary
+      'at most 50', // sourceRefs
+      'at most 10, each at most 400 characters', // unresolvedQuestions
+      'at least 1', // line numbers
+    ];
+    const specific: Record<string, string[]> = {
+      'reviewer.v1': ['at most 20 findings', '<untrusted_diff artifact="...">'],
+      'planner.v1': [
+        'between 1 and 12 steps',
+        '1 to 20 files',
+        'testSuggestions (at most 10)',
+        '<untrusted_diff',
+      ],
+      'implementer.v1': ['1 to 20 entries'],
+      'verifier.v1': ['list at most 10'],
+    };
+
+    expect(Object.keys(byVersion).sort()).toEqual(Object.keys(specific).sort());
+    for (const [version, text] of Object.entries(byVersion)) {
+      expect(text, version).toContain('<previous_output_issues>');
+      expect(text, version).toMatch(/previous output itself is not shown/);
+      expect(text, version).toMatch(/Produce the complete output again/);
+      for (const phrase of [...shared, ...(specific[version] ?? [])])
+        expect(text.toLowerCase(), `${version} → ${phrase}`).toContain(phrase.toLowerCase());
+    }
+  });
+
+  it('implementer.v1 only modifies provided in-scope files, names the findings tag, and explains escaping', () => {
+    const p = createTemplateRegistry().prompt('implementer.v1');
+
+    expect(p).toContain('<untrusted_upstream step="review" schema="findings.v1">');
+    expect(p).toContain("listed in the plan's fileScope and provided in an <untrusted_file> block");
+    expect(p).toContain('Do not create new files');
+    expect(p).not.toContain('"add"');
+    expect(p).not.toContain('--- /dev/null');
+    expect(p).toContain('escaped as "&lt;/untrusted_file"');
+    expect(p).toContain('reproduce the original, unescaped text');
+  });
+
   it('each prompt names every top-level field of its output schema', () => {
     const registry = createTemplateRegistry();
 

@@ -105,6 +105,7 @@ const UNSUPPORTED = [
   'exclusiveMaximum',
   'maxItems',
   'oneOf',
+  'const',
 ];
 
 /** Every schema node reachable through the subschema keywords the converter emits. */
@@ -152,10 +153,9 @@ describe('toStrictJsonSchema', () => {
     expect(validator.safeParse({ ...(FIXTURES[id] as object), extra: 1 }).success).toBe(false);
   });
 
-  it('turns optional keys into required nullable keys and oneOf into anyOf', () => {
+  it('keeps nullable keys as is and turns oneOf into anyOf and const into a single-value enum', () => {
     const schema = z.strictObject({
-      a: z.string().optional(),
-      b: z.string().nullable().optional(),
+      b: z.string().nullable(),
       u: z.discriminatedUnion('k', [
         z.strictObject({ k: z.literal('x') }),
         z.strictObject({ k: z.literal('y') }),
@@ -165,11 +165,115 @@ describe('toStrictJsonSchema', () => {
     const strict = toStrictJsonSchema(schema);
     const props = strict['properties'] as Record<string, JsonSchema>;
 
-    expect(strict['required']).toEqual(['a', 'b', 'u']);
-    expect(props['a']).toEqual({ anyOf: [{ type: 'string' }, { type: 'null' }] });
-    expect(props['b']).toEqual({ type: ['string', 'null'] }); // already nullable: left as is
+    expect(strict['required']).toEqual(['b', 'u']);
+    expect(props['b']).toEqual({ type: ['string', 'null'] });
     expect(props['u']).not.toHaveProperty('oneOf');
-    expect(props['u']?.['anyOf']).toHaveLength(2);
+    const branches = props['u']?.['anyOf'] as JsonSchema[];
+    expect(branches).toHaveLength(2);
+    expect((branches[0]?.['properties'] as Record<string, JsonSchema>)['k']).toEqual({
+      type: 'string',
+      enum: ['x'],
+    });
+  });
+
+  it('literal outcomes become single-value enums (plan.v1, patch.v1)', () => {
+    for (const id of ['plan.v1', 'patch.v1'] as const) {
+      const outcome = (toStrictJsonSchema(OUTPUT_SCHEMAS[id])['properties'] as Record<string, JsonSchema>)[
+        'outcome'
+      ];
+      expect(outcome).toEqual({ type: 'string', enum: [id.slice(0, -3)] });
+    }
+  });
+
+  it('throws for optional and defaulted keys, which strict mode would turn into a null Zod rejects', () => {
+    expect(() => toStrictJsonSchema(z.strictObject({ a: z.string().optional() }))).toThrow(
+      /optional or defaulted key "a".*\.nullable\(\)/,
+    );
+    expect(() => toStrictJsonSchema(z.strictObject({ n: z.number().default(1) }))).toThrow(
+      /optional or defaulted key "n"/,
+    );
+    expect(() => toStrictJsonSchema(z.strictObject({ b: z.string().nullable().optional() }))).toThrow(
+      /optional or defaulted key "b"/,
+    );
+  });
+
+  it('throws unless the root is an object schema', () => {
+    expect(() => toStrictJsonSchema(z.array(z.string()))).toThrow(/root schema must be/);
+    expect(() =>
+      toStrictJsonSchema(z.union([z.strictObject({ a: z.string() }), z.strictObject({ b: z.string() })])),
+    ).toThrow(/root schema must be/);
+    expect(() => toStrictJsonSchema(z.string())).toThrow(/root schema must be/);
+  });
+
+  it.each([
+    ['not (z.never items)', z.strictObject({ j: z.array(z.never()) }), /"not"/],
+    ['allOf (intersection)', z.strictObject({ i: z.string().and(z.string()) }), /"allOf"/],
+    ['prefixItems (tuple)', z.strictObject({ t: z.tuple([z.string()]) }), /"prefixItems"/],
+    ['unknown', z.strictObject({ c: z.unknown() }), /accepts any value/],
+    ['any', z.strictObject({ c: z.array(z.any()) }), /accepts any value/],
+  ])('throws for %s, which strict mode cannot express', (_name, schema, message) => {
+    expect(() => toStrictJsonSchema(schema)).toThrow(message);
+  });
+
+  it('throws for boolean schemas such as items: false', () => {
+    // Zod emits `items: false` only beside prefixItems (rejected first); metadata puts it on a plain array.
+    const schema = z.strictObject({ t: z.array(z.string()).meta({ items: false }) });
+
+    expect(() => toStrictJsonSchema(schema)).toThrow(/boolean or non-object schema at \$\.t\[\]/);
+  });
+
+  it('restates stripped constraints in the node description', () => {
+    const findings = toStrictJsonSchema(OUTPUT_SCHEMAS['findings.v1'])['properties'] as Record<
+      string,
+      JsonSchema
+    >;
+    const plan = toStrictJsonSchema(OUTPUT_SCHEMAS['plan.v1'])['properties'] as Record<string, JsonSchema>;
+    const refItem = (findings['sourceRefs']?.['items'] as JsonSchema)['properties'] as Record<
+      string,
+      JsonSchema
+    >;
+    const startLine = (refItem['startLine']?.['anyOf'] as JsonSchema[])[0];
+
+    expect(findings['findings']?.['description']).toContain('At most 20 items.');
+    expect(findings['summary']?.['description']).toBe('1–1200 characters.');
+    expect(findings['sourceRefs']?.['description']).toBe('At most 50 items.');
+    expect(findings['unresolvedQuestions']?.['description']).toBe('At most 10 items.');
+    expect((findings['unresolvedQuestions']?.['items'] as JsonSchema)['description']).toBe(
+      'At most 400 characters.',
+    );
+    expect(startLine).toEqual({ type: 'integer', description: 'Positive integer (≥ 1).' });
+    expect(plan['steps']?.['description']).toBe('1–12 items.');
+    expect(plan['steps']?.['minItems']).toBe(1);
+    expect(plan['fileScope']?.['description']).toBe('1–20 items.');
+  });
+
+  it('appends constraint text to an existing description and covers every constraint phrasing', () => {
+    const strict = toStrictJsonSchema(
+      z.strictObject({
+        tags: z.array(z.string().min(2)).min(2).max(5).describe('Tags.'),
+        exact: z.array(z.string()).length(3),
+        many: z.array(z.string()).min(4),
+        idx: z.number().int().nonnegative(),
+        big: z.number().int().min(5).max(9),
+        ratio: z.number().gt(0).lt(1),
+        step: z.number().multipleOf(5),
+        set: z.array(z.string()).meta({ uniqueItems: true }),
+        mail: z.email(),
+      }),
+    );
+    const p = strict['properties'] as Record<string, JsonSchema>;
+
+    expect(p['tags']).toMatchObject({ description: 'Tags. 2–5 items.' });
+    expect(p['tags']).not.toHaveProperty('minItems');
+    expect((p['tags']?.['items'] as JsonSchema)['description']).toBe('At least 2 characters.');
+    expect(p['exact']?.['description']).toBe('Exactly 3 items.');
+    expect(p['many']?.['description']).toBe('At least 4 items.');
+    expect(p['idx']?.['description']).toBe('Non-negative integer (≥ 0).');
+    expect(p['big']?.['description']).toBe('Integer ≥ 5. At most 9.');
+    expect(p['ratio']?.['description']).toBe('Greater than 0. Less than 1.');
+    expect(p['step']?.['description']).toBe('Multiple of 5.');
+    expect(p['set']?.['description']).toBe('Items must be unique.');
+    expect(p['mail']).toEqual({ type: 'string', description: 'Format: email.' });
   });
 
   it('keeps date-time formats and drops other formats with their generated pattern', () => {
@@ -179,13 +283,27 @@ describe('toStrictJsonSchema', () => {
     const props = strict['properties'] as Record<string, JsonSchema>;
 
     expect(props['at']?.['format']).toBe('date-time');
-    expect(props['mail']).toEqual({ type: 'string' });
+    expect(props['mail']).toEqual({ type: 'string', description: 'Format: email.' });
     expect(props['code']).toEqual({ type: 'string', pattern: '^F\\d$' });
   });
 
   it('throws for records, which strict mode cannot express', () => {
     expect(() => toStrictJsonSchema(z.strictObject({ r: z.record(z.string(), z.number()) }))).toThrow(
       /strict mode/,
+    );
+  });
+
+  it('converts shared definitions under $defs and keeps $ref nodes', () => {
+    const tag = z.strictObject({ label: z.string(), extra: z.string().optional() }).meta({ id: 'TestTag' });
+    const node = z.strictObject({ label: z.string().max(10) }).meta({ id: 'TestNode' });
+    const strict = toStrictJsonSchema(z.strictObject({ a: node, b: node }));
+    const defs = Object.values(strict['$defs'] as Record<string, JsonSchema>);
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({ additionalProperties: false, required: ['label'] });
+    expect((strict['properties'] as Record<string, JsonSchema>)['a']).toHaveProperty('$ref');
+    expect(() => toStrictJsonSchema(z.strictObject({ a: tag, b: tag }))).toThrow(
+      /"extra" at \$\.\$defs\.TestTag/,
     );
   });
 
