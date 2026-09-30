@@ -10,7 +10,8 @@
   },
   "include": [
     "src",
-    "review-propose-fix"
+    "review-propose-fix",
+    "review-propose-fix/**/*.json"
   ],
   "references": [
     {
