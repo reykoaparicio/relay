@@ -15,6 +15,8 @@ export const qk = {
   step: (runId: string, stepId: string) => ['step', runId, stepId] as const,
   events: (runId: string) => ['events', runId] as const,
   ledger: (runId: string) => ['ledger', runId] as const,
+  /** One artifact's content (`artifacts.get`); artifacts are immutable, so the key never needs invalidation. */
+  artifact: (artifactId: string) => ['artifact', artifactId] as const,
   memory: (projectId: string, tab: string) => ['memory', projectId, tab] as const,
   memoryRecord: (id: string) => ['memory-record', id] as const,
   providers: () => ['providers'] as const,

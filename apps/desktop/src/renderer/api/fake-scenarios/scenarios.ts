@@ -1,7 +1,8 @@
 // Fake scenarios (10 J3): one per mock state, selected with `?fake=<name>` in `pnpm dev:renderer`.
 import { appError } from '@relay/contracts';
 import type { PauseReason, RunStatus } from '@relay/contracts';
-import { buildWorld, DAY, HOUR, MINUTE } from './world';
+import { runEventSchema } from '@relay/contracts';
+import { buildWorld, DAY, HOUR, MINUTE, rawResponseArtifact, sid } from './world';
 import type { FakeWorld, RunSpec, StepKeyName, WorldOptions } from './world';
 
 export const FAKE_SCENARIOS = [
@@ -31,6 +32,7 @@ export const FAKE_SCENARIOS = [
   'failed',
   'cancelled',
   'completed',
+  'export-failed',
   'incomplete',
   'incomplete-report',
   'memory-conflict',
@@ -88,6 +90,21 @@ const PREFLIGHT_ISSUES = [
   { path: 'profileOverrides.implement', message: 'Implementer: max output exceeds the model limit.', code: 'MODEL_UNSUPPORTED' },
   { path: 'input', message: 'The selected context is too large for the Reviewer profile.', code: 'CONTEXT_TOO_LARGE' },
 ];
+
+/** Raw response of the invalid patch output (stored redacted, 05). */
+const RAW_RESPONSE_ARTIFACT_ID = sid('artifact', 9_001);
+
+/** OUTPUT_INVALID details of the schema-invalid / output-invalid states. */
+const INVALID_PATCH_DETAILS = {
+  schemaId: 'patch.v1',
+  issues: [
+    { path: 'files[0].unifiedDiff', message: 'must be a unified diff', code: 'custom' },
+    { path: 'files[1].relPath', message: 'src/validation/schema.ts is outside the approved file scope', code: 'custom' },
+  ],
+  repairsUsed: 1,
+  repairsMax: 1,
+  rawResponseArtifactId: RAW_RESPONSE_ARTIFACT_ID,
+};
 
 const DONE_TO_APPROVAL = { intake: 'succeeded', review: 'succeeded', plan: 'succeeded' } as const;
 const DONE_TO_IMPLEMENT = { ...DONE_TO_APPROVAL, approve: 'succeeded' } as const;
@@ -155,9 +172,7 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(
         focus('running', null, {
           steps: { ...DONE_TO_IMPLEMENT, implement: 'validating' },
-          stepError: failedStep('implement', 'OUTPUT_INVALID', {
-            issues: [{ path: 'files[0].unifiedDiff', message: 'must be a unified diff' }],
-          }),
+          stepError: failedStep('implement', 'OUTPUT_INVALID', INVALID_PATCH_DETAILS),
           cost: { reported: 480_000, reserved: 540_000 },
         }),
       );
@@ -207,11 +222,7 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
         }),
       );
     case 'output-invalid':
-      return withFocus(
-        pausedAtImplement('output_invalid', 'OUTPUT_INVALID', {
-          issues: [{ path: 'files[0].unifiedDiff', message: 'must be a unified diff' }],
-        }),
-      );
+      return withFocus(pausedAtImplement('output_invalid', 'OUTPUT_INVALID', INVALID_PATCH_DETAILS));
     case 'provider-unavailable':
       return withFocus(pausedAtImplement('provider_unavailable', 'PROVIDER_UNAVAILABLE', { providerId: 'anthropic' }));
     case 'refused':
@@ -267,8 +278,15 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
         }),
       );
     case 'cancelled':
-      return withFocus(focus('cancelled', null, { steps: { ...DONE_TO_APPROVAL, approve: 'skipped' } }));
+      return withFocus(
+        focus('cancelled', null, {
+          steps: { ...DONE_TO_IMPLEMENT, implement: 'unknown', verify: 'skipped' },
+          unknownAttempt: { step: 'implement', liability: 620_000 },
+          cost: { reported: 480_000, unknown: 620_000 },
+        }),
+      );
     case 'completed':
+    case 'export-failed':
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }));
     case 'incomplete':
     case 'incomplete-report':
@@ -285,7 +303,44 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
   }
 }
 
+/** Scenario details that are not part of a run spec (extra artifacts, events, failure switches). */
+function decorate(name: FakeScenarioName, world: FakeWorld, now: number): FakeWorld {
+  const focusRun = world.runs.find((r) => r.id === sid('run', 24));
+  if (name === 'export-failed') world.exportFails = true;
+  if ((name === 'schema-invalid' || name === 'output-invalid') && focusRun !== undefined) {
+    const step = focusRun.steps.find((s) => s.stepKey === 'implement');
+    world.artifacts.set(
+      RAW_RESPONSE_ARTIFACT_ID,
+      rawResponseArtifact(
+        RAW_RESPONSE_ARTIFACT_ID,
+        focusRun.id,
+        step?.id ?? null,
+        now - HOUR,
+        '{\n  "summary": "Validate the create-user payload",\n  "files": [{ "relPath": "src/routes/users.ts", "unifiedDiff": "replace the handler body" }],\n  "_redacted": ["request headers", "account id"]\n}',
+      ),
+    );
+  }
+  if (name === 'budget-overrun' && focusRun !== undefined) {
+    // 06 F4: `ledger.overrun { attemptId, N, X }` — the last call cost X, more than the N reserved.
+    const events = world.events.get(focusRun.id) ?? [];
+    const seq = (events.at(-1)?.seq ?? 0) + 1;
+    const attemptId = world.steps.get(focusRun.steps.find((s) => s.stepKey === 'implement')?.id ?? '')?.attempts[0]?.id ?? null;
+    world.events.set(focusRun.id, [
+      ...events,
+      runEventSchema.parse({
+        id: sid('event', 24_900),
+        runId: focusRun.id,
+        seq,
+        type: 'ledger.overrun',
+        at: now - HOUR,
+        payload: { stepKey: 'implement', attemptId, N: 620_000, X: 710_000 },
+      }),
+    ]);
+  }
+  return world;
+}
+
 /** Builds the in-memory world of a scenario. */
 export function buildScenario(name: FakeScenarioName, now: number): FakeWorld {
-  return buildWorld({ now, scenario: name, ...options(name) });
+  return decorate(name, buildWorld({ now, scenario: name, ...options(name) }), now);
 }

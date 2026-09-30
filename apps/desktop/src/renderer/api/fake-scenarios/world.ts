@@ -568,7 +568,16 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
       profileName: profile?.name ?? null,
       providerId: profile?.providerId ?? null,
       modelId: profile?.modelId ?? null,
-      outcome: key === 'review' && state === 'succeeded' ? 'findings' : null,
+      outcome:
+        state !== 'succeeded'
+          ? null
+          : key === 'review'
+            ? 'findings'
+            : key === 'verify'
+              ? spec.status === 'incomplete'
+                ? 'incomplete'
+                : 'accept'
+              : null,
       outputArtifactId,
       error: stepError,
     };
@@ -596,7 +605,8 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
         providerLatencyMs: settled ? 8_400 : null,
         appElapsedMs: settled ? 9_100 : null,
         providerRequestId: settled ? `req_${String(attemptN)}` : null,
-        startedAt: createdAt + 5_000 * (i + 1),
+        // An in-flight attempt started 47 s ago (running-streaming: 46.1 s provider time + 0.4 s app time so far).
+        startedAt: state === 'executing' ? now - 47_000 : createdAt + 5_000 * (i + 1),
         finishedAt: settled ? createdAt + 5_000 * (i + 1) + 9_100 : null,
       });
       attempts.push(attempt);
@@ -744,6 +754,26 @@ function artifact(
   };
 }
 
+/** A redacted raw-response text artifact (schema-invalid / output-invalid "View raw response"). */
+export function rawResponseArtifact(id: string, runId: string, stepRunId: string | null, createdAt: number, text: string): StoredArtifact {
+  return {
+    meta: artifactMetaSchema.parse({
+      id,
+      kind: 'raw_response',
+      schemaId: null,
+      runId,
+      stepRunId,
+      attemptId: null,
+      sha256: sha(id.slice(-8)),
+      sizeBytes: text.length,
+      mediaType: 'text/plain',
+      createdAt,
+      purged: false,
+    }),
+    content: { kind: 'text', text, truncated: false },
+  };
+}
+
 function manifest(runId: string, stepKey: string, profile: (typeof PROFILES)[ProfileKey]) {
   return contextManifestSchema.parse({
     schemaVersion: 1,
@@ -788,7 +818,7 @@ function buildEvents(run: RunDetail, spec: RunSpec, attempts: readonly AttemptVi
     if (attempt !== undefined) {
       push('attempt.created', at + 100, { stepKey: s.stepKey, attemptId: attempt.id });
       if (spec.streaming === true && s.state === 'executing') {
-        push('attempt.stream_progress', at + 600, { stepKey: s.stepKey, outputTokensSoFar: 420, elapsedMs: 3_200 });
+        push('attempt.stream_progress', attempt.startedAt + 46_500, { stepKey: s.stepKey, outputTokensSoFar: 1_380, elapsedMs: 46_100 });
       }
       if (attempt.state === 'succeeded') push('attempt.settled', at + 9_100, { stepKey: s.stepKey, attemptId: attempt.id });
       if (attempt.state === 'unknown') push('attempt.unknown', at + 9_100, { stepKey: s.stepKey, attemptId: attempt.id });

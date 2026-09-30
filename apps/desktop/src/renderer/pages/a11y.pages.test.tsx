@@ -3,6 +3,7 @@ import { screen, waitFor } from '@testing-library/react';
 import { axe, describeViolations } from '../components/ui/test-utils';
 import { FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
+import { sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 
 interface PageCase {
@@ -41,8 +42,51 @@ const CASES: readonly PageCase[] = [
   { name: 'Settings coming soon', path: '/settings/data', scenario: 'awaiting-approval', ready: 'Coming soon.' },
 ];
 
+const RUN = (n: number) => `${P}/runs/${sid('run', n)}`;
+
+/** Every run-inspector mock state (10 J5), ready when the step tabs render. */
+const INSPECTOR_STATES: ReadonlyArray<readonly [FakeScenarioName, number]> = [
+  ['awaiting-approval', 24],
+  ['running-streaming', 25],
+  ['budget-paused', 24],
+  ['budget-paused-project', 24],
+  ['budget-overrun', 24],
+  ['unknown-outcome', 24],
+  ['schema-invalid', 24],
+  ['output-invalid', 24],
+  ['provider-unavailable', 24],
+  ['setup-blocked', 24],
+  ['refused', 24],
+  ['rate-limited', 24],
+  ['paused-user', 24],
+  ['paused-limit', 24],
+  ['paused-deadline', 24],
+  ['auth-failed', 24],
+  ['approval-stale', 24],
+  ['interrupted', 24],
+  ['cancelling', 24],
+  ['cancelled', 24],
+  ['failed', 24],
+  ['completed', 24],
+  ['incomplete', 24],
+];
+
+const INSPECTOR_CASES: readonly PageCase[] = INSPECTOR_STATES.map(([scenario, n]) => ({
+  name: `Run inspector ${scenario}`,
+  path: RUN(n),
+  scenario,
+  ready: 'Timeline',
+}));
+
+const REPORT_CASES: readonly PageCase[] = [
+  { name: 'Report report', path: `${RUN(24)}/report`, scenario: 'completed', ready: 'Limitations' },
+  { name: 'Report patch', path: `${RUN(24)}/report?tab=patch`, scenario: 'completed', ready: 'Files in patch' },
+  { name: 'Report incomplete-report', path: `${RUN(24)}/report`, scenario: 'incomplete-report', ready: 'Limitations' },
+  { name: 'Report incomplete-report (cancelled)', path: `${RUN(24)}/report`, scenario: 'cancelled', ready: 'Limitations' },
+];
+
 describe('page accessibility (axe, J11)', () => {
-  it.each(CASES)('$name has no axe violations, a skip link, and exactly one h1', async ({ path, scenario, ready }) => {
+  it.each([...CASES, ...INSPECTOR_CASES, ...REPORT_CASES])('$name has no axe violations, a skip link, and exactly one h1', async ({ path, scenario, ready }) => {
     const { container } = renderApp(path, { scenario });
     await screen.findAllByText(ready, {}, { timeout: 3000 });
     // Let secondary queries (badges, provider line) settle so axe sees the final DOM.
