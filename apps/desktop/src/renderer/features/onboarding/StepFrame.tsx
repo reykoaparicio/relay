@@ -57,7 +57,10 @@ export function StepFrame({
   return (
     <section className="card" aria-labelledby={titleId}>
       <form className="stack" onSubmit={onSubmit} noValidate>
-        <h2 id={titleId}>{title}</h2>
+        {/* Focus target on step change (OnboardingPage); focusable by script only. */}
+        <h2 id={titleId} tabIndex={-1} data-step-heading="">
+          {title}
+        </h2>
         {intro === undefined ? null : <div className="muted">{intro}</div>}
         {children}
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', marginTop: 8 }}>

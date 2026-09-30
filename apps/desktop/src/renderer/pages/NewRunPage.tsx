@@ -58,6 +58,7 @@ import { useProfiles } from '../hooks/useProfiles';
 import { useProject } from '../hooks/useProject';
 import { useProviders } from '../hooks/useProviders';
 import { useWorkflow, useWorkflows } from '../hooks/useWorkflow';
+import { useNextAction, useRetryAction } from '../features/common/useNextAction';
 
 /** Preflight recomputes 400 ms after the last change (10 J7). */
 export const PREFLIGHT_DEBOUNCE_MS = 400;
@@ -116,6 +117,8 @@ export function NewRunPage() {
   const settled = useDebouncedValue(draft === null ? '' : canonicalJson(draft), PREFLIGHT_DEBOUNCE_MS);
   const preflight = usePreflight(settled === '' ? null : (JSON.parse(settled) as PreflightInput));
   const pf = preflight.data;
+  /** The preflight answer belongs to the settled input `settled`, and is not a kept-previous placeholder. */
+  const preflightSettled = settled !== '' && !preflight.isFetching && !preflight.isPlaceholderData;
 
   const importDiff = useMutation({
     mutationFn: () => call('relay/v1/artifacts.importDiff', { projectId }),
@@ -142,6 +145,10 @@ export function NewRunPage() {
   const preflightError =
     preflight.error !== null && !isNotImplemented(preflight.error) ? preflight.error : null;
   const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal });
+  const submitFingerprint = submittable === null ? null : canonicalJson(submittable);
+  /** A settled preflight for exactly the input Start would send (B3: never start unpreflighted inputs). */
+  const preflightMatches = preflightSettled && submitFingerprint === settled;
+  const freshPreflight = preflightMatches && preflight.isSuccess ? pf : undefined;
   const startError =
     start.error === null ||
     start.error === undefined ||
@@ -156,15 +163,34 @@ export function NewRunPage() {
   const serverProblems: FormProblem[] = [];
   if (pf !== undefined && preflightError === null) {
     for (const i of pf.issues)
-      serverProblems.push({ fieldId: fieldForPath(i.path), message: i.message, code: i.code });
+      serverProblems.push({ fieldId: fieldForPath(i.path, form.source), message: i.message, code: i.code });
   }
+  // System errors (runner down, internal, conflict) are not form problems: they render as an ErrorView.
+  const isSystemError = (e: unknown) => {
+    const code = toViewError(e).code;
+    return code === 'INTERNAL' || code === 'CONFLICT' || code === 'RUNNER_UNAVAILABLE';
+  };
   for (const e of [preflightError, startError]) {
-    if (e === null || budgetFromError(e) !== null) continue;
-    const appErr = toViewError(e);
-    if (appErr.code === 'INTERNAL' || appErr.code === 'CONFLICT' || appErr.code === 'RUNNER_UNAVAILABLE')
-      continue;
-    serverProblems.push(...problemsFromError(appErr, validationIssuesOf(e)));
+    if (e === null || budgetFromError(e) !== null || isSystemError(e)) continue;
+    serverProblems.push(...problemsFromError(toViewError(e), validationIssuesOf(e), form.source));
   }
+  const preflightSystemError =
+    preflightError !== null && budgetFromError(preflightError) === null && isSystemError(preflightError)
+      ? preflightError
+      : null;
+  // Summary links must reach a rendered control: a profile issue for a step not in the table has no anchor.
+  const knownFields = new Set<string>([
+    FIELD.goal,
+    form.source === 'files' ? FIELD.files : FIELD.diff,
+    FIELD.allowance,
+    FIELD.revisions,
+    FIELD.attempts,
+    FIELD.timeout,
+    FIELD.memory,
+    ...rows.map((r) => FIELD.profile(r.stepKey)),
+  ]);
+  for (const [i, p] of serverProblems.entries())
+    if (p.fieldId !== null && !knownFields.has(p.fieldId)) serverProblems[i] = { ...p, fieldId: null };
   const problems = [...check.problems, ...serverProblems].filter(
     (p, i, all) => all.findIndex((q) => q.fieldId === p.fieldId && q.message === p.message) === i,
   );
@@ -181,16 +207,73 @@ export function NewRunPage() {
       ? startError
       : null;
 
+  const preflightUnavailable =
+    preflightMatches && preflight.error !== null && isNotImplemented(preflight.error);
+  /** Start needs a fresh, clean preflight of the submitted input (or a preflight stubbed in this build). */
+  const checked =
+    preflightUnavailable ||
+    (freshPreflight !== undefined && freshPreflight.issues.length === 0 && freshPreflight.budget.allowed);
+  // The (debounced) check has not caught up with the form yet.
+  const draftFingerprint = draft === null ? '' : canonicalJson(draft);
+  const checking =
+    draft !== null &&
+    (settled !== draftFingerprint || !preflightSettled) &&
+    preflightSystemError === null &&
+    budget === null &&
+    problems.length === 0;
+  const draftClean =
+    !checking &&
+    draft !== null &&
+    preflight.isSuccess &&
+    pf !== undefined &&
+    pf.issues.length === 0 &&
+    pf.budget.allowed;
+  // With no goal yet the check uses a placeholder goal; Start then only reveals what is missing.
+  const allPassed = submittable === null ? goal === '' && draftClean : checked && freshPreflight !== undefined;
   const onSubmit = (e: SyntheticEvent) => {
     e.preventDefault();
     if (!form.submitted) dispatch({ type: 'patch', patch: { submitted: true } });
-    if (start.isPending || submittable === null || budget !== null) return;
+    if (start.isPending || submittable === null || budget !== null || !checked) return;
     start.mutate(submittable);
+  };
+  const focusField = (id: string) => {
+    document.getElementById(id)?.focus();
   };
   const focusFirstProfile = () => {
     const first = rows[0];
-    if (first !== undefined) document.getElementById(FIELD.profile(first.stepKey))?.focus();
+    if (first !== undefined) focusField(FIELD.profile(first.stepKey));
   };
+  const focusFirstProblem = () => {
+    const first = problems.find((p) => p.fieldId !== null);
+    focusField(first?.fieldId ?? FIELD.goal);
+  };
+  const onLoadAction = useRetryAction(() => {
+    void project.refetch();
+    void workflows.refetch();
+    void workflow.refetch();
+    void profiles.refetch();
+  });
+  const onImportErrorAction = useNextAction({}, { projectId });
+  const onErrorAction = useNextAction(
+    {
+      choose_profile: focusFirstProfile,
+      increase_allowance: () => {
+        focusField(FIELD.allowance);
+      },
+      raise_limits: () => {
+        focusField(FIELD.attempts);
+      },
+      narrow_scope: () => {
+        focusField(form.source === 'files' ? FIELD.files : FIELD.diff);
+      },
+      fix_input: focusFirstProblem,
+      edit_goal: () => {
+        focusField(FIELD.goal);
+      },
+      reload: () => void preflight.refetch(),
+    },
+    { projectId },
+  );
 
   const header = (
     <PageHeader
@@ -203,7 +286,9 @@ export function NewRunPage() {
         { label: 'New run' },
       ]}
       status={
-        pf === undefined ? undefined : budget !== null ? (
+        preflightSystemError !== null ? (
+          <span>Start unavailable: the run check failed.</span>
+        ) : budget !== null ? (
           <span>
             Start blocked: the {budget.scope === 'project' ? 'project monthly' : 'run'} allowance would be
             exceeded.
@@ -213,9 +298,11 @@ export function NewRunPage() {
             {String(problems.length)} problem{problems.length === 1 ? '' : 's'} prevent
             {problems.length === 1 ? 's' : ''} starting this run.
           </span>
-        ) : (
+        ) : allPassed ? (
           <span>All checks passed. Ready to start.</span>
-        )
+        ) : checking ? (
+          <span>Checking…</span>
+        ) : undefined
       }
       actions={
         <ButtonLink as={Link} variant="ghost" to={paths.runs(projectId)}>
@@ -230,15 +317,7 @@ export function NewRunPage() {
     return (
       <>
         {header}
-        <ErrorView
-          error={toViewError(loadError)}
-          onAction={() => {
-            void project.refetch();
-            void workflows.refetch();
-            void workflow.refetch();
-            void profiles.refetch();
-          }}
-        />
+        <ErrorView error={toViewError(loadError)} onAction={onLoadAction} />
       </>
     );
   }
@@ -271,7 +350,13 @@ export function NewRunPage() {
   const blocked = budget !== null;
   const startDisabledReason = blocked
     ? `Blocked by the ${budget.scope === 'project' ? 'monthly' : 'run'} allowance. Choose an option above.`
-    : null;
+    : preflightSystemError !== null
+      ? 'The run check failed. Retry it in Input summary.'
+      : submittable !== null && !checked && problems.length === 0
+        ? 'Checking…'
+        : null;
+  /** Disabled while blocked, checking, or with problems; with no input yet a submit shows what is missing. */
+  const startDisabled = blocked || preflightSystemError !== null || (submittable !== null && !checked);
   const pendingProblems = problems.length;
 
   return (
@@ -377,12 +462,7 @@ export function NewRunPage() {
                       Use Selected files for now.
                     </NotAvailableNotice>
                   ) : (
-                    <ErrorView
-                      error={toViewError(importDiff.error)}
-                      onAction={() => {
-                        importDiff.mutate();
-                      }}
-                    />
+                    <ErrorView error={toViewError(importDiff.error)} onAction={onImportErrorAction} />
                   )}
                 </div>
               )}
@@ -495,6 +575,7 @@ export function NewRunPage() {
                 error={approved.error}
                 onRetry={() => void approved.refetch()}
                 checked={form.memoryIds}
+                fieldError={fieldErrors[FIELD.memory]}
                 suggestions={suggested.data?.length ?? 0}
                 onToggle={(id, checked) => {
                   dispatch({ type: 'toggle-memory', id, checked });
@@ -509,8 +590,18 @@ export function NewRunPage() {
               {preflight.error !== null && isNotImplemented(preflight.error) ? (
                 <NotAvailableNotice error={preflight.error} />
               ) : null}
+              {preflightSystemError === null ? null : (
+                <div className="stack">
+                  <ErrorView error={toViewError(preflightSystemError)} onAction={onErrorAction} />
+                  <div>
+                    <Button pending={preflight.isFetching} onClick={() => void preflight.refetch()}>
+                      Retry the check
+                    </Button>
+                  </div>
+                </div>
+              )}
               {pf === undefined ? (
-                draft === null ? (
+                preflightSystemError !== null ? null : draft === null ? (
                   <p className="small muted">Select the input to see what this run will send and reserve.</p>
                 ) : (
                   <div aria-busy="true">
@@ -537,7 +628,7 @@ export function NewRunPage() {
                 titleId={ids.providers}
                 level={2}
               />
-              {pf === undefined ? (
+              {pf === undefined || preflightSystemError !== null ? (
                 <p className="small muted">Shown after the check completes.</p>
               ) : (
                 <ProvidersReceiving
@@ -553,7 +644,7 @@ export function NewRunPage() {
                 variant="primary"
                 icon={Play}
                 pending={start.isPending}
-                disabled={blocked}
+                disabled={startDisabled}
                 aria-describedby="new-run-start-note"
               >
                 Start run
@@ -565,7 +656,7 @@ export function NewRunPage() {
                     : 'Relay pauses for your approval before drafting a patch.')}
               </p>
               {otherStartError === null ? null : (
-                <ErrorView error={toViewError(otherStartError)} onAction={() => undefined} />
+                <ErrorView error={toViewError(otherStartError)} onAction={onErrorAction} />
               )}
             </div>
           </div>

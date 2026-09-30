@@ -12,6 +12,7 @@ import { ProfileAssignmentTable } from '../run-setup/ProfileAssignmentTable';
 import { MissingPrerequisite } from './RuleTemplateSteps';
 import { StepFrame } from './StepFrame';
 import type { StepProps } from './StepFrame';
+import { useRetryAction } from '../common/useNextAction';
 
 /** Step 7 `profiles-and-allowance`: role → profile table (editable) and the run allowance (default $3.00). */
 export function ProfilesStep({ state, dispatch, go }: StepProps) {
@@ -19,6 +20,10 @@ export function ProfilesStep({ state, dispatch, go }: StepProps) {
   const profiles = useProfiles();
   const providers = useProviders();
   const [showErrors, setShowErrors] = useState(false);
+  const onLoadAction = useRetryAction(() => {
+    void workflow.refetch();
+    void profiles.refetch();
+  });
   if (state.workflow === null)
     return (
       <MissingPrerequisite
@@ -58,10 +63,7 @@ export function ProfilesStep({ state, dispatch, go }: StepProps) {
       {loadError === null ? null : (
         <ErrorView
           error={toViewError(loadError)}
-          onAction={() => {
-            void workflow.refetch();
-            void profiles.refetch();
-          }}
+          onAction={onLoadAction}
         />
       )}
       {spec === undefined || profiles.data === undefined ? (

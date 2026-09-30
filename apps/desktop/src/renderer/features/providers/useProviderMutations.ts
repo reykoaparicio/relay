@@ -1,6 +1,7 @@
 // Provider connection flows shared by onboarding (connect-provider) and Settings → Providers (10 J6, J10).
 // The API key goes straight to `providers.connect` (main keeps it; §6.3) and is never stored in React state after
-// submit: callers clear their input before awaiting.
+// submit: callers clear their input before awaiting, and the connect call keeps it out of every cache.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CredentialStorageMode, ProviderId, ProviderStatus, ProviderTestResult } from '@relay/contracts';
 import { call } from '../../api/client';
@@ -40,23 +41,78 @@ export async function runProviderTest(providerId: ProviderId): Promise<TestOutco
 
 function useInvalidateProviderViews() {
   const queryClient = useQueryClient();
-  return () => {
+  return useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: qk.providers() });
     // Missing-credential warnings are engine-computed per profile (06 F14).
     void queryClient.invalidateQueries({ queryKey: qk.profiles() });
-  };
+  }, [queryClient]);
 }
 
-/** `providers.connect` then `providers.test`. */
-export function useConnectProvider() {
+export interface ConnectCallbacks {
+  readonly onSuccess?: (outcome: ConnectOutcome) => void;
+  readonly onError?: (error: unknown) => void;
+}
+
+export interface ConnectProvider {
+  /** Sends the key to main. Ignored while a connect is in flight. The key is never kept after this call. */
+  readonly mutate: (input: ConnectInput, callbacks?: ConnectCallbacks) => void;
+  readonly isPending: boolean;
+  readonly error: unknown;
+  readonly reset: () => void;
+}
+
+/**
+ * `providers.connect` then `providers.test`. Deliberately **not** a TanStack mutation: mutation variables live in the
+ * query client's MutationCache (and devtools), so the API key would outlive the submit (FR-02, §6.3). The key is only
+ * a local of this async call; the hook keeps nothing but pending/error state.
+ */
+export function useConnectProvider(): ConnectProvider {
   const invalidate = useInvalidateProviderViews();
-  return useMutation<ConnectOutcome, unknown, ConnectInput>({
-    mutationFn: async ({ providerId, apiKey, storage }) => {
-      const status = await call('relay/v1/providers.connect', { providerId, apiKey, storage });
-      return { status, test: await runProviderTest(providerId) };
+  const [isPending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const mutate = useCallback(
+    (input: ConnectInput, callbacks: ConnectCallbacks = {}) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
+      setPending(true);
+      setError(null);
+      const { providerId, apiKey, storage } = input;
+      const run = async (): Promise<ConnectOutcome> => {
+        const status = await call('relay/v1/providers.connect', { providerId, apiKey, storage });
+        return { status, test: await runProviderTest(providerId) };
+      };
+      run().then(
+        (outcome) => {
+          inFlight.current = false;
+          invalidate();
+          if (!mounted.current) return;
+          setPending(false);
+          callbacks.onSuccess?.(outcome);
+        },
+        (e: unknown) => {
+          inFlight.current = false;
+          invalidate();
+          if (!mounted.current) return;
+          setPending(false);
+          setError(e);
+          callbacks.onError?.(e);
+        },
+      );
     },
-    onSettled: invalidate,
-  });
+    [invalidate],
+  );
+  const reset = useCallback(() => {
+    setError(null);
+  }, []);
+  return { mutate, isPending, error, reset };
 }
 
 /** `providers.test` for an already connected provider. */

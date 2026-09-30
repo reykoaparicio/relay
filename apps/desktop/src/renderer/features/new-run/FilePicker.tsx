@@ -3,6 +3,7 @@ import { INPUT_CAPS } from '@relay/contracts';
 import type { PreviewResult } from '@relay/contracts';
 import { Button, ErrorView, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
+import { useRetryAction } from '../common/useNextAction';
 import { EXCLUSION_REASON_LABELS } from '../../lib/format';
 import { formatBytes } from '../run-setup/PreviewPanel';
 import { FIELD } from './new-run-model';
@@ -21,8 +22,9 @@ export interface FilePickerProps {
  * reason as text but cannot be selected. The first checkbox carries the field id (error-summary anchor).
  */
 export function FilePicker({ preview, error, onRetry, selected, onChange, fieldError }: FilePickerProps) {
+  const onAction = useRetryAction(onRetry);
   if (error !== null && error !== undefined)
-    return <ErrorView error={toViewError(error)} onAction={onRetry} />;
+    return <ErrorView error={toViewError(error)} onAction={onAction} />;
   if (preview === undefined) {
     return (
       <div aria-busy="true" id={FIELD.files} tabIndex={-1}>

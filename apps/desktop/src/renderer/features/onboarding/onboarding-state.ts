@@ -80,7 +80,17 @@ export type OnboardingAction =
   | { readonly type: 'patch'; readonly patch: Partial<OnboardingState> }
   | { readonly type: 'connected'; readonly entry: ConnectedProvider }
   | { readonly type: 'select-profile'; readonly stepKey: string; readonly profileId: string }
-  | { readonly type: 'selection'; readonly selection: DirectorySelection };
+  | { readonly type: 'selection'; readonly selection: DirectorySelection }
+  /** The directory selection expired or is unknown to main: choose the folder again. */
+  | { readonly type: 'clear-selection' };
+
+/** State that belongs to one project and is reset when `project` changes. */
+const PROJECT_DERIVED_RESET = { savedRule: null } as const satisfies Partial<OnboardingState>;
+
+/** True when a directory selection can no longer be used to create the project. */
+export function selectionExpired(selection: DirectorySelection, now: number): boolean {
+  return now >= selection.expiresAt;
+}
 
 /** Last path segment of a display path ("~/code/my-api" → "my-api"). */
 export function folderName(displayPath: string): string {
@@ -90,8 +100,13 @@ export function folderName(displayPath: string): string {
 
 export function onboardingReducer(state: OnboardingState, action: OnboardingAction): OnboardingState {
   switch (action.type) {
-    case 'patch':
-      return { ...state, ...action.patch };
+    case 'patch': {
+      const next = { ...state, ...action.patch };
+      // A saved rule belongs to the project it was saved in: switching projects (sample ↔ own folder) drops it.
+      if ('project' in action.patch && (action.patch.project?.id ?? null) !== (state.project?.id ?? null))
+        return { ...next, ...PROJECT_DERIVED_RESET };
+      return next;
+    }
     case 'connected':
       return {
         ...state,
@@ -102,6 +117,8 @@ export function onboardingReducer(state: OnboardingState, action: OnboardingActi
         ...state,
         profileSelection: { ...state.profileSelection, [action.stepKey]: action.profileId },
       };
+    case 'clear-selection':
+      return { ...state, selection: null };
     case 'selection':
       return {
         ...state,

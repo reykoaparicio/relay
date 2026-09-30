@@ -4,12 +4,14 @@ import { toViewError } from '../../api/errors';
 import { StepFrame } from './StepFrame';
 import type { StepProps } from './StepFrame';
 import { useSampleProject } from './useSampleProject';
+import { useNextAction } from '../common/useNextAction';
 
 /** Step 1 `welcome`: the local-storage vs remote-processing boundary (§6.2), with the sample offered up front. */
 export function WelcomeStep({ dispatch, go }: StepProps) {
   const sample = useSampleProject(dispatch, () => {
     go('connect-provider');
   });
+  const onSampleErrorAction = useNextAction();
   return (
     <StepFrame
       title="Welcome to Relay"
@@ -71,9 +73,7 @@ export function WelcomeStep({ dispatch, go }: StepProps) {
         {sample.error === null || sample.error === undefined ? null : (
           <ErrorView
             error={toViewError(sample.error)}
-            onAction={() => {
-              sample.mutate({});
-            }}
+            onAction={onSampleErrorAction}
           />
         )}
       </div>
@@ -86,6 +86,7 @@ export function StartPointStep({ state, dispatch, go }: StepProps) {
   const sample = useSampleProject(dispatch, () => {
     go('connect-provider');
   });
+  const onSampleErrorAction = useNextAction();
   const onContinue = () => {
     if (state.startPoint === 'own') {
       // Switching away from the sample: the own project is created on the folder step.
@@ -129,9 +130,7 @@ export function StartPointStep({ state, dispatch, go }: StepProps) {
       {sample.error === null || sample.error === undefined ? null : (
         <ErrorView
           error={toViewError(sample.error)}
-          onAction={() => {
-            sample.mutate({});
-          }}
+          onAction={onSampleErrorAction}
         />
       )}
     </StepFrame>

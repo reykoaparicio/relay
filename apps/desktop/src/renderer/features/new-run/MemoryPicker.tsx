@@ -1,9 +1,11 @@
+import type { ReactNode } from 'react';
 import { Pin } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
 import { ErrorView, Skeleton } from '../../components/ui';
 import { isNotImplemented, toViewError } from '../../api/errors';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
 import { NotAvailableNotice } from '../common/NotAvailableNotice';
+import { useRetryAction } from '../common/useNextAction';
 import { ROLE_LABELS } from '../run-setup/model-steps';
 import { FIELD } from './new-run-model';
 
@@ -14,6 +16,8 @@ export interface MemoryPickerProps {
   readonly checked: readonly string[];
   readonly onToggle: (id: string, checked: boolean) => void;
   readonly suggestions?: number;
+  /** A server problem about the memory selection (error-summary target, shown inline). */
+  readonly fieldError?: string | undefined;
 }
 
 function scopeText(m: MemoryRecordView): string {
@@ -31,30 +35,63 @@ export function MemoryPicker({
   checked,
   onToggle,
   suggestions = 0,
+  fieldError,
 }: MemoryPickerProps) {
+  const onAction = useRetryAction(onRetry);
+  const errorId = `${FIELD.memory}-error`;
+  const inlineError =
+    fieldError === undefined ? null : (
+      <span className="error" id={errorId}>
+        {fieldError}
+      </span>
+    );
+  // Without a list there is no checkbox: the section itself is the error-summary target (focusable, not tabbable).
+  const wrap = (body: ReactNode) => (
+    <div
+      id={FIELD.memory}
+      tabIndex={-1}
+      className="stack"
+      aria-describedby={fieldError === undefined ? undefined : errorId}
+    >
+      {body}
+      {inlineError}
+    </div>
+  );
   if (error !== null && error !== undefined) {
-    return isNotImplemented(error) ? (
-      <NotAvailableNotice error={error}>
-        Pinned project rules are still included by Relay when the run starts.
-      </NotAvailableNotice>
-    ) : (
-      <ErrorView error={toViewError(error)} onAction={onRetry} />
+    return wrap(
+      isNotImplemented(error) ? (
+        <NotAvailableNotice error={error}>
+          Pinned project rules are still included by Relay when the run starts.
+        </NotAvailableNotice>
+      ) : (
+        <ErrorView error={toViewError(error)} onAction={onAction} />
+      ),
     );
   }
   if (records === undefined) {
-    return (
+    return wrap(
       <div aria-busy="true">
         <Skeleton lines={3} />
-      </div>
+      </div>,
     );
   }
-  if (records.length === 0) return <p className="small muted">No approved memory in this project yet.</p>;
+  if (records.length === 0) return wrap(<p className="small muted">No approved memory in this project yet.</p>);
+  // The anchor goes on the first control that can take focus: pinned rules are disabled (locked on).
+  const firstEnabled = records.findIndex((m) => !m.pinned);
   return (
-    <fieldset className="fieldset field">
-      <legend className="sr-only">Approved memory records to include</legend>
+    <fieldset
+      className="fieldset field"
+      aria-describedby={fieldError === undefined ? undefined : errorId}
+    >
+      <legend
+        className={fieldError === undefined ? 'sr-only' : undefined}
+        {...(firstEnabled === -1 ? { id: FIELD.memory, tabIndex: -1 } : {})}
+      >
+        Approved memory records to include
+      </legend>
       <ul className="stack" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
         {records.map((m, i) => {
-          const id = i === 0 ? FIELD.memory : `${FIELD.memory}-${String(i)}`;
+          const id = i === firstEnabled ? FIELD.memory : `${FIELD.memory}-${String(i)}`;
           const descId = `${id}-desc`;
           return (
             <li key={m.id} className="row" style={{ gap: 8, alignItems: 'flex-start', flexWrap: 'nowrap' }}>
@@ -63,7 +100,8 @@ export function MemoryPicker({
                 id={id}
                 checked={m.pinned || checked.includes(m.id)}
                 disabled={m.pinned}
-                aria-describedby={descId}
+                aria-describedby={fieldError === undefined ? descId : `${descId} ${errorId}`}
+                aria-invalid={fieldError === undefined || m.pinned ? undefined : true}
                 onChange={(e) => {
                   onToggle(m.id, e.target.checked);
                 }}
@@ -89,6 +127,7 @@ export function MemoryPicker({
           {String(suggestions)} suggested record{suggestions === 1 ? ' is' : 's are'} excluded until approved.
         </p>
       ) : null}
+      {inlineError}
     </fieldset>
   );
 }

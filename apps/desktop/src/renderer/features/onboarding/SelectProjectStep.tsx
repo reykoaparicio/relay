@@ -4,6 +4,7 @@ import { FolderOpen } from 'lucide-react';
 import type { ProviderId } from '@relay/contracts';
 import { Button, Checkbox, ErrorView, Field, InlineAlert, TextInput } from '../../components/ui';
 import { call } from '../../api/client';
+import { isAppErrorException } from '../../api/client';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { PROVIDER_LABELS } from '../../lib/format';
@@ -12,6 +13,8 @@ import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { usePreview } from '../../hooks/usePreview';
 import { useProviders } from '../../hooks/useProviders';
 import { PreviewPanel } from '../run-setup/PreviewPanel';
+import { useNextAction } from '../common/useNextAction';
+import { selectionExpired } from './onboarding-state';
 import { StepFrame } from './StepFrame';
 import type { StepProps } from './StepFrame';
 
@@ -80,13 +83,21 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
     state.selection === null ? null : { selectionId: state.selection.selectionId },
     exclusions,
   );
+  /** The folder choice expired (or main no longer knows it): the user must choose the folder again. */
+  const [selectionLost, setSelectionLost] = useState(false);
   const pick = useMutation({
     mutationFn: () => call('relay/v1/projects.pickDirectory', {}),
     onSuccess: (res) => {
-      if (res.selection !== null) dispatch({ type: 'selection', selection: res.selection });
+      if (res.selection !== null) {
+        setSelectionLost(false);
+        dispatch({ type: 'selection', selection: res.selection });
+      }
     },
   });
   const create = useIdempotentMutation('relay/v1/projects.create', {
+    onError: (e) => {
+      if (isAppErrorException(e) && e.appError.code === 'NOT_FOUND') loseSelection();
+    },
     onSuccess: (project) => {
       dispatch({
         type: 'patch',
@@ -94,6 +105,20 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
       });
       void queryClient.invalidateQueries({ queryKey: qk.projects() });
       go('add-rule');
+    },
+  });
+
+  function loseSelection() {
+    // A new folder choice is a new intent: never reuse the key of the create that named the old selection.
+    create.newIntent();
+    setSelectionLost(true);
+    setShowErrors(false);
+    dispatch({ type: 'clear-selection' });
+  }
+  const onPickErrorAction = useNextAction();
+  const onCreateErrorAction = useNextAction({
+    fix_input: () => {
+      setShowErrors(true);
     },
   });
 
@@ -123,7 +148,12 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
 
   const onCreate = () => {
     setShowErrors(true);
-    if (state.selection === null || nameError !== null || allowedError !== null) return;
+    if (state.selection === null) return;
+    if (selectionExpired(state.selection, Date.now())) {
+      loseSelection();
+      return;
+    }
+    if (nameError !== null || allowedError !== null) return;
     create.mutate({
       selectionId: state.selection.selectionId,
       name: state.projectName.trim(),
@@ -158,6 +188,14 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
         disabledReason: 'Choose a folder first.',
       }}
     >
+      {state.selection === null && selectionLost ? (
+        <InlineAlert tone="warning" title="Choose the folder again">
+          <p>
+            The folder choice expired before the project was created. Nothing was created. Choose the folder
+            again to continue.
+          </p>
+        </InlineAlert>
+      ) : null}
       {state.selection === null ? (
         <div className="stack">
           <p className="small">Pick a repository you own or have permission to process.</p>
@@ -233,17 +271,12 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
         </>
       )}
       {pick.error === null ? null : (
-        <ErrorView
-          error={toViewError(pick.error)}
-          onAction={() => {
-            pick.mutate();
-          }}
-        />
+        <ErrorView error={toViewError(pick.error)} onAction={onPickErrorAction} />
       )}
-      {create.error === null || create.error === undefined ? null : (
-        <ErrorView error={toViewError(create.error)} onAction={onCreate} />
+      {create.error === null || create.error === undefined || selectionLost ? null : (
+        <ErrorView error={toViewError(create.error)} onAction={onCreateErrorAction} />
       )}
-      {state.selection === null && pick.isSuccess ? (
+      {state.selection === null && pick.isSuccess && !selectionLost ? (
         <InlineAlert tone="neutral" title="No folder chosen">
           <p>The folder dialog was closed without a choice.</p>
         </InlineAlert>

@@ -17,6 +17,7 @@ import { MEMORY_TYPE_LABELS } from '../../lib/format';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { useWorkflow, useWorkflows } from '../../hooks/useWorkflow';
 import { NotAvailableNotice } from '../common/NotAvailableNotice';
+import { useNextAction, useRetryAction } from '../common/useNextAction';
 import { ROLE_LABELS } from '../run-setup/model-steps';
 import { ruleTitle } from './onboarding-state';
 import type { RuleScope, RuleType } from './onboarding-state';
@@ -68,6 +69,11 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
       dispatch({ type: 'patch', patch: { savedRule: { id: record.id, revision: record.currentRevision } } });
       void queryClient.invalidateQueries({ queryKey: ['memory', record.projectId] });
       go('choose-template');
+    },
+  });
+  const onSaveErrorAction = useNextAction({
+    fix_input: () => {
+      document.querySelector<HTMLElement>('textarea')?.focus();
     },
   });
   const project = state.project;
@@ -193,7 +199,7 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
           Project rules cannot be saved in this build yet. Skip this step; you can add rules later in Memory.
         </NotAvailableNotice>
       ) : (
-        <ErrorView error={toViewError(save.error)} onAction={onSave} />
+        <ErrorView error={toViewError(save.error)} onAction={onSaveErrorAction} />
       )}
     </StepFrame>
   );
@@ -238,6 +244,7 @@ export function ChooseTemplateStep({ state, dispatch, go }: StepProps) {
   const selectedId = state.workflow?.id ?? offered[0]?.id ?? null;
   const selected = offered.find((w) => w.id === selectedId);
   const version = useWorkflow(selected?.id, selected?.latestValidatedVersion);
+  const onWorkflowsAction = useRetryAction(() => void workflows.refetch());
 
   return (
     <StepFrame
@@ -261,7 +268,7 @@ export function ChooseTemplateStep({ state, dispatch, go }: StepProps) {
       }}
     >
       {workflows.error === null ? null : (
-        <ErrorView error={toViewError(workflows.error)} onAction={() => void workflows.refetch()} />
+        <ErrorView error={toViewError(workflows.error)} onAction={onWorkflowsAction} />
       )}
       {workflows.data === undefined && workflows.error === null ? (
         <div aria-busy="true">

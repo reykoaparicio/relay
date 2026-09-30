@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { appError } from '@relay/contracts';
 import { FAKE_PROJECT_ID } from '../api/fake-bridge';
 import { PROFILES } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
@@ -63,16 +64,18 @@ describe('NewRunPage (J7)', () => {
     expect(plan).toHaveAttribute('aria-invalid', 'true');
     expect(plan).toHaveAccessibleDescription(/no working credential for OpenAI/);
     expect(screen.getByText('Fix 3 problems to start.')).toBeInTheDocument();
-    // Starting anyway: runs.start answers VALIDATION_FAILED with the same issues; they are not listed twice.
+    // Start stays disabled while the preflight reports issues: runs.start is never sent.
     const user = userEvent.setup();
     await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Try anyway');
-    await user.click(screen.getByRole('button', { name: 'Start run' }));
     await waitFor(() => {
-      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
-    });
+      expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toMatchObject({ goal: 'Try anyway' });
+    }, SLOW);
     expect(
-      await screen.findByRole('alert', { name: /3 problems prevent starting this run/ }),
+      await screen.findByRole('alert', { name: /3 problems prevent starting this run/ }, SLOW),
     ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    await user.type(screen.getByRole('spinbutton', { name: /Max attempts/ }), '{Enter}');
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
   });
 
   it('a limit above RUN_LIMIT_MAXIMUMS shows a field error at once', async () => {
@@ -136,6 +139,9 @@ describe('NewRunPage (J7)', () => {
       screen.getByRole('checkbox', { name: 'Preserve the existing public response format' }),
     ).toBeChecked();
     await user.click(await screen.findByRole('checkbox', { name: 'Keep handlers thin' }));
+    // Start waits for the preflight of exactly this input.
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
 
     const release = bridge.hold('relay/v1/runs.start');
     const startButton = screen.getByRole('button', { name: 'Start run' });
@@ -164,5 +170,125 @@ describe('NewRunPage (J7)', () => {
     expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
     expect(screen.getByText(/Pinned project rules are still included/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
+  });
+
+  // ----- Referee regressions -----
+
+  it('B3: a profile change followed by Enter within the debounce never starts unpreflighted inputs', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review input validation');
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toMatchObject({
+        goal: 'Review input validation',
+      });
+    }, SLOW);
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /Planner profile \(Plan step\)/ }),
+      PROFILES.economy.id,
+    );
+    await user.type(screen.getByRole('textbox', { name: /Run allowance \(USD\)/ }), '{Enter}');
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(screen.getAllByText('Checking…').length).toBeGreaterThan(0);
+    // Once the preflight of this exact input passes, Enter starts it.
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', { name: /Run allowance \(USD\)/ }), '{Enter}');
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+    });
+    const started = { ...(bridge.callsTo('relay/v1/runs.start')[0]?.input as Record<string, unknown>) };
+    expect(started['idempotencyKey']).toEqual(expect.any(String));
+    delete started['idempotencyKey'];
+    expect(started['profileOverrides']).toEqual({ plan: PROFILES.economy.id });
+    expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toEqual(started);
+  });
+
+  it('B4: a preflight RUNNER_UNAVAILABLE shows an ErrorView with retry (no endless skeleton) and disables Start', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    bridge.failNext('relay/v1/runs.preflight', appError('RUNNER_UNAVAILABLE'));
+    await ready();
+    const summary = screen.getByRole('region', { name: 'Input summary' });
+    expect(
+      await within(summary).findByText('The background runner is not available.', {}, SLOW),
+    ).toBeInTheDocument();
+    expect(within(summary).getByRole('button', { name: 'Restart runner' })).toBeInTheDocument();
+    expect(summary.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(screen.getByText('The run check failed. Retry it in Input summary.')).toBeInTheDocument();
+    await user.click(within(summary).getByRole('button', { name: 'Retry the check' }));
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
+  });
+
+  it('B5: a preflight error next action routes (Restart runner → diagnostics) and never starts the run', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    bridge.failNext('relay/v1/runs.preflight', appError('RUNNER_UNAVAILABLE'));
+    await ready();
+    await user.click(await screen.findByRole('button', { name: 'Restart runner' }, SLOW));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/settings/diagnostics');
+    });
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
+  });
+
+  it('B5: a runs.start RUNNER_UNAVAILABLE next action opens diagnostics and never re-sends runs.start', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review input validation');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
+    }, SLOW);
+    await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+    bridge.failNext('relay/v1/runs.start', appError('RUNNER_UNAVAILABLE'));
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await user.click(await screen.findByRole('button', { name: 'Restart runner' }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/settings/diagnostics');
+    });
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+  });
+
+  it('B9: in diff mode an input problem links to the diff import button, which shows the error', async () => {
+    const user = userEvent.setup();
+    renderApp(NEW_RUN, { scenario: 'validation-errors' });
+    await ready();
+    await user.click(screen.getByRole('radio', { name: /Import a \.diff\/\.patch file/ }));
+    const importButton = screen.getByRole('button', { name: 'Import a .diff/.patch file…' });
+    await user.click(importButton);
+    await screen.findByText(/Imported diff touching 2 files/);
+    const summary = await screen.findByRole('alert', { name: /problems prevent starting this run/ }, SLOW);
+    const link = await within(summary).findByRole(
+      'link',
+      { name: 'The selected context is too large for the Reviewer profile.' },
+      SLOW,
+    );
+    const diffButton = screen.getByRole('button', { name: 'Import a different file…' });
+    expect(diffButton).toHaveAccessibleDescription(/too large for the Reviewer profile/);
+    await user.click(link);
+    expect(diffButton).toHaveFocus();
+  });
+
+  it('B9: a memory problem links to the first enabled memory checkbox (pinned rules are disabled)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    bridge.world.preflightIssues = [
+      { path: 'memoryRecordIds.0', message: 'A chosen memory record is no longer approved.', code: 'VALIDATION_FAILED' },
+    ];
+    await ready();
+    const summary = await screen.findByRole('alert', { name: /1 problem prevents starting this run/ }, SLOW);
+    await screen.findByRole('checkbox', { name: 'Keep handlers thin' });
+    await user.click(
+      within(summary).getByRole('link', { name: 'A chosen memory record is no longer approved.' }),
+    );
+    const focused = document.activeElement as HTMLInputElement;
+    expect(focused.type).toBe('checkbox');
+    expect(focused).toBeEnabled();
+    expect(focused).toHaveAccessibleDescription(/no longer approved/);
   });
 });

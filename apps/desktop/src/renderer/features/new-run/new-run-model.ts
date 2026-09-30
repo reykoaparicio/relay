@@ -82,10 +82,18 @@ export const FIELD = {
   profile: (stepKey: string) => `new-run-profile-${stepKey}`,
 } as const;
 
-/** Server issue path → field id (`profileOverrides.plan` → the plan profile select). */
-export function fieldForPath(path: string): string | null {
+/** The control that holds the run input for a source: the file picker, or the diff import button. */
+export function inputField(source: InputSource): string {
+  return source === 'diff' ? FIELD.diff : FIELD.files;
+}
+
+/**
+ * Server issue path → field id (`profileOverrides.plan` → the plan profile select). `input` issues target the control
+ * rendered for the current source (the file picker is not rendered in diff mode).
+ */
+export function fieldForPath(path: string, source: InputSource = 'files'): string | null {
   if (path === 'goal') return FIELD.goal;
-  if (path === 'input' || path.startsWith('input.')) return FIELD.files;
+  if (path === 'input' || path.startsWith('input.')) return inputField(source);
   const profile = /^profileOverrides\.([a-z][a-z0-9_-]*)/.exec(path);
   if (profile?.[1] !== undefined) return FIELD.profile(profile[1]);
   if (path.startsWith('limitOverrides.budgetMicrousd')) return FIELD.allowance;
@@ -242,11 +250,16 @@ export function budgetFromError(e: unknown): BudgetBreakdown | null {
 export function problemsFromError(
   error: AppError,
   issues: ReadonlyArray<{ path: string; message: string; code: string }>,
+  source: InputSource = 'files',
 ): FormProblem[] {
   if (issues.length > 0)
-    return issues.map((i) => ({ fieldId: fieldForPath(i.path), message: i.message, code: i.code }));
+    return issues.map((i) => ({ fieldId: fieldForPath(i.path, source), message: i.message, code: i.code }));
   const stepKey = typeof error.details?.['stepKey'] === 'string' ? error.details['stepKey'] : null;
   const fieldId =
-    stepKey !== null ? FIELD.profile(stepKey) : error.code === 'CONTEXT_TOO_LARGE' ? FIELD.files : null;
+    stepKey !== null
+      ? FIELD.profile(stepKey)
+      : error.code === 'CONTEXT_TOO_LARGE'
+        ? inputField(source)
+        : null;
   return [{ fieldId, message: error.userMessage, code: error.code }];
 }

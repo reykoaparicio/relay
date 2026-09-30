@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { INPUT_CAPS } from '@relay/contracts';
 import { useNavigate } from 'react-router';
@@ -15,12 +15,14 @@ import { call } from '../../api/client';
 import { isNotImplemented, toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
-import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
+import { canonicalJson, useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { usePreflight } from '../../hooks/usePreflight';
 import { usePreview } from '../../hooks/usePreview';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useWorkflow } from '../../hooks/useWorkflow';
 import { NotAvailableNotice } from '../common/NotAvailableNotice';
+import { useNextAction } from '../common/useNextAction';
+import { budgetFromError } from '../new-run/new-run-model';
 import { paths } from '../shell/paths';
 import { checkAllowance, checkWhole, LIMIT_BOUNDS } from '../run-setup/limits';
 import { modelSteps, profileOverridesFor } from '../run-setup/model-steps';
@@ -66,28 +68,64 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
           },
           ...(overrides === undefined ? {} : { profileOverrides: overrides }),
         };
-  const preflight = usePreflight(
-    base === null || debouncedGoal === '' ? null : { ...base, goal: debouncedGoal },
-  );
+  const preflightInput = base === null || debouncedGoal === '' ? null : { ...base, goal: debouncedGoal };
+  const preflight = usePreflight(preflightInput);
+  const submitInput = base === null ? null : { ...base, goal: goal.trim() };
 
+  /** Set synchronously once runs.start succeeded: no further start from this step (one run per setup). */
+  const startedRef = useRef(false);
+  const [started, setStarted] = useState(false);
   const start = useIdempotentMutation('relay/v1/runs.start', {
     onSuccess: (res) => {
+      startedRef.current = true;
+      setStarted(true);
       if (project === null) return;
-      const finish = async () => {
+      // Open the run first; completing onboarding runs detached (it does not need this step mounted).
+      void navigate(paths.run(project.id, res.runId));
+      const projectId = project.id;
+      void (async () => {
         try {
           await call('relay/v1/app.updateSettings', {
             onboardingCompletedAt: Date.now(),
-            activeProjectId: project.id,
+            activeProjectId: projectId,
           });
         } catch {
-          // The run exists either way: open it. `/` offers setup again, where "Skip setup" completes it.
+          // The run exists either way. `/` offers setup again, where "Skip setup" completes it.
         }
-        await queryClient.invalidateQueries({ queryKey: qk.settings() });
+        void queryClient.invalidateQueries({ queryKey: qk.settings() });
         void queryClient.invalidateQueries({ queryKey: qk.projects() });
-        void navigate(paths.run(project.id, res.runId));
-      };
-      void finish();
+      })();
     },
+  });
+  const focusGoal = () => {
+    document.getElementById('onboarding-goal')?.focus();
+  };
+  const toProfiles = () => {
+    go('profiles-and-allowance');
+  };
+  const onStartErrorAction = useNextAction({
+    increase_allowance: toProfiles,
+    choose_profile: toProfiles,
+    raise_limits: toProfiles,
+    fix_input: focusGoal,
+    edit_goal: focusGoal,
+    narrow_scope: () => {
+      go('select-project');
+    },
+    reload: () => void preflight.refetch(),
+  });
+  const onPreflightErrorAction = useNextAction({
+    increase_allowance: toProfiles,
+    choose_profile: toProfiles,
+    raise_limits: toProfiles,
+    fix_input: focusGoal,
+    edit_goal: focusGoal,
+    reload: () => void preflight.refetch(),
+    wait: () => void preflight.refetch(),
+  });
+  const onPreviewErrorAction = useNextAction({
+    reload: () => void preview.refetch(),
+    wait: () => void preview.refetch(),
   });
 
   if (project === null)
@@ -115,13 +153,39 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       : goal.length > 2000
         ? 'Use at most 2000 characters.'
         : null;
+  // Start is gated on a preflight of exactly the input that would be submitted: not a debounced/placeholder
+  // result for an older input, not while it refetches, with no issues and within the allowance.
+  const matches =
+    preflightInput !== null &&
+    submitInput !== null &&
+    canonicalJson(preflightInput) === canonicalJson(submitInput);
+  const settledCheck = matches && !preflight.isFetching && !preflight.isPlaceholderData;
+  const fresh = settledCheck && preflight.isSuccess ? preflight.data : undefined;
   const pf = preflight.data;
-  const blocked = pf !== undefined && !pf.budget.allowed;
+  const budgetError = budgetFromError(preflight.error);
+  const budget = budgetError ?? (pf !== undefined && !pf.budget.allowed ? pf.budget : null);
+  const blocked = budget !== null;
+  // A stubbed preflight (not implemented in this build) cannot gate: runs.start runs its own admission check.
+  const preflightUnavailable = settledCheck && isNotImplemented(preflight.error);
+  const preflightFailed =
+    preflight.error !== null && !isNotImplemented(preflight.error) && budgetError === null;
+  const checked =
+    preflightUnavailable || (fresh !== undefined && fresh.issues.length === 0 && fresh.budget.allowed);
+  const canStart = goalError !== null || (checked && !blocked);
   const onStart = () => {
     setShowErrors(true);
-    if (goalError !== null || base === null) return;
-    start.mutate({ ...base, goal: goal.trim() });
+    if (startedRef.current || goalError !== null || submitInput === null || !canStart) return;
+    start.mutate(submitInput);
   };
+  const disabledReason = blocked
+    ? 'Blocked by the run allowance. Go back and raise it.'
+    : base === null
+      ? 'Waiting for the file preview.'
+      : preflightFailed
+        ? 'The run check failed. Retry it above.'
+        : pf !== undefined && pf.issues.length > 0 && settledCheck
+          ? 'Fix the problems above to start.'
+          : 'Checking…';
 
   return (
     <StepFrame
@@ -131,11 +195,9 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       primary={{
         label: 'Start run',
         onSubmit: onStart,
-        pending: start.isPending,
-        disabled: blocked || base === null,
-        disabledReason: blocked
-          ? 'Blocked by the run allowance. Go back and raise it.'
-          : 'Waiting for the file preview.',
+        pending: start.isPending || started,
+        disabled: started || base === null || !canStart,
+        disabledReason,
       }}
     >
       <Field
@@ -159,12 +221,28 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       </Field>
       <h3>Input summary</h3>
       {preview.error === null ? null : (
-        <ErrorView error={toViewError(preview.error)} onAction={() => void preview.refetch()} />
+        <ErrorView error={toViewError(preview.error)} onAction={onPreviewErrorAction} />
       )}
       {preflight.error === null ? null : isNotImplemented(preflight.error) ? (
         <NotAvailableNotice error={preflight.error} />
+      ) : budgetError !== null ? (
+        <InlineAlert
+          tone="warning"
+          title="The run allowance would be exceeded"
+          actions={<Button onClick={toProfiles}>Raise the run allowance</Button>}
+        >
+          <p>Relay did not reserve or send anything.</p>
+          <BudgetBreakdownTable breakdown={budgetError} />
+        </InlineAlert>
       ) : (
-        <ErrorView error={toViewError(preflight.error)} onAction={() => void preflight.refetch()} />
+        <div className="stack">
+          <ErrorView error={toViewError(preflight.error)} onAction={onPreflightErrorAction} />
+          <div>
+            <Button pending={preflight.isFetching} onClick={() => void preflight.refetch()}>
+              Retry the check
+            </Button>
+          </div>
+        </div>
       )}
       {pf === undefined ? (
         preflight.error === null ? (
@@ -195,7 +273,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
               </ul>
             </InlineAlert>
           )}
-          {blocked ? (
+          {blocked && budgetError === null ? (
             <InlineAlert
               tone="warning"
               title="The run allowance would be exceeded"
@@ -221,7 +299,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
         Relay will pause for your approval before drafting a patch. No project files will be modified.
       </p>
       {start.error === null || start.error === undefined ? null : (
-        <ErrorView error={toViewError(start.error)} onAction={onStart} />
+        <ErrorView error={toViewError(start.error)} onAction={onStartErrorAction} />
       )}
     </StepFrame>
   );

@@ -55,6 +55,7 @@ export function TestOutcomeView({
   }
   const error = outcome.error === null || outcome.error === undefined ? null : toViewError(outcome.error);
   const appErr = error ?? outcome.result?.error ?? null;
+  const rejected = appErr?.code === 'AUTH_REQUIRED';
   return (
     <div className="stack">
       <InlineAlert
@@ -66,7 +67,11 @@ export function TestOutcomeView({
           </>
         }
       >
-        <p>Check the key and replace it, or continue and fix it later in Settings.</p>
+        <p>
+          {rejected
+            ? 'The provider rejected the key. Check the key and replace it, or continue and fix it later in Settings.'
+            : 'The key was not reported as rejected. See the reason below; you can test again later in Settings.'}
+        </p>
       </InlineAlert>
       {appErr === null ? null : <ErrorView error={appErr} onAction={onErrorAction} />}
     </div>

@@ -6,6 +6,7 @@ import { Button, ConfirmDialog, ErrorView, KeyValueList, RelativeTime } from '..
 import { toViewError } from '../../api/errors';
 import { paths } from '../shell/paths';
 import { NotAvailableNotice } from '../common/NotAvailableNotice';
+import { useNextAction } from '../common/useNextAction';
 import { ApiKeyField, apiKeyError } from '../providers/ApiKeyField';
 import { TestOutcomeView } from '../providers/TestOutcomeView';
 import type { TestOutcome } from '../providers/useProviderMutations';
@@ -15,11 +16,13 @@ import {
   useTestProvider,
 } from '../providers/useProviderMutations';
 
-type ProviderState = 'connected' | 'not-connected' | 'auth-failed';
+type ProviderState = 'connected' | 'not-connected' | 'auth-failed' | 'test-failed';
 
+/** "Auth failed" only when the provider rejected the key (AUTH_REQUIRED); other failed tests keep their own code. */
 export function providerState(p: ProviderStatus): ProviderState {
   if (!p.connected) return 'not-connected';
-  return p.lastTest?.ok === false ? 'auth-failed' : 'connected';
+  if (p.lastTest?.ok !== false) return 'connected';
+  return p.lastTest.code === 'AUTH_REQUIRED' ? 'auth-failed' : 'test-failed';
 }
 
 const STATE_BADGE: Readonly<
@@ -28,6 +31,7 @@ const STATE_BADGE: Readonly<
   connected: { label: 'Connected', tone: 'success', icon: CircleCheck },
   'not-connected': { label: 'Not connected', tone: 'neutral', icon: CircleX },
   'auth-failed': { label: 'Auth failed', tone: 'danger', icon: TriangleAlert },
+  'test-failed': { label: 'Test failed', tone: 'warning', icon: TriangleAlert },
 };
 
 const STORAGE_TEXT: Readonly<Record<ProviderStatus['storage'], string>> = {
@@ -60,10 +64,23 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
     readonly source: 'test' | 'connect';
     readonly test: TestOutcome;
   } | null>(null);
+  /** Session-only mode chosen from a SECURE_STORAGE_UNAVAILABLE recovery (the Keychain save is not offered). */
+  const [sessionOnly, setSessionOnly] = useState(false);
+  /** The key was cleared on submit and the last connect failed: ask for it again (it is never kept). */
+  const [needsRepaste, setNeedsRepaste] = useState(false);
+  const keyFieldId = `${titleId}-key`;
   const connect = useConnectProvider();
   const test = useTestProvider();
   const disconnect = useDisconnectProvider();
-  const showForm = state === 'not-connected' || replacing;
+  const showForm = state === 'not-connected' || replacing || needsRepaste;
+  const secure = secureStorageAvailable && !sessionOnly;
+
+  const focusKey = () => {
+    // After the form re-renders (it may only appear with this state change).
+    setTimeout(() => {
+      document.getElementById(keyFieldId)?.focus();
+    }, 0);
+  };
 
   const submit = (storage: CredentialStorageMode) => {
     const problem = apiKeyError(apiKey);
@@ -71,22 +88,39 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
     if (problem !== null) return;
     const key = apiKey;
     setApiKey(''); // FR-02: the key leaves React state on submit.
+    setNeedsRepaste(false);
     connect.mutate(
       { providerId: p.providerId, apiKey: key, storage },
       {
         onSuccess: (res) => {
           setOutcome({ source: 'connect', test: res.test });
           setReplacing(false);
+          setSessionOnly(false);
+        },
+        onError: () => {
+          setNeedsRepaste(true);
         },
       },
     );
   };
 
-  const onErrorAction = (action: string) => {
-    if (action === 'increase_allowance') void navigate(paths.settings('data'));
-    if (action === 'reconnect_provider') setReplacing(true);
-    if (action === 'use_session_key') submit('session');
+  /** Asks for the key again; never re-submits (the key was cleared on submit, FR-02). */
+  const askForKey = () => {
+    connect.reset();
+    setReplacing(true);
+    setNeedsRepaste(true);
+    setKeyError(null);
+    focusKey();
   };
+
+  const onErrorAction = useNextAction({
+    increase_allowance: () => void navigate(paths.settings('data')),
+    reconnect_provider: askForKey,
+    use_session_key: () => {
+      setSessionOnly(true);
+      askForKey();
+    },
+  });
 
   const lastTest = p.lastTest;
   return (
@@ -184,6 +218,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
       {showForm ? (
         <div className="stack">
           <ApiKeyField
+            id={keyFieldId}
             label={replacing ? `Replacement ${p.displayName} API key` : `${p.displayName} API key`}
             value={apiKey}
             onValueChange={(v) => {
@@ -193,13 +228,17 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
             error={keyError}
             disabled={connect.isPending}
             hint={
-              secureStorageAvailable
-                ? 'Masked. Relay sends a deliberately small test request after saving. Only a redacted label is shown afterwards.'
-                : 'Masked. Kept in memory for this session only; secure storage is unavailable and Relay never stores keys in plaintext.'
+              needsRepaste
+                ? sessionOnly
+                  ? 'The key was cleared for safety. Paste it again to use it for this session only.'
+                  : 'The key was cleared for safety. Paste it again to retry.'
+                : secure
+                  ? 'Masked. Relay sends a deliberately small test request after saving. Only a redacted label is shown afterwards.'
+                  : 'Masked. Kept in memory for this session only; secure storage is unavailable and Relay never stores keys in plaintext.'
             }
           />
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            {secureStorageAvailable ? (
+            {secure ? (
               <>
                 <Button
                   variant="primary"
@@ -245,7 +284,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
         <ErrorView error={toViewError(connect.error)} onAction={onErrorAction} />
       )}
       {disconnect.error === null ? null : (
-        <ErrorView error={toViewError(disconnect.error)} onAction={() => undefined} />
+        <ErrorView error={toViewError(disconnect.error)} onAction={onErrorAction} />
       )}
       {outcome === null ? null : outcome.source === 'test' && outcome.test.kind === 'not_tested' ? (
         <NotAvailableNotice error={outcome.test.error}>

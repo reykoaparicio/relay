@@ -1,8 +1,8 @@
-import { useReducer } from 'react';
+import { useEffect, useReducer, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Navigate, useNavigate, useParams } from 'react-router';
-import { Button, ErrorView, PageHeader, Stepper } from '../components/ui';
+import { Button, ErrorView, PageHeader, Stepper, useLiveRegion } from '../components/ui';
 import { call } from '../api/client';
 import { toViewError } from '../api/errors';
 import { qk } from '../api/keys';
@@ -22,6 +22,7 @@ import { SelectProjectStep } from '../features/onboarding/SelectProjectStep';
 import type { StepProps } from '../features/onboarding/StepFrame';
 import { StartPointStep, WelcomeStep } from '../features/onboarding/WelcomeSteps';
 import { paths } from '../features/shell/paths';
+import { useNextAction } from '../features/common/useNextAction';
 import { useNavPerf } from '../hooks/useNavPerf';
 import { useProjects } from '../hooks/useProjects';
 import { useSettings } from '../hooks/useSettings';
@@ -43,6 +44,7 @@ function SkipSetup() {
   const queryClient = useQueryClient();
   const projects = useProjects();
   const settings = useSettings();
+  const onSkipErrorAction = useNextAction();
   const target = projects.data?.find((p) => p.id === settings.data?.activeProjectId) ?? projects.data?.[0];
   const skip = useMutation({
     mutationFn: (projectId: string) =>
@@ -64,16 +66,28 @@ function SkipSetup() {
       >
         Skip setup
       </Button>
-      {skip.error === null ? null : (
-        <ErrorView
-          error={toViewError(skip.error)}
-          onAction={() => {
-            skip.mutate(target.id);
-          }}
-        />
-      )}
+      {skip.error === null ? null : <ErrorView error={toViewError(skip.error)} onAction={onSkipErrorAction} />}
     </div>
   );
+}
+
+/**
+ * On a step change (not the first render), focus moves to the new step's heading and the live region announces
+ * "Step N of 8: <heading>" (keyboard and screen-reader users otherwise stay on a button that no longer exists).
+ */
+function useStepFocus(current: OnboardingStep | null) {
+  const { announce } = useLiveRegion();
+  const previous = useRef(current);
+  useEffect(() => {
+    if (current === null || previous.current === current) return;
+    previous.current = current;
+    const heading = document.querySelector<HTMLElement>('[data-step-heading]');
+    heading?.focus();
+    const title = heading?.textContent.trim() ?? '';
+    const n = stepIndex(current) + 1;
+    const label = title === '' ? (ONBOARDING_STEPS[n - 1]?.label ?? '') : title;
+    announce(`Step ${String(n)} of ${String(ONBOARDING_STEPS.length)}: ${label}`);
+  }, [current, announce]);
 }
 
 /**
@@ -87,6 +101,7 @@ export function OnboardingPage() {
   const current: OnboardingStep | null =
     step === undefined ? 'welcome' : isOnboardingStep(step) ? step : null;
   useNavPerf('onboarding', current !== null);
+  useStepFocus(current);
   if (current === null) return <Navigate to={paths.onboarding('welcome')} replace />;
 
   const index = stepIndex(current);

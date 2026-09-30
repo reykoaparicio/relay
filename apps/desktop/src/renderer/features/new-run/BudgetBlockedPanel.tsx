@@ -33,7 +33,10 @@ export function BudgetBlockedPanel({
   onChooseProfile,
 }: BudgetBlockedPanelProps) {
   const titleId = useId();
-  const [text, setText] = useState(() => dollarsText(neededAllowance(budget)));
+  // The suggestion follows the current breakdown: an edit applies only to the suggestion it was typed over.
+  const suggested = dollarsText(neededAllowance(budget));
+  const [edit, setEdit] = useState<{ readonly over: string; readonly text: string } | null>(null);
+  const text = edit !== null && edit.over === suggested ? edit.text : suggested;
   const isProject = budget.scope === 'project';
   const over = (budget.total - budget.L) as Microusd;
   return (
@@ -70,7 +73,7 @@ export function BudgetBlockedPanel({
                 label="New run allowance (USD)"
                 value={text}
                 onValueChange={(t) => {
-                  setText(t);
+                  setEdit({ over: suggested, text: t });
                 }}
               />
               <div>

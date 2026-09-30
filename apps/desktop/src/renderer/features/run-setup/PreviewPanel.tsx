@@ -1,6 +1,7 @@
 import type { PreviewResult } from '@relay/contracts';
 import { ErrorView, FileTree, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
+import { useRetryAction } from '../common/useNextAction';
 
 const KIB = 1024;
 
@@ -25,8 +26,9 @@ export interface PreviewPanelProps {
 
 /** Included-file preview (FR-01): FileTree with excluded reasons as text, and totals against the caps. */
 export function PreviewPanel({ data, error, onRetry, label }: PreviewPanelProps) {
+  const onAction = useRetryAction(onRetry);
   if (error !== null && error !== undefined)
-    return <ErrorView error={toViewError(error)} onAction={onRetry} />;
+    return <ErrorView error={toViewError(error)} onAction={onAction} />;
   if (data === undefined) {
     return (
       <div aria-busy="true">

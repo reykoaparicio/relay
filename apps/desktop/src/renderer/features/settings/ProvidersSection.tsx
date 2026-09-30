@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { appError } from '@relay/contracts';
 import type { CapabilityWarning, ProfileWithWarnings } from '@relay/contracts';
 import { CatalogTable, ErrorView, InlineAlert, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
@@ -7,6 +8,7 @@ import { useDiagnostics } from '../../hooks/useDiagnostics';
 import { NOW_IDLE_INTERVAL_MS, useNow } from '../../hooks/useNow';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useProviders } from '../../hooks/useProviders';
+import { useNextAction } from '../common/useNextAction';
 import { ProviderCard, providerState } from './ProviderCard';
 
 /** CatalogTable.profileChecks: engine warnings grouped by the profile's model (06 F14); never re-derived here. */
@@ -27,10 +29,14 @@ export function ProvidersSection() {
   const diagnostics = useDiagnostics();
   const catalog = useCatalog();
   const profiles = useProfiles();
+  const providersAction = useNextAction({ reload: () => void providers.refetch(), wait: () => void providers.refetch() });
+  const catalogAction = useNextAction({ reload: () => void catalog.refetch(), wait: () => void catalog.refetch() });
+  const profilesAction = useNextAction({ reload: () => void profiles.refetch(), wait: () => void profiles.refetch() });
   const now = useNow(NOW_IDLE_INTERVAL_MS, providers.dataUpdatedAt);
   const listed = (providers.data ?? []).filter((p) => p.providerId !== 'fake');
   const secure = diagnostics.data?.secureStorage.available ?? true;
-  const failed = listed.filter((p) => providerState(p) === 'auth-failed');
+  const rejected = listed.filter((p) => providerState(p) === 'auth-failed');
+  const testFailed = listed.filter((p) => providerState(p) === 'test-failed');
   const catalogVersion =
     diagnostics.data?.catalog.version ??
     [...(catalog.data ?? [])]
@@ -53,14 +59,36 @@ export function ProvidersSection() {
           </p>
         </InlineAlert>
       ) : null}
-      {failed.map((p) => (
+      {rejected.map((p) => (
         <InlineAlert key={p.providerId} tone="danger" title={`${p.displayName} rejected the stored key`}>
           <p>
-            The last test returned <code>{p.lastTest?.code ?? 'an error'}</code>. Profiles on {p.displayName}{' '}
-            cannot start runs until you replace the key. Nothing was sent with the failing key.
+            The last connection test returned <code>AUTH_REQUIRED</code>: {p.displayName} rejected Relay&apos;s small
+            test request made with this key. Profiles on {p.displayName} cannot start runs until you replace the
+            key.
           </p>
         </InlineAlert>
       ))}
+      {testFailed.map((p) => {
+        const code = p.lastTest?.code;
+        return (
+          <InlineAlert
+            key={p.providerId}
+            tone="warning"
+            title={`The last ${p.displayName} connection test failed`}
+          >
+            <p>
+              {code === undefined ? 'The test did not pass.' : appError(code).userMessage}
+              {code === undefined ? null : (
+                <>
+                  {' '}
+                  Error code <code>{code}</code>.
+                </>
+              )}
+            </p>
+            <p>The stored key was not reported as rejected. Test the connection again when ready.</p>
+          </InlineAlert>
+        );
+      })}
       <section className="stack" aria-labelledby={providersTitle}>
         <h2 id={providersTitle}>Providers</h2>
         <p className="small muted">
@@ -68,7 +96,7 @@ export function ProvidersSection() {
           label is shown.
         </p>
         {providers.error === null ? null : (
-          <ErrorView error={toViewError(providers.error)} onAction={() => void providers.refetch()} />
+          <ErrorView error={toViewError(providers.error)} onAction={providersAction} />
         )}
         {providers.data === undefined && providers.error === null ? (
           <div aria-busy="true">
@@ -89,10 +117,10 @@ export function ProvidersSection() {
           model.
         </p>
         {catalog.error === null ? null : (
-          <ErrorView error={toViewError(catalog.error)} onAction={() => void catalog.refetch()} />
+          <ErrorView error={toViewError(catalog.error)} onAction={catalogAction} />
         )}
         {profiles.error === null ? null : (
-          <ErrorView error={toViewError(profiles.error)} onAction={() => void profiles.refetch()} />
+          <ErrorView error={toViewError(profiles.error)} onAction={profilesAction} />
         )}
         {catalog.data === undefined ? (
           catalog.error === null ? (

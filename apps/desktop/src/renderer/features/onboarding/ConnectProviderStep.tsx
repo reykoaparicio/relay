@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { PlugZap } from 'lucide-react';
+import { useNavigate } from 'react-router';
 import type { CredentialStorageMode, ProviderId } from '@relay/contracts';
 import { Button, ErrorView, InlineAlert, RadioGroup, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
@@ -9,6 +10,8 @@ import { useProviders } from '../../hooks/useProviders';
 import { ApiKeyField, apiKeyError } from '../providers/ApiKeyField';
 import { TestOutcomeView } from '../providers/TestOutcomeView';
 import { useConnectProvider } from '../providers/useProviderMutations';
+import { useNextAction } from '../common/useNextAction';
+import { paths } from '../shell/paths';
 import { StepFrame } from './StepFrame';
 import type { StepProps } from './StepFrame';
 
@@ -27,6 +30,7 @@ const KEY_SOURCE: Readonly<Record<ProviderId, string>> = {
  * `providers.test`. Only the redacted label is shown afterwards; the key leaves React state on submit.
  */
 export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
+  const navigate = useNavigate();
   const providers = useProviders();
   const diagnostics = useDiagnostics();
   const connect = useConnectProvider();
@@ -40,6 +44,7 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
   const [storageChoice, setStorageChoice] = useState<CredentialStorageMode | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [needsRepaste, setNeedsRepaste] = useState(false);
+  const keyFieldId = useId();
 
   const chosen = providerId ?? firstOpen;
   const storage: CredentialStorageMode = !secureAvailable ? 'session' : (storageChoice ?? 'os_protected');
@@ -71,6 +76,29 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
     );
   };
 
+  /** Asks for the key again (it was cleared on submit and is never re-sent from memory). */
+  const askForKey = () => {
+    connect.reset();
+    setNeedsRepaste(true);
+    setKeyError(null);
+    setTimeout(() => {
+      document.getElementById(keyFieldId)?.focus();
+    }, 0);
+  };
+  const onErrorAction = useNextAction({
+    reconnect_provider: askForKey,
+    use_session_key: () => {
+      setStorageChoice('session');
+      askForKey();
+    },
+    // providers.test BUDGET_BLOCKED: the setup allowance for connection tests is in Settings → Data.
+    increase_allowance: () => void navigate(paths.settings('data')),
+  });
+  const onLoadAction = useNextAction({
+    reload: () => void providers.refetch(),
+    wait: () => void providers.refetch(),
+  });
+
   const anyConnected = connectedIds.length > 0 || state.connected.length > 0;
   const otherProvider = SETUP_PROVIDERS.find((id) => id !== chosen && !connectedIds.includes(id));
 
@@ -82,7 +110,7 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
             <Skeleton lines={4} />
           </div>
         ) : (
-          <ErrorView error={toViewError(providers.error)} onAction={() => void providers.refetch()} />
+          <ErrorView error={toViewError(providers.error)} onAction={onLoadAction} />
         )}
       </StepFrame>
     );
@@ -137,6 +165,7 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
         }))}
       />
       <ApiKeyField
+        id={keyFieldId}
         label={`${PROVIDER_LABELS[chosen]} API key`}
         value={apiKey}
         onValueChange={(v) => {
@@ -179,18 +208,14 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
         </Button>
       </div>
       {connect.error === null || connect.error === undefined ? null : (
-        <ErrorView
-          error={toViewError(connect.error)}
-          onAction={(action) => {
-            if (action === 'use_session_key') setStorageChoice('session');
-          }}
-        />
+        <ErrorView error={toViewError(connect.error)} onAction={onErrorAction} />
       )}
       {lastForChosen === undefined ? null : (
         <TestOutcomeView
           providerName={lastForChosen.status.displayName}
           redactedLabel={lastForChosen.status.redactedLabel}
           outcome={lastForChosen.test}
+          onErrorAction={onErrorAction}
         />
       )}
       {anyConnected ? (
