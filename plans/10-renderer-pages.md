@@ -247,7 +247,7 @@ The first-run flow must not require any knowledge of graph theory, tokenizers, c
 | `a11y.pages.test.tsx` | `axe` finds no violations on each page in its default state and on each new run-inspector banner state. The skip link is present. Exactly one `h1` per page |
 
 ## Success Criteria (gate)
-- [ ] `pnpm test:unit -- apps/desktop/src/renderer` → green
+- [ ] `pnpm test:unit apps/desktop/src/renderer` → green
 - [ ] `pnpm typecheck` → exit 0
 - [ ] `pnpm lint` → exit 0 (no node/electron/provider imports in renderer; jsx-a11y strict)
 - [ ] `pnpm dev:renderer` → every `?fake=<scenario>` route renders without console errors (manual check against the mocks side by side; screenshot pairs attached to the commit)

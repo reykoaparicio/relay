@@ -156,8 +156,8 @@ Agents build horizontally, but each milestone's exit gate from the spec must sti
 | Spec milestone | Dates | Plans that must be *done* | Vertical-slice check (exact) |
 |---|---|---|---|
 | M1 Desktop vertical slice | Sep 30–Oct 6 | Wave 0–1: 01, 02, 03 (C1–C6), 04 (D1–D4, D7–D8), 05 (E1–E4, E6), 06 (F1–F5, F13 minimal, F15, F16), 07 (G6 + stub context), 08 (H1–H7), 09 (I1–I4), 10 (J1–J4), 11 (K1–K2), 12 (L1–L3 + @m1 specs) | `pnpm e2e --grep @m1`: app opens, project selected, one fake single-step request runs with reserve/settle recorded (§15.4 "simple instrumentation"), run visible after relaunch |
-| M2 Workflow + portability | Oct 7–13 | Wave 2: 04 complete, 05 complete, 06 (F6–F8, F10, F14, F18), 10 (J6–J8 core) | `pnpm test:integration -- -t "@m2"` + `RELAY_LIVE_TESTS=1 pnpm test:live` **including `workflow.live.test.ts`**: the same template completes through **each** adapter (§15.2 M2 gate) under `RELAY_LIVE_WORKFLOW_CAP_MICROUSD` (default $1.50) |
-| M3 Memory + recovery | Oct 14–20 | 06 (F9 recovery, F11), 07 complete, 11 (K3–K6) | `pnpm test:integration -- -t "@m3"`: crash matrix green; project isolation green |
+| M2 Workflow + portability | Oct 7–13 | Wave 2: 04 complete, 05 complete, 06 (F6–F8, F10, F14, F18), 10 (J6–J8 core) | `pnpm test:integration -t "@m2"` + `RELAY_LIVE_TESTS=1 pnpm test:live` **including `workflow.live.test.ts`**: the same template completes through **each** adapter (§15.2 M2 gate) under `RELAY_LIVE_WORKFLOW_CAP_MICROUSD` (default $1.50) |
+| M3 Memory + recovery | Oct 14–20 | 06 (F9 recovery, F11), 07 complete, 11 (K3–K6) | `pnpm test:integration -t "@m3"`: crash matrix green; project isolation green |
 | M4 Limits + evidence | Oct 21–27 | 06 complete, 10 complete, 11 complete | `pnpm e2e --grep "@m4"` (budget pause, cancel, export) |
 | M5 Pilot + hardening | Oct 28–Nov 3 | 12 complete, 13 (M1–M4) | Full §6 verification on the demo Mac; packaged app launches |
 | M6 Freeze + pitch | Nov 4–10 | 13 complete | `pnpm demo:reset && pnpm demo:verify`; rehearsal checklist in `docs/demo/` |
@@ -222,7 +222,7 @@ Final integration verification (Phase 6), in order, all must exit 0:
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm lint
-pnpm test:unit -- --coverage              # thresholds: contracts 95%, engine 90%, storage 90%, providers 85%, tools 90% lines
+pnpm test:unit --coverage              # thresholds: contracts 95%, engine 90%, storage 90%, providers 85%, tools 90% lines
 pnpm test:integration                     # includes crash matrix (11 §K4)
 pnpm build                                # electron-vite build → apps/desktop/out/{main,preload,renderer,runner}
 RELAY_E2E_KEEP=1 pnpm e2e                 # Playwright, fake provider, all specs incl. @a11y; keeps the userData dir for the scan

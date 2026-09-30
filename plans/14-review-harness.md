@@ -168,10 +168,10 @@ Added §7.2 edges (spec clarifications, R3-22): see the note under 06 §F2.
 
 - R6-1 (fixed): `choose_profile` → `runs.retryStep { stepId, profileId }` only when the paused step is `failed`, else `runs.resume({ kind: 'switch_profile', stepKey, profileId })`; 02 `RUN_ACTION_OPS: Record<RunAction, Channel | readonly Channel[] | 'navigate'>` + catalog test; 06 F2/F7 (retryStep only for failed steps; budget/setup pauses use `switch_profile`; `setup_blocked` offers `resume`); 10 J2/J8 consistent.
 - R6-2 (fixed): context port input is `{ run, step, snapshot, stepSpec, preservedSnapshot, purpose, priorAttempts }` in 06 F1, 06 F4 call site, and 07 G1 `AssembleInput`; G3 schema-repair block reads `purpose` + `priorAttempts`.
-- R6-3 (fixed): per-package `test`/`typecheck` gates replaced by `pnpm typecheck` and `pnpm test:unit -- <path filter>` (02, 03, 04, 05, 06, 07, 08, 10).
+- R6-3 (fixed): per-package `test`/`typecheck` gates replaced by `pnpm typecheck` and `pnpm test:unit <path filter>` (02, 03, 04, 05, 06, 07, 08, 10).
 - R6-4 (fixed): `node -e` smokes run as `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "…"` (02, 03, 06, 07).
 - R6-5 (fixed): 00 §6 runs `RELAY_E2E_KEEP=1 pnpm e2e` before `pnpm check:secrets`.
-- R6-6 (fixed): 00 §4 M3 uses `pnpm test:integration -- -t "@m3"` (vitest has no `--grep`).
+- R6-6 (fixed): 00 §4 M3 uses `pnpm test:integration -t "@m3"` (vitest has no `--grep`).
 - R6-7 (fixed): 01 vitest `unit` include adds `tests/evaluations/**/*.test.ts`.
 - R6-8 (fixed): runner serves `providers.list` from its DB; main overlays `storage: 'session'` presence; stays forwarded; `providers.listCredentialRefs` only for main-boot vault reconciliation (02, 08 H4).
 - R6-9 (fixed): 08 H4 `app.exportDiagnostics` gets runner data via the forwarded `app.getDiagnostics`.

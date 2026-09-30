@@ -283,7 +283,7 @@ export interface RunnerSupervisor {
 
 ## Success Criteria (gate)
 - [ ] `pnpm typecheck` → exit 0 (includes the desktop node + web projects)
-- [ ] `pnpm test:unit -- apps/desktop/src/main apps/desktop/src/runner apps/desktop/build` → green
+- [ ] `pnpm test:unit apps/desktop/src/main apps/desktop/src/runner apps/desktop/build` → green
 - [ ] `pnpm build` → produces `apps/desktop/out/{main,preload,renderer}` and exactly one `out/main/*runner*.js`
 - [ ] `grep -l "node:sqlite" apps/desktop/out/main/*runner*.js` and `grep -l "CREATE TABLE runs" apps/desktop/out/main/*runner*.js` → both match (sqlite is a runtime built-in import; migrations are embedded)
 - [ ] `grep -E "require\\([\"']@relay/|require\\([\"']zod" apps/desktop/out/preload/*.js` → no matches (preload is a self-contained CJS bundle)

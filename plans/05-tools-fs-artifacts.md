@@ -175,10 +175,10 @@ writeExportFile(destinationRealpath: string, name: string, bytes: Uint8Array, pr
 | `export.test.ts` | Destination inside the project root is refused (`inside_project`), including via a symlinked destination. A destination that **contains** a project root is refused (`contains_project`). A sibling directory is allowed. No overwrite (name suffixing) for both `exportArtifacts` and `writeExportFile`. `writeExportFile` rejects a name with `/` or `..` |
 
 ## Success Criteria (gate)
-- [ ] `pnpm typecheck && pnpm test:unit -- packages/tools --coverage` → green, ≥ 90% lines
+- [ ] `pnpm typecheck && pnpm test:unit packages/tools --coverage` → green, ≥ 90% lines
 - [ ] `pnpm lint` → exit 0
-- [ ] `pnpm test:unit -- packages/tools -t "symlink escape"` → passes (named test exists)
-- [ ] `pnpm test:unit -- packages/tools -t "contains_project"` → passes (named test exists)
+- [ ] `pnpm test:unit packages/tools -t "symlink escape"` → passes (named test exists)
+- [ ] `pnpm test:unit packages/tools -t "contains_project"` → passes (named test exists)
 - [ ] Scan benchmark test (`scan.bench.test.ts`, tagged `@perf`) → fixture < 300 ms on the dev Mac
 
 ## Review Checklist

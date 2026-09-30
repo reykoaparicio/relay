@@ -572,7 +572,7 @@ Otherwise (fresh heartbeat **and** live PID) it returns `held_by_other`. An imme
 ## Success Criteria (gate)
 - [ ] Day-1 spike recorded in ADR-012: `node:sqlite` loads and runs the C3 DDL inside an Electron 44 `utilityProcess` (or the driver was switched to `better-sqlite3` before repo work)
 - [ ] `pnpm typecheck` → exit 0
-- [ ] `pnpm test:unit -- packages/storage --coverage` → green, ≥ 90% lines
+- [ ] `pnpm test:unit packages/storage --coverage` → green, ≥ 90% lines
 - [ ] `pnpm lint` → exit 0 (dependency-cruiser: `node:sqlite` imported only in `packages/storage`)
 - [ ] `grep -rn "migrationsDir" packages/storage` → no matches, and `grep -n "readFile\|readdir" packages/storage/src/migrate.ts packages/storage/migrations/*.ts` → no matches (migrations are embedded)
 - [ ] `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "import {openTestDb} from '@relay/storage'; const d=await openTestDb(); console.log(d.repos.ledger.runBalances('run_x')); await d.dispose()"` prints `{ L: 0, C: 0, R: 0, U: 0 }`

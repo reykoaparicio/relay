@@ -167,7 +167,7 @@ Owned by I: `renderWithProviders()` (QueryClient + LiveRegion + Theme) and `axe`
 | `a11y.test.tsx` | `axe` has no violations for each component rendered in its main states (dark + light), including `ResponsivePanels` in both layouts and `CatalogTable` |
 
 ## Success Criteria (gate)
-- [ ] `pnpm test:unit -- apps/desktop/src/renderer/components apps/desktop/src/renderer/lib apps/desktop/src/renderer/styles` → green
+- [ ] `pnpm test:unit apps/desktop/src/renderer/components apps/desktop/src/renderer/lib apps/desktop/src/renderer/styles` → green
 - [ ] `pnpm lint` → exit 0 (jsx-a11y strict, no `dangerouslySetInnerHTML`)
 - [ ] ui-ux-pro-max pre-delivery checklist, all true:
   - [ ] No emojis used as icons (lucide only)

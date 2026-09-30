@@ -338,7 +338,7 @@ export default defineConfig({
 
 ### A8: CI (`.github/workflows/ci.yml`)
 Jobs:
-1. `check` on `macos-14` (target OS): checkout → pnpm setup → `actions/setup-node` (node-version-file `.nvmrc`) → `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm lint` → `pnpm test:unit -- --coverage` → `pnpm test:integration` → **API doc** (R2-36): `pnpm gen:api-doc` writes `docs/architecture/ipc-api.md`, then `git diff --exit-code docs/architecture/ipc-api.md` fails the job if the committed reference is stale. (Before B10 exists the step is skipped via `if: hashFiles('packages/contracts/src/scripts/gen-api-doc.ts') != ''`.)
+1. `check` on `macos-14` (target OS): checkout → pnpm setup → `actions/setup-node` (node-version-file `.nvmrc`) → `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm lint` → `pnpm test:unit --coverage` → `pnpm test:integration` → **API doc** (R2-36): `pnpm gen:api-doc` writes `docs/architecture/ipc-api.md`, then `git diff --exit-code docs/architecture/ipc-api.md` fails the job if the committed reference is stale. (Before B10 exists the step is skipped via `if: hashFiles('packages/contracts/src/scripts/gen-api-doc.ts') != ''`.)
 2. `e2e` (needs check, `macos-14`): `pnpm e2e` with `RELAY_PROVIDER_MODE=fake`; upload `playwright-report/` and traces on failure.
 3. `audit` (non-blocking): `pnpm audit --prod --audit-level high`.
 CI never has provider keys; `test:live` is not run in CI.

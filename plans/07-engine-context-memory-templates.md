@@ -208,8 +208,8 @@ Output-schema acceptance/rejection tests live in contracts (02). G keeps only th
 
 ## Success Criteria (gate)
 - [ ] `pnpm typecheck` → exit 0
-- [ ] Wave 1: `pnpm test:unit -- packages/templates packages/engine/src/context packages/engine/src/manifest packages/engine/src/prompt-render` → green, with the stub covering steps 1, 2, 4, 6, 8
-- [ ] Wave 3: `pnpm test:unit -- packages/templates packages/engine/src/context packages/engine/src/memory packages/engine/src/token-budget packages/engine/src/prompt-render packages/engine/src/manifest` → green (the `memory` filter also matches `memory-retrieval`)
+- [ ] Wave 1: `pnpm test:unit packages/templates packages/engine/src/context packages/engine/src/manifest packages/engine/src/prompt-render` → green, with the stub covering steps 1, 2, 4, 6, 8
+- [ ] Wave 3: `pnpm test:unit packages/templates packages/engine/src/context packages/engine/src/memory packages/engine/src/token-budget packages/engine/src/prompt-render packages/engine/src/manifest` → green (the `memory` filter also matches `memory-retrieval`)
 - [ ] Coverage for G files ≥ 90% lines
 - [ ] `pnpm lint` → exit 0
 - [ ] `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "…"` smoke (importing `@relay/templates`): `createTemplateRegistry().get('review-propose-fix').steps.length === 5` and `seedVersions().length ≥ 1`

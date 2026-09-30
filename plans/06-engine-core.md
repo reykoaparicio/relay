@@ -854,12 +854,12 @@ It does **not** start the engine. Callers run `await runtime.engine.start()`. `d
 | `engine.test.ts` (tagged `@m2`) | Full template on the fake `happy-path` scenario: final statuses, **4 model attempts** (review, plan, implement, verify), synthetic intake/finalize rows succeeded, ledger totals equal fake prices × fixture usage, and the report artifact exists |
 
 ## Success Criteria (gate)
-- [ ] `pnpm typecheck && pnpm test:unit -- packages/engine --coverage` → green, ≥ 90% lines on F files
+- [ ] `pnpm typecheck && pnpm test:unit packages/engine --coverage` → green, ≥ 90% lines on F files
 - [ ] `pnpm lint` → exit 0 (no electron/sqlite imports; no value imports of storage/providers/tools outside `runtime.ts`, tests, and `src/testing/**`)
 - [ ] `grep -rn "tx('immediate', async" packages/engine/src | wc -l` → 0
 - [ ] `grep -rn "vi.useFakeTimers" packages/engine/src | wc -l` → 0 (only injected timers)
 - [ ] `grep -rn "from './testing" packages/engine/src/index.ts` matches only `./testing/crash-hooks`
-- [ ] `pnpm test:unit -- packages/engine -t "@m2"` → green (4 model attempts)
+- [ ] `pnpm test:unit packages/engine -t "@m2"` → green (4 model attempts)
 - [ ] `pnpm --filter @relay/tests exec node --conditions=development --import tsx --input-type=module -e "import {createRuntime} from '@relay/engine'; const r=await createRuntime({userDataDir: process.argv[1], providerMode:'fake', credentials:{resolve:async()=>({ok:true,value:'test-key'})}}); await r.engine.start(); await r.dispose()" "$(mktemp -d)"` → exit 0
 
 ## Review Checklist

@@ -147,8 +147,8 @@ Every row also asserts:
 
 ## Success Criteria (gate)
 - [ ] `pnpm test:integration` → all green, in < 3 min locally
-- [ ] `pnpm test:integration -- -t "@crash"` → 7/7 crash rows green, run 3× consecutively (flake check: `for i in 1 2 3; do pnpm test:integration -- -t @crash || exit 1; done`)
-- [ ] `pnpm test:integration -- -t "@m3"` and `-t "@m4"` → green at those milestones; at M4 `migration.int.test.ts` runs (not skipped)
+- [ ] `pnpm test:integration -t "@crash"` → 7/7 crash rows green, run 3× consecutively (flake check: `for i in 1 2 3; do pnpm test:integration -t @crash || exit 1; done`)
+- [ ] `pnpm test:integration -t "@m3"` and `-t "@m4"` → green at those milestones; at M4 `migration.int.test.ts` runs (not skipped)
 - [ ] No test touches the committed fixture (check `git status --porcelain tests/fixtures` → empty after the run)
 - [ ] `git ls-files tests/fixtures/sample-api/.env tests/fixtures/sample-api/node_modules tests/fixtures/sample-api/dist` lists the committed fixture files; `link-outside` is not tracked
 
