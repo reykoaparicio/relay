@@ -35,7 +35,11 @@ export async function setupOwnProject(
 }
 
 /** Runs → Start a workflow → New run (all selected files, defaults) → Start run. Lands on the run inspector route. */
-export async function startRunViaNewRun(page: Page, goal: string): Promise<string> {
+export async function startRunViaNewRun(
+  page: Page,
+  goal: string,
+  opts: { allowance?: string; maxAttempts?: number } = {},
+): Promise<string> {
   await new Shell(page).nav('Runs');
   const runs = new Runs(page);
   await runs.expectLoaded();
@@ -43,6 +47,8 @@ export async function startRunViaNewRun(page: Page, goal: string): Promise<strin
   const form = new NewRun(page);
   await form.expectLoaded();
   await form.fillGoal(goal);
+  if (opts.allowance !== undefined) await form.setAllowance(opts.allowance);
+  if (opts.maxAttempts !== undefined) await form.setLimits({ maxAttempts: opts.maxAttempts });
   await form.expectReady();
   await form.submit();
   await expect(page).toHaveURL(/#\/p\/[^/]+\/runs\/run_[^/?]+$/);

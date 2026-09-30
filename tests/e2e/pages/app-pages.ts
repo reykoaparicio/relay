@@ -95,6 +95,14 @@ export class NewRun {
     await this.form().getByLabel('Run allowance (USD)').fill(dollars.replace(/^\$/, ''));
   }
 
+  /** Limits card (bounded by RUN_LIMIT_MAXIMUMS). */
+  async setLimits(o: { maxAttempts?: number; revisionCycles?: number; timeoutMinutes?: number }): Promise<void> {
+    const f = this.form();
+    if (o.maxAttempts !== undefined) await f.getByLabel('Max attempts (run)').fill(String(o.maxAttempts));
+    if (o.revisionCycles !== undefined) await f.getByLabel('Revision cycles').fill(String(o.revisionCycles));
+    if (o.timeoutMinutes !== undefined) await f.getByLabel('Timeout (minutes)').fill(String(o.timeoutMinutes));
+  }
+
   async expectReady(): Promise<void> {
     await expect(this.page.getByText('All checks passed. Ready to start.')).toBeVisible();
   }
@@ -104,14 +112,8 @@ export class NewRun {
   }
 }
 
-/** Run inspector (J8). */
-export class RunInspector {
-  constructor(readonly page: Page) {}
-
-  async expectLoaded(): Promise<void> {
-    await expect(this.page.getByRole('heading', { level: 1, name: 'Run inspection' })).toBeVisible();
-  }
-}
+/** Run inspector (J8): see ./run-inspector.ts. */
+export { RunInspector } from './run-inspector.js';
 
 export type StorageMode = 'keychain' | 'session';
 
@@ -192,6 +194,16 @@ export class Settings {
       if (await sessionOnly.count()) await sessionOnly.click();
       else await card.getByRole('button', { name: 'Test and use for this session' }).click();
     }
+  }
+
+  /** "Replace key" on a connected card, then save the new key for this session only. */
+  async replaceKey(displayName: string, key: string): Promise<void> {
+    const card = this.providerCard(displayName);
+    await card.getByRole('button', { name: 'Replace key' }).click();
+    await card.getByLabel(`Replacement ${displayName} API key`).fill(key);
+    const sessionOnly = card.getByRole('button', { name: 'Use for this session only' });
+    if (await sessionOnly.count()) await sessionOnly.click();
+    else await card.getByRole('button', { name: 'Test and use for this session' }).click();
   }
 
   async test(displayName: string): Promise<void> {

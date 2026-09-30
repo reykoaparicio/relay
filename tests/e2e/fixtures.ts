@@ -4,11 +4,11 @@
 import { test as base, expect, _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page, TestInfo } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { FakeCall, FakeLogEntry } from '@relay/providers';
 import { SAMPLE_API_ROOT, computeFixtureManifest } from '../helpers/fixture-hash.js';
+import { makeTempDir, safeRemove } from './safe-remove.js';
 
 const desktopDir = path.resolve('apps/desktop');
 // The Electron binary path, resolved from apps/desktop's devDependency (the root has no `electron`, 01 §R4-13).
@@ -122,23 +122,23 @@ export const test = base.extend<Fixtures>({
   projectEnvSecret: [false, { option: true }],
 
   userDataDir: async ({}, use) => {
-    const d = await realpath(await mkdtemp(path.join(tmpdir(), 'relay-e2e-')));
+    const d = await makeTempDir();
     await use(d);
     // The host copies the bundled sample next to an overridden userData (`<userData>-samples`).
-    await rm(`${d}-samples`, { recursive: true, force: true });
+    await safeRemove(`${d}-samples`);
     if (process.env['RELAY_E2E_KEEP'] === '1') {
       // Retained for `pnpm check:secrets` (13 §M2), which reads this path as its default scan dir.
       await mkdir('test-results', { recursive: true });
       await writeFile('test-results/last-userdata.txt', `${d}\n`);
     } else {
-      await rm(d, { recursive: true, force: true });
+      await safeRemove(d);
     }
   },
 
   // Every test gets its own copy of tests/fixtures/sample-api outside userData; the tree must be unchanged afterwards.
   project: [
     async ({ projectEnvSecret }, use) => {
-      const parent = await realpath(await mkdtemp(path.join(tmpdir(), 'relay-e2e-project-')));
+      const parent = await makeTempDir('project-');
       const dir = path.join(parent, 'sample-api');
       await cp(SAMPLE_API_ROOT, dir, { recursive: true, verbatimSymlinks: true });
       if (projectEnvSecret) await writeFile(path.join(dir, '.env'), `${FIXTURE_ENV_SECRET}\n`);
@@ -146,7 +146,7 @@ export const test = base.extend<Fixtures>({
       await use({ dir, name: 'sample-api', treeHashBefore: before });
       const after = await treeHash(dir);
       expect(after, 'the project files must be unchanged by every workflow (FR-10)').toBe(before);
-      if (process.env['RELAY_E2E_KEEP'] !== '1') await rm(parent, { recursive: true, force: true });
+      if (process.env['RELAY_E2E_KEEP'] !== '1') await safeRemove(parent);
     },
     { auto: true },
   ],
