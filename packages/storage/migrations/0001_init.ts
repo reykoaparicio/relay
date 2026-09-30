@@ -247,6 +247,9 @@ CREATE UNIQUE INDEX artifacts_input_file_uq ON artifacts(run_id, sha256) WHERE k
 CREATE INDEX artifacts_run_idx ON artifacts(run_id, kind);
 CREATE TRIGGER artifacts_no_update BEFORE UPDATE OF sha256, rel_path, size_bytes, kind ON artifacts
 BEGIN SELECT RAISE(ABORT, 'artifact content is immutable'); END;
+-- Purge removes the FILE and sets purged_at (C8); the row and its hash stay for audit.
+CREATE TRIGGER artifacts_no_delete BEFORE DELETE ON artifacts
+BEGIN SELECT RAISE(ABORT, 'artifacts are never deleted'); END;
 
 -- ============ Approvals (§11.3) ============
 CREATE TABLE approvals (
@@ -269,6 +272,8 @@ CREATE TABLE approvals (
 CREATE INDEX approvals_run_idx ON approvals(run_id, created_at);
 CREATE TRIGGER approvals_decided_immutable BEFORE UPDATE OF decision, plan_hash, context_hash, decided_at ON approvals
 WHEN OLD.decision IS NOT NULL BEGIN SELECT RAISE(ABORT, 'approval decision is immutable'); END;
+CREATE TRIGGER approvals_decided_no_delete BEFORE DELETE ON approvals
+WHEN OLD.decision IS NOT NULL BEGIN SELECT RAISE(ABORT, 'decided approvals are never deleted'); END;
 
 -- ============ Memory (§10) ============
 CREATE TABLE memory_records (
@@ -303,13 +308,15 @@ CREATE TABLE memory_revisions (
 ) STRICT;
 CREATE TRIGGER memory_revisions_immutable BEFORE UPDATE ON memory_revisions
 BEGIN SELECT RAISE(ABORT, 'memory revisions are immutable'); END;
+CREATE TRIGGER memory_revisions_no_delete BEFORE DELETE ON memory_revisions
+BEGIN SELECT RAISE(ABORT, 'memory revisions are never deleted'); END;
 -- Revisions are never deleted. A deleted record keeps its revisions but is excluded from retrieval (§10.4).
 -- purgeProjectHistory (C8) removes only the per-run snapshot copies. Hard delete of revisions is out of P0.
 
 CREATE TABLE memory_events (                 -- §10.4 "Human approval is a durable event"
   id          TEXT PRIMARY KEY,
   record_id   TEXT NOT NULL REFERENCES memory_records(id),
-  event       TEXT NOT NULL CHECK (event IN ('suggested','approved','edited','archived','rejected','deleted','conflict_resolved','unarchived')),
+  event       TEXT NOT NULL CHECK (event IN ('suggested','approved','edited','archived','rejected','deleted','conflict_resolved','unarchived','history_purged')),
   revision    INTEGER NOT NULL,
   actor       TEXT NOT NULL,                  -- 'user' | 'run:<id>'
   detail_json TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
@@ -351,6 +358,7 @@ CREATE TABLE run_events (
   UNIQUE (run_id, seq)
 ) STRICT;
 CREATE TRIGGER run_events_immutable BEFORE UPDATE ON run_events BEGIN SELECT RAISE(ABORT, 'run_events are immutable'); END;
+CREATE TRIGGER run_events_no_delete BEFORE DELETE ON run_events BEGIN SELECT RAISE(ABORT, 'run_events are immutable'); END;
 
 CREATE TABLE idempotency_keys (             -- 02 §B0 idempotency
   op            TEXT NOT NULL,

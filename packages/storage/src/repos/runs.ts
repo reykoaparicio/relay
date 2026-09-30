@@ -193,12 +193,15 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       );
     },
     insertInputFiles(runId, files) {
-      const stmt = driver.prepare(
-        'INSERT INTO run_input_files (run_id, rel_path, sha256, artifact_id, size_bytes, captured_at) VALUES (?, ?, ?, ?, ?, ?)',
-      );
-      for (const f of files) {
-        stmt.run(runId, f.relPath, f.sha256, f.artifactId, f.sizeBytes, f.capturedAt);
-      }
+      // All-or-nothing (joins an open tx).
+      deps.inTx(() => {
+        const stmt = driver.prepare(
+          'INSERT INTO run_input_files (run_id, rel_path, sha256, artifact_id, size_bytes, captured_at) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        for (const f of files) {
+          stmt.run(runId, f.relPath, f.sha256, f.artifactId, f.sizeBytes, f.capturedAt);
+        }
+      });
     },
     inputFiles(runId) {
       return driver.prepare('SELECT * FROM run_input_files WHERE run_id = ? ORDER BY rel_path').all(runId).map(mapInputFile);

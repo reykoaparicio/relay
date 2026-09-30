@@ -122,4 +122,40 @@ describe('LedgerRepo', () => {
     expect(bad.ok).toBe(false);
     expect(() => repo.append([runEntry(run.id, p.id, { type: 'reserve', bucket: 'reserved', deltaMicrousd: 0.5 })])).toThrow();
   });
+
+  it('append is all-or-nothing: a failing entry leaves no partial group and balances unchanged (B2)', () => {
+    const { p, run } = setup();
+    f.db.repos.ledger.append([runEntry(run.id, p.id, { type: 'allowance_set', bucket: 'allowance', deltaMicrousd: 1000 })]);
+    const before = f.db.repos.ledger.runBalances(run.id);
+
+    expect(() =>
+      f.db.repos.ledger.append([
+        runEntry(run.id, p.id, { type: 'reserve', bucket: 'reserved', deltaMicrousd: 100 }),
+        // scope 'run' without project_id violates a CHECK on the second row.
+        { scope: 'run', runId: run.id, type: 'reserve', bucket: 'allowance', deltaMicrousd: -100 },
+      ]),
+    ).toThrow(/CHECK constraint failed/);
+
+    expect(f.db.repos.ledger.runBalances(run.id)).toEqual(before);
+    expect(f.db.repos.ledger.list(run.id, { limit: 10 }).ok && f.db.repos.ledger.list(run.id, { limit: 10 })).toMatchObject({
+      value: { items: [{ type: 'allowance_set' }] },
+    });
+  });
+
+  it('append joins an enclosing db.tx instead of nesting, and rolls back with it (B2)', () => {
+    const { p, run } = setup();
+
+    expect(() =>
+      f.db.tx('immediate', (repos) => {
+        repos.ledger.append([runEntry(run.id, p.id, { type: 'allowance_set', bucket: 'allowance', deltaMicrousd: 5 })]);
+        throw new Error('abort');
+      }),
+    ).toThrow('abort');
+    const inside = f.db.tx('immediate', (repos) =>
+      repos.ledger.append([runEntry(run.id, p.id, { type: 'allowance_set', bucket: 'allowance', deltaMicrousd: 7 })]),
+    );
+
+    expect(inside).toHaveLength(1);
+    expect(f.db.repos.ledger.runBalances(run.id).L).toBe(7);
+  });
 });

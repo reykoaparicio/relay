@@ -3,7 +3,7 @@ import { err, errors, idSchema, invariant, ok } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
 import { mapMemoryEvent, mapMemoryItem, mapMemoryRevision, mapRunMemorySnapshot, RowReader } from '../mappers.js';
 import { bit, jsonParam, toJson } from '../sql.js';
-import type { MemoryItem, MemoryRepo, MemoryRevisionInsert, MemoryRevisionRow } from '../types.js';
+import type { MemoryItem, MemoryRecordInsert, MemoryRepo, MemoryRevisionInsert, MemoryRevisionRow } from '../types.js';
 import type { RepoDeps } from './deps.js';
 
 /** Records joined with their current revision (aliased `rev_*` for {@link mapMemoryItem}). */
@@ -31,32 +31,37 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
     return mapMemoryRevision(row);
   };
 
+  const insertRecordAndRevision = (rec: MemoryRecordInsert, rev: MemoryRevisionInsert): MemoryItem => {
+    driver
+      .prepare(
+        `INSERT INTO memory_records (id, project_id, type, status, current_revision, scope_json, pinned, expires_at,
+           review_at, source_run_id, proposal_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        rec.id,
+        rec.projectId,
+        rec.type,
+        rec.status,
+        toJson(rec.scope),
+        bit(rec.pinned ?? false),
+        rec.expiresAt ?? null,
+        rec.reviewAt ?? null,
+        rec.sourceRunId ?? null,
+        jsonParam(rec.proposal) ?? null,
+        rec.createdAt,
+        rec.createdAt,
+      );
+    insertRevision(rec.id, 1, rev);
+    const item = get(rec.id);
+    invariant(item !== undefined, 'memory record missing after insert');
+    return item;
+  };
+
   return {
     insertRecord(rec, rev) {
-      driver
-        .prepare(
-          `INSERT INTO memory_records (id, project_id, type, status, current_revision, scope_json, pinned, expires_at,
-             review_at, source_run_id, proposal_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          rec.id,
-          rec.projectId,
-          rec.type,
-          rec.status,
-          toJson(rec.scope),
-          bit(rec.pinned ?? false),
-          rec.expiresAt ?? null,
-          rec.reviewAt ?? null,
-          rec.sourceRunId ?? null,
-          jsonParam(rec.proposal) ?? null,
-          rec.createdAt,
-          rec.createdAt,
-        );
-      insertRevision(rec.id, 1, rev);
-      const item = get(rec.id);
-      invariant(item !== undefined, 'memory record missing after insert');
-      return item;
+      // Record + first revision are one unit (joins an open tx): an invalid revision never leaves an orphan record.
+      return deps.inTx(() => insertRecordAndRevision(rec, rev));
     },
     get,
     getWithRevisions(id) {
@@ -103,13 +108,16 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
     },
     addRevision(recordId, rev, expectedRevision): Result<MemoryRevisionRow> {
       const next = expectedRevision + 1;
-      const changes = driver
-        .prepare('UPDATE memory_records SET current_revision = ?, updated_at = ? WHERE id = ? AND current_revision = ?')
-        .run(next, rev.createdAt, recordId, expectedRevision).changes;
-      if (changes === 0) {
-        return err(errors.conflict({ entity: 'memory', expectedRevision }));
-      }
-      return ok(insertRevision(recordId, next, rev));
+      // CAS bump + revision insert are one unit (joins an open tx): a rejected revision never moves the pointer.
+      return deps.inTx(() => {
+        const changes = driver
+          .prepare('UPDATE memory_records SET current_revision = ?, updated_at = ? WHERE id = ? AND current_revision = ?')
+          .run(next, rev.createdAt, recordId, expectedRevision).changes;
+        if (changes === 0) {
+          return err(errors.conflict({ entity: 'memory', expectedRevision }));
+        }
+        return ok(insertRevision(recordId, next, rev));
+      });
     },
     setStatus(id, from, to, at) {
       invariant(from.length > 0, 'setStatus requires at least one from-status');
@@ -136,12 +144,14 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
       return mapMemoryEvent(row);
     },
     snapshotForRun(runId, rows) {
-      const stmt = driver.prepare(
-        `INSERT INTO run_memory_snapshot (run_id, record_id, revision, title, content, included) VALUES (?, ?, ?, ?, ?, ?)`,
-      );
-      for (const r of rows) {
-        stmt.run(runId, r.recordId, r.revision, r.title, r.content, bit(r.included));
-      }
+      deps.inTx(() => {
+        const stmt = driver.prepare(
+          `INSERT INTO run_memory_snapshot (run_id, record_id, revision, title, content, included) VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        for (const r of rows) {
+          stmt.run(runId, r.recordId, r.revision, r.title, r.content, bit(r.included));
+        }
+      });
     },
     runSnapshot(runId) {
       return driver

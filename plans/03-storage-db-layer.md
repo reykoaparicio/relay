@@ -335,6 +335,9 @@ CREATE UNIQUE INDEX artifacts_input_file_uq ON artifacts(run_id, sha256) WHERE k
 CREATE INDEX artifacts_run_idx ON artifacts(run_id, kind);
 CREATE TRIGGER artifacts_no_update BEFORE UPDATE OF sha256, rel_path, size_bytes, kind ON artifacts
 BEGIN SELECT RAISE(ABORT, 'artifact content is immutable'); END;
+-- Purge removes the FILE and sets purged_at (C8); the row and its hash stay for audit.
+CREATE TRIGGER artifacts_no_delete BEFORE DELETE ON artifacts
+BEGIN SELECT RAISE(ABORT, 'artifacts are never deleted'); END;
 
 -- ============ Approvals (§11.3) ============
 CREATE TABLE approvals (
@@ -357,6 +360,8 @@ CREATE TABLE approvals (
 CREATE INDEX approvals_run_idx ON approvals(run_id, created_at);
 CREATE TRIGGER approvals_decided_immutable BEFORE UPDATE OF decision, plan_hash, context_hash, decided_at ON approvals
 WHEN OLD.decision IS NOT NULL BEGIN SELECT RAISE(ABORT, 'approval decision is immutable'); END;
+CREATE TRIGGER approvals_decided_no_delete BEFORE DELETE ON approvals
+WHEN OLD.decision IS NOT NULL BEGIN SELECT RAISE(ABORT, 'decided approvals are never deleted'); END;
 
 -- ============ Memory (§10) ============
 CREATE TABLE memory_records (
@@ -391,13 +396,15 @@ CREATE TABLE memory_revisions (
 ) STRICT;
 CREATE TRIGGER memory_revisions_immutable BEFORE UPDATE ON memory_revisions
 BEGIN SELECT RAISE(ABORT, 'memory revisions are immutable'); END;
+CREATE TRIGGER memory_revisions_no_delete BEFORE DELETE ON memory_revisions
+BEGIN SELECT RAISE(ABORT, 'memory revisions are never deleted'); END;
 -- Revisions are never deleted. A deleted record keeps its revisions but is excluded from retrieval (§10.4).
 -- purgeProjectHistory (C8) removes only the per-run snapshot copies. Hard delete of revisions is out of P0.
 
 CREATE TABLE memory_events (                 -- §10.4 "Human approval is a durable event"
   id          TEXT PRIMARY KEY,
   record_id   TEXT NOT NULL REFERENCES memory_records(id),
-  event       TEXT NOT NULL CHECK (event IN ('suggested','approved','edited','archived','rejected','deleted','conflict_resolved','unarchived')),
+  event       TEXT NOT NULL CHECK (event IN ('suggested','approved','edited','archived','rejected','deleted','conflict_resolved','unarchived','history_purged')),
   revision    INTEGER NOT NULL,
   actor       TEXT NOT NULL,                  -- 'user' | 'run:<id>'
   detail_json TEXT CHECK (detail_json IS NULL OR json_valid(detail_json)),
@@ -439,6 +446,7 @@ CREATE TABLE run_events (
   UNIQUE (run_id, seq)
 ) STRICT;
 CREATE TRIGGER run_events_immutable BEFORE UPDATE ON run_events BEGIN SELECT RAISE(ABORT, 'run_events are immutable'); END;
+CREATE TRIGGER run_events_no_delete BEFORE DELETE ON run_events BEGIN SELECT RAISE(ABORT, 'run_events are immutable'); END;
 
 CREATE TABLE idempotency_keys (             -- 02 §B0 idempotency
   op            TEXT NOT NULL,
@@ -498,7 +506,7 @@ Each repo is a factory `createXRepo(driver, deps)` built on prepared statements,
 
 | Repo | Methods (all synchronous) |
 |---|---|
-| `ProjectRepo` | `insert(p)`, `get(id)`, `getWithRoot(id)` (runner-internal, includes realpath), `list({includeArchived})`, `update(id, patch, expectedUpdatedAt)` → `CONFLICT` on mismatch, `archive(id)`, `stats(id, monthStart)` |
+| `ProjectRepo` | `insert(p)`, `get(id)`, `getWithRoot(id)` (runner-internal, includes realpath), `list({includeArchived})`, `update(id, patch, expectedUpdatedAt)` → `CONFLICT` on mismatch **or when the project is archived** (archived projects are read-only), `NOT_FOUND` when absent, `archive(id)` (sets `archived_at`; like `update`, writes `updated_at = max(now, current.updated_at + 1)` so `updated_at` strictly increases and a stale `update` CAS can never succeed after an archive), `stats(id, monthStart)` |
 | `SettingsRepo` | `get(key)`, `set(key, value)` |
 | `CredentialRefRepo` | `upsert(ref)`, `get(providerId)`, `list()`, `delete(providerId)`, `recordTest(providerId, ok, code, at)` |
 | `CatalogRepo` | `upsertMany(entries)`, `get(provider, model, version?)` (latest when version absent), `list(provider?)`, `latestVersion()`. Mapping: `CatalogEntry.displayName` ↔ `display_name`, `prices` ↔ `prices_json`, `capabilities` ↔ `capabilities_json`, `effectiveDate` ↔ `effective_date`, `source` ↔ `source`, `sourceRetrievedAt` ↔ `source_retrieved_at`, `catalogVersion` ↔ `catalog_version` |
@@ -509,12 +517,14 @@ Each repo is a factory `createXRepo(driver, deps)` built on prepared statements,
 | `StepRepo` | `insertMany(steps)`, `insertRetry(prev, fields)` (new row with the same `run_id, step_key, revision_index, ordinal`, `retry_index = prev.retry_index + 1`, fresh counters), `get(id)`, `listForRun(runId)`, `latestPerStepKey(runId)` (one row per `step_key`: max `(revision_index, retry_index)`), `latestFor(runId, stepKey)` (`ORDER BY revision_index DESC, retry_index DESC LIMIT 1`), `listEligible(runId, now)` (latest rows in state `ready`/`reserved` with `not_before_at IS NULL OR not_before_at <= now`, ordered by `ordinal`), `earliestNotBefore(runId)` (min future `not_before_at` among latest rows, so the loop can sleep until then), `setNotBefore(id, at \| null)`, `transition(id, from[], to, fields)` (CAS) |
 | `AttemptRepo` | `insert(a)`, `get(id)`, `transition(id, from[], to, fields)` (CAS), `listForStep(stepRunId)`, `listUnresolved(runId?)`, `setProviderIds(id, {requestId?, responseId?})` (write-once **per column**: `SET provider_request_id = COALESCE(provider_request_id, ?), provider_response_id = COALESCE(provider_response_id, ?)`, so a later call never overwrites an id and can still fill the other one), `nextSeq(stepRunId)` |
 | `LedgerRepo` | `append(entries[])` (all share `group_id`), `runBalances(runId)` → `{L,C,R,U}` from `run_budget_v`, `projectMonthBalances(projectId, monthStartMs, monthEndMs)` → `{C,R,U}` and `setupBalances(monthStartMs, monthEndMs)` → `{C,R,U}` (semantics below), `attemptBalances(attemptId)` → `{reserved, unknown, settled}`, `list(runId, {sort, cursor, limit})` (keyset on `(created_at, id)`), `settledByCertainty(runId)` |
-| `ArtifactRepo` | `insertIfAbsent(meta)` → returns the existing row on an `(attempt_id, kind, sha256)` conflict (idempotent §7.5; the raw response and the validated output of one attempt are separate rows even if their bytes match), `findInputFile(runId, sha256)` (the per-run `input_file` dedupe key), `get(id)`, `listForRun(runId, kinds?)`, `markPurged(id, at)` |
+| `ArtifactRepo` | `insertIfAbsent(meta)` → returns the existing row on an `(attempt_id, kind, sha256)` conflict (idempotent §7.5; the raw response and the validated output of one attempt are separate rows even if their bytes match); a replay with the same `id` returns that row only when its `sha256`, `kind`, and `rel_path` match, otherwise `CONFLICT` (as for a `rel_path` already holding other content), `findInputFile(runId, sha256)` (the per-run `input_file` dedupe key), `get(id)`, `listForRun(runId, kinds?)`, `markPurged(id, at)` |
 | `ApprovalRepo` | `insert(a)`, `get(id)`, `pendingForRun(runId)`, `latestApprovedForRun(runId)`, `decide(id, decision, note, at)` (CAS `WHERE decision IS NULL AND invalidated_at IS NULL`), `invalidate(id, reason, at)` |
 | `MemoryRepo` | `insertRecord(rec, rev)`, `get(id)`, `getWithRevisions(id)`, `list({projectId, statuses, types, query})` (**projectId required at type level**, §10.5), `retrievable(projectId, role, now)` (approved ∧ not expired ∧ (scope all ∨ role ∈ roles)), `addRevision(recordId, rev, expectedRevision)` (CAS on `current_revision`), `setStatus(id, from[], to, at)`, `recordEvent(e)`, `snapshotForRun(runId, rows)`, `runSnapshot(runId)`, `purgeRunSnapshots(projectId)` |
 | `EventRepo` | `append(runId, type, payload)` (seq = `COALESCE(MAX(seq),0)+1` inside the same tx), `list(runId, afterSeq, limit)`, `lastSeq(runId)` |
 | `IdempotencyRepo` | `get(op, key)`, `put(op, key, requestHash, result: IdempotentResult)`, `sweep(olderThan)` |
 | `LeaseRepo` | `acquire(ownerId, pid, now, staleAfterMs)` → `'acquired' \| 'held_by_other'` (rules below), `heartbeat(ownerId, now)` (CAS on owner), `release(ownerId)` |
+
+**Multi-statement writes are atomic.** Every repo method that issues more than one write (`LedgerRepo.append`, `MemoryRepo.insertRecord` (record + first revision), `MemoryRepo.addRevision`, `MemoryRepo.snapshotForRun`, `StepRepo.insertMany`, `RunRepo.insertInputFiles`, `CatalogRepo.upsertMany`, `ProjectRepo.archive`, `LeaseRepo.acquire`) runs through `deps.inTx`: it **joins** the caller's transaction when one is open on the connection (so it commits or rolls back with the enclosing `db.tx`), and otherwise opens its own `BEGIN IMMEDIATE … COMMIT` through the UoW (no savepoints). A failing row therefore never leaves a partial group behind.
 
 **Keyset pagination.** Both whitelisted sorts from 02 are supported by the same `(created_at, id)` index:
 - `created_desc` (default): `WHERE (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT ?`
@@ -537,14 +547,15 @@ The cursor is an opaque base64url of `{created_at, id, sort}`. A cursor used wit
 Otherwise (fresh heartbeat **and** live PID) it returns `held_by_other`. An immediate restart after a crash therefore succeeds (fresh heartbeat, dead PID), which the crash tests rely on (11 R4-10).
 
 ## C7: Backup & restore (`src/backup.ts`)
-- `createBackup({ db, userDataDir, clock })` creates `backups/<YYYYMMDD-HHmmss>/relay.sqlite` via `backupTo`, and then copies `artifacts/` **referenced** by DB rows. Artifacts are immutable (content-addressed by id+hash), so copying after the DB snapshot is consistent. It writes a `manifest.json` `{ schemaVersion, createdAt, artifactCount, sha256s }`. Spec §18.4 requires backups with no credentials, so `secrets/` is never copied.
+- `createBackup({ db, userDataDir, clock })` creates `backups/<YYYYMMDD-HHmmss>/relay.sqlite` via `backupTo`, then opens that **snapshot file read-only** and lists the unpurged artifacts and the schema version **from the snapshot** (never from the live DB, which may have gained or purged artifacts since), and copies those `artifacts/` files. Artifacts are immutable (content-addressed by id+hash), so copying after the DB snapshot is consistent; a file already missing (purged after the snapshot) is skipped and left out of the manifest. It writes a `manifest.json` `{ schemaVersion, createdAt, artifactCount, sha256s }`. Spec §18.4 requires backups with no credentials, so `secrets/` is never copied.
 - `restoreBackup` is **not** exposed in the UI in P0. The documented manual procedure lives in `docs/release/backup-restore.md` (M) and is tested by K's `backup.int.test.ts`.
 
 ## C8: Purge & retention (§10.4 "separate project-history purge operation", §12.3 retention)
 - `purgeProjectHistory(projectId)` deletes the rows in `run_memory_snapshot` for the project's runs. It then calls `ArtifactStore.purge(relPath)` (05 §E6) for each of those runs' `raw_response` and `context_manifest` artifacts and sets `artifacts.purged_at` (`ArtifactRepo.markPurged`) to the returned `purgedAt`. The store artifacts are `0o444`, so the `chmod 0o644` before the unlink happens **inside** `ArtifactStore.purge`; storage never touches file modes.
   - Artifact rows and hashes stay, because ledger entries and attempts reference them.
   - The immutability trigger covers only `sha256, rel_path, size_bytes, kind`, so updating `purged_at` is allowed.
-  - Each affected record gets a `memory_events` row. The ledger is never touched.
+  - Each affected record gets a `memory_events` row with `event = 'history_purged'`. The ledger is never touched.
+  - Purge never deletes `artifacts`, `memory_revisions`, `run_events`, or decided `approvals` rows; C3 `BEFORE DELETE` triggers abort any such delete (an undecided approval may still be deleted).
 - `sweepRawResponses(now, retentionDays)` runs at runner boot and then daily (scheduled by 06). It purges `raw_response` files older than `app_settings.rawResponseRetentionDays` (default 30) through the same `ArtifactStore.purge` + `markPurged` path.
 - Readers check `purged_at` first: a purged artifact returns `{ purged: true, purgedAt }` instead of content (and the store itself answers `NOT_FOUND` with `details.purged = true` if asked for the file). The UI shows "Raw response removed by retention policy (N days)".
 - Because file removal and the row update cannot share a transaction, the order is: purge the file, then set `purged_at` in a tx. A crash in between leaves a row whose file is missing; the next sweep sees `purged_at IS NULL`, calls `purge` again (idempotent: a missing file returns the existing tombstone's `purgedAt`), and sets the column.
@@ -555,7 +566,7 @@ Otherwise (fresh heartbeat **and** live PID) it returns `held_by_other`. An imme
 |---|---|
 | `driver.test.ts` | `openNodeSqlite(path, { readOnly: true })` rejects a write. `inTransaction` is false outside and true inside `BEGIN IMMEDIATE`. The prepared-statement cache returns the same statement for the same SQL. `backupTo` produces an openable file |
 | `migrate.test.ts` | Fresh DB → version = latest. Re-running is a no-op. `MIGRATIONS` is contiguous from 1 and no `sql` contains a backtick, `${`, or a backslash. A tampered migration (a test list whose applied `sql` differs by one byte) fails the checksum with `MigrationChecksumError`. A DB with a newer version is refused. A pre-migration backup is created when the DB is non-empty. With the C1 pragmas (`trusted_schema = OFF`), inserting invalid JSON into a `json_valid` column fails with `CHECK constraint failed` and valid JSON succeeds |
-| `schema.test.ts` | Every trigger fires: ledger UPDATE/DELETE abort; validated workflow_version UPDATE aborts; decided approval immutable; memory revisions immutable; run_events immutable; config revisions immutable. `CHECK`s: terminal status without `ended_at` rejected; `paused` without `pause_reason` rejected, non-paused with a reason rejected, unknown reason rejected; ledger `scope='run'` without `project_id` rejected, `scope='setup'` with `run_id` rejected; `idempotency_keys.result_json` over 2048 bytes rejected. Unique keys: two `step_runs` rows differing only in `retry_index` accepted, an exact duplicate rejected; artifacts with the same `(attempt_id, sha256)` but different `kind` accepted, a duplicate `(attempt_id, kind, sha256)` rejected; a second `input_file` with the same `(run_id, sha256)` rejected. Every enum CHECK list equals its 02 contracts array (including `input_file` and all 14 pause reasons). FK violation raises. The table list equals the C3 list |
+| `schema.test.ts` | Every trigger fires: ledger UPDATE/DELETE abort; validated workflow_version UPDATE aborts; decided approval immutable; memory revisions immutable; run_events immutable; config revisions immutable. `BEFORE DELETE` aborts on `run_events`, `memory_revisions`, `artifacts`, and decided `approvals` (an undecided approval deletes). `CHECK`s: terminal status without `ended_at` rejected; `paused` without `pause_reason` rejected, non-paused with a reason rejected, unknown reason rejected; ledger `scope='run'` without `project_id` rejected, `scope='setup'` with `run_id` rejected; `idempotency_keys.result_json` over 2048 bytes rejected. Unique keys: two `step_runs` rows differing only in `retry_index` accepted, an exact duplicate rejected; artifacts with the same `(attempt_id, sha256)` but different `kind` accepted, a duplicate `(attempt_id, kind, sha256)` rejected; a second `input_file` with the same `(run_id, sha256)` rejected. Every enum CHECK list equals its 02 contracts array (including `input_file` and all 14 pause reasons). FK violation raises. The table list equals the C3 list |
 | `unit-of-work.test.ts` | Rollback on throw leaves no rows. The ROLLBACK guard: an error after SQLite has already ended the tx surfaces the original error, not "cannot rollback". Nested tx throws. **Type test:** `// @ts-expect-error` on an async callback. **Busy:** while connection A holds an open immediate `tx`, connection B (same file, `busy_timeout = 50`, same thread) fails a write with `SQLITE_BUSY` → `RUNNER_UNAVAILABLE` (retryable) |
 | `run-repo.test.ts` | Keyset pagination is stable with equal `created_at` (tie-break on id) for **both** `created_desc` and `created_asc`, and paging through all rows yields each exactly once. A cursor from one sort used with the other → `VALIDATION_FAILED`. `updateStatus` CAS returns false when `from` doesn't match, and clears `pause_reason` when leaving `paused`. `enterRunning`/`leaveRunning` accrue `execution_ms_used`. `setPauseRequested` round-trips. `getInspectorProjection` issues ≤ 6 statements (spy on driver.prepare+run) |
 | `step-repo.test.ts` | `insertRetry` creates `retry_index + 1` with fresh counters. `latestFor` and `latestPerStepKey` return the max `(revision_index, retry_index)` (a revision beats a retry of an older revision). `listEligible` excludes a row with `not_before_at > now` and includes it once `now` passes. `earliestNotBefore` returns the minimum future value, or null |

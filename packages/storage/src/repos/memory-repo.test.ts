@@ -119,4 +119,45 @@ describe('MemoryRepo', () => {
     expect(f.db.repos.memory.runSnapshot(run.id)).toEqual([]);
     expect(f.db.repos.memory.runSnapshot(otherRun.id)).toHaveLength(1);
   });
+
+  it('insertRecord leaves no orphan record when the revision is invalid (B2)', () => {
+    const p = seedProject(f.db, f.clock);
+    const id = newId('memory');
+
+    expect(() =>
+      f.db.repos.memory.insertRecord(
+        { id, projectId: p.id, type: 'user_rule', status: 'approved', scope: { roles: 'all' }, createdAt: f.clock.now() },
+        { id: newId('memoryRevision'), title: '', content: 'C', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
+      ),
+    ).toThrow(/CHECK constraint failed/);
+
+    expect(f.db.repos.memory.get(id)).toBeUndefined();
+    expect(f.db.repos.memory.list({ projectId: p.id })).toEqual([]);
+  });
+
+  it('addRevision does not move current_revision when the new revision is invalid (B2)', () => {
+    const p = seedProject(f.db, f.clock);
+    const m = add(p.id);
+
+    expect(() =>
+      f.db.repos.memory.addRevision(
+        m.record.id,
+        { id: newId('memoryRevision'), title: 'ok', content: '', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
+        1,
+      ),
+    ).toThrow(/CHECK constraint failed/);
+
+    expect(f.db.repos.memory.get(m.record.id)?.record.currentRevision).toBe(1);
+  });
+
+  it('snapshotForRun is all-or-nothing (B2)', () => {
+    const p = seedProject(f.db, f.clock);
+    const run = seedRun(f.db, f.clock, p.id);
+    const m = add(p.id);
+    const row = { recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true };
+
+    expect(() => { f.db.repos.memory.snapshotForRun(run.id, [row, row]); }).toThrow(/UNIQUE constraint failed/);
+
+    expect(f.db.repos.memory.runSnapshot(run.id)).toEqual([]);
+  });
 });

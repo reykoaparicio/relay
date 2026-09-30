@@ -124,8 +124,12 @@ export interface ProjectRepo {
   /** Runner-internal; includes the realpath. @throws RelayError NOT_FOUND */
   getWithRoot(id: ProjectId): ProjectWithRoot;
   list(opts?: { readonly includeArchived?: boolean }): readonly ProjectRow[];
-  /** Optimistic concurrency on `updated_at`: CONFLICT when `expectedUpdatedAt` does not match. */
+  /**
+   * Optimistic concurrency on `updated_at`: CONFLICT when `expectedUpdatedAt` does not match, or when the project is
+   * archived (archived projects are read-only); NOT_FOUND when it does not exist.
+   */
   update(id: ProjectId, patch: ProjectPatch, expectedUpdatedAt: EpochMs): Result<ProjectRow>;
+  /** Sets `archived_at`; `updated_at` strictly increases (so a stale `update` CAS conflicts). False if absent/archived. */
   archive(id: ProjectId): boolean;
   stats(id: ProjectId, monthStart: EpochMs): ProjectStats;
 }
@@ -649,7 +653,11 @@ export interface ArtifactFilter {
 }
 
 export interface ArtifactRepo {
-  /** Idempotent (§7.5): on an (attempt, kind, sha256) or per-run input_file conflict returns the existing row. */
+  /**
+   * Idempotent (§7.5): on an (attempt, kind, sha256) or per-run input_file conflict returns the existing row; a replay
+   * with the same id and the same sha256/kind/rel_path returns that row.
+   * @throws RelayError CONFLICT when the id exists with different sha256/kind/rel_path, or rel_path holds other content.
+   */
   insertIfAbsent(meta: ArtifactInsert): ArtifactRow;
   findInputFile(runId: RunId, sha256: Sha256): ArtifactRow | undefined;
   get(id: ArtifactId): ArtifactRow | undefined;

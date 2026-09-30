@@ -72,4 +72,27 @@ describe('createBackup', () => {
     copy.close();
     live.close();
   });
+
+  it('builds the manifest from the snapshot, not the live DB changed after backupTo (B3)', async () => {
+    const p = seedProject(f.db, f.clock);
+    const run = seedRun(f.db, f.clock, p.id);
+    const inSnapshot = seedArtifact(run.id, p.id, 'artifacts/run/in-snapshot', true);
+    let late: ReturnType<typeof seedArtifact> | undefined;
+    // Hook: the live DB changes right after the snapshot is taken.
+    const db = {
+      ...f.db,
+      backupTo: async (dest: string): Promise<void> => {
+        await f.db.backupTo(dest);
+        late = seedArtifact(run.id, p.id, 'artifacts/run/late-x', true);
+        f.db.repos.artifacts.markPurged(inSnapshot.id, f.clock.now());
+      },
+    };
+
+    const b = await createBackup({ db, userDataDir: userData, clock: f.clock });
+
+    expect(late).toBeDefined();
+    expect(b.manifest).toMatchObject({ schemaVersion: 1, artifactCount: 1, sha256s: [inSnapshot.sha256] });
+    expect(existsSync(join(b.dir, 'artifacts', 'run', 'in-snapshot'))).toBe(true);
+    expect(existsSync(join(b.dir, 'artifacts', 'run', 'late-x'))).toBe(false);
+  });
 });

@@ -48,6 +48,34 @@ describe('ProjectRepo', () => {
     expect(() => f.db.repos.projects.get(newId('project'))).toThrow();
   });
 
+  it('archive strictly advances updated_at at the same ms, so a stale update CAS conflicts (B1)', () => {
+    const p = seedProject(f.db, f.clock);
+    // Clock frozen at the insert ms: archive must still move updated_at forward.
+
+    expect(f.db.repos.projects.archive(p.id)).toBe(true);
+    const archived = f.db.repos.projects.get(p.id);
+    const stale = f.db.repos.projects.update(p.id, { name: 'ghost' }, p.updatedAt);
+    const current = f.db.repos.projects.update(p.id, { name: 'ghost' }, archived.updatedAt);
+
+    expect(archived.updatedAt).toBe(p.updatedAt + 1);
+    expect(archived.archivedAt).toBe(f.clock.now());
+    expect(!stale.ok && stale.error.code).toBe('CONFLICT');
+    // Even with the current updated_at, an archived project is read-only.
+    expect(!current.ok && current.error.code).toBe('CONFLICT');
+    expect(f.db.repos.projects.get(p.id).name).toBe('sample-api');
+  });
+
+  it('archive never moves updated_at backwards when the clock goes back (B1)', () => {
+    const p = seedProject(f.db, f.clock);
+    f.clock.advance(100);
+    const r = f.db.repos.projects.update(p.id, { name: 'renamed' }, p.updatedAt);
+    f.clock.advance(-500);
+
+    f.db.repos.projects.archive(p.id);
+
+    expect(r.ok && f.db.repos.projects.get(p.id).updatedAt).toBe(r.ok && r.value.updatedAt + 1);
+  });
+
   it('computes dashboard stats', () => {
     const p = seedProject(f.db, f.clock);
     const run = seedRun(f.db, f.clock, p.id);
@@ -125,6 +153,24 @@ describe('settings, credentials, catalog, workflows, config revisions, approvals
     expect(repo.list('fake').map((c) => c.catalogVersion)).toEqual(['2026-10-01']);
     expect(repo.list()).toHaveLength(1);
     expect(repo.latestVersion()).toBe('2026-10-01');
+  });
+
+  it('CatalogRepo.upsertMany is all-or-nothing (B2)', () => {
+    const good = catalogModelSchema.parse({
+      providerId: 'fake',
+      modelId: 'atomic',
+      catalogVersion: '2026-09-25',
+      displayName: 'Atomic',
+      capabilities: CAPABILITIES,
+      prices: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+      effectiveDate: '2026-09-25',
+      source: 'https://relay.invalid/pricing',
+      sourceRetrievedAt: '2026-09-25',
+    });
+    const bad = { ...good, modelId: 'broken', displayName: null as unknown as string };
+
+    expect(() => f.db.repos.catalog.upsertMany([good, bad])).toThrow(/NOT NULL constraint failed/);
+    expect(f.db.repos.catalog.get('fake', 'atomic')).toBeUndefined();
   });
 
   it('WorkflowRepo manages drafts with CAS and validated versions', () => {

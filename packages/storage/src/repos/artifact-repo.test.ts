@@ -1,3 +1,4 @@
+import { RelayError } from '@relay/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { toArtifactMeta } from '../mappers.js';
 import type { FixtureDb } from '../testing/fixtures.js';
@@ -97,5 +98,27 @@ describe('ArtifactRepo', () => {
     expect(f.db.repos.artifacts.listWhere({ projectId: p.id, unpurgedOnly: true })).toEqual([]);
     expect(f.db.repos.artifacts.listWhere({ kinds: ['raw_response'], createdBefore: f.clock.now() })).toEqual([]);
     expect(f.db.repos.artifacts.get(newId('artifact'))).toBeUndefined();
+  });
+
+  it('refuses an id replay whose sha256, kind, or rel_path differs, and returns the row for a true replay (B4)', () => {
+    const { meta } = setup();
+    const first = f.db.repos.artifacts.insertIfAbsent(meta({ kind: 'report', attemptId: null }));
+    const replay = (o: Partial<ArtifactInsert>) => () =>
+      f.db.repos.artifacts.insertIfAbsent(meta({ id: first.id, kind: 'report', attemptId: null, relPath: first.relPath, ...o }));
+
+    const codeOf = (fn: () => unknown): string | undefined => {
+      try {
+        fn();
+        return undefined;
+      } catch (e) {
+        return e instanceof RelayError ? e.appError.code : 'not-a-relay-error';
+      }
+    };
+
+    expect(codeOf(replay({ sha256: sha('z') }))).toBe('CONFLICT');
+    expect(codeOf(replay({ kind: 'plan' }))).toBe('CONFLICT');
+    expect(codeOf(replay({ relPath: 'artifacts/run/elsewhere' }))).toBe('CONFLICT');
+    expect(replay({})().id).toBe(first.id);
+    expect(f.db.repos.artifacts.get(first.id)?.sha256).toBe(sha('a'));
   });
 });

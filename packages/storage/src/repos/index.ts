@@ -25,7 +25,7 @@ export function createRepos(driver: SqlDriver, deps: RepoDeps): Repos {
     projects: createProjectRepo(driver, deps),
     settings: createSettingsRepo(driver, deps),
     credentials: createCredentialRefRepo(driver, deps),
-    catalog: createCatalogRepo(driver),
+    catalog: createCatalogRepo(driver, deps),
     profiles: createProfileRepo(driver, deps),
     workflows: createWorkflowRepo(driver, deps),
     configRevisions: createConfigRevisionRepo(driver, deps),

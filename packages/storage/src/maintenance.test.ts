@@ -66,7 +66,7 @@ describe('maintenance (C8)', () => {
     expect(f.db.repos.artifacts.get(plan.id)?.purgedAt).toBeNull();
     expect(f.db.repos.artifacts.get(foreign.id)?.purgedAt).toBeNull();
     expect(f.db.repos.artifacts.get(failing.id)?.purgedAt).toBeNull();
-    expect(f.db.repos.memory.getWithRevisions(m.record.id)?.events.map((e) => e.detail)).toEqual([{ action: 'project_history_purged' }]);
+    expect(f.db.repos.memory.getWithRevisions(m.record.id)?.events.map((e) => [e.event, e.detail])).toEqual([['history_purged', null]]);
     expect(f.db.repos.ledger.runBalances(run.id).L).toBe(1);
   });
 

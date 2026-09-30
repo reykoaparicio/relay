@@ -1,5 +1,5 @@
 import type { ArtifactId } from '@relay/contracts';
-import { RelayError, errors } from '@relay/contracts';
+import { RelayError, errors, invariant } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
 import { mapArtifact } from '../mappers.js';
 import { bit } from '../sql.js';
@@ -21,7 +21,19 @@ export function createArtifactRepo(driver: SqlDriver): ArtifactRepo {
     const row = driver.prepare(sql).get(...params);
     return row === undefined ? undefined : mapArtifact(row);
   };
-  const findExisting = (m: ArtifactInsert): ArtifactRow | undefined => {
+  const sameContent = (row: ArtifactRow, m: ArtifactInsert): boolean =>
+    row.sha256 === m.sha256 && row.kind === m.kind && row.relPath === m.relPath;
+  const conflict = (reason: string): RelayError => new RelayError(errors.conflict({ entity: 'artifact', reason }));
+  /** Resolves an `ON CONFLICT DO NOTHING` miss: an idempotent replay returns the existing row, anything else conflicts. */
+  const resolveExisting = (m: ArtifactInsert): ArtifactRow => {
+    const byId = get(m.id);
+    if (byId !== undefined) {
+      // Same id must mean the same content; a different sha/kind/path under this id is never silently aliased.
+      if (!sameContent(byId, m)) {
+        throw conflict('id_taken');
+      }
+      return byId;
+    }
     if (m.attemptId !== undefined && m.attemptId !== null) {
       const hit = one('SELECT * FROM artifacts WHERE attempt_id = ? AND kind = ? AND sha256 = ?', m.attemptId, m.kind, m.sha256);
       if (hit !== undefined) {
@@ -34,7 +46,8 @@ export function createArtifactRepo(driver: SqlDriver): ArtifactRepo {
         return hit;
       }
     }
-    return get(m.id);
+    // e.g. the same rel_path already holds different content: never silently alias it.
+    throw conflict('rel_path_taken');
   };
 
   return {
@@ -59,11 +72,11 @@ export function createArtifactRepo(driver: SqlDriver): ArtifactRepo {
           m.schemaId ?? null,
           m.createdAt,
         ).changes;
-      const row = changes > 0 ? get(m.id) : findExisting(m);
-      if (row === undefined) {
-        // e.g. the same rel_path already holds different content: never silently alias it.
-        throw new RelayError(errors.conflict({ entity: 'artifact', reason: 'rel_path_taken' }));
+      if (changes === 0) {
+        return resolveExisting(m);
       }
+      const row = get(m.id);
+      invariant(row !== undefined, 'artifact missing after insert');
       return row;
     },
     findInputFile(runId, sha256) {

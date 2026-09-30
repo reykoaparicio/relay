@@ -64,13 +64,11 @@ export function createMaintenance(deps: MaintenanceDeps): Maintenance {
         const { deleted, recordIds } = repos.memory.purgeRunSnapshots(projectId);
         for (const recordId of recordIds) {
           const item = repos.memory.get(recordId);
-          // memory_events has no dedicated purge event type (contracts MEMORY_EVENT_TYPES); 'edited' + detail marks it.
           repos.memory.recordEvent({
             recordId,
-            event: 'edited',
+            event: 'history_purged',
             revision: item?.record.currentRevision ?? 1,
             actor: 'user',
-            detail: { action: 'project_history_purged' },
             createdAt: now,
           });
         }

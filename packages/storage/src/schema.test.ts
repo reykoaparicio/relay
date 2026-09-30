@@ -187,6 +187,52 @@ describe('schema (0001_init)', () => {
     expect(() => { raw.exec("UPDATE run_config_revisions SET reason = 'x'"); }).toThrow(/config revisions are immutable/);
   });
 
+  it('aborts DELETE of run events, memory revisions, artifacts, and decided approvals (B5)', () => {
+    const { project, run, step } = seedAll();
+    f.db.repos.memory.insertRecord(
+      { id: newId('memory'), projectId: project.id, type: 'user_rule', status: 'approved', scope: { roles: 'all' }, createdAt: f.clock.now() },
+      { id: newId('memoryRevision'), title: 'T', content: 'C', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
+    );
+    f.db.repos.events.append(run.id, 'run.created', {});
+    const plan = insertArtifact({ runId: run.id, projectId: project.id, attemptId: null, kind: 'plan', hash: sha('1') });
+    const approval = (): ReturnType<typeof f.db.repos.approvals.insert> =>
+      f.db.repos.approvals.insert({
+        id: newId('approval'),
+        runId: run.id,
+        stepRunId: step.id,
+        planArtifactId: plan,
+        planHash: sha('2'),
+        contextHash: sha('3'),
+        fileScope: [],
+        requestedPermissions: {},
+        createdAt: f.clock.now(),
+      });
+    const decided = approval();
+    f.db.repos.approvals.decide(decided.id, 'approved', null, f.clock.now());
+    const pending = approval();
+
+    expect(() => { raw.exec('DELETE FROM run_events'); }).toThrow(/run_events are immutable/);
+    expect(() => { raw.exec('DELETE FROM memory_revisions'); }).toThrow(/memory revisions are never deleted/);
+    expect(() => raw.prepare('DELETE FROM artifacts WHERE id = ?').run(plan)).toThrow(/artifacts are never deleted/);
+    expect(() => raw.prepare('DELETE FROM approvals WHERE id = ?').run(decided.id)).toThrow(/decided approvals are never deleted/);
+    // An undecided approval carries no audit decision and may still be removed.
+    expect(raw.prepare('DELETE FROM approvals WHERE id = ?').run(pending.id).changes).toBe(1);
+    expect(raw.prepare('SELECT count(*) AS n FROM run_events').get()).toEqual({ n: 1 });
+    expect(raw.prepare('SELECT count(*) AS n FROM memory_revisions').get()).toEqual({ n: 1 });
+  });
+
+  it('accepts the history_purged memory event (0b)', () => {
+    const { project } = seedAll();
+    const m = f.db.repos.memory.insertRecord(
+      { id: newId('memory'), projectId: project.id, type: 'user_rule', status: 'approved', scope: { roles: 'all' }, createdAt: f.clock.now() },
+      { id: newId('memoryRevision'), title: 'T', content: 'C', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
+    );
+
+    const e = f.db.repos.memory.recordEvent({ recordId: m.record.id, event: 'history_purged', revision: 1, actor: 'user', createdAt: f.clock.now() });
+
+    expect(e.event).toBe('history_purged');
+  });
+
   it('enforces the runs status CHECKs', () => {
     const { run } = seedAll();
     const set = (status: string, reason: string | null, ended: number | null) => () =>

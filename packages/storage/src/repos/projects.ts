@@ -14,7 +14,7 @@ const UPDATE_SQL = `UPDATE projects SET ${optionalSetClause([
   'allowed_provider_ids_json',
   'provider_options_json',
   'monthly_allowance_microusd',
-])}, updated_at = ? WHERE id = ? AND updated_at = ?`;
+])}, updated_at = ? WHERE id = ? AND updated_at = ? AND archived_at IS NULL`;
 
 export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRepo {
   const find = (id: ProjectId): ProjectRow | undefined => {
@@ -71,6 +71,10 @@ export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRep
       if (current === undefined) {
         return err(errors.notFound('project'));
       }
+      if (current.archivedAt !== null) {
+        // An archived project is read-only; the SQL guard below enforces the same rule under the CAS.
+        return err(errors.conflict({ entity: 'project', reason: 'archived', currentUpdatedAt: current.updatedAt }));
+      }
       // Strictly increasing so a second writer holding the same expectedUpdatedAt always conflicts.
       const now = Math.max(deps.clock.now(), current.updatedAt + 1);
       const changes = driver
@@ -93,12 +97,21 @@ export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRep
       return ok(get(id));
     },
     archive(id) {
-      const now = deps.clock.now();
-      return (
-        driver
-          .prepare('UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL')
-          .run(now, now, id).changes > 0
-      );
+      return deps.inTx(() => {
+        const current = find(id);
+        if (current === undefined || current.archivedAt !== null) {
+          return false;
+        }
+        // Same strictly increasing rule as update: a wall clock at (or behind) the stored value must still move
+        // updated_at forward, or a writer holding the old value could CAS over the archive (ABA).
+        const now = deps.clock.now();
+        const updatedAt = Math.max(now, current.updatedAt + 1);
+        return (
+          driver
+            .prepare('UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL')
+            .run(now, updatedAt, id).changes > 0
+        );
+      });
     },
     stats(id, monthStart) {
       const row = driver

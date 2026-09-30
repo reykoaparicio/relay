@@ -257,4 +257,29 @@ describe('RunRepo', () => {
     expect(() => repos.runs.getInspectorProjection(newId('run'))).toThrow();
     inner.close();
   });
+
+  it('insertInputFiles is all-or-nothing: a failing second file leaves no rows (B2)', () => {
+    const p = seedProject(f.db, f.clock);
+    const run = seedRun(f.db, f.clock, p.id);
+    const art = f.db.repos.artifacts.insertIfAbsent({
+      id: newId('artifact'),
+      runId: run.id,
+      projectId: p.id,
+      kind: 'input_file',
+      relPath: 'artifacts/run/y',
+      sha256: sha('1'),
+      sizeBytes: 3,
+      mediaType: 'text/plain',
+      createdAt: f.clock.now(),
+    });
+
+    expect(() => {
+      f.db.repos.runs.insertInputFiles(run.id, [
+        { relPath: 'src/a.ts' as never, sha256: sha('1'), artifactId: art.id, sizeBytes: 3, capturedAt: f.clock.now() },
+        { relPath: 'src/b.ts' as never, sha256: sha('2'), artifactId: newId('artifact'), sizeBytes: 3, capturedAt: f.clock.now() },
+      ]);
+    }).toThrow(/FOREIGN KEY constraint failed/);
+
+    expect(f.db.repos.runs.inputFiles(run.id)).toEqual([]);
+  });
 });

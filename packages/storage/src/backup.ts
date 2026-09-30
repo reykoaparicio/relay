@@ -1,8 +1,11 @@
 import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { Clock, EpochMs } from '@relay/contracts';
+import { openNodeSqlite } from './driver-node-sqlite.js';
+import { readInt } from './mappers.js';
+import { createArtifactRepo } from './repos/artifacts.js';
 import { backupStamp } from './stamp.js';
-import type { Db } from './types.js';
+import type { ArtifactRow, Db } from './types.js';
 
 /** `manifest.json` written next to the backup DB (03 §C7). */
 export interface BackupManifest {
@@ -48,6 +51,25 @@ async function uniqueDir(root: string, stamp: string): Promise<string> {
   }
 }
 
+/**
+ * Reads the artifact list and schema version from the SNAPSHOT (not the live DB), so the manifest describes exactly
+ * what the backup contains even if the live DB changes after `backupTo` returns.
+ */
+function readSnapshot(dbPath: string): { artifacts: readonly ArtifactRow[]; schemaVersion: number } {
+  const snap = openNodeSqlite(dbPath, { readOnly: true });
+  try {
+    const artifacts = createArtifactRepo(snap).listWhere({ unpurgedOnly: true });
+    const schemaVersion = readInt(
+      'schema_migrations',
+      snap.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations').get(),
+      'v',
+    );
+    return { artifacts, schemaVersion };
+  } finally {
+    snap.close();
+  }
+}
+
 /** Resolves `relPath` under `root`, or null if it would escape it. */
 function contained(root: string, relPath: string): string | null {
   const abs = resolve(root, relPath);
@@ -56,7 +78,7 @@ function contained(root: string, relPath: string): string | null {
 
 /**
  * Creates `backups/<YYYYMMDD-HHmmss>/relay.sqlite` via the online backup API, then copies the unpurged artifact files
- * referenced by DB rows (immutable, so copying after the snapshot is consistent) and writes `manifest.json` (03 §C7).
+ * referenced by the snapshot's rows (immutable, so copying after the snapshot is consistent) and writes `manifest.json` (03 §C7).
  * Files that are already missing (e.g. purged between listing and copying) are skipped.
  */
 export async function createBackup(opts: CreateBackupOptions): Promise<BackupResult> {
@@ -66,8 +88,9 @@ export async function createBackup(opts: CreateBackupOptions): Promise<BackupRes
   const dbPath = join(dir, 'relay.sqlite');
   await opts.db.backupTo(dbPath);
   let sizeBytes = (await stat(dbPath)).size;
+  const snapshot = readSnapshot(dbPath);
   const sha256s: string[] = [];
-  for (const a of opts.db.repos.artifacts.listWhere({ unpurgedOnly: true })) {
+  for (const a of snapshot.artifacts) {
     const src = a.relPath.startsWith(ARTIFACTS_PREFIX) ? contained(opts.userDataDir, a.relPath) : null;
     const dest = contained(dir, a.relPath);
     if (src === null || dest === null) {
@@ -85,7 +108,7 @@ export async function createBackup(opts: CreateBackupOptions): Promise<BackupRes
     sizeBytes += a.sizeBytes;
     sha256s.push(a.sha256);
   }
-  const manifest: BackupManifest = { schemaVersion: opts.db.schemaVersion(), createdAt, artifactCount: sha256s.length, sha256s };
+  const manifest: BackupManifest = { schemaVersion: snapshot.schemaVersion, createdAt, artifactCount: sha256s.length, sha256s };
   await writeFile(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   return { dir, dbPath, manifest, sizeBytes };
 }

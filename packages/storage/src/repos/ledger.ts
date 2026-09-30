@@ -45,34 +45,39 @@ export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo 
     return ok({ items, nextCursor });
   };
 
+  const appendGroup = (entries: Parameters<LedgerRepo['append']>[0]): LedgerEntryRow[] => {
+    const groupId = deps.ids.next('ledger');
+    const now = deps.clock.now();
+    const stmt = driver.prepare(
+      `INSERT INTO ledger_entries (id, scope, run_id, project_id, attempt_id, type, bucket, delta_microusd, certainty,
+         price_catalog_version, group_id, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+    );
+    return entries.map((e) => {
+      invariant(Number.isSafeInteger(e.deltaMicrousd), 'ledger delta must be a safe-integer µUSD amount');
+      const row = stmt.get(
+        deps.ids.next('ledger'),
+        e.scope,
+        e.runId ?? null,
+        e.projectId ?? null,
+        e.attemptId ?? null,
+        e.type,
+        e.bucket,
+        e.deltaMicrousd,
+        e.certainty ?? null,
+        e.priceCatalogVersion ?? null,
+        groupId,
+        e.note ?? null,
+        e.createdAt ?? now,
+      );
+      return mapLedgerEntry(row);
+    });
+  };
+
   return {
     append(entries) {
-      const groupId = deps.ids.next('ledger');
-      const now = deps.clock.now();
-      const stmt = driver.prepare(
-        `INSERT INTO ledger_entries (id, scope, run_id, project_id, attempt_id, type, bucket, delta_microusd, certainty,
-           price_catalog_version, group_id, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-      );
-      return entries.map((e) => {
-        invariant(Number.isSafeInteger(e.deltaMicrousd), 'ledger delta must be a safe-integer µUSD amount');
-        const row = stmt.get(
-          deps.ids.next('ledger'),
-          e.scope,
-          e.runId ?? null,
-          e.projectId ?? null,
-          e.attemptId ?? null,
-          e.type,
-          e.bucket,
-          e.deltaMicrousd,
-          e.certainty ?? null,
-          e.priceCatalogVersion ?? null,
-          groupId,
-          e.note ?? null,
-          e.createdAt ?? now,
-        );
-        return mapLedgerEntry(row);
-      });
+      // One group is all-or-nothing: a failing entry must never leave the others behind (joins an open tx).
+      return deps.inTx(() => appendGroup(entries));
     },
     runBalances(runId) {
       const r = new RowReader('run_budget_v', driver.prepare(RUN_BALANCES_SQL).get(runId), 'l');

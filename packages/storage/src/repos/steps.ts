@@ -45,23 +45,26 @@ export function createStepRepo(driver: SqlDriver, deps: RepoDeps): StepRepo {
 
   return {
     insertMany(steps) {
-      const stmt = driver.prepare(INSERT_SQL);
-      for (const s of steps) {
-        stmt.run(
-          s.id,
-          s.runId,
-          s.stepKey,
-          s.ordinal,
-          s.revisionIndex ?? 0,
-          0,
-          s.state,
-          s.profileName ?? null,
-          toJson(s.inputArtifactIds ?? []),
-          s.createdAt,
-          s.createdAt,
-        );
-      }
-      return steps.map((s) => get(s.id));
+      // All-or-nothing (joins an open tx): a failing row never leaves a partial step graph.
+      return deps.inTx(() => {
+        const stmt = driver.prepare(INSERT_SQL);
+        for (const s of steps) {
+          stmt.run(
+            s.id,
+            s.runId,
+            s.stepKey,
+            s.ordinal,
+            s.revisionIndex ?? 0,
+            0,
+            s.state,
+            s.profileName ?? null,
+            toJson(s.inputArtifactIds ?? []),
+            s.createdAt,
+            s.createdAt,
+          );
+        }
+        return steps.map((s) => get(s.id));
+      });
     },
     insertRetry(prev, fields) {
       driver

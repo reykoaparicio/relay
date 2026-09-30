@@ -98,4 +98,21 @@ describe('StepRepo', () => {
     expect(() => f.db.repos.steps.get(newId('stepRun'))).toThrow();
     expect(() => f.db.repos.steps.transition(s.id, [], 'ready', {})).toThrow();
   });
+
+  it('insertMany is all-or-nothing: a failing second row leaves no partial rows (B2)', () => {
+    const run = setup();
+    const row = (id: ReturnType<typeof newId<'stepRun'>>) => ({
+      id,
+      runId: run.id,
+      stepKey: 'plan' as StepKey,
+      ordinal: 2,
+      state: 'pending' as const,
+      createdAt: f.clock.now(),
+    });
+
+    // Same (run, step_key, revision_index, retry_index) twice → UNIQUE on the second row.
+    expect(() => f.db.repos.steps.insertMany([row(newId('stepRun')), row(newId('stepRun'))])).toThrow(/UNIQUE constraint failed/);
+
+    expect(f.db.repos.steps.listForRun(run.id)).toEqual([]);
+  });
 });
