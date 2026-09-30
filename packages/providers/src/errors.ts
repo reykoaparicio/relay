@@ -86,6 +86,9 @@ export function parseRetryAfterMs(headers: Headers | undefined, clock: Clock): n
   return Math.min(RETRY_AFTER_CAP_MS, Math.max(0, ms));
 }
 
+/** HTTP 502 Bad Gateway / 504 Gateway Timeout: the outcome at the provider is unknown (row 11a). */
+const GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 504]);
+
 const PROMPT_TOO_LONG = /prompt is too long|too many (input )?tokens|context (length|window)|maximum context/i;
 
 interface Mapped {
@@ -99,7 +102,7 @@ function isInstance(err: unknown, cls: ErrorClass): boolean {
   return err instanceof cls;
 }
 
-/** Rows 6–11 (an HTTP error status line arrived; phase `responded`). */
+/** Rows 6–11b (an HTTP error status line arrived; phase `responded`). */
 function mapStatusError(err: object, v: ApiErrorView, ctx: MapErrorContext): Mapped | undefined {
   const c = ctx.classes;
   const providerError = v.body === undefined ? undefined : redactDeep(v.body);
@@ -120,6 +123,12 @@ function mapStatusError(err: object, v: ApiErrorView, ctx: MapErrorContext): Map
   if (v.status === 413 || (isInstance(err, c.BadRequestError) && PROMPT_TOO_LONG.test(v.message))) {
     return { code: 'CONTEXT_TOO_LARGE', phase: 'responded', details: withBody };
   }
+  // Row 11a: a gateway error (502/504) is emitted by an intermediary that may already have forwarded the request, so
+  // the provider may have executed it: never "known not executed" (spec §7.6), no blind retry.
+  if (v.status !== undefined && GATEWAY_STATUSES.has(v.status)) {
+    return { code: 'REQUEST_OUTCOME_UNKNOWN', phase: 'responded', details: { ...withBody, gateway: true } };
+  }
+  // Row 11b: the provider itself answered 500/503 (other ≥ 500) before any body byte → known not executed.
   if (isInstance(err, c.InternalServerError) || (v.status !== undefined && v.status >= 500)) {
     return { code: 'PROVIDER_UNAVAILABLE', phase: 'responded', details: withBody };
   }
@@ -160,7 +169,7 @@ function classify(err: unknown, ctx: MapErrorContext): Mapped {
 
 /**
  * Maps anything a provider call threw to a `kind: 'error'` result with an accurate {@link DispatchPhase}.
- * Only rows 4 (`not_sent`) and 11 (5xx before any body byte) are transport-retryable; `sent_no_response` and
+ * Only rows 4 (`not_sent`) and 11b (500/503/other 5xx except 502/504, before any body byte) are transport-retryable; `sent_no_response` and
  * `responded_partial` always map to `REQUEST_OUTCOME_UNKNOWN` (06 §F7). Provider error bodies are redacted.
  */
 export function mapProviderError(err: unknown, ctx: MapErrorContext): ModelError {

@@ -2,7 +2,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { RelayError, errors } from '@relay/contracts';
 import type { Clock, ModelCapabilities, ModelPrices } from '@relay/contracts';
-import { findCatalogEntry, latestCatalogVersion } from './catalog.js';
+import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
 import { connectionTestRequest } from './connection-test.js';
 import { mapProviderError } from './errors.js';
 import type { SdkErrorClasses } from './errors.js';
@@ -11,6 +11,7 @@ import { NOOP_LOGGER, safeHook } from './safe-hook.js';
 import { createTrackedFetch } from './tracked-fetch.js';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type {
+  EstimateContext,
   FallbackInfo,
   GenerateContext,
   Logger,
@@ -261,10 +262,10 @@ export function createAnthropicAdapter(opts: AnthropicAdapterOptions): ProviderA
   const estimate = async (
     req: ModelRequest,
     prices: ModelPrices,
-    ctx?: { readonly apiKey?: string; readonly signal?: AbortSignal },
+    ctx?: EstimateContext,
   ): Promise<UsageEstimate> => {
     const entry = findCatalogEntry('anthropic', req.modelId);
-    const version = entry?.catalogVersion ?? latestCatalogVersion();
+    const version = priceCatalogVersionFor('anthropic', req.modelId, prices, ctx?.priceCatalogVersion);
     if (ctx?.apiKey !== undefined && entry?.capabilities.supportsTokenCounting === true) {
       try {
         const inputTokens = await countTokens(req, ctx.apiKey, ctx.signal);

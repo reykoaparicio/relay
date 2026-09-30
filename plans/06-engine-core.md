@@ -279,7 +279,8 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
   const adapter = ctx.providers.get(providerId);
   const credential = await ctx.credentials.resolve({ providerId, purpose: 'dispatch', attemptId: null });  // BEFORE estimate and before any attempt row
   const estimate = await adapter.estimate(request, stepSnap.profile.prices,
-    credential.ok ? { apiKey: credential.value } : {});                      // provider count only with a key (04 R4-12)
+    { ...(credential.ok ? { apiKey: credential.value } : {}),                 // provider count only with a key (04 R4-12)
+      priceCatalogVersion: stepSnap.profile.priceCatalogVersion });           // version of the SAME entry as the prices (§9.2)
   const binding = requiresApproval(stepSnap) ? await loadApprovalBinding(ctx, run, providerId) : null; // hashes + providers (F6 #8)
   const policy = checkDispatch({ run, step, stepSnap, request, estimate, credentialOk: credential.ok, binding,
                                  project: db.repos.projects.get(run.projectId), now: clock.now() });  // F6 pure

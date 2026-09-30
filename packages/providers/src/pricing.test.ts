@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { catalogFileSchema, mulDivCeil } from '@relay/contracts';
 import type { ModelPrices } from '@relay/contracts';
 import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
-import { computeCost, computeIterationsCost, upperBound } from './pricing.js';
+import { findCatalogEntry, maxProviderPrices } from './catalog.js';
+import { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, computeIterationsCost, upperBound } from './pricing.js';
 import type { NormalizedUsage } from './types.js';
 
 const PRICES: ModelPrices = catalogFileSchema.parse(testCatalog).entries[0]!.prices; // clearly fake round prices
@@ -46,26 +47,53 @@ describe('computeCost', () => {
 });
 
 describe('upperBound', () => {
-  it('prices all input as uncached plus the full output allowance', () => {
-    expect(upperBound(1000, 500, PRICES)).toBe(1000 + 5000);
+  it('prices all input at the highest input-side rate (cache write) plus the full output allowance and rounding slack', () => {
+    // 1000 × 1.25 + 500 × 10 + 2 µUSD
+    expect(upperBound(1000, 500, PRICES)).toBe(1250 + 5000 + INPUT_SPLIT_ROUNDING_SLACK_MICROUSD);
+    expect(upperBound(0, 500, PRICES)).toBe(5000);
   });
 
-  it('is ≥ any actual cost with the same token counts and no cache categories (property)', () => {
+  it('regression: an all-cache-write turn never exceeds N', () => {
+    const n = 100_000;
+    const actual = computeCost(usage({ cacheWriteInputTokens: n, outputTokens: 10 }), PRICES);
+
+    expect(actual.microusd).toBeLessThanOrEqual(upperBound(n, 10, PRICES));
+  });
+
+  const pricesArb = fc.record({
+    input: fc.nat(50_000_000),
+    output: fc.nat(100_000_000),
+    cacheRead: fc.nat(50_000_000),
+    cacheWrite: fc.nat(50_000_000),
+  }) as fc.Arbitrary<ModelPrices>;
+
+  it('is ≥ computeCost for any split of the same input tokens across uncached / cache read / cache write (property)', () => {
     fc.assert(
-      fc.property(fc.nat(10_000_000), fc.nat(1_000_000), fc.nat(1_000_000), (input, maxOut, used) => {
-        const actual = computeCost(usage({ uncachedInputTokens: input, outputTokens: Math.min(used, maxOut) }), PRICES);
-        return actual.microusd <= upperBound(input, maxOut, PRICES);
-      }),
+      fc.property(
+        fc.nat(5_000_000),
+        fc.nat(5_000_000),
+        fc.nat(5_000_000),
+        fc.nat(1_000_000),
+        fc.nat(1_000_000),
+        fc.oneof(fc.constant(PRICES), pricesArb),
+        (uncached, read, write, maxOut, used, prices) => {
+          const actual = computeCost(
+            usage({ uncachedInputTokens: uncached, cacheReadInputTokens: read, cacheWriteInputTokens: write, outputTokens: Math.min(used, maxOut) }),
+            prices,
+          );
+          return actual.microusd <= upperBound(uncached + read + write, maxOut, prices);
+        },
+      ),
+      { numRuns: 2000 },
     );
   });
 
-  it('is ≥ the cost when part of the input was cached (cache rates never exceed 1.25× input)', () => {
-    fc.assert(
-      fc.property(fc.nat(1_000_000), fc.nat(1_000_000), fc.nat(100_000), (uncached, read, out) => {
-        const actual = computeCost(usage({ uncachedInputTokens: uncached, cacheReadInputTokens: read, outputTokens: out }), PRICES);
-        return actual.microusd <= upperBound(uncached + read, out, PRICES);
-      }),
-    );
+  it('covers the worst-case per-category rounding (1 token in each input category at a sub-µUSD rate)', () => {
+    const tiny = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } as ModelPrices;
+    const actual = computeCost(usage({ uncachedInputTokens: 1, cacheReadInputTokens: 1, cacheWriteInputTokens: 1 }), tiny);
+
+    expect(actual.microusd).toBe(3);
+    expect(upperBound(3, 0, tiny)).toBe(3);
   });
 });
 
@@ -77,12 +105,36 @@ describe('computeIterationsCost', () => {
       { modelId: 'b', usage: usage({ outputTokens: 100 }) },
     ];
 
-    const cost = computeIterationsCost(iterations, (id) => (id === 'a' ? PRICES : other));
+    const cost = computeIterationsCost(iterations, (id) => (id === 'a' ? PRICES : other), 'anthropic');
 
     expect(cost).toEqual({ microusd: 1000 + 2000, certainty: 'calculated' });
   });
 
-  it('refuses to guess when a model has no known price', () => {
-    expect(computeIterationsCost([{ modelId: 'x', usage: usage({}) }], () => undefined)).toBeUndefined();
+  it('prices an unknown fallback model at the maximum catalog price of the provider and marks it estimated', () => {
+    const opus = findCatalogEntry('anthropic', 'claude-opus-5-5')!.prices;
+    const iterations = [
+      { modelId: 'claude-haiku-4-5', usage: usage({ uncachedInputTokens: 1000, outputTokens: 5 }) },
+      { modelId: 'claude-future-9', usage: usage({ uncachedInputTokens: 1000, outputTokens: 200 }) },
+    ];
+    const haiku = findCatalogEntry('anthropic', 'claude-haiku-4-5')!.prices;
+
+    const cost = computeIterationsCost(iterations, (id) => findCatalogEntry('anthropic', id)?.prices, 'anthropic');
+
+    const max = maxProviderPrices('anthropic')!;
+    expect(max.output).toBeGreaterThanOrEqual(opus.output);
+    expect(cost.certainty).toBe('estimated');
+    expect(cost.microusd).toBe(computeCost(iterations[0]!.usage, haiku).microusd + computeCost(iterations[1]!.usage, max).microusd);
+  });
+
+  it('uses the known iteration prices when the provider has no catalog entries at all, and throws with no price', () => {
+    const iterations = [
+      { modelId: 'known', usage: usage({ outputTokens: 1 }) },
+      { modelId: 'unknown', usage: usage({ outputTokens: 1 }) },
+    ];
+
+    const cost = computeIterationsCost(iterations, (id) => (id === 'known' ? PRICES : undefined), 'openai');
+
+    expect(cost).toEqual({ microusd: 20, certainty: 'estimated' });
+    expect(() => computeIterationsCost([{ modelId: 'x', usage: usage({}) }], () => undefined, 'openai')).toThrow(/no known price/);
   });
 });

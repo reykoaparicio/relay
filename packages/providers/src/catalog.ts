@@ -1,7 +1,7 @@
 // 04 §D2: versioned price + capability catalog. Files are static JSON imports (no runtime fs reads, R2-20).
 // Adding a catalog version = adding a JSON file under ../catalog AND its import line + CATALOG_FILES entry below.
 import { catalogFileSchema } from '@relay/contracts';
-import type { CatalogModel, ProviderId } from '@relay/contracts';
+import type { CatalogModel, ModelPrices, ProviderId } from '@relay/contracts';
 import catalog20260925 from '../catalog/2026-09-25.json' with { type: 'json' };
 
 /** Every statically imported catalog file, oldest first. */
@@ -49,4 +49,47 @@ export function cheapestCatalogModel(providerId: ProviderId): CatalogModel | und
         best === undefined || e.prices.input + e.prices.output < best.prices.input + best.prices.output ? e : best,
       undefined,
     );
+}
+
+/**
+ * Component-wise maximum of every catalog price of `providerId` (all versions) and `extra`. Used where the model that
+ * will be billed is not known up front (ADR-016 refusal fallback), so admission and settlement stay conservative.
+ * @returns `undefined` only when neither the catalog nor `extra` carries a price.
+ */
+export function maxProviderPrices(providerId: ProviderId, ...extra: readonly ModelPrices[]): ModelPrices | undefined {
+  const all = [...loadCatalogEntries().filter((e) => e.providerId === providerId).map((e) => e.prices), ...extra];
+  const [first, ...rest] = all;
+  if (first === undefined) return undefined;
+  return rest.reduce<ModelPrices>(
+    (max, p) => ({
+      input: p.input > max.input ? p.input : max.input,
+      output: p.output > max.output ? p.output : max.output,
+      cacheRead: p.cacheRead > max.cacheRead ? p.cacheRead : max.cacheRead,
+      cacheWrite: p.cacheWrite > max.cacheWrite ? p.cacheWrite : max.cacheWrite,
+    }),
+    first,
+  );
+}
+
+const samePrices = (a: ModelPrices, b: ModelPrices): boolean =>
+  a.input === b.input && a.output === b.output && a.cacheRead === b.cacheRead && a.cacheWrite === b.cacheWrite;
+
+/**
+ * The catalog version that `prices` came from for `(providerId, modelId)`: the explicit `priceCatalogVersion` when
+ * the caller passes one (the run's profile snapshot), else the newest entry whose prices equal `prices`, else the
+ * newest entry for the model, else the newest catalog version.
+ */
+export function priceCatalogVersionFor(
+  providerId: ProviderId,
+  modelId: string,
+  prices: ModelPrices,
+  explicit?: string,
+): string {
+  if (explicit !== undefined) return explicit;
+  let match: CatalogModel | undefined;
+  for (const e of loadCatalogEntries()) {
+    if (e.providerId !== providerId || e.modelId !== modelId || !samePrices(e.prices, prices)) continue;
+    if (match === undefined || e.catalogVersion > match.catalogVersion) match = e;
+  }
+  return (match ?? findCatalogEntry(providerId, modelId))?.catalogVersion ?? latestCatalogVersion();
 }

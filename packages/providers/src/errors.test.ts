@@ -173,6 +173,24 @@ describe('mapProviderError — D3 rows in order', () => {
     expect(r.error.retryable).toBe(true);
   });
 
+  it.each([500, 503])('row 11b: %i before any body byte stays PROVIDER_UNAVAILABLE', (status) => {
+    const r = mapProviderError(statusError(status, 'api_error', 'x'), ctx(responded(status)));
+
+    expect(r).toMatchObject({ phase: 'responded', error: { code: 'PROVIDER_UNAVAILABLE' } });
+  });
+
+  it.each([502, 504])('regression (F5) row 11a: gateway %i before any body byte → REQUEST_OUTCOME_UNKNOWN (§7.6)', (status) => {
+    const r = mapProviderError(statusError(status, 'api_error', 'Bad gateway'), ctx(responded(status)));
+
+    expect(r.error.code).toBe('REQUEST_OUTCOME_UNKNOWN');
+    expect(r.phase).toBe('responded');
+    expect(r.error.details).toMatchObject({ gateway: true, status });
+  });
+
+  it('529 stays RATE_LIMITED next to the gateway rule', () => {
+    expect(mapProviderError(statusError(529, 'overloaded_error', 'Overloaded'), ctx(responded(529))).error.code).toBe('RATE_LIMITED');
+  });
+
   it('maps 413 to CONTEXT_TOO_LARGE and 402 billing to AUTH_REQUIRED', () => {
     expect(mapProviderError(statusError(413, 'request_too_large', 'too large'), ctx(responded(413))).error.code).toBe('CONTEXT_TOO_LARGE');
     expect(mapProviderError(statusError(402, 'billing_error', 'billing'), ctx(responded(402))).error.code).toBe('AUTH_REQUIRED');

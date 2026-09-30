@@ -6,7 +6,7 @@ import type { AttemptPurpose, CatalogModel, ModelCapabilities, ModelPrices, Prov
 import type { Clock } from '@relay/contracts';
 import { createMemoryCallLog } from './call-log.js';
 import type { FakeCall, FakeCallLog } from './call-log.js';
-import { findCatalogEntry, latestCatalogVersion } from './catalog.js';
+import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
 import { CONNECTION_TEST_STEP_KEY } from './connection-test.js';
 import { localEstimate, localTokenEstimate, promptChars } from './estimate.js';
 import { FAKE_FIXTURES } from './fake-fixtures/index.js';
@@ -14,6 +14,7 @@ import type { FakeScenario, FakeScriptStep, FakeStepResult } from './fake-scenar
 import { NOOP_LOGGER, safeHook } from './safe-hook.js';
 import type {
   DispatchPhase,
+  EstimateContext,
   GenerateContext,
   Logger,
   ModelError,
@@ -53,13 +54,21 @@ interface ServedCall {
   readonly schemaName: string;
 }
 
-/** Scenario cursor + served-attempt memory; shared by every fake adapter of one registry (04 §D8). */
+/** A scenario step together with its index in `scenario.steps`. */
+export interface TakenStep {
+  readonly index: number;
+  readonly step: FakeScriptStep;
+}
+
+/**
+ * Scenario cursor + served-attempt memory; shared by every fake adapter of one registry (04 §D8). Reconcile answer
+ * counters are NOT kept here: they are derived from the call log, so a restarted instance continues the sequence.
+ */
 export interface FakeScriptState {
   readonly scenario: FakeScenario;
   /** Returns the first not-yet-consumed matching step (consuming one use), or `undefined` (fall through). */
-  take(call: { readonly stepKey: string; readonly purpose: AttemptPurpose }): FakeScriptStep | undefined;
+  take(call: { readonly stepKey: string; readonly purpose: AttemptPurpose }): TakenStep | undefined;
   readonly served: Map<string, ServedCall>;
-  readonly reconcileCounts: Map<string, number>;
 }
 
 function stepMatches(step: FakeScriptStep, call: { readonly stepKey: string; readonly purpose: AttemptPurpose }): boolean {
@@ -74,12 +83,12 @@ export function createFakeScriptState(scenario: FakeScenario): FakeScriptState {
   return {
     scenario,
     served: new Map(),
-    reconcileCounts: new Map(),
     take: (call) => {
-      const idx = scenario.steps.findIndex((s, i) => (used[i] ?? 0) < (s.times ?? 1) && stepMatches(s, call));
-      if (idx < 0) return undefined;
-      used[idx] = (used[idx] ?? 0) + 1;
-      return scenario.steps[idx];
+      const index = scenario.steps.findIndex((s, i) => (used[i] ?? 0) < (s.times ?? 1) && stepMatches(s, call));
+      const step = scenario.steps[index];
+      if (step === undefined) return undefined;
+      used[index] = (used[index] ?? 0) + 1;
+      return { index, step };
     },
   };
 }
@@ -245,11 +254,13 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
     if (ctx.signal.aborted) return aborted('not_sent');
     const startedAt = clock.now();
     const { attemptId, runId, stepKey, purpose } = req.metadata;
-    const step = state.take({ stepKey, purpose });
+    const taken = state.take({ stepKey, purpose });
+    const step = taken?.step;
     state.served.set(attemptId, { step, stepKey, schemaName: req.outputSchema.name });
     const call: FakeCall = {
-      at: startedAt, runId, attemptId, stepKey, purpose, providerId, modelId: req.modelId,
+      kind: 'generate', at: startedAt, runId, attemptId, stepKey, purpose, providerId, modelId: req.modelId,
       systemSha256: createHash('sha256').update(req.system).digest('hex'),
+      scriptStep: taken?.index ?? null,
     };
     safeHook('onDispatched', () => ctx.hooks?.onDispatched?.(), logger);
     safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId: `${FAKE_RESPONSE_ID_PREFIX}${attemptId}` }), logger);
@@ -261,21 +272,23 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
     return produce(step, req, ctx, startedAt);
   };
 
-  const rematch = (call: FakeCall): FakeScriptStep | undefined => scenario.steps.find((s) => stepMatches(s, call));
-
   const reconcile = (ids: { readonly providerResponseId: string }): Promise<ReconciliationResult> => {
     if (!ids.providerResponseId.startsWith(FAKE_RESPONSE_ID_PREFIX)) return Promise.resolve({ kind: 'not_found' });
     const attemptId = ids.providerResponseId.slice(FAKE_RESPONSE_ID_PREFIX.length);
     let served = state.served.get(attemptId);
     if (served === undefined) {
-      const call = callLog.entries().find((c) => c.attemptId === attemptId); // the JSONL log survives a restart
+      // The JSONL log survives a restart. The recorded step index identifies the exact step that served the call (a
+      // re-match could pick an earlier step with the same match).
+      const call = callLog.entries().findLast((c) => c.attemptId === attemptId);
       if (call === undefined) return Promise.resolve({ kind: 'not_found' });
-      served = { step: rematch(call), stepKey: call.stepKey, schemaName: call.stepKey };
+      const step = call.scriptStep === null ? undefined : scenario.steps[call.scriptStep];
+      served = { step, stepKey: call.stepKey, schemaName: call.stepKey };
     }
     const answers = served.step?.reconcile ?? [];
     if (answers.length === 0) return Promise.resolve({ kind: 'not_found' });
-    const n = state.reconcileCounts.get(attemptId) ?? 0;
-    state.reconcileCounts.set(attemptId, n + 1);
+    // The answer index is the number of earlier reconcile calls for this attempt in the log (continues across restarts).
+    const n = callLog.reconcileEntries().filter((c) => c.attemptId === attemptId).length;
+    callLog.append({ kind: 'reconcile', at: clock.now(), attemptId, providerId });
     const answer = answers[Math.min(n, answers.length - 1)] ?? 'not_found';
     const usage = withUsage({ uncachedInputTokens: DEFAULT_INPUT_TOKENS, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: DEFAULT_OUTPUT_TOKENS }, served.step?.usage);
     switch (answer) {
@@ -294,8 +307,8 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
     }
   };
 
-  const estimate = (req: ModelRequest, prices: ModelPrices): Promise<UsageEstimate> =>
-    Promise.resolve(localEstimate(req, prices, findCatalogEntry(providerId, req.modelId)?.catalogVersion ?? latestCatalogVersion()));
+  const estimate = (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> =>
+    Promise.resolve(localEstimate(req, prices, priceCatalogVersionFor(providerId, req.modelId, prices, ctx?.priceCatalogVersion)));
 
   const testConnection = (ctx: { readonly signal: AbortSignal; readonly modelId: string }): Promise<ModelResult> => {
     if (ctx.signal.aborted) return Promise.resolve(aborted('not_sent'));

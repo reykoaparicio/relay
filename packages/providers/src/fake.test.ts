@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -307,6 +307,7 @@ describe('fake provider: call log and crash step', () => {
     await new Promise((res) => setImmediate(res));
     expect(callLog.entries()).toEqual([
       {
+        kind: 'generate',
         at: 1_000_000,
         runId: 'run_1',
         attemptId: r.metadata.attemptId,
@@ -315,6 +316,7 @@ describe('fake provider: call log and crash step', () => {
         providerId: 'anthropic',
         modelId: 'claude-opus-5-5',
         systemSha256: createHash('sha256').update('system for review').digest('hex'),
+        scriptStep: 0,
       },
     ]);
     controller.abort();
@@ -379,6 +381,57 @@ describe('fake provider: reconcile', () => {
     expect(answer).toMatchObject({ kind: 'completed', json: FAKE_FIXTURES['patch.v1'] });
   });
 
+  it('regression (F6): after a restart, reconcile uses the recorded step and continues the answer sequence', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-fake-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'fake-call-log.jsonl');
+    const scenario: FakeScenario = {
+      name: 'two-step',
+      steps: [
+        { match: { stepKey: 'implement' }, result: { kind: 'unknown_after_dispatch' }, reconcile: ['failed'] },
+        { match: { stepKey: 'implement' }, result: { kind: 'unknown_after_dispatch' }, reconcile: ['in_progress', 'completed'] },
+      ],
+    };
+    const ctx = { apiKey: 'k', signal: new AbortController().signal };
+    const first = make(scenario, { callLog: createJsonlCallLog(file) });
+    const a = req('implement');
+    const b = req('implement');
+    await gen(first.provider, a);
+    await gen(first.provider, b);
+    const idB = { providerResponseId: `fake_resp_${b.metadata.attemptId}` };
+    const before = await first.provider.reconcile!(idB, ctx);
+
+    const restarted = make(scenario, { callLog: createJsonlCallLog(file) });
+    const after = await restarted.provider.reconcile!(idB, ctx);
+    const againA = await restarted.provider.reconcile!({ providerResponseId: `fake_resp_${a.metadata.attemptId}` }, ctx);
+
+    expect(before).toEqual({ kind: 'in_progress' });
+    expect(after).toMatchObject({ kind: 'completed', json: FAKE_FIXTURES['patch.v1'] });
+    expect(againA).toEqual({ kind: 'failed' });
+    const log = createJsonlCallLog(file);
+    expect(log.entries().map((c) => c.scriptStep)).toEqual([0, 1]);
+    expect(log.reconcileEntries().map((c) => [c.kind, c.attemptId])).toEqual([
+      ['reconcile', b.metadata.attemptId],
+      ['reconcile', b.metadata.attemptId],
+      ['reconcile', a.metadata.attemptId],
+    ]);
+    const lines = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { kind: string });
+    expect(lines.map((l) => l.kind)).toEqual(['generate', 'generate', 'reconcile', 'reconcile', 'reconcile']);
+  });
+
+  it('reads older log lines without kind/scriptStep as fall-through generate calls', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-fake-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'fake-call-log.jsonl');
+    writeFileSync(file, `${JSON.stringify({ at: 1, runId: 'r', attemptId: 'att_old', stepKey: 'review', purpose: 'initial', providerId: 'anthropic', modelId: 'm', systemSha256: 'x' })}\n`);
+
+    const log = createJsonlCallLog(file);
+    const { provider } = make('reconcile-completed', { callLog: log });
+
+    expect(log.entries()).toEqual([expect.objectContaining({ kind: 'generate', attemptId: 'att_old', scriptStep: null })]);
+    await expect(provider.reconcile!({ providerResponseId: 'fake_resp_att_old' }, { apiKey: 'k', signal: new AbortController().signal })).resolves.toEqual({ kind: 'not_found' });
+  });
+
   it('answers not_found for unknown ids and steps without reconcile answers', async () => {
     const { provider } = make('happy-path');
     const r = req('review');
@@ -435,6 +488,14 @@ describe('fake provider: capabilities, estimate, testConnection', () => {
 
     expect(est.basis).toBe('local_estimate');
     expect(est.priceCatalogVersion).toBe('2026-09-25');
+  });
+
+  it('records the explicit price catalog version passed alongside the prices', async () => {
+    const { provider } = make('happy-path');
+
+    const est = await provider.estimate(req('review'), PRICES, { priceCatalogVersion: '2025-01-01' });
+
+    expect(est.priceCatalogVersion).toBe('2025-01-01');
   });
 
   it('testConnection returns the connection fixture without touching the script or the call log', async () => {

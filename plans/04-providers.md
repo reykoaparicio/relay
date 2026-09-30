@@ -80,7 +80,7 @@ export interface ProviderAdapter {
   readonly providerId: ProviderId;
   capabilities(modelId: string): Promise<ModelCapabilities>;           // from catalog + live models API when available
   estimate(req: ModelRequest, prices: ModelPrices,
-           ctx?: { apiKey?: string; signal?: AbortSignal }): Promise<UsageEstimate>;
+           ctx?: EstimateContext): Promise<UsageEstimate>;   // { apiKey?, signal?, priceCatalogVersion? }
   generate(req: ModelRequest, ctx: { apiKey: string; signal: AbortSignal; hooks?: GenerateHooks }): Promise<ModelResult>;
   reconcile?(ids: { providerResponseId: string }, ctx: { apiKey: string; signal: AbortSignal }): Promise<ReconciliationResult>;
   testConnection(ctx: { apiKey: string; signal: AbortSignal; modelId: string }): Promise<ModelResult>; // FR-02 tiny request
@@ -139,7 +139,11 @@ Catalog file format (a **versioned** data file; old versions are kept, never edi
 - **Seeding is not D's job (R2-19).** D exports only `loadCatalogEntries()`. The engine's `seedDatabase` (06 §F16) inserts the entries into `model_catalog` idempotently.
 - Cache write price uses the 1.25× input rate. Before relying on it, verify it on the pricing page at D2 time. `pricing.test.ts` pins the arithmetic rather than the rates.
 - `computeCost(usage: NormalizedUsage, prices: ModelPrices): { microusd, certainty: 'calculated' }` = `Σ mulDivCeil(tokens_cat, price_cat)` over the **disjoint** categories. It never adds `reasoningTokens` separately because they are already in `outputTokens` (§8.4 "do not double-count").
-- `upperBound(inputTokens, maxOutputTokens, prices)` = `mulDivCeil(inputTokens, prices.input) + mulDivCeil(maxOutputTokens, prices.output)`. It assumes no cache discount, so the bound is conservative (§9.3).
+- `upperBound(inputTokens, maxOutputTokens, prices)` = `mulDivCeil(inputTokens, max(prices.input, prices.cacheWrite, prices.cacheRead)) + mulDivCeil(maxOutputTokens, prices.output) + INPUT_SPLIT_ROUNDING_SLACK_MICROUSD` (2 µUSD when `inputTokens > 0`). Every input token is priced at the highest input-side rate (a cache write costs more than an uncached token), and the slack covers `computeCost` rounding each input category up separately. So `upperBound(n, m, p) ≥ computeCost(u, p)` for **every** split of `n` input tokens across uncached / cache read / cache write and output ≤ `m` (fast-check property over random splits and prices, §9.3).
+- **Local estimate input.** `inputTokens` of a local estimate counts system + messages + `JSON.stringify(req.outputSchema.jsonSchema)` characters (structured outputs bill the schema as input) through the D4 heuristic, plus a fixed `LOCAL_REQUEST_OVERHEAD_TOKENS = 512` per request (provider-injected structured-output framing). A provider count already includes both.
+- **Refusal fallback (ADR-016) in N.** With `refusalFallback: 'default'`, N covers **two hops** (the declined call + the rescue), each priced at the component-wise maximum of the passed prices and every catalog entry of the same provider (all versions; conservatively, every same-provider model counts as an eligible fallback): `N = 2 × upperBound(inputTokens, maxOutputTokens, maxProviderPrices(providerId, prices))`. Shared helper in `estimate.ts` (`buildEstimate`), used by every adapter.
+- `computeIterationsCost(iterations, pricesFor, providerId)` prices each served iteration with its own model. An iteration whose model has no known price (a fallback model newer than the catalog) is priced at `maxProviderPrices(providerId, …known)` and the result is `certainty: 'estimated'`; it never returns `undefined`.
+- **Price catalog version.** `UsageEstimate.priceCatalogVersion` is the version of the **same** catalog entry as the prices passed: `estimate(req, prices, { priceCatalogVersion })` (the engine passes the profile snapshot's version alongside its prices); when omitted, the newest entry for `(providerId, modelId)` whose prices equal the passed prices (`priceCatalogVersionFor`).
 
 ## D3: Dispatch tracking & error mapping (`src/tracked-fetch.ts`, `src/errors.ts`)
 
@@ -187,9 +191,10 @@ The mapping is a specific-first chain, following the claude-api skill's advice t
 | 9 | `NotFoundError` 404 | `MODEL_UNSUPPORTED` | `responded` | none |
 | 10a | `BadRequestError` 400 whose error type/message indicates prompt too long | `CONTEXT_TOO_LARGE` | `responded` | none |
 | 10b | other `BadRequestError` 400, `UnprocessableEntityError` 422 | `MODEL_UNSUPPORTED` (redacted provider message in `details.providerError`) | `responded` | none |
-| 11 | `InternalServerError` (other ≥ 500) — an HTTP 5xx status line, so **no body byte of a stream** was ever produced | `PROVIDER_UNAVAILABLE` | `responded` | transport retry (known not executed: the provider answered with an error status and produced no output) |
+| 11a | HTTP **502** / **504** (gateway) before any body byte, checked **before** row 11b | `REQUEST_OUTCOME_UNKNOWN` (`details.gateway = true`) | `responded` | **no blind retry** (§7.6): an intermediary answered, the provider may have executed the request |
+| 11b | `InternalServerError` (500, 503, other ≥ 500 except 502/504/529) — an HTTP 5xx status line from the provider, so **no body byte of a stream** was ever produced | `PROVIDER_UNAVAILABLE` | `responded` | transport retry (known not executed: the provider answered with an error status and produced no output) |
 
-- The 5xx-before-any-body-byte rule (row 11) and the `not_sent` rule (row 4) are the **only** transport-retryable cases. `responded_partial` and `sent_no_response` always map to `REQUEST_OUTCOME_UNKNOWN` (06 §F7, R3-6).
+- The 5xx-before-any-body-byte rule (row 11b; never 502/504, row 11a) and the `not_sent` rule (row 4) are the **only** transport-retryable cases. `responded_partial` and `sent_no_response` always map to `REQUEST_OUTCOME_UNKNOWN` (06 §F7, R3-6).
 - `PROVIDER_UNAVAILABLE` is a contracts taxonomy extension (02 §B3: retryable, nextAction `wait`, future HTTP 502).
 - All raw provider error bodies pass through `redactDeep` before they are stored in `attempts.error_json.details.providerError`.
 
@@ -333,6 +338,8 @@ export const FAKE_SCENARIOS: Record<string, FakeScenario>;
 - The fake provider is selected when `RELAY_PROVIDER_MODE=fake`. **Packaged builds ignore this variable unless `RELAY_E2E=1`** (08 §H1), so a real user can never be served fake results. This is spec §22.2: "never present a scripted fake-provider response as a live model result". The UI also shows a persistent "Fake provider" badge whenever it is active.
 - Fake prices: `providerId: 'fake'`, `modelId: 'fake-model'`, `input 1_000_000`, `output 2_000_000` µUSD/MTok.
 
+**Reconcile persistence (F6 audit fix).** Each `generate` log line records `kind: 'generate'` and `scriptStep` (the index of the script step that served it). Each reconcile call appends `{ kind: 'reconcile', at, attemptId, providerId }`. After a restart the fake looks up the serving step by `scriptStep` and advances the reconcile answer by counting prior reconcile lines for that attempt. `entries()` returns generate lines only.
+
 ## D8: Registry (`src/registry.ts`)
 
 ```ts
@@ -373,7 +380,7 @@ Scheduled for the end of Wave 2, **after** D4 and D5 pass their gates. It is not
 
   Thinking tokens are reported **separately** from candidates but billed as output. Verify this against the pricing page, and pin it with a `usage.test.ts` fixture next to the Anthropic and OpenAI cases.
 - **Finish reasons:** `STOP` → success. `MAX_TOKENS` → truncated. `SAFETY` / `PROHIBITED_CONTENT` / `RECITATION` / `BLOCKLIST` → refused. Any other value → truncated with the raw reason. Also map a blocked prompt (`promptFeedback.blockReason`) → refused.
-- **Errors:** map the SDK's API error by HTTP status using the same D3 table (401/403 → `AUTH_REQUIRED`, 404 → `MODEL_UNSUPPORTED`, 429 → `RATE_LIMITED`, 5xx before body → `PROVIDER_UNAVAILABLE`, mid-stream → `REQUEST_OUTCOME_UNKNOWN`).
+- **Errors:** map the SDK's API error by HTTP status using the same D3 table (401/403 → `AUTH_REQUIRED`, 404 → `MODEL_UNSUPPORTED`, 429 → `RATE_LIMITED`, 500/503 before body → `PROVIDER_UNAVAILABLE`, 502/504 → `REQUEST_OUTCOME_UNKNOWN` (gateway: may have executed), mid-stream → `REQUEST_OUTCOME_UNKNOWN`).
 - **Estimate:** use `ai.models.countTokens` when an apiKey is present, otherwise the local heuristic.
 - **Catalog:** add one Gemini model with streaming + JSON-schema output to the catalog, with official pricing `source` + `sourceRetrievedAt`. The tiered long-context prices must be handled: store the **higher** tier as the admission price unless the request's input is provably below the tier threshold, so admission stays conservative (§9.3).
 - **Tests:** `gemini.test.ts` (mock fetch or mock client with recorded chunks under `src/__fixtures__/gemini/`), plus the `usage.test.ts` Gemini fixture, plus `tests/live/gemini.live.test.ts` (same $0.10 cap).

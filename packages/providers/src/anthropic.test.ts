@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RelayError, catalogFileSchema } from '@relay/contracts';
+import { RelayError, catalogFileSchema, mulDivCeil } from '@relay/contracts';
 import type { ModelPrices } from '@relay/contracts';
 import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
 import { createMockFetch, jsonResponse, sseResponse, tickingClock } from './__fixtures__/mock-fetch.js';
 import type { MockFetchCall } from './__fixtures__/mock-fetch.js';
 import { createAnthropicAdapter } from './anthropic.js';
+import { findCatalogEntry, maxProviderPrices } from './catalog.js';
+import { LOCAL_REQUEST_OVERHEAD_TOKENS } from './estimate.js';
+import { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, upperBound } from './pricing.js';
 import type { GenerateHooks, ModelRequest, ModelResult } from './types.js';
 
 const sse = (name: string): string =>
@@ -332,7 +335,8 @@ describe('anthropic adapter: estimate, capabilities, testConnection', () => {
     expect(calls[0]!.url).toBe('https://api.anthropic.com/v1/messages/count_tokens');
     expect(bodyOf(calls[0])).not.toHaveProperty('max_tokens');
     expect(est).toMatchObject({ basis: 'provider_count', inputTokens: 1234, maxOutputTokens: 8000, priceCatalogVersion: '2026-09-25' });
-    expect(est.upperAllowanceMicrousd).toBe(1234 + 80_000);
+    // Input priced at the highest input-side rate (cache write 1.25×) + output allowance + rounding slack (04 §D2).
+    expect(est.upperAllowanceMicrousd).toBe(mulDivCeil(1234, PRICES.cacheWrite) + 80_000 + INPUT_SPLIT_ROUNDING_SLACK_MICROUSD);
   });
 
   it('falls back to the local heuristic without a key', async () => {
@@ -343,7 +347,8 @@ describe('anthropic adapter: estimate, capabilities, testConnection', () => {
 
     expect(calls).toHaveLength(0);
     expect(est.basis).toBe('local_estimate');
-    expect(est.inputTokens).toBe(Math.ceil(((21 + 26) * 23) / 64));
+    const schemaChars = JSON.stringify(request().outputSchema.jsonSchema).length;
+    expect(est.inputTokens).toBe(Math.ceil(((21 + 26 + schemaChars) * 23) / 64) + LOCAL_REQUEST_OVERHEAD_TOKENS);
   });
 
   it('falls back to the local heuristic when counting fails', async () => {
@@ -366,6 +371,50 @@ describe('anthropic adapter: estimate, capabilities, testConnection', () => {
 
     expect(calls).toHaveLength(0);
     expect(est.basis).toBe('local_estimate');
+  });
+
+  it('regression (F1): the local estimate bills the output JSON schema as input', async () => {
+    const adapter = createAnthropicAdapter({ clock: tickingClock(), fetch: createMockFetch(() => jsonResponse(200, {})).fetch });
+    const bigSchema = { type: 'object', description: 'x'.repeat(18_000) };
+    const schemaChars = JSON.stringify(bigSchema).length;
+    expect(schemaChars).toBeGreaterThanOrEqual(18_000);
+
+    const small = await adapter.estimate(request({ outputSchema: { name: 's', jsonSchema: {} } }), PRICES);
+    const big = await adapter.estimate(request({ outputSchema: { name: 's', jsonSchema: bigSchema } }), PRICES);
+
+    const extraTokens = big.inputTokens - small.inputTokens;
+    expect(extraTokens).toBeGreaterThanOrEqual(Math.floor(((schemaChars - 2) * 23) / 64));
+    expect(extraTokens).toBeGreaterThan(6000);
+    expect(big.upperAllowanceMicrousd - small.upperAllowanceMicrousd).toBeGreaterThanOrEqual(mulDivCeil(extraTokens, PRICES.input));
+    expect(small.inputTokens).toBeGreaterThanOrEqual(LOCAL_REQUEST_OVERHEAD_TOKENS);
+  });
+
+  it('regression (F2): refusalFallback default covers two hops at the maximum anthropic catalog price', async () => {
+    const adapter = createAnthropicAdapter({ clock: tickingClock(), fetch: createMockFetch(() => jsonResponse(200, { input_tokens: 1000 })).fetch });
+    const haiku = findCatalogEntry('anthropic', 'claude-haiku-4-5')!;
+    const req = { modelId: 'claude-haiku-4-5', maxOutputTokens: 4000 };
+
+    const off = await adapter.estimate(request({ ...req, refusalFallback: 'off' }), haiku.prices, { apiKey: API_KEY });
+    const on = await adapter.estimate(request({ ...req, refusalFallback: 'default' }), haiku.prices, { apiKey: API_KEY });
+
+    const max = maxProviderPrices('anthropic')!;
+    expect(off.upperAllowanceMicrousd).toBe(upperBound(1000, 4000, haiku.prices));
+    expect(on.upperAllowanceMicrousd).toBe(2 * upperBound(1000, 4000, max));
+    // Worst case: haiku declines using the whole allowance, then the most expensive model rescues with the whole allowance.
+    const declined = computeCost({ uncachedInputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 1000, outputTokens: 4000 }, haiku.prices);
+    const rescue = computeCost({ uncachedInputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 1000, outputTokens: 4000 }, max);
+    expect(on.upperAllowanceMicrousd).toBeGreaterThanOrEqual(declined.microusd + rescue.microusd);
+  });
+
+  it('records the catalog version the passed prices came from (explicit, or looked up by the prices)', async () => {
+    const adapter = createAnthropicAdapter({ clock: tickingClock(), fetch: createMockFetch(() => jsonResponse(200, {})).fetch });
+    const opus = findCatalogEntry('anthropic', 'claude-opus-5-5')!;
+
+    const explicit = await adapter.estimate(request(), opus.prices, { priceCatalogVersion: '2026-01-01' });
+    const byPrices = await adapter.estimate(request(), opus.prices);
+
+    expect(explicit.priceCatalogVersion).toBe('2026-01-01');
+    expect(byPrices.priceCatalogVersion).toBe(opus.catalogVersion);
   });
 
   it('returns catalog capabilities and rejects unknown models with MODEL_UNSUPPORTED', async () => {

@@ -158,6 +158,14 @@ export interface GenerateContext {
   readonly hooks?: GenerateHooks;
 }
 
+/** Context for `estimate`. */
+export interface EstimateContext {
+  readonly apiKey?: string;
+  readonly signal?: AbortSignal;
+  /** Catalog version of the `prices` passed alongside (keeps the recorded version and the prices consistent). */
+  readonly priceCatalogVersion?: string;
+}
+
 /** Answer of `reconcile` (§7.5). */
 export type ReconciliationResult =
   | { readonly kind: 'completed'; readonly json: unknown; readonly usage: NormalizedUsage; readonly rawUsage: unknown }
@@ -170,11 +178,11 @@ export interface ProviderAdapter {
   readonly providerId: ProviderId;
   /** From the catalog (plus live models API when available). */
   capabilities(modelId: string): Promise<ModelCapabilities>;
-  estimate(
-    req: ModelRequest,
-    prices: ModelPrices,
-    ctx?: { readonly apiKey?: string; readonly signal?: AbortSignal },
-  ): Promise<UsageEstimate>;
+  /**
+   * `ctx.priceCatalogVersion` is the catalog version `prices` came from (the run's profile snapshot); it is recorded as
+   * `UsageEstimate.priceCatalogVersion`. When omitted, the version is looked up by `prices` identity (04 §D2).
+   */
+  estimate(req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate>;
   /** Never throws for provider/network conditions; returns `kind: 'error'` with an accurate phase. */
   generate(req: ModelRequest, ctx: GenerateContext): Promise<ModelResult>;
   reconcile?(
