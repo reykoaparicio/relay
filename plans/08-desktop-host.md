@@ -264,6 +264,9 @@ export interface RunnerSupervisor {
 ## H10: Samples (`src/main/samples.ts`)
 `projects.createSample` copies `process.resourcesPath/sample-api` (or `tests/fixtures/sample-api` in dev) to `userData/samples/sample-api-<n>` with `fs.cp(src, dst, { recursive: true, filter: (p) => basename(p) !== '.env' })`, then calls the internal runner op `projects.createFromRoot` with `isDemo: true` (H4). The `.env` exclusion applies in dev too (the packaged resource already lacks it via the `extraResources` filter). The original fixture is never modified (§1.4).
 
+
+**Sample location (implementation fix).** The copy must live **outside** userData and `~/Library`, which 05 E1 refuses as project roots. When userData is overridden (dev/E2E) use the sibling `<userData>-samples/`; otherwise `~/Documents/Relay Samples/`. The copy is idempotent per idempotency key.
+
 ## Unit tests (owned by H, colocated; `vi.mock('electron')`)
 
 | File | Must cover |

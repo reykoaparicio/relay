@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "pnpm --filter @relay/desktop dev",
     "dev:renderer": "pnpm --filter @relay/desktop dev:renderer",
-    "build": "pnpm -r --filter ./packages/** build && pnpm --filter @relay/desktop build",
+    "build": "pnpm -r --filter './packages/**' build && pnpm --filter @relay/desktop build",
     "typecheck": "tsc -b tsconfig.json",
     "lint": "eslint . --max-warnings 0 && depcruise apps packages --config .dependency-cruiser.cjs",
     "format": "prettier --write .",

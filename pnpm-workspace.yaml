@@ -5,6 +5,7 @@ packages:
 
 # Supply-chain hygiene: only packages listed here may run install scripts.
 onlyBuiltDependencies:
+  - electron   # downloads the Electron binary (plan 08/12)
   - esbuild
 ignoredBuiltDependencies:
   - "@google/genai"

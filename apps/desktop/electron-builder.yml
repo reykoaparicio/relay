@@ -1,0 +1,32 @@
+# 08 H9 packaging (electron-builder 26). Everything is bundled into out/**; only the sample project ships beside it.
+appId: dev.relay.prototype
+productName: Relay
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - "out/**/*"
+  - "package.json"
+extraResources:
+  # Bundled sample (§4.1); the fixture .env is never shipped.
+  - from: "../../tests/fixtures/sample-api"
+    to: "sample-api"
+    filter: ["**/*", "!.env", "!**/.env"]
+asar: true
+mac:
+  target:
+    - target: dir
+      arch: arm64
+    - target: dmg
+      arch: arm64
+  category: public.app-category.developer-tools
+  hardenedRuntime: false
+  # Ad-hoc signature: arm64 macOS refuses to run unsigned code (§18.1). VERIFY with `codesign -dv` (13 §M1).
+  identity: "-"
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
