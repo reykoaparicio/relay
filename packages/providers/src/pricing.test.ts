@@ -132,9 +132,9 @@ describe('computeIterationsCost', () => {
       { modelId: 'unknown', usage: usage({ outputTokens: 1 }) },
     ];
 
-    const cost = computeIterationsCost(iterations, (id) => (id === 'known' ? PRICES : undefined), 'openai');
+    const cost = computeIterationsCost(iterations, (id) => (id === 'known' ? PRICES : undefined), 'gemini');
 
     expect(cost).toEqual({ microusd: 20, certainty: 'estimated' });
-    expect(() => computeIterationsCost([{ modelId: 'x', usage: usage({}) }], () => undefined, 'openai')).toThrow(/no known price/);
+    expect(() => computeIterationsCost([{ modelId: 'x', usage: usage({}) }], () => undefined, 'gemini')).toThrow(/no known price/);
   });
 });

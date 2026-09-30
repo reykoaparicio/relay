@@ -8,7 +8,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** Official provider pricing pages (R3-37). */
 const OFFICIAL_PRICING: Record<string, RegExp> = {
   anthropic: /^https:\/\/(platform\.claude\.com|docs\.anthropic\.com|www\.anthropic\.com|claude\.com)\//,
-  openai: /^https:\/\/(openai\.com|platform\.openai\.com)\//,
+  openai: /^https:\/\/(openai\.com|platform\.openai\.com|developers\.openai\.com)\//,
   gemini: /^https:\/\/(ai\.google\.dev|cloud\.google\.com)\//,
 };
 
@@ -54,6 +54,17 @@ describe('loadCatalogEntries', () => {
     expect(findCatalogEntry('anthropic', 'claude-opus-5-5')?.capabilities).toMatchObject({ supportsRequestLookup: false, supportsTokenCounting: true });
     expect(findCatalogEntry('anthropic', 'claude-haiku-4-5')?.capabilities.effortLevels).toEqual([]);
     expect(findCatalogEntry('anthropic', 'nope')).toBeUndefined();
+  });
+
+  it('carries the D6 OpenAI Balanced model from the official pricing page (standard tier, ≤ 272K input)', () => {
+    const e = findCatalogEntry('openai', 'gpt-6.1-sol');
+
+    expect(e?.source).toBe('https://developers.openai.com/api/docs/pricing');
+    expect(e?.sourceRetrievedAt).toBe('2026-09-30');
+    expect(e?.prices).toEqual({ input: 2_000_000, output: 10_000_000, cacheRead: 100_000, cacheWrite: 2_500_000 });
+    // Capped at the long-context threshold so the standard prices are the billed prices.
+    expect(e?.capabilities).toMatchObject({ structuredOutput: true, streaming: true, maxInputTokens: 272_000, supportsRequestLookup: true });
+    expect(cheapestCatalogModel('openai')?.modelId).toBe('gpt-6.1-sol');
   });
 
   it('prices cache writes at 1.25× input for every Anthropic entry', () => {

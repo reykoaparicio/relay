@@ -34,6 +34,13 @@ export interface ModelRequest {
   readonly effort?: Effort;
   /** ADR-016: provider-side refusal fallback; off unless the profile opts in. */
   readonly refusalFallback: 'off' | 'default';
+  /**
+   * Per-project provider data-handling options (contracts `ProviderOptions`, `project.providerPolicy.providerOptions`).
+   * `openai.storeResponses` (default `true`) keeps the response on OpenAI for ≥ 30 days, which is what makes
+   * post-crash reconciliation (`responses.retrieve`) possible; `false` sends `store: false` and disables request
+   * lookup (see `supportsRequestLookupFor`).
+   */
+  readonly providerOptions?: { readonly openai?: { readonly storeResponses?: boolean } };
   /** Real adapters send ONLY attemptId + runId to the provider; stepKey/purpose stay local. */
   readonly metadata: {
     readonly attemptId: string;

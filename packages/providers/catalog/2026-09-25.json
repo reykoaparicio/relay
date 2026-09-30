@@ -3,7 +3,7 @@
   "currency": "USD",
   "notes": [
     "Anthropic prices were taken at D2 from the claude-api skill model table (cached 2026-09-25): Opus 5.5 $4/$20 per MTok, cache read $0.20; Sonnet 5.5 $2/$10, cache read $0.20. Haiku 4.5 ($1/$5, cache read $0.10) is not in that table. Cache writes use the 1.25x input rate (5-minute TTL). The official page (source URL) could not be fetched from the D2 environment: every entry with priceVerification 'pending-official-page' must be re-checked against the source before M2 sign-off. If a number differs, add a new catalog version file; never edit this one.",
-    "OpenAI and Gemini entries are added in D6 / D10 from their official pricing pages."
+    "OpenAI entry added in D6 (2026-09-30) from the official pricing page https://developers.openai.com/api/docs/pricing (platform.openai.com/docs/pricing 301-redirects there) and the model page https://developers.openai.com/api/docs/models/gpt-6.1-sol, both fetched 2026-09-30. gpt-6.1-sol standard tier (prompts up to 272K input tokens): $2 input, $0.10 cached input, $2.50 cache write, $10 output per MTok; the changelog lists the release and these prices on 2026-09-29 (effectiveDate). Above 272K input tokens OpenAI charges 2x input/cache and 1.5x output, so maxInputTokens is deliberately capped at 272000 (the model's window is 1,050,000): capability validation blocks long-context prompts and the standard prices are provably the billed prices. Reasoning effort levels per the model page: low, medium (default), high, xhigh, max ('none' is not listed, so reasoning is always on). supportsTokenCounting: POST /v1/responses/input_tokens (openai SDK 7.25 client.responses.inputTokens.count). Gemini entries are added in D10."
   ],
   "entries": [
     {
@@ -68,6 +68,27 @@
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
       "sourceRetrievedAt": "2026-09-25",
       "priceVerification": "pending-official-page"
+    },
+    {
+      "providerId": "openai",
+      "modelId": "gpt-6.1-sol",
+      "displayName": "GPT-6.1 Sol",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": true,
+        "maxInputTokens": 272000,
+        "maxOutputTokens": 128000,
+        "supportsRequestLookup": true,
+        "supportsTokenCounting": true,
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "thinkingAlwaysOn": true
+      },
+      "prices": { "input": 2000000, "output": 10000000, "cacheRead": 100000, "cacheWrite": 2500000 },
+      "effectiveDate": "2026-09-29",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "sourceRetrievedAt": "2026-09-30",
+      "priceVerification": "official-page-2026-09-30"
     },
     {
       "providerId": "fake",

@@ -1,0 +1,42 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_01SuccessFixture","object":"response","created_at":1790000000,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":"You are the reviewer.","max_output_tokens":8000,"model":"gpt-6.1-sol","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":"medium","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"json_schema","name":"findings_v1","description":null,"schema":{"type":"object"},"strict":true},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{"relay_attempt_id":"att_fixture","relay_run_id":"run_fixture"}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_01SuccessFixture","object":"response","created_at":1790000000,"status":"in_progress","background":false,"error":null,"incomplete_details":null,"instructions":"You are the reviewer.","max_output_tokens":8000,"model":"gpt-6.1-sol","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":"medium","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"json_schema","name":"findings_v1","description":null,"schema":{"type":"object"},"strict":true},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":null,"user":null,"metadata":{"relay_attempt_id":"att_fixture","relay_run_id":"run_fixture"}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_fixture_1","type":"reasoning","summary":[]},"sequence_number":2}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_fixture_1","type":"reasoning","summary":[]},"sequence_number":3}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_fixture_1","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":4}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_fixture_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]},"sequence_number":5}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture_1","output_index":1,"content_index":0,"delta":"{\"summary\":\"No issue","logprobs":[],"sequence_number":6}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture_1","output_index":1,"content_index":0,"delta":"s found in the selected files.\",\"sourceR","logprobs":[],"sequence_number":7}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture_1","output_index":1,"content_index":0,"delta":"efs\":[],\"unresolvedQuestions\":[],\"outcom","logprobs":[],"sequence_number":8}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture_1","output_index":1,"content_index":0,"delta":"e\":\"no_issues\",\"findings\":[]}","logprobs":[],"sequence_number":9}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","item_id":"msg_fixture_1","output_index":1,"content_index":0,"text":"{\"summary\":\"No issues found in the selected files.\",\"sourceRefs\":[],\"unresolvedQuestions\":[],\"outcome\":\"no_issues\",\"findings\":[]}","logprobs":[],"sequence_number":10}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","item_id":"msg_fixture_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"{\"summary\":\"No issues found in the selected files.\",\"sourceRefs\":[],\"unresolvedQuestions\":[],\"outcome\":\"no_issues\",\"findings\":[]}","annotations":[],"logprobs":[]},"sequence_number":11}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_fixture_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"summary\":\"No issues found in the selected files.\",\"sourceRefs\":[],\"unresolvedQuestions\":[],\"outcome\":\"no_issues\",\"findings\":[]}","annotations":[],"logprobs":[]}]},"sequence_number":12}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_01SuccessFixture","object":"response","created_at":1790000000,"status":"completed","background":false,"error":null,"incomplete_details":null,"instructions":"You are the reviewer.","max_output_tokens":8000,"model":"gpt-6.1-sol","output":[{"id":"rs_fixture_1","type":"reasoning","summary":[]},{"id":"msg_fixture_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"summary\":\"No issues found in the selected files.\",\"sourceRefs\":[],\"unresolvedQuestions\":[],\"outcome\":\"no_issues\",\"findings\":[]}","annotations":[],"logprobs":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":"medium","summary":null},"store":true,"temperature":1,"text":{"format":{"type":"json_schema","name":"findings_v1","description":null,"schema":{"type":"object"},"strict":true},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":180,"output_tokens_details":{"reasoning_tokens":120},"total_tokens":1180},"user":null,"metadata":{"relay_attempt_id":"att_fixture","relay_run_id":"run_fixture"}},"sequence_number":13}
+

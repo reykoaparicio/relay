@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { localTokenEstimate, promptChars } from './estimate.js';
 import { ZERO_USAGE, normalizeAnthropicUsage, normalizeOpenAIUsage } from './usage.js';
@@ -59,6 +60,34 @@ describe('normalizeOpenAIUsage', () => {
   it('never produces negative uncached input', () => {
     expect(normalizeOpenAIUsage({ input_tokens: 10, input_tokens_details: { cached_tokens: 50 } }).uncachedInputTokens).toBe(0);
     expect(normalizeOpenAIUsage(null)).toEqual(ZERO_USAGE);
+  });
+});
+
+/** The usage block of the terminal `response.completed` event of an OpenAI SSE fixture. */
+function openAIFixtureUsage(name: string): Parameters<typeof normalizeOpenAIUsage>[0] {
+  const text = readFileSync(new URL(`./__fixtures__/openai/${name}.sse`, import.meta.url), 'utf8');
+  const line = text.split('\n').find((l) => l.startsWith('data: {"type":"response.completed"'));
+  if (line === undefined) throw new Error(`no response.completed in ${name}`);
+  return (JSON.parse(line.slice('data: '.length)) as { response: { usage: Parameters<typeof normalizeOpenAIUsage>[0] } }).response.usage;
+}
+
+describe('double-count trap: the same token split through both providers', () => {
+  it('OpenAI cache-usage fixture (input_tokens 1700 incl. 500 cached + 200 written) → uncached 1000', () => {
+    const raw = openAIFixtureUsage('cache-usage');
+
+    expect(raw?.input_tokens).toBe(1700);
+    expect(normalizeOpenAIUsage(raw)).toEqual({ uncachedInputTokens: 1000, cacheReadInputTokens: 500, cacheWriteInputTokens: 200, outputTokens: 180, reasoningTokens: 120 });
+  });
+
+  it('Anthropic reports the same split with input_tokens 1000 (already excluding cache) → uncached 1000', () => {
+    const a = normalizeAnthropicUsage({ input_tokens: 1000, cache_read_input_tokens: 500, cache_creation_input_tokens: 200, output_tokens: 180 });
+    const o = normalizeOpenAIUsage(openAIFixtureUsage('cache-usage'));
+
+    expect([a.uncachedInputTokens, a.cacheReadInputTokens, a.cacheWriteInputTokens]).toEqual([o.uncachedInputTokens, o.cacheReadInputTokens, o.cacheWriteInputTokens]);
+  });
+
+  it('OpenAI success fixture without cache: uncached = input_tokens; reasoning stays inside output', () => {
+    expect(normalizeOpenAIUsage(openAIFixtureUsage('success'))).toEqual({ uncachedInputTokens: 1000, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 180, reasoningTokens: 120 });
   });
 });
 
