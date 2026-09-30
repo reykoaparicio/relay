@@ -1,0 +1,124 @@
+import { describe, expect, it } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { FAKE_PROJECT_ID } from '../api/fake-bridge';
+import { renderApp } from '../features/testing/render-app';
+
+const OVERVIEW = `/p/${FAKE_PROJECT_ID}`;
+
+async function ready() {
+  await screen.findByRole('heading', { level: 1, name: 'Project overview' });
+  await screen.findByRole('table', { name: /most recent runs/i }).catch(() => undefined);
+}
+
+describe('OverviewPage', () => {
+  it('awaiting-approval: the attention card targets the exact approval step', async () => {
+    const { bridge } = renderApp(OVERVIEW, { scenario: 'awaiting-approval' });
+    const card = await screen.findByRole('region', { name: 'Needs your attention' });
+    const run = bridge.world.runs.find((r) => r.status === 'awaiting_approval');
+    const approvalStep = run?.steps.find((s) => s.state === 'awaiting_approval');
+    expect(approvalStep).toBeDefined();
+    const inspect = within(card).getByRole('link', { name: 'Inspect plan' });
+    expect(inspect.getAttribute('href')).toBe(`/p/${FAKE_PROJECT_ID}/runs/${run?.id ?? ''}?step=${approvalStep?.id ?? ''}`);
+    expect(within(card).getByText('Awaiting your approval')).toBeInTheDocument();
+    expect(within(card).getByText('No project files have been modified.')).toBeInTheDocument();
+    // Runs nav badge counts the run waiting for approval (screen-reader text, not color only).
+    expect(await screen.findByText('1 waiting for approval')).toBeInTheDocument();
+  });
+
+  it('usage tile says "tracked by Relay" and links to the latest run ledger; run budget values link to ?tab=ledger', async () => {
+    const { bridge } = renderApp(OVERVIEW, { scenario: 'awaiting-approval' });
+    await ready();
+    const latest = bridge.world.runs[0];
+    const usage = await screen.findByRole('link', { name: /usage tracked by relay/i });
+    expect(usage.getAttribute('href')).toBe(`#/p/${FAKE_PROJECT_ID}/runs/${latest?.id ?? ''}?tab=ledger`);
+    expect(usage).toHaveTextContent('Your provider account bill may be higher');
+
+    const table = await screen.findByRole('table', { name: /most recent runs/i });
+    const ledgerLinks = within(table).getAllByRole('link', { name: /open the ledger/i });
+    expect(ledgerLinks).toHaveLength(3);
+    for (const link of ledgerLinks) expect(link.getAttribute('href')).toMatch(/\/runs\/run_\w+\?tab=ledger$/);
+
+    const controls = screen.getByRole('region', { name: 'Run controls' });
+    const budget = within(controls).getByRole('link', { name: /\$3\.00/ });
+    expect(budget.getAttribute('href')).toMatch(/\?tab=ledger$/);
+    expect(within(controls).getByText(/tracked by Relay/)).toBeInTheDocument();
+  });
+
+  it('active-run: shows the running step and pauses through runs.pause', async () => {
+    const { bridge } = renderApp(OVERVIEW, { scenario: 'active-run' });
+    const card = await screen.findByRole('region', { name: 'Active run' });
+    expect(within(card).getByText(/Step 2 of 6/)).toBeInTheDocument();
+    expect(within(card).getByRole('img', { name: /Run allowance/ })).toBeInTheDocument();
+    expect(screen.getByText('Running · step 2 of 6')).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: 'Pause after this step' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.pause')).toHaveLength(1);
+    });
+    expect(screen.queryByRole('region', { name: 'Needs your attention' })).not.toBeInTheDocument();
+  });
+
+  it('empty: offers the sample project and the template; the sample is created with an idempotency key', async () => {
+    const { bridge, router } = renderApp(OVERVIEW, { scenario: 'empty' });
+    await screen.findByRole('heading', { name: 'Start your first run' });
+    expect(screen.getByRole('link', { name: 'Start: Review & propose a fix' }).getAttribute('href')).toBe(`/p/${FAKE_PROJECT_ID}/runs/new`);
+    expect(screen.getByText('No runs yet')).toBeInTheDocument();
+    expect(await screen.findByText(/No runs yet\. Runs you start appear here/)).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Try the sample project' });
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/projects.createSample')).toHaveLength(1);
+    });
+    const input = bridge.callsTo('relay/v1/projects.createSample')[0]?.input as { idempotencyKey: string };
+    expect(input.idempotencyKey).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    await waitFor(() => {
+      expect(router.state.location.pathname).not.toBe(OVERVIEW);
+    });
+  });
+
+  it('interrupted: banner + RecoveryPanel with the unresolved liability', async () => {
+    renderApp(OVERVIEW, { scenario: 'interrupted' });
+    expect(await screen.findByText(/was interrupted/)).toBeInTheDocument();
+    const recovery = await screen.findByRole('region', { name: 'Recovery' });
+    expect(within(recovery).getByText('Requests with an unknown outcome')).toBeInTheDocument();
+    expect(within(recovery).getByRole('button', { name: 'Continue from last checkpoint' })).toBeInTheDocument();
+    const review = screen.getByRole('link', { name: 'Review recovery options' });
+    expect(review.getAttribute('href')).toMatch(/\/runs\/run_\w+\?step=stp_\w+$/);
+    expect(screen.getByText('1 interrupted run needs a decision')).toBeInTheDocument();
+  });
+
+  it('unknown-outcome pause also renders the recovery state', async () => {
+    renderApp(OVERVIEW, { scenario: 'unknown-outcome' });
+    expect(await screen.findByText(/paused: unknown request outcome/)).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Recovery' })).toBeInTheDocument();
+  });
+
+  it('provider-disconnected: names the provider, shows the redacted key and a reconnect link', async () => {
+    renderApp(OVERVIEW, { scenario: 'provider-disconnected' });
+    const banner = await screen.findByText('Authentication failed for OpenAI');
+    const alert = banner.closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(within(alert as HTMLElement).getByText('sk-…Q7d2')).toBeInTheDocument();
+    const reconnect = within(alert as HTMLElement).getByRole('link', { name: 'Reconnect OpenAI' });
+    expect(reconnect.getAttribute('href')).toBe('/settings/providers');
+    expect(await screen.findByText('1 of 2 providers connected')).toBeInTheDocument();
+  });
+
+  it('auth-failed run pause also triggers the provider banner', async () => {
+    renderApp(OVERVIEW, { scenario: 'auth-failed' });
+    expect(await screen.findByText('Authentication failed for OpenAI')).toBeInTheDocument();
+  });
+
+  it('records the relay:nav:overview measure once the primary data rendered', async () => {
+    renderApp(OVERVIEW, { scenario: 'completed' });
+    await screen.findByRole('table', { name: /most recent runs/i });
+    await waitFor(() => {
+      expect(performance.getEntriesByName('relay:nav:overview', 'measure')).toHaveLength(1);
+    });
+  });
+
+  it('shows the fake provider badge in fake mode', async () => {
+    renderApp(OVERVIEW, { scenario: 'completed' });
+    expect(await screen.findByText('Fake provider: no real model calls')).toBeInTheDocument();
+  });
+});

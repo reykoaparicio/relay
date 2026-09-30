@@ -1,8 +1,9 @@
-// jsdom setup for the unit-web Vitest project (created by Agent I; owned by Agent J afterwards).
+// jsdom setup for the unit-web Vitest project (created by Agent I; owned by Agent J).
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, expect } from 'vitest';
 import * as axeMatchers from 'vitest-axe/matchers';
+import { installBridge } from './api/bridge';
 
 expect.extend(axeMatchers);
 
@@ -10,6 +11,9 @@ expect.extend(axeMatchers);
 afterEach(() => {
   cleanup();
   document.documentElement.removeAttribute('data-theme');
+  installBridge(null);
+  performance.clearMarks();
+  performance.clearMeasures();
 });
 
 /**
