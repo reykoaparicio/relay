@@ -6,8 +6,23 @@ const nodeDev = ['development', 'module', 'node'];
 const webDev = ['development', 'module', 'browser'];
 const NO_NETWORK = 'tests/helpers/no-network.ts';
 
+// 00 §6 coverage floors (lines). Enforced when run with --coverage.
+const COVERAGE = {
+  provider: 'v8' as const,
+  include: ['packages/*/src/**/*.ts', 'apps/desktop/src/**/*.{ts,tsx}'],
+  exclude: ['**/*.test.{ts,tsx}', '**/testing/**', '**/__fixtures__/**', '**/fake-fixtures/**', '**/src/scripts/**'],
+  thresholds: {
+    'packages/contracts/src/**': { lines: 95 },
+    'packages/engine/src/**': { lines: 90 },
+    'packages/storage/src/**': { lines: 90 },
+    'packages/providers/src/**': { lines: 85 },
+    'packages/tools/src/**': { lines: 90 },
+  },
+};
+
 export default defineConfig({
   test: {
+    coverage: COVERAGE,
     projects: [
       {
         resolve: { conditions: nodeDev },

@@ -1,3 +1,4 @@
+import { builtinModules } from 'node:module';
 import tseslint from 'typescript-eslint';
 import boundaries from 'eslint-plugin-boundaries';
 import react from 'eslint-plugin-react';
@@ -142,7 +143,7 @@ export default tseslint.config(
       'react/no-danger': 'error',
       'no-restricted-imports': ['error', { patterns: [
         PUBLIC_API_ONLY,
-        { group: ['node:*', 'electron', 'fs', 'path', 'child_process'], message: 'Renderer must not import Node/Electron (§6.3).' },
+        { group: ['node:*', 'electron', 'electron/*', ...builtinModules, ...builtinModules.map((m) => `${m}/*`)], message: 'Renderer must not import Node/Electron (§6.3).' },
         { group: ['@anthropic-ai/*', 'openai', '@google/genai'], message: 'Provider SDKs never enter the renderer (§13.4).' },
       ]}],
     },

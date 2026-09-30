@@ -4,11 +4,12 @@
     "rootDir": "src",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo",
-    "types": [
-      "node"
-    ]
+    "types": []
   },
   "include": [
     "src"
+  ],
+  "exclude": [
+    "src/scripts/**"
   ]
 }

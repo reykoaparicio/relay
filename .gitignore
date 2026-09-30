@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+dist-scripts/
 coverage/
 playwright-report/
 test-results/
@@ -26,3 +27,9 @@ tmp/
 !tests/fixtures/sample-api/dist/
 !tests/fixtures/databases/*.sqlite
 !docs/demo/snapshot/**
+# …but never secrets, env files or live SQLite sidecars inside the snapshot (03 §C7, 13 §M3).
+docs/demo/snapshot/**/secrets/
+docs/demo/snapshot/**/.env*
+docs/demo/snapshot/**/*.sqlite-wal
+docs/demo/snapshot/**/*.sqlite-shm
+docs/demo/snapshot/**/*.sqlite-journal

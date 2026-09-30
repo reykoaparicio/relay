@@ -13,7 +13,17 @@ module.exports = {
       severity: 'error',
       comment: 'Renderer must not import Node/Electron or provider SDKs (§6.3, §13.4).',
       from: { path: '^apps/desktop/src/renderer' },
-      to: { path: ['^(node:|electron$|fs$|path$)', 'node_modules/(openai|@anthropic-ai|@google/genai)'] },
+      to: {
+        // dependency-cruiser strips `node:`, so match Node built-ins by dependency type (F6 audit fix).
+        dependencyTypes: ['core'],
+      },
+    },
+    {
+      name: 'renderer-no-electron-or-sdk',
+      severity: 'error',
+      comment: 'Renderer must not import Electron or provider SDKs (§6.3, §13.4).',
+      from: { path: '^apps/desktop/src/renderer' },
+      to: { path: ['^electron$', 'node_modules/electron/', 'node_modules/openai/', 'node_modules/@anthropic-ai/', 'node_modules/@google/genai/'] },
     },
     {
       name: 'sqlite-only-in-storage',

@@ -47,7 +47,17 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # F2 audit fix: skip until the E2E suite (plan 12) and the Electron app (plan 08) exist.
+      - name: Detect E2E suite
+        id: e2e
+        run: |
+          if [ -f playwright.config.ts ] && [ -f apps/desktop/electron.vite.config.ts ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; else echo "ready=false" >> "$GITHUB_OUTPUT"; fi
+      # Electron 44 downloads its binary on first use; fetch it up front so the Playwright launch doesn't time out.
+      - name: Fetch Electron binary
+        if: steps.e2e.outputs.ready == 'true'
+        run: pnpm --filter @relay/desktop exec electron --version
       - run: pnpm e2e
+        if: steps.e2e.outputs.ready == 'true'
       - name: Upload Playwright report and traces
         if: failure()
         uses: actions/upload-artifact@v4
