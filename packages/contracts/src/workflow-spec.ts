@@ -6,7 +6,7 @@ import { stepKeySchema } from './primitives.js';
 import { MEMORY_TYPES, memoryTypeSchema, roleSchema } from './status.js';
 
 /** §5.3 "retry policy"; §7.6 adjustable within `MAX_RETRY_POLICY`. */
-export const retryPolicySchema = z.object({
+export const retryPolicySchema = z.strictObject({
   transport: z.number().int().min(0).max(MAX_RETRY_POLICY.transport),
   schemaRepair: z.number().int().min(0).max(MAX_RETRY_POLICY.schemaRepair),
   rateLimitWaits: z.number().int().min(0).max(MAX_RETRY_POLICY.rateLimitWaits),
@@ -15,7 +15,7 @@ export const retryPolicySchema = z.object({
 export type RetryPolicy = z.infer<typeof retryPolicySchema>;
 
 /** §5.3 "memory scope": which memory a model step may receive (engine/G1 filter by it). */
-export const memoryScopeSchema = z.object({
+export const memoryScopeSchema = z.strictObject({
   roles: z.union([z.literal('step_role'), z.literal('all')]).default('step_role'),
   types: z.array(memoryTypeSchema).default([...MEMORY_TYPES]),
 });
@@ -28,23 +28,35 @@ export const RESERVED_STEP_KEYS = ['intake', 'finalize'] as const;
 /** Approval binding targets (§11.3). */
 export const APPROVAL_BIND_TARGETS = ['planHash', 'contextHash'] as const;
 
-/** Model step spec (§12.4). */
-export const modelStepSpecSchema = z.object({
-  id: stepKeySchema,
-  kind: z.literal('model'),
-  role: roleSchema,
-  profile: z.string(),
-  dependsOn: z.array(stepKeySchema).default([]),
-  outputSchema: z.enum(MODEL_OUTPUT_SCHEMA_IDS),
-  instructionVersion: z.string().regex(/^[a-z-]+\.v\d+$/), // e.g. "reviewer.v1" → templates prompt module
-  maxOutputTokens: z.number().int().positive().optional(), // overrides profile.params (§5.3 "output allowance")
-  retryPolicy: retryPolicySchema.default({ ...RETRY_DEFAULTS_PER_STEP }),
-  memoryScope: memoryScopeSchema.prefault({}),
-  allowedTools: z.array(z.never()).max(0).default([]), // §5.3 "allowed tools"; P0 = none (ADR-014)
-});
+/**
+ * Model step spec (§12.4). Objects in the spec are strict: an imported file with an unknown (e.g. misspelled) key is
+ * rejected with an `unrecognized_keys` issue rather than silently dropped (§12.4 "validate it before accepting").
+ * `instructionVersion` is optional because the §12.4 example omits it; it defaults to `${role}.v1`.
+ */
+export const modelStepSpecSchema = z
+  .strictObject({
+    id: stepKeySchema,
+    kind: z.literal('model'),
+    role: roleSchema,
+    profile: z.string(),
+    dependsOn: z.array(stepKeySchema).default([]),
+    outputSchema: z.enum(MODEL_OUTPUT_SCHEMA_IDS),
+    instructionVersion: z
+      .string()
+      .regex(/^[a-z-]+\.v\d+$/)
+      .optional(), // e.g. "reviewer.v1" → templates prompt module
+    maxOutputTokens: z.number().int().positive().optional(), // overrides profile.params (§5.3 "output allowance")
+    retryPolicy: retryPolicySchema.default({ ...RETRY_DEFAULTS_PER_STEP }),
+    memoryScope: memoryScopeSchema.prefault({}),
+    allowedTools: z.array(z.never()).max(0).default([]), // §5.3 "allowed tools"; P0 = none (ADR-014)
+  })
+  .transform(({ instructionVersion, ...step }) => ({
+    ...step,
+    instructionVersion: instructionVersion ?? `${step.role}.v1`,
+  }));
 
 /** Approval step spec (§11.3). */
-export const approvalStepSpecSchema = z.object({
+export const approvalStepSpecSchema = z.strictObject({
   id: stepKeySchema,
   kind: z.literal('approval'),
   dependsOn: z.array(stepKeySchema).min(1),
@@ -57,7 +69,7 @@ export const stepSpecSchema = z.discriminatedUnion('kind', [modelStepSpecSchema,
 export type StepSpec = z.infer<typeof stepSpecSchema>;
 
 /** §12.4 revision policy. */
-export const revisionPolicySchema = z.object({
+export const revisionPolicySchema = z.strictObject({
   triggerStep: stepKeySchema,
   triggerOutcome: z.literal('revise'),
   repeatSteps: z.array(stepKeySchema).min(1),
@@ -65,12 +77,12 @@ export const revisionPolicySchema = z.object({
   onLimit: z.literal('incomplete'),
 });
 
-const workflowSpecBaseSchema = z.object({
+const workflowSpecBaseSchema = z.strictObject({
   schemaVersion: z.literal(1),
   id: z.string().regex(/^[a-z0-9-]+$/),
   version: z.number().int().positive(),
   name: z.string().min(1).max(80),
-  limits: workflowLimitsSchema,
+  limits: workflowLimitsSchema.strict(),
   steps: z.array(stepSpecSchema).min(1).max(12),
   revisionPolicy: revisionPolicySchema,
 });
@@ -107,7 +119,10 @@ function checkIds(spec: WorkflowSpecShape): WorkflowGraphIssue[] {
   return issues;
 }
 
-function checkDependencies(spec: WorkflowSpecShape, index: ReadonlyMap<string, number>): WorkflowGraphIssue[] {
+function checkDependencies(
+  spec: WorkflowSpecShape,
+  index: ReadonlyMap<string, number>,
+): WorkflowGraphIssue[] {
   const issues: WorkflowGraphIssue[] = [];
   spec.steps.forEach((s, i) => {
     s.dependsOn.forEach((dep, k) => {
@@ -147,30 +162,84 @@ function checkCycles(spec: WorkflowSpecShape, index: ReadonlyMap<string, number>
   return issues;
 }
 
-function checkApprovalBeforeImplementer(spec: WorkflowSpecShape): WorkflowGraphIssue[] {
-  const firstImpl = spec.steps.findIndex((s) => s.kind === 'model' && s.role === 'implementer');
-  if (firstImpl < 0) return [];
-  const hasEarlierApproval = spec.steps.slice(0, firstImpl).some((s) => s.kind === 'approval');
-  return hasEarlierApproval
-    ? []
-    : [{ path: ['steps', firstImpl], message: 'an approval step must precede the first implementer step (FR-08)' }];
+/** Indices of every step `i` depends on, directly or transitively (unknown ids are ignored; cycles terminate). */
+function ancestorsOf(spec: WorkflowSpecShape, index: ReadonlyMap<string, number>, i: number): Set<number> {
+  const found = new Set<number>();
+  const stack = [i];
+  while (stack.length > 0) {
+    const current = stack.pop() ?? i;
+    for (const dep of spec.steps[current]?.dependsOn ?? []) {
+      const j = index.get(dep);
+      if (j !== undefined && !found.has(j)) {
+        found.add(j);
+        stack.push(j);
+      }
+    }
+  }
+  return found;
 }
 
-function checkRevisionPolicy(spec: WorkflowSpecShape, index: ReadonlyMap<string, number>): WorkflowGraphIssue[] {
+const isPlanner = (s: StepSpec | undefined): boolean => s?.kind === 'model' && s.outputSchema === 'plan.v1';
+
+/**
+ * FR-08 by dependency, not position: every implementer depends (transitively) on an approval step, and every approval
+ * depends (transitively) on a `plan.v1` planner step, so nothing is implemented from an unapproved plan.
+ */
+function checkApprovalChain(
+  spec: WorkflowSpecShape,
+  index: ReadonlyMap<string, number>,
+): WorkflowGraphIssue[] {
+  const issues: WorkflowGraphIssue[] = [];
+  spec.steps.forEach((s, i) => {
+    const ancestors = [...ancestorsOf(spec, index, i)].map((j) => spec.steps[j]);
+    if (s.kind === 'model' && s.role === 'implementer' && !ancestors.some((a) => a?.kind === 'approval')) {
+      issues.push({
+        path: ['steps', i, 'dependsOn'],
+        message: 'an implementer step must depend on an approval step (FR-08)',
+      });
+    }
+    // An approval with no dependsOn at all is already reported by the schema (`.min(1)`).
+    if (s.kind === 'approval' && s.dependsOn.length > 0 && !ancestors.some(isPlanner)) {
+      issues.push({
+        path: ['steps', i, 'dependsOn'],
+        message: 'an approval step must depend on a plan.v1 planner step',
+      });
+    }
+  });
+  return issues;
+}
+
+function checkRevisionPolicy(
+  spec: WorkflowSpecShape,
+  index: ReadonlyMap<string, number>,
+): WorkflowGraphIssue[] {
   const issues: WorkflowGraphIssue[] = [];
   const rp = spec.revisionPolicy;
   const trigger = index.get(rp.triggerStep);
+  const triggerStep = trigger === undefined ? undefined : spec.steps[trigger];
   if (trigger === undefined) {
     issues.push({ path: ['revisionPolicy', 'triggerStep'], message: `unknown step "${rp.triggerStep}"` });
-  } else if (spec.steps[trigger]?.kind !== 'model') {
-    issues.push({ path: ['revisionPolicy', 'triggerStep'], message: 'the trigger step must be a model step' });
+  } else if (triggerStep?.kind !== 'model' || triggerStep.outputSchema !== 'review.v1') {
+    // §7.6: only a review.v1 verdict carries the `revise` outcome.
+    issues.push({
+      path: ['revisionPolicy', 'triggerStep'],
+      message: 'the trigger step must be a review.v1 model step',
+    });
+  } else if (!rp.repeatSteps.includes(rp.triggerStep)) {
+    issues.push({
+      path: ['revisionPolicy', 'repeatSteps'],
+      message: `repeatSteps must include the trigger step "${rp.triggerStep}"`,
+    });
   }
   rp.repeatSteps.forEach((key, k) => {
     const j = index.get(key);
     if (j === undefined) {
       issues.push({ path: ['revisionPolicy', 'repeatSteps', k], message: `unknown step "${key}"` });
     } else if (spec.steps[j]?.kind === 'approval') {
-      issues.push({ path: ['revisionPolicy', 'repeatSteps', k], message: 'an approval step cannot be repeated' });
+      issues.push({
+        path: ['revisionPolicy', 'repeatSteps', k],
+        message: 'an approval step cannot be repeated',
+      });
     }
   });
   return issues;
@@ -178,7 +247,8 @@ function checkRevisionPolicy(spec: WorkflowSpecShape, index: ReadonlyMap<string,
 
 /**
  * Pure §5.3 graph checks: unique, non-reserved ids; every `dependsOn` names an existing earlier step; no cycles;
- * an approval precedes the first implementer; the revision policy names existing, non-approval steps.
+ * every implementer depends on an approval and every approval on a planner; the revision policy is triggered by a
+ * review.v1 model step, repeats that step, and names existing, non-approval steps.
  * Capability checks need catalog data and live in the engine (06 §F10).
  */
 export function collectWorkflowGraphIssues(spec: WorkflowSpecShape): WorkflowGraphIssue[] {
@@ -187,7 +257,7 @@ export function collectWorkflowGraphIssues(spec: WorkflowSpecShape): WorkflowGra
     ...checkIds(spec),
     ...checkDependencies(spec, index),
     ...checkCycles(spec, index),
-    ...checkApprovalBeforeImplementer(spec),
+    ...checkApprovalChain(spec, index),
     ...checkRevisionPolicy(spec, index),
   ];
 }

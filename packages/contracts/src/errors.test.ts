@@ -10,6 +10,7 @@ import {
   toAppError,
   USER_MESSAGE_MAX,
 } from './errors.js';
+import type { AppError, ErrorContext } from './errors.js';
 import type { AttemptId, CorrelationId, RunId } from './ids.js';
 import { microusd } from './money.js';
 import type { RelPath } from './primitives.js';
@@ -19,7 +20,8 @@ const BODY = '01J9ZZZZZZZZZZZZZZZZZZZZZZ';
 const attemptId = `att_${BODY}` as AttemptId;
 const runId = `run_${BODY}` as RunId;
 const correlationId = `cor_${BODY}` as CorrelationId;
-const toCamel = (code: string): string => code.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+const toCamel = (code: string): string =>
+  code.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 
 describe('error taxonomy', () => {
   it('every ErrorCode has a factory, a default nextAction, and retryable', () => {
@@ -91,6 +93,61 @@ describe('error taxonomy', () => {
     expect(e.alternatives).toEqual(['choose_profile', 'stop']);
     expect(budgetBreakdownSchema.parse(e.details)).toEqual(breakdown);
     expect(e.details?.['total']).toBe(microusd(60_000));
+  });
+
+  it('internal carries only the correlation id, ignoring userMessage, details, and ids from ctx (B13)', () => {
+    const internalWithCtx = errors.internal as (c: CorrelationId, ctx: ErrorContext) => AppError;
+
+    const e = internalWithCtx(correlationId, {
+      userMessage: 'SQLITE_CONSTRAINT at /Users/me/secret.db',
+      details: { stack: 'Error: boom\n    at /Users/me/x.ts:1' },
+      runId,
+      attemptId,
+    });
+
+    expect(e).toEqual({
+      code: 'INTERNAL',
+      userMessage: ERROR_DEFINITIONS.INTERNAL.userMessage,
+      retryable: false,
+      nextAction: 'report_bug',
+      alternatives: [],
+      correlationId,
+    });
+  });
+
+  it('typed factory fields win over ctx.details (B13)', () => {
+    const auth = errors.authRequired('anthropic', { details: { providerId: 'openai', extra: 1 } });
+    const limit = errors.limitReached('attempts', { details: { limit: 'deadline' } });
+    const perm = errors.permissionDenied('outside_root', { details: { reason: 'excluded' } });
+    const stale = errors.approvalStale('plan_changed', { details: { reason: 'scope_changed' } });
+    const rate = errors.rateLimited(1500, { details: { retryAfterMs: 1 } });
+    const invalid = errors.outputInvalid([], { details: { issues: 'overridden' } });
+    const conflict = errors.conflict({ currentRevision: 3 }, { details: { currentRevision: 1 } });
+
+    expect(auth.details).toEqual({ providerId: 'anthropic', extra: 1 });
+    expect(limit.details).toEqual({ limit: 'attempts' });
+    expect(perm.details).toEqual({ reason: 'outside_root' });
+    expect(stale.details).toEqual({ reason: 'plan_changed' });
+    expect(rate.details).toEqual({ retryAfterMs: 1500 });
+    expect(invalid.details).toEqual({ issues: [] });
+    expect(conflict.details).toEqual({ currentRevision: 3 });
+  });
+
+  it('budgetBlocked merges ctx.details under the breakdown (B13)', () => {
+    const breakdown = budgetBreakdownSchema.parse({
+      L: 10,
+      C: 5,
+      R: 0,
+      U: 0,
+      N: 10,
+      scope: 'run',
+      total: 15,
+      allowed: false,
+    });
+
+    const e = errors.budgetBlocked(breakdown, { details: { stepKey: 'plan', total: 0 } });
+
+    expect(e.details).toEqual({ ...breakdown, stepKey: 'plan' });
   });
 
   it('appError applies context overrides and truncates long messages', () => {

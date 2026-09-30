@@ -41,6 +41,15 @@ describe('idSchema', () => {
     expect(isIdOf('run', 42)).toBe(false);
   });
 
+  it('rejects a ULID whose first char exceeds 7 (timestamp above 2^48 - 1) (B14)', () => {
+    const tail = '1J9ZZZZZZZZZZZZZZZZZZZZZZ';
+
+    expect(idSchema('run').safeParse(`run_7${tail}`).success).toBe(true);
+    for (const first of ['8', '9', 'A', 'Z']) {
+      expect(idSchema('run').safeParse(`run_${first}${tail}`).success).toBe(false);
+    }
+  });
+
   it('exposes the ULID body pattern', () => {
     expect(idPattern('run').source).toContain(ULID_PATTERN);
   });

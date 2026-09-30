@@ -7,7 +7,9 @@ import { credentialStorageModeSchema, errorCodeSchema, providerIdSchema } from '
 export const REDACTED_LABEL_MAX = 40;
 
 /** Vault file of an OS-protected key, relative to userData (never the key itself; §12.2). */
-export const vaultFileSchema = z.string().regex(/^secrets\/crd_[0-9A-HJKMNP-TV-Z]{26}\.bin$/, 'must be secrets/crd_<ULID>.bin');
+export const vaultFileSchema = z
+  .string()
+  .regex(/^secrets\/crd_[0-9A-HJKMNP-TV-Z]{26}\.bin$/, 'must be secrets/crd_<ULID>.bin');
 
 /** §12.2 ProviderCredentialRef: metadata only; the raw credential is never here. */
 export const credentialRefSchema = z.object({

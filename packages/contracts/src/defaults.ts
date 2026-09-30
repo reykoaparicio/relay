@@ -14,7 +14,12 @@ export const DEFAULT_LIMITS = {
 export const RETRY_DEFAULTS_PER_STEP = { transport: 1, schemaRepair: 1, rateLimitWaits: 3 } as const;
 
 /** §7.6 "within a maximum policy limit": the most a workflow may raise each retry counter. */
-export const MAX_RETRY_POLICY = { transport: 2, schemaRepair: 2, rateLimitWaits: 5, qualityRevisions: 5 } as const;
+export const MAX_RETRY_POLICY = {
+  transport: 2,
+  schemaRepair: 2,
+  rateLimitWaits: 5,
+  qualityRevisions: 5,
+} as const;
 
 /** §7.6 "Backoff has a maximum wait". */
 export const MAX_BACKOFF_MS = 60_000;
@@ -26,7 +31,11 @@ export const SETUP_ALLOWANCE_MICROUSD = 50_000;
 export const RAW_RESPONSE_RETENTION_DAYS = 30;
 
 /** §9.1 upper bounds for user-raised run limits (`raise_limits`, `limitOverrides`). */
-export const RUN_LIMIT_MAXIMUMS = { maxAttempts: 50, executionTimeoutSeconds: 7200, maxRevisionCycles: 5 } as const;
+export const RUN_LIMIT_MAXIMUMS = {
+  maxAttempts: 50,
+  executionTimeoutSeconds: 7200,
+  maxRevisionCycles: 5,
+} as const;
 
 /** §9.1 lower bound for a run's execution timeout. */
 export const MIN_EXECUTION_TIMEOUT_SECONDS = 60;
@@ -44,7 +53,12 @@ export const INPUT_CAPS = {
  * Deviation from the §9.1 example of 4,000: current models count thinking tokens against max output; too-low caps
  * truncate structured output (OUTPUT_INVALID). Admission still reserves the full cap, so spend remains bounded.
  */
-export const DEFAULT_MAX_OUTPUT_TOKENS = { reviewer: 8_000, planner: 8_000, implementer: 16_000, verifier: 8_000 } as const;
+export const DEFAULT_MAX_OUTPUT_TOKENS = {
+  reviewer: 8_000,
+  planner: 8_000,
+  implementer: 16_000,
+  verifier: 8_000,
+} as const;
 
 /** Hard ceiling for a profile's `maxOutputTokens` (02 §B2 `modelParamsSchema`). */
 export const MAX_OUTPUT_TOKENS_CEILING = 128_000;

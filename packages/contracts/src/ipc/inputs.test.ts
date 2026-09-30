@@ -6,14 +6,31 @@ import { INTERNAL_RUNNER_OPS } from './internal.js';
 const KEY = '01J9ZZZZZZZZZZZZZZZZZZZZZZ';
 
 describe('op input schemas', () => {
+  it('providers.connect trims apiKey before the length checks (B16)', () => {
+    const input = OPERATIONS['providers.connect'].input;
+    const base = { providerId: 'anthropic', storage: 'os_protected' };
+    const key = 'k'.repeat(20);
+
+    expect(input.safeParse({ ...base, apiKey: ' '.repeat(25) }).success).toBe(false);
+    expect(input.safeParse({ ...base, apiKey: `  ${'k'.repeat(19)}   ` }).success).toBe(false);
+    expect(input.parse({ ...base, apiKey: `\n ${key} \t` }).apiKey).toBe(key);
+  });
+
   it('approvals.decide requires a note for revision_requested', () => {
     const input = OPERATIONS['approvals.decide'].input;
-    const base = { idempotencyKey: KEY, approvalId: fakeId('approval'), planHash: fakeSha(), contextHash: fakeSha('b') };
+    const base = {
+      idempotencyKey: KEY,
+      approvalId: fakeId('approval'),
+      planHash: fakeSha(),
+      contextHash: fakeSha('b'),
+    };
 
     expect(input.safeParse({ ...base, decision: 'approved' }).success).toBe(true);
     expect(input.safeParse({ ...base, decision: 'revision_requested' }).success).toBe(false);
     expect(input.safeParse({ ...base, decision: 'revision_requested', note: '  ' }).success).toBe(false);
-    expect(input.safeParse({ ...base, decision: 'revision_requested', note: 'Smaller scope' }).success).toBe(true);
+    expect(input.safeParse({ ...base, decision: 'revision_requested', note: 'Smaller scope' }).success).toBe(
+      true,
+    );
   });
 
   it('memory.create requires sourceFile for source_reference and caps title/content', () => {
@@ -28,7 +45,9 @@ describe('op input schemas', () => {
 
     expect(input.safeParse({ ...base, type: 'user_rule' }).success).toBe(true);
     expect(input.safeParse({ ...base, type: 'source_reference' }).success).toBe(false);
-    expect(input.safeParse({ ...base, type: 'source_reference', sourceFile: { relPath: 'docs/a.md' } }).success).toBe(true);
+    expect(
+      input.safeParse({ ...base, type: 'source_reference', sourceFile: { relPath: 'docs/a.md' } }).success,
+    ).toBe(true);
     expect(input.safeParse({ ...base, type: 'run_summary' }).success).toBe(false);
     expect(input.safeParse({ ...base, type: 'user_rule', title: 'x'.repeat(121) }).success).toBe(false);
     expect(input.safeParse({ ...base, type: 'user_rule', content: 'x'.repeat(4001) }).success).toBe(false);
@@ -45,18 +64,29 @@ describe('op input schemas', () => {
     expect(input.safeParse({ ...base, resolution: { keep: fakeId('memory', 3) } }).success).toBe(false);
     expect(input.safeParse({ ...base, recordIds: [a, a], resolution: { keep: a } }).success).toBe(false);
     expect(
-      input.safeParse({ ...base, resolution: { rewrite: { title: 'Combined', content: 'Both', scope } } }).success,
+      input.safeParse({ ...base, resolution: { rewrite: { title: 'Combined', content: 'Both', scope } } })
+        .success,
     ).toBe(true);
     expect(
       input.safeParse({
         ...base,
-        resolution: { keepBothWithScopes: [{ recordId: a, scope }, { recordId: b, scope }] },
+        resolution: {
+          keepBothWithScopes: [
+            { recordId: a, scope },
+            { recordId: b, scope },
+          ],
+        },
       }).success,
     ).toBe(true);
     expect(
       input.safeParse({
         ...base,
-        resolution: { keepBothWithScopes: [{ recordId: a, scope }, { recordId: a, scope }] },
+        resolution: {
+          keepBothWithScopes: [
+            { recordId: a, scope },
+            { recordId: a, scope },
+          ],
+        },
       }).success,
     ).toBe(false);
   });
@@ -67,8 +97,12 @@ describe('op input schemas', () => {
 
     expect(list).toMatchObject({ limit: 25, sort: 'created_desc' });
     expect(events.limit).toBe(200);
-    expect(OPERATIONS['runs.list'].input.safeParse({ projectId: fakeId('project'), limit: 101 }).success).toBe(false);
-    expect(OPERATIONS['runs.events'].input.safeParse({ runId: fakeId('run'), afterSeq: 0, limit: 501 }).success).toBe(false);
+    expect(
+      OPERATIONS['runs.list'].input.safeParse({ projectId: fakeId('project'), limit: 101 }).success,
+    ).toBe(false);
+    expect(
+      OPERATIONS['runs.events'].input.safeParse({ runId: fakeId('run'), afterSeq: 0, limit: 501 }).success,
+    ).toBe(false);
   });
 
   it('app.openExternal accepts https only', () => {
@@ -104,11 +138,19 @@ describe('op input schemas', () => {
       }).success,
     ).toBe(true);
     expect(
-      record.safeParse({ providerId: 'openai', storageMode: 'session', vaultFile: '../x.bin', redactedLabel: 'x' }).success,
+      record.safeParse({
+        providerId: 'openai',
+        storageMode: 'session',
+        vaultFile: '../x.bin',
+        redactedLabel: 'x',
+      }).success,
     ).toBe(false);
     expect(
-      ledger.safeParse({ projectId: fakeId('project'), month: '2026-09', destinationRealpath: '/tmp/x.csv' }).success,
+      ledger.safeParse({ projectId: fakeId('project'), month: '2026-09', destinationRealpath: '/tmp/x.csv' })
+        .success,
     ).toBe(true);
-    expect(ledger.safeParse({ projectId: fakeId('project'), destinationRealpath: '/tmp/x.csv' }).success).toBe(false);
+    expect(
+      ledger.safeParse({ projectId: fakeId('project'), destinationRealpath: '/tmp/x.csv' }).success,
+    ).toBe(false);
   });
 });

@@ -44,7 +44,9 @@ describe('stepDetailSchema', () => {
     expect(stepDetailSchema.safeParse(detail('plan.v1', planFixture())).success).toBe(true);
     expect(stepDetailSchema.safeParse(detail('plan.v1', findingsFixture())).success).toBe(false);
     expect(stepDetailSchema.safeParse(detail('review.v2', reviewFixture())).success).toBe(false);
-    expect(stepDetailSchema.safeParse({ ...detail('plan.v1', planFixture()), output: null }).success).toBe(true);
+    expect(stepDetailSchema.safeParse({ ...detail('plan.v1', planFixture()), output: null }).success).toBe(
+      true,
+    );
   });
 });
 
@@ -52,17 +54,45 @@ describe('recoveryDecisionSchema', () => {
   it('rejects raise_limits with no fields and with maxAttempts above the maximum', () => {
     expect(recoveryDecisionSchema.safeParse({ kind: 'raise_limits' }).success).toBe(false);
     expect(
-      recoveryDecisionSchema.safeParse({ kind: 'raise_limits', maxAttempts: RUN_LIMIT_MAXIMUMS.maxAttempts + 1 }).success,
+      recoveryDecisionSchema.safeParse({
+        kind: 'raise_limits',
+        maxAttempts: RUN_LIMIT_MAXIMUMS.maxAttempts + 1,
+      }).success,
     ).toBe(false);
-    expect(recoveryDecisionSchema.safeParse({ kind: 'raise_limits', executionTimeoutSeconds: 1800 }).success).toBe(true);
+    expect(
+      recoveryDecisionSchema.safeParse({ kind: 'raise_limits', executionTimeoutSeconds: 1800 }).success,
+    ).toBe(true);
+  });
+
+  it('bounds raise_limits by the runLimitsSchema minimums (B12)', () => {
+    expect(
+      recoveryDecisionSchema.safeParse({ kind: 'raise_limits', executionTimeoutSeconds: 59 }).success,
+    ).toBe(false);
+    expect(
+      recoveryDecisionSchema.safeParse({ kind: 'raise_limits', executionTimeoutSeconds: 1 }).success,
+    ).toBe(false);
+    expect(
+      recoveryDecisionSchema.safeParse({ kind: 'raise_limits', executionTimeoutSeconds: 60 }).success,
+    ).toBe(true);
+    expect(recoveryDecisionSchema.safeParse({ kind: 'raise_limits', maxAttempts: 0 }).success).toBe(false);
+    expect(recoveryDecisionSchema.safeParse({ kind: 'raise_limits', maxAttempts: 1 }).success).toBe(true);
   });
 
   it('accepts every other decision kind', () => {
-    for (const kind of ['continue', 'use_preserved_snapshot', 'resnapshot_and_replan', 'acknowledge_overrun']) {
+    for (const kind of [
+      'continue',
+      'use_preserved_snapshot',
+      'resnapshot_and_replan',
+      'acknowledge_overrun',
+    ]) {
       expect(recoveryDecisionSchema.safeParse({ kind }).success).toBe(true);
     }
     expect(
-      recoveryDecisionSchema.safeParse({ kind: 'switch_profile', stepKey: 'plan', profileId: fakeId('profile') }).success,
+      recoveryDecisionSchema.safeParse({
+        kind: 'switch_profile',
+        stepKey: 'plan',
+        profileId: fakeId('profile'),
+      }).success,
     ).toBe(true);
   });
 });
@@ -74,10 +104,14 @@ describe('workflowDraftPatchSchema', () => {
       workflowDraftPatchSchema.safeParse({
         prompts: { 'reviewer.v1': 'Review the files.' },
         limits: { maxAttempts: 12 },
-        steps: { review: { profile: 'economy', retryPolicy: { transport: 2, schemaRepair: 1, rateLimitWaits: 3 } } },
+        steps: {
+          review: { profile: 'economy', retryPolicy: { transport: 2, schemaRepair: 1, rateLimitWaits: 3 } },
+        },
       }).success,
     ).toBe(true);
-    expect(workflowDraftPatchSchema.safeParse({ steps: { review: { outputSchema: 'plan.v1' } } }).success).toBe(false);
+    expect(
+      workflowDraftPatchSchema.safeParse({ steps: { review: { outputSchema: 'plan.v1' } } }).success,
+    ).toBe(false);
   });
 });
 
@@ -95,14 +129,25 @@ describe('runStartInputSchema', () => {
     const r = runStartInputSchema.safeParse({ ...base, profileOverrides: { review: fakeId('profile') } });
 
     expect(r.success).toBe(true);
-    expect(runStartInputSchema.safeParse({ ...base, profileOverrides: { Review: fakeId('profile') } }).success).toBe(false);
+    expect(
+      runStartInputSchema.safeParse({ ...base, profileOverrides: { Review: fakeId('profile') } }).success,
+    ).toBe(false);
   });
 
   it('validates the input union and limit overrides', () => {
-    expect(runStartInputSchema.safeParse({ ...base, input: { kind: 'diff', diffArtifactId: fakeId('artifact') } }).success).toBe(true);
-    expect(runStartInputSchema.safeParse({ ...base, input: { kind: 'files', relPaths: [] } }).success).toBe(false);
-    expect(runStartInputSchema.safeParse({ ...base, limitOverrides: { maxToolCalls: 1 } }).success).toBe(false);
-    expect(runStartInputSchema.safeParse({ ...base, limitOverrides: { executionTimeoutSeconds: 59 } }).success).toBe(false);
+    expect(
+      runStartInputSchema.safeParse({ ...base, input: { kind: 'diff', diffArtifactId: fakeId('artifact') } })
+        .success,
+    ).toBe(true);
+    expect(runStartInputSchema.safeParse({ ...base, input: { kind: 'files', relPaths: [] } }).success).toBe(
+      false,
+    );
+    expect(runStartInputSchema.safeParse({ ...base, limitOverrides: { maxToolCalls: 1 } }).success).toBe(
+      false,
+    );
+    expect(
+      runStartInputSchema.safeParse({ ...base, limitOverrides: { executionTimeoutSeconds: 59 } }).success,
+    ).toBe(false);
   });
 });
 
@@ -142,8 +187,13 @@ describe('profile and catalog schemas', () => {
     const file = { catalogVersion: '2026-09-25', currency: 'USD', entries: [entry] };
 
     expect(catalogFileSchema.safeParse(file).success).toBe(true);
-    expect(catalogFileSchema.safeParse({ ...file, entries: [{ ...entry, source: 'http://x' }] }).success).toBe(false);
-    expect(catalogFileSchema.safeParse({ ...file, entries: [{ ...entry, prices: { ...prices, input: 1.5 } }] }).success).toBe(false);
+    expect(
+      catalogFileSchema.safeParse({ ...file, entries: [{ ...entry, source: 'http://x' }] }).success,
+    ).toBe(false);
+    expect(
+      catalogFileSchema.safeParse({ ...file, entries: [{ ...entry, prices: { ...prices, input: 1.5 } }] })
+        .success,
+    ).toBe(false);
     expect(catalogFileSchema.safeParse({ ...file, entries: [] }).success).toBe(false);
   });
 });
@@ -223,15 +273,26 @@ describe('project, run, memory, and settings DTOs', () => {
       stale: false,
       conflictsWith: [],
       content: 'Use pnpm, never npm.',
-      revisions: [{ revision: 1, title: 'Use pnpm', content: 'x', author: `run:${fakeId('run')}`, createdAt: 1, sourceRefs: [] }],
+      revisions: [
+        {
+          revision: 1,
+          title: 'Use pnpm',
+          content: 'x',
+          author: `run:${fakeId('run')}`,
+          createdAt: 1,
+          sourceRefs: [],
+        },
+      ],
       events: [{ event: 'approved', revision: 1, actor: 'user', createdAt: 1 }],
       usedByRuns: 0,
     };
 
     expect(memoryRecordDetailSchema.safeParse(detail).success).toBe(true);
     expect(
-      memoryRecordDetailSchema.safeParse({ ...detail, events: [{ event: 'approved', revision: 1, actor: 'bot', createdAt: 1 }] })
-        .success,
+      memoryRecordDetailSchema.safeParse({
+        ...detail,
+        events: [{ event: 'approved', revision: 1, actor: 'bot', createdAt: 1 }],
+      }).success,
     ).toBe(false);
     expect(memoryRecordDetailSchema.safeParse({ ...detail, scope: { roles: [] } }).success).toBe(false);
   });

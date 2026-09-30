@@ -8,7 +8,7 @@ export const patchV1Schema = handoffBase.extend({
     .array(
       z.object({
         relPath: z.string(),
-        changeType: z.enum(['modify', 'add', 'delete']),
+        changeType: z.enum(['modify', 'delete']), // P0: patches only touch provided files (§11.1; 07 G6 BH-5),
         unifiedDiff: z.string(),
       }),
     )

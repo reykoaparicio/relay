@@ -83,8 +83,8 @@ export type IdOf<P extends IdPrefixKey> = IdTypes[P];
 
 /** Crockford base32 alphabet used by ULIDs (no I, L, O, U). */
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-/** Regex body for a 26-char ULID. */
-export const ULID_PATTERN = '[0-9A-HJKMNP-TV-Z]{26}';
+/** Regex body for a 26-char ULID. The first char is 0-7: a 48-bit timestamp never exceeds `7ZZZZZZZZZ`. */
+export const ULID_PATTERN = '[0-7][0-9A-HJKMNP-TV-Z]{25}';
 const TIME_LEN = 10;
 const RANDOM_LEN = 16;
 const RANDOM_BYTES = 10;

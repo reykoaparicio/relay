@@ -64,7 +64,7 @@ describe('DiffViewer', () => {
   it('virtualizes files longer than the threshold (renders fewer rows than lines)', () => {
     const big = Array.from({ length: DIFF_VIRTUALIZE_THRESHOLD + 100 }, (_, i) => `+line ${String(i)}`).join('\n');
 
-    const { container } = render(<DiffViewer files={[{ relPath: 'big.ts', changeType: 'add', unifiedDiff: big }]} />);
+    const { container } = render(<DiffViewer files={[{ relPath: 'big.ts', changeType: 'modify', unifiedDiff: big }]} />);
 
     expect(container.querySelectorAll('.diff-line').length).toBeLessThan(DIFF_VIRTUALIZE_THRESHOLD);
   });

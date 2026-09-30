@@ -15,7 +15,12 @@ export const CREDENTIAL_PURPOSES = ['dispatch', 'connection_test'] as const;
 
 /** Main → runner messages. */
 export const runnerRequestSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('op'), id: z.string().min(1), channel: runnerChannelSchema, input: z.unknown() }),
+  z.object({
+    kind: z.literal('op'),
+    id: z.string().min(1),
+    channel: runnerChannelSchema,
+    input: z.unknown(),
+  }),
   z.object({
     kind: z.literal('credential.response'),
     id: z.string().min(1),
@@ -24,7 +29,10 @@ export const runnerRequestSchema = z.discriminatedUnion('kind', [
       z.object({ ok: z.literal(false), error: appErrorSchema }),
     ]),
   }),
-  z.object({ kind: z.literal('shutdown'), graceMs: z.number().int().nonnegative().max(RUNNER_SHUTDOWN_MAX_GRACE_MS) }),
+  z.object({
+    kind: z.literal('shutdown'),
+    graceMs: z.number().int().nonnegative().max(RUNNER_SHUTDOWN_MAX_GRACE_MS),
+  }),
 ]);
 /** Main → runner message. */
 export type RunnerRequest = z.infer<typeof runnerRequestSchema>;

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { RATE_LIMITS } from '../defaults.js';
-import { exclusionsSchema, projectDetailSchema, projectSchema, providerOptionsSchema } from '../domain/project.js';
+import {
+  exclusionsSchema,
+  projectDetailSchema,
+  projectSchema,
+  providerOptionsSchema,
+} from '../domain/project.js';
 import { previewResultSchema } from '../domain/views.js';
 import { idSchema } from '../ids.js';
 import { nonNegativeMicrousdSchema } from '../money.js';
@@ -86,7 +91,11 @@ export const projectOps = {
     channel: 'relay/v1/projects.update',
     kind: 'command',
     route: 'runner',
-    input: z.object({ projectId: idSchema('project'), expectedUpdatedAt: epochMsSchema, patch: projectPatchSchema }),
+    input: z.object({
+      projectId: idSchema('project'),
+      expectedUpdatedAt: epochMsSchema,
+      patch: projectPatchSchema,
+    }),
     output: projectSchema,
     errors: ['CONFLICT', 'VALIDATION_FAILED', 'NOT_FOUND'],
     idempotent: false,

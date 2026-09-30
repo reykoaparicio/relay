@@ -115,7 +115,9 @@ export function reportFixture(): Record<string, unknown> {
       },
     ],
     totals: costSummaryFixture(),
-    unknownLiabilities: [{ attemptId: fakeId('attempt'), stepKey: 'plan', liabilityMicrousd: 10, state: 'abandoned' }],
+    unknownLiabilities: [
+      { attemptId: fakeId('attempt'), stepKey: 'plan', liabilityMicrousd: 10, state: 'abandoned' },
+    ],
     artifacts: { findings: fakeId('artifact', 1), plan: null, patch: null, review: null },
     limitations: ['Relay proposed a patch. It was not applied to your project.'],
     snapshotUsed: false,
@@ -134,11 +136,30 @@ export function manifestFixture(): Record<string, unknown> {
     profile: { name: 'Economy', providerId: 'anthropic', modelId: 'claude-haiku-4-5' },
     priceCatalogVersion: '2026-09-25',
     instructions: { version: 'reviewer.v1', sha256: fakeSha('b') },
-    files: [{ relPath: 'src/a.ts', sha256: fakeSha('c'), sizeBytes: 120, tokens: 40, included: true, reason: 'selected' }],
-    memory: [
-      { recordId: fakeId('memory'), revision: 1, type: 'user_rule', included: true, pinned: true, stale: false, score: 1 },
+    files: [
+      {
+        relPath: 'src/a.ts',
+        sha256: fakeSha('c'),
+        sizeBytes: 120,
+        tokens: 40,
+        included: true,
+        reason: 'selected',
+      },
     ],
-    upstream: [{ stepKey: 'review', artifactId: fakeId('artifact'), schemaId: 'findings.v1', sha256: fakeSha('d') }],
+    memory: [
+      {
+        recordId: fakeId('memory'),
+        revision: 1,
+        type: 'user_rule',
+        included: true,
+        pinned: true,
+        stale: false,
+        score: 1,
+      },
+    ],
+    upstream: [
+      { stepKey: 'review', artifactId: fakeId('artifact'), schemaId: 'findings.v1', sha256: fakeSha('d') },
+    ],
     omitted: [{ kind: 'file', ref: 'src/big.ts', reason: 'token_budget' }],
     tokens: { estimatedInput: 1000, budget: 200_000, basis: 'local_estimate' },
     contextHash: fakeSha('e'),

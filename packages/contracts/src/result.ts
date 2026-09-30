@@ -4,8 +4,7 @@ import { appErrorSchema } from './errors.js';
 
 /** Engine-internal result (services, repos, adapters). Uses `value`; never crosses a process boundary. */
 export type Result<T, E = AppError> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: E };
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: E };
 
 /** Successful {@link Result}. */
 export const ok = <T>(value: T): Result<T, never> => ({ ok: true, value });

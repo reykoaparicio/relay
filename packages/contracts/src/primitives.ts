@@ -24,9 +24,15 @@ export const relPathSchema = z
   .min(1)
   .max(REL_PATH_MAX)
   .refine((s) => !s.startsWith('/'), 'must be relative (no leading /)')
-  .refine((s) => !s.includes('\0'), 'must not contain NUL')
+  .refine((s) => !/[\x00-\x1f\x7f]/.test(s), 'must not contain control characters')
   .refine((s) => !s.includes('\\'), 'POSIX separators only')
   .refine((s) => s.split('/').every((seg) => seg !== '..'), 'must not contain a .. segment')
+  // Canonical form: no empty (`a//b`, trailing `/`), `.`, or whitespace-only segments.
+  .refine(
+    (s) => s.split('/').every((seg) => seg !== '' && seg !== '.'),
+    'must be canonical (no empty or . segments)',
+  )
+  .refine((s) => s.split('/').every((seg) => seg.trim() !== ''), 'must not contain a whitespace-only segment')
   .transform((s) => s as RelPath);
 
 /** Workflow step key: 'review', 'plan', 'intake', 'finalize', … (spec §12.4 step `id`). */

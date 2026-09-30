@@ -18,7 +18,16 @@ describe('contextManifestSchema', () => {
   it('rejects absolute file paths', () => {
     const badPath = {
       ...manifestFixture(),
-      files: [{ relPath: '/etc/passwd', sha256: 'a'.repeat(64), sizeBytes: 1, tokens: 1, included: true, reason: 'selected' }],
+      files: [
+        {
+          relPath: '/etc/passwd',
+          sha256: 'a'.repeat(64),
+          sizeBytes: 1,
+          tokens: 1,
+          included: true,
+          reason: 'selected',
+        },
+      ],
     };
 
     expect(contextManifestSchema.safeParse(badPath).success).toBe(false);

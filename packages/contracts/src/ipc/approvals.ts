@@ -17,7 +17,11 @@ export const approvalDecideInputSchema = z
   })
   .superRefine((v, ctx) => {
     if (v.decision === 'revision_requested' && (v.note === undefined || v.note.trim() === '')) {
-      ctx.addIssue({ code: 'custom', path: ['note'], message: 'a note is required when requesting a revision' });
+      ctx.addIssue({
+        code: 'custom',
+        path: ['note'],
+        message: 'a note is required when requesting a revision',
+      });
     }
   });
 

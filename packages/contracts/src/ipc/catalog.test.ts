@@ -151,6 +151,8 @@ describe('channel types', () => {
     expectTypeOf<'relay/v1/app.getInfo'>().not.toExtend<RunnerChannel>();
     expectTypeOf<InputOf<'relay/v1/runs.start'>['goal']>().toEqualTypeOf<string>();
     expectTypeOf<OutputOf<'relay/v1/runs.get'>['id']>().toEqualTypeOf<RunId>();
-    expectTypeOf<Extract<IpcResult<'relay/v1/runs.start'>, { ok: true }>['data']['runId']>().toEqualTypeOf<RunId>();
+    expectTypeOf<
+      Extract<IpcResult<'relay/v1/runs.start'>, { ok: true }>['data']['runId']
+    >().toEqualTypeOf<RunId>();
   });
 });

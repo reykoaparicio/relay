@@ -29,6 +29,12 @@ const PAIRS: readonly (readonly [readonly string[], z.ZodEnum])[] = [
   [status.RUNNER_STATES, status.runnerStateSchema],
 ];
 
+describe('memory event types', () => {
+  it('includes history_purged for revision-history purges', () => {
+    expect(status.memoryEventTypeSchema.safeParse('history_purged').success).toBe(true);
+  });
+});
+
 describe('status enums', () => {
   it('every exported as-const array has a z.enum schema with identical members', () => {
     const arrays = Object.entries(status).filter(([k, v]) => /^[A-Z_]+$/.test(k) && Array.isArray(v));

@@ -43,7 +43,11 @@ export const capabilityWarningSchema = z.object({
 export type CapabilityWarning = z.infer<typeof capabilityWarningSchema>;
 
 /** One versioned prompt of a workflow version, keyed by instruction version. */
-export const workflowPromptSchema = z.object({ instructionVersion: z.string(), role: roleSchema, text: z.string() });
+export const workflowPromptSchema = z.object({
+  instructionVersion: z.string(),
+  role: roleSchema,
+  text: z.string(),
+});
 
 /** `workflows.get` output. Structural edits are P1 (§5.3), so `editable.structure` is always false. */
 export const workflowVersionViewSchema = z.object({

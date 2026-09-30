@@ -2,10 +2,20 @@ import { z } from 'zod';
 import { idSchema } from '../ids.js';
 import { microusdSchema, nonNegativeMicrousdSchema } from '../money.js';
 import { epochMsSchema, stepKeySchema } from '../primitives.js';
-import { costCertaintySchema, ledgerBucketSchema, ledgerEntryTypeSchema, ledgerScopeSchema } from '../status.js';
+import {
+  costCertaintySchema,
+  ledgerBucketSchema,
+  ledgerEntryTypeSchema,
+  ledgerScopeSchema,
+} from '../status.js';
 
 /** §9.3 balances: allowance L, settled C, reserved R, unknown U (all µUSD). */
-export const balancesSchema = z.object({ L: microusdSchema, C: microusdSchema, R: microusdSchema, U: microusdSchema });
+export const balancesSchema = z.object({
+  L: microusdSchema,
+  C: microusdSchema,
+  R: microusdSchema,
+  U: microusdSchema,
+});
 /** §9.3 balances. */
 export type Balances = z.infer<typeof balancesSchema>;
 

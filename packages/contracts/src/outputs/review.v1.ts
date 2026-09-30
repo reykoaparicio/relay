@@ -29,7 +29,11 @@ export const reviewV1Schema = handoffBase
   })
   .superRefine((v, ctx) => {
     if (v.outcome === 'revise' && v.requestedChanges.length < 1) {
-      ctx.addIssue({ code: 'custom', path: ['requestedChanges'], message: 'revise requires ≥ 1 requested change' });
+      ctx.addIssue({
+        code: 'custom',
+        path: ['requestedChanges'],
+        message: 'revise requires ≥ 1 requested change',
+      });
     }
   });
 /** `review.v1` value. */

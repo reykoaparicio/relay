@@ -75,21 +75,29 @@ describe('mulDivCeil', () => {
     };
 
     fc.assert(
-      fc.property(fc.integer({ min: 0, max: 10_000_000 }), fc.integer({ min: 0, max: 200_000_000 }), (t, p) => {
-        expect(BigInt(mulDivCeil(t, p))).toBe(model(BigInt(t), BigInt(p)));
-      }),
+      fc.property(
+        fc.integer({ min: 0, max: 10_000_000 }),
+        fc.integer({ min: 0, max: 200_000_000 }),
+        (t, p) => {
+          expect(BigInt(mulDivCeil(t, p))).toBe(model(BigInt(t), BigInt(p)));
+        },
+      ),
       { numRuns: 10_000 },
     );
   });
 
   it('is never below the exact real-valued cost (property)', () => {
     fc.assert(
-      fc.property(fc.integer({ min: 0, max: 1_000_000 }), fc.integer({ min: 0, max: 100_000_000 }), (t, p) => {
-        const cost = mulDivCeil(t, p);
+      fc.property(
+        fc.integer({ min: 0, max: 1_000_000 }),
+        fc.integer({ min: 0, max: 100_000_000 }),
+        (t, p) => {
+          const cost = mulDivCeil(t, p);
 
-        expect(cost * 1_000_000).toBeGreaterThanOrEqual(t * p);
-        expect((cost - 1) * 1_000_000).toBeLessThan(t * p);
-      }),
+          expect(cost * 1_000_000).toBeGreaterThanOrEqual(t * p);
+          expect((cost - 1) * 1_000_000).toBeLessThan(t * p);
+        },
+      ),
     );
   });
 });

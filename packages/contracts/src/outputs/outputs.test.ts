@@ -24,15 +24,26 @@ describe('output schemas', () => {
     expect(MODEL_OUTPUT_SCHEMA_IDS).not.toContain('report.v1');
   });
 
-  it.each(OUTPUT_SCHEMA_IDS)('%s accepts a minimal valid fixture and rejects a missing required key', (id) => {
-    const schema = OUTPUT_SCHEMAS[id];
-    const fixture = FIXTURES[id]();
+  it.each(OUTPUT_SCHEMA_IDS)(
+    '%s accepts a minimal valid fixture and rejects a missing required key',
+    (id) => {
+      const schema = OUTPUT_SCHEMAS[id];
+      const fixture = FIXTURES[id]();
 
-    expect(schema.safeParse(fixture).success).toBe(true);
-    for (const key of Object.keys(fixture)) {
-      const rest = Object.fromEntries(Object.entries(fixture).filter(([k]) => k !== key));
-      expect(schema.safeParse(rest).success, `missing ${key}`).toBe(false);
-    }
+      expect(schema.safeParse(fixture).success).toBe(true);
+      for (const key of Object.keys(fixture)) {
+        const rest = Object.fromEntries(Object.entries(fixture).filter(([k]) => k !== key));
+        expect(schema.safeParse(rest).success, `missing ${key}`).toBe(false);
+      }
+    },
+  );
+
+  it('patch.v1 rejects changeType add (P0 patches only modify or delete provided files)', () => {
+    const file = { relPath: 'src/a.ts', changeType: 'add', unifiedDiff: '--- a\n+++ b\n' };
+    const shape = OUTPUT_SCHEMAS['patch.v1'];
+    const parsed = shape.safeParse({ ...patchFixture(), files: [file] });
+
+    expect(parsed.success).toBe(false);
   });
 
   it('review.v1 with outcome revise and no requested changes is an issue', () => {
@@ -52,8 +63,14 @@ describe('output schemas', () => {
     const finding = (base['findings'] as Record<string, unknown>[])[0] ?? {};
 
     const noRefs = { ...base, findings: [{ ...finding, sourceRefs: [] }] };
-    const tooMany = { ...base, findings: Array.from({ length: 21 }, (_, i) => ({ ...finding, id: `F${String(i)}` })) };
-    const exactly20 = { ...base, findings: Array.from({ length: 20 }, (_, i) => ({ ...finding, id: `F${String(i)}` })) };
+    const tooMany = {
+      ...base,
+      findings: Array.from({ length: 21 }, (_, i) => ({ ...finding, id: `F${String(i)}` })),
+    };
+    const exactly20 = {
+      ...base,
+      findings: Array.from({ length: 20 }, (_, i) => ({ ...finding, id: `F${String(i)}` })),
+    };
 
     expect(OUTPUT_SCHEMAS['findings.v1'].safeParse(noRefs).success).toBe(false);
     expect(OUTPUT_SCHEMAS['findings.v1'].safeParse(tooMany).success).toBe(false);

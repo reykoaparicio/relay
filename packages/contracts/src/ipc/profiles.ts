@@ -27,7 +27,10 @@ export const profileOps = {
     channel: 'relay/v1/profiles.upsert',
     kind: 'command',
     route: 'runner',
-    input: z.object({ profile: modelProfileInputSchema, expectedRevision: z.number().int().positive().optional() }),
+    input: z.object({
+      profile: modelProfileInputSchema,
+      expectedRevision: z.number().int().positive().optional(),
+    }),
     output: profileWithWarningsSchema,
     errors: ['MODEL_UNSUPPORTED', 'CONFLICT', 'NOT_FOUND'],
     idempotent: false,

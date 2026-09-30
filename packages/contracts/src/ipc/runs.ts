@@ -30,7 +30,10 @@ export const runPreflightSchema = z.object({
     memoryRecords: z.array(memoryRefSchema),
     providersReceivingContext: z.array(providerIdSchema),
   }),
-  firstReservation: z.object({ N: nonNegativeMicrousdSchema, basis: z.enum(['provider_count', 'local_estimate']) }),
+  firstReservation: z.object({
+    N: nonNegativeMicrousdSchema,
+    basis: z.enum(['provider_count', 'local_estimate']),
+  }),
   budget: budgetBreakdownSchema,
   issues: z.array(validationIssueSchema),
 });
@@ -110,7 +113,11 @@ export const runOps = {
     channel: 'relay/v1/runs.resume',
     kind: 'command',
     route: 'runner',
-    input: z.object({ idempotencyKey: idempotencyKeySchema, runId: idSchema('run'), decision: recoveryDecisionSchema }),
+    input: z.object({
+      idempotencyKey: idempotencyKeySchema,
+      runId: idSchema('run'),
+      decision: recoveryDecisionSchema,
+    }),
     output: z.object({ status: runStatusSchema }),
     errors: [
       'BUDGET_BLOCKED',
@@ -133,7 +140,9 @@ export const runOps = {
     input: z.object({ runId: idSchema('run') }),
     output: z.object({
       status: z.enum(['cancelling', 'cancelled']),
-      unresolvedCharges: z.array(z.object({ attemptId: idSchema('attempt'), liabilityMicrousd: microusdSchema })),
+      unresolvedCharges: z.array(
+        z.object({ attemptId: idSchema('attempt'), liabilityMicrousd: microusdSchema }),
+      ),
     }),
     errors: ['CONFLICT', 'NOT_FOUND'],
     idempotent: false,
@@ -180,7 +189,14 @@ export const runOps = {
       profileId: idSchema('profile').optional(),
     }),
     output: runDetailSchema,
-    errors: ['LIMIT_REACHED', 'BUDGET_BLOCKED', 'MODEL_UNSUPPORTED', 'PERMISSION_DENIED', 'CONFLICT', 'NOT_FOUND'],
+    errors: [
+      'LIMIT_REACHED',
+      'BUDGET_BLOCKED',
+      'MODEL_UNSUPPORTED',
+      'PERMISSION_DENIED',
+      'CONFLICT',
+      'NOT_FOUND',
+    ],
     idempotent: true,
     rateLimit: RATE_LIMITS.dispatch,
   }),

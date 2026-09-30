@@ -19,6 +19,31 @@ describe('relPathSchema', () => {
   });
 });
 
+describe('relPathSchema canonical form (B15)', () => {
+  it.each([
+    '.',
+    './a',
+    'a/.',
+    'a//b',
+    'a/',
+    'a/./b',
+    'a\x01b',
+    'a\x1fb',
+    'a\x7fb',
+    'a\nb',
+    ' ',
+    'a/ /b',
+    '\t/a',
+    'a/\t',
+  ])('rejects %j', (p) => {
+    expect(relPathSchema.safeParse(p).success).toBe(false);
+  });
+
+  it.each(['a b/c d.ts', 'src/.env.example', '.github/workflows/ci.yml'])('still accepts %j', (p) => {
+    expect(relPathSchema.safeParse(p).success).toBe(true);
+  });
+});
+
 describe('sha256Schema', () => {
   it('accepts lowercase 64-hex and rejects uppercase or 63 chars', () => {
     expect(sha256Schema.safeParse('a'.repeat(64)).success).toBe(true);

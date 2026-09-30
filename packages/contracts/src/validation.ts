@@ -28,13 +28,24 @@ export interface IssueLike {
   readonly path: readonly PropertyKey[];
   readonly message: string;
   readonly code: string;
+  /** Present on Zod `unrecognized_keys` issues. */
+  readonly keys?: readonly string[];
 }
 
-/** Converts Zod issues into {@link ValidationIssue}s (messages truncated to the schema's 400-char limit). */
+const toIssue = (path: readonly PropertyKey[], message: string, code: string): ValidationIssue => ({
+  path: formatIssuePath(path),
+  message: message.slice(0, 400),
+  code: code.slice(0, 64),
+});
+
+/**
+ * Converts Zod issues into {@link ValidationIssue}s (messages truncated to the schema's 400-char limit). An
+ * `unrecognized_keys` issue becomes one field-specific issue per unknown key (e.g. `steps[0].temperature`, §5.3).
+ */
 export function toValidationIssues(issues: readonly IssueLike[]): ValidationIssue[] {
-  return issues.map((i) => ({
-    path: formatIssuePath(i.path),
-    message: i.message.slice(0, 400),
-    code: i.code.slice(0, 64),
-  }));
+  return issues.flatMap((i) =>
+    i.code === 'unrecognized_keys' && i.keys !== undefined && i.keys.length > 0
+      ? i.keys.map((k) => toIssue([...i.path, k], `unknown key "${k}"`, i.code))
+      : [toIssue(i.path, i.message, i.code)],
+  );
 }

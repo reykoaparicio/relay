@@ -39,7 +39,7 @@ export const providerOps = {
     route: 'main+runner',
     input: z.object({
       providerId: providerIdSchema,
-      apiKey: z.string().min(API_KEY_LENGTH.min).max(API_KEY_LENGTH.max),
+      apiKey: z.string().trim().min(API_KEY_LENGTH.min).max(API_KEY_LENGTH.max), // trimmed before the length checks
       storage: credentialStorageModeSchema,
     }),
     output: providerStatusSchema,

@@ -17,7 +17,9 @@ describe('pushEventSchema', () => {
     ];
 
     for (const e of events) expect(pushEventSchema.safeParse(e).success).toBe(true);
-    expect(pushEventSchema.safeParse({ type: 'run.event', event: runEventFixture('run.exploded') }).success).toBe(false);
+    expect(
+      pushEventSchema.safeParse({ type: 'run.event', event: runEventFixture('run.exploded') }).success,
+    ).toBe(false);
     expect(pushEventSchema.safeParse({ type: 'nope' }).success).toBe(false);
   });
 });

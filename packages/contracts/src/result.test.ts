@@ -14,13 +14,19 @@ describe('toIpc', () => {
   });
 
   it('passes meta through on success', () => {
-    expect(toIpc(ok([1]), { nextCursor: 'abc' })).toEqual({ ok: true, data: [1], meta: { nextCursor: 'abc' } });
+    expect(toIpc(ok([1]), { nextCursor: 'abc' })).toEqual({
+      ok: true,
+      data: [1],
+      meta: { nextCursor: 'abc' },
+    });
   });
 });
 
 describe('ipcResultSchema', () => {
   it('parses both shapes and rejects a malformed error', () => {
-    expect(ipcResultSchema.safeParse({ ok: true, data: { a: 1 }, meta: { nextCursor: null } }).success).toBe(true);
+    expect(ipcResultSchema.safeParse({ ok: true, data: { a: 1 }, meta: { nextCursor: null } }).success).toBe(
+      true,
+    );
     expect(ipcResultSchema.safeParse({ ok: false, error: appError('CONFLICT') }).success).toBe(true);
     expect(ipcResultSchema.safeParse({ ok: false, error: { code: 'NOPE' } }).success).toBe(false);
   });

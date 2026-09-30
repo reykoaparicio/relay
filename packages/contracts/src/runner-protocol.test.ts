@@ -16,7 +16,11 @@ describe('runnerRequestSchema', () => {
 
   it('accepts credential responses and bounded shutdowns', () => {
     expect(
-      runnerRequestSchema.safeParse({ kind: 'credential.response', id: 'c1', result: { ok: true, apiKey: 'k' } }).success,
+      runnerRequestSchema.safeParse({
+        kind: 'credential.response',
+        id: 'c1',
+        result: { ok: true, apiKey: 'k' },
+      }).success,
     ).toBe(true);
     expect(
       runnerRequestSchema.safeParse({
@@ -34,12 +38,17 @@ describe('runnerMessageSchema', () => {
   it('credential.request requires purpose and accepts attemptId null', () => {
     const base = { kind: 'credential.request', id: 'r1', providerId: 'anthropic' };
 
-    expect(runnerMessageSchema.safeParse({ ...base, purpose: 'dispatch', attemptId: null }).success).toBe(true);
-    expect(runnerMessageSchema.safeParse({ ...base, purpose: 'connection_test', attemptId: fakeId('attempt') }).success).toBe(
+    expect(runnerMessageSchema.safeParse({ ...base, purpose: 'dispatch', attemptId: null }).success).toBe(
       true,
     );
+    expect(
+      runnerMessageSchema.safeParse({ ...base, purpose: 'connection_test', attemptId: fakeId('attempt') })
+        .success,
+    ).toBe(true);
     expect(runnerMessageSchema.safeParse({ ...base, attemptId: null }).success).toBe(false);
-    expect(runnerMessageSchema.safeParse({ ...base, purpose: 'exfiltrate', attemptId: null }).success).toBe(false);
+    expect(runnerMessageSchema.safeParse({ ...base, purpose: 'exfiltrate', attemptId: null }).success).toBe(
+      false,
+    );
   });
 
   it('parses ready, op.result, heartbeat, event, and fatal messages', () => {

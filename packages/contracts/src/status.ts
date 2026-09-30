@@ -118,7 +118,13 @@ export const attemptStateSchema = z.enum(ATTEMPT_STATES);
 export type AttemptState = z.infer<typeof attemptStateSchema>;
 
 /** Why an attempt was made (§7.6). */
-export const ATTEMPT_PURPOSES = ['initial', 'transport_retry', 'schema_repair', 'user_retry', 'reconcile'] as const;
+export const ATTEMPT_PURPOSES = [
+  'initial',
+  'transport_retry',
+  'schema_repair',
+  'user_retry',
+  'reconcile',
+] as const;
 /** Schema for {@link AttemptPurpose}. */
 export const attemptPurposeSchema = z.enum(ATTEMPT_PURPOSES);
 /** Attempt purpose. */
@@ -184,6 +190,7 @@ export const MEMORY_EVENT_TYPES = [
   'deleted',
   'conflict_resolved',
   'unarchived',
+  'history_purged', // revision history purged (the current text is kept)
 ] as const;
 /** Schema for {@link MemoryEventType}. */
 export const memoryEventTypeSchema = z.enum(MEMORY_EVENT_TYPES);

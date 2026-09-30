@@ -674,7 +674,7 @@ export const planV1Schema = handoffBase.extend({
 // outputs/patch.v1.ts
 export const patchV1Schema = handoffBase.extend({
   outcome: z.literal('patch'),
-  files: z.array(z.object({ relPath: z.string(), changeType: z.enum(['modify','add','delete']), unifiedDiff: z.string() })).min(1).max(20),
+  files: z.array(z.object({ relPath: z.string(), changeType: z.enum(['modify','delete']) /* P0: only provided files */, unifiedDiff: z.string() })).min(1).max(20),
   testSuggestions: z.array(z.object({ relPath: z.string().nullable(), description: z.string() })),
   notes: z.string(),
 });

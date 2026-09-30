@@ -64,14 +64,16 @@ export const ERROR_DEFINITIONS = {
     nextAction: 'increase_allowance',
     alternatives: ['choose_profile', 'stop'],
     httpStatus: 402,
-    userMessage: 'This step would exceed the allowance. Increase the allowance, choose a cheaper profile, or stop.',
+    userMessage:
+      'This step would exceed the allowance. Increase the allowance, choose a cheaper profile, or stop.',
   },
   CONTEXT_TOO_LARGE: {
     retryable: false,
     nextAction: 'narrow_scope',
     alternatives: ['choose_profile'],
     httpStatus: 413,
-    userMessage: 'The selected context is too large for this model. Select fewer files or choose another profile.',
+    userMessage:
+      'The selected context is too large for this model. Select fewer files or choose another profile.',
   },
   OUTPUT_INVALID: {
     retryable: true,
@@ -99,7 +101,8 @@ export const ERROR_DEFINITIONS = {
     nextAction: 'decide_unknown',
     alternatives: [],
     httpStatus: 409,
-    userMessage: 'Relay cannot tell whether the provider finished this request. Decide how to handle the possible charge.',
+    userMessage:
+      'Relay cannot tell whether the provider finished this request. Decide how to handle the possible charge.',
   },
   ARTIFACT_WRITE_FAILED: {
     retryable: true,
@@ -162,7 +165,8 @@ export const ERROR_DEFINITIONS = {
     nextAction: 'use_session_key',
     alternatives: [],
     httpStatus: 503,
-    userMessage: 'Secure storage is not available on this computer. You can use the key for this session only.',
+    userMessage:
+      'Secure storage is not available on this computer. You can use the key for this session only.',
   },
   MODEL_REFUSED: {
     retryable: false,
@@ -226,28 +230,37 @@ export const LIMIT_KINDS = ['attempts', 'revisions', 'deadline', 'tool_calls'] a
 export type LimitKind = (typeof LIMIT_KINDS)[number];
 
 /** Why an approval is stale (03 `approvals.invalidated_reason`). */
-export const APPROVAL_STALE_REASONS = ['plan_changed', 'scope_changed', 'project_changed', 'provider_changed'] as const;
+export const APPROVAL_STALE_REASONS = [
+  'plan_changed',
+  'scope_changed',
+  'project_changed',
+  'provider_changed',
+] as const;
 /** Approval stale reason. */
 export type ApprovalStaleReason = (typeof APPROVAL_STALE_REASONS)[number];
 
-/** Error factories, one per {@link ErrorCode} (camelCase of the code). */
+/** Error factories, one per {@link ErrorCode} (camelCase of the code). Typed arguments win over `ctx.details`. */
 export const errors = {
   authRequired: (providerId: ProviderId, ctx?: ErrorContext): AppError =>
-    appError('AUTH_REQUIRED', { ...ctx, details: { providerId, ...ctx?.details } }),
-  modelUnsupported: (info: { providerId?: ProviderId; modelId?: string; reason?: string } = {}, ctx?: ErrorContext) =>
-    appError('MODEL_UNSUPPORTED', { ...ctx, details: { ...info, ...ctx?.details } }),
+    appError('AUTH_REQUIRED', { ...ctx, details: { ...ctx?.details, providerId } }),
+  modelUnsupported: (
+    info: { providerId?: ProviderId; modelId?: string; reason?: string } = {},
+    ctx?: ErrorContext,
+  ) => appError('MODEL_UNSUPPORTED', { ...ctx, details: { ...ctx?.details, ...info } }),
   rateLimited: (retryAfterMs: number | null, ctx?: ErrorContext): AppError =>
-    appError('RATE_LIMITED', { ...ctx, details: { retryAfterMs, ...ctx?.details } }),
+    appError('RATE_LIMITED', { ...ctx, details: { ...ctx?.details, retryAfterMs } }),
   budgetBlocked: (breakdown: BudgetBreakdown, ctx?: ErrorContext): AppError =>
-    appError('BUDGET_BLOCKED', { ...ctx, details: { ...breakdown } }),
-  contextTooLarge: (info: { estimatedInputTokens: number; budgetTokens: number }, ctx?: ErrorContext): AppError =>
-    appError('CONTEXT_TOO_LARGE', { ...ctx, details: { ...info, ...ctx?.details } }),
+    appError('BUDGET_BLOCKED', { ...ctx, details: { ...ctx?.details, ...breakdown } }),
+  contextTooLarge: (
+    info: { estimatedInputTokens: number; budgetTokens: number },
+    ctx?: ErrorContext,
+  ): AppError => appError('CONTEXT_TOO_LARGE', { ...ctx, details: { ...ctx?.details, ...info } }),
   outputInvalid: (issues: readonly ValidationIssue[] = [], ctx?: ErrorContext): AppError =>
-    appError('OUTPUT_INVALID', { ...ctx, details: { issues: [...issues], ...ctx?.details } }),
+    appError('OUTPUT_INVALID', { ...ctx, details: { ...ctx?.details, issues: [...issues] } }),
   approvalStale: (reason: ApprovalStaleReason, ctx?: ErrorContext): AppError =>
-    appError('APPROVAL_STALE', { ...ctx, details: { reason, ...ctx?.details } }),
+    appError('APPROVAL_STALE', { ...ctx, details: { ...ctx?.details, reason } }),
   projectChanged: (changedPaths: readonly RelPath[] = [], ctx?: ErrorContext): AppError =>
-    appError('PROJECT_CHANGED', { ...ctx, details: { changedPaths: [...changedPaths], ...ctx?.details } }),
+    appError('PROJECT_CHANGED', { ...ctx, details: { ...ctx?.details, changedPaths: [...changedPaths] } }),
   requestOutcomeUnknown: (attemptId: AttemptId, ctx?: ErrorContext): AppError =>
     appError('REQUEST_OUTCOME_UNKNOWN', { ...ctx, attemptId }),
   artifactWriteFailed: (ctx?: ErrorContext): AppError => appError('ARTIFACT_WRITE_FAILED', ctx),
@@ -255,23 +268,29 @@ export const errors = {
   providerUnavailable: (providerId?: ProviderId, ctx?: ErrorContext): AppError =>
     appError(
       'PROVIDER_UNAVAILABLE',
-      providerId === undefined ? ctx : { ...ctx, details: { providerId, ...ctx?.details } },
+      providerId === undefined ? ctx : { ...ctx, details: { ...ctx?.details, providerId } },
     ),
   validationFailed: (issues: readonly ValidationIssue[], ctx?: ErrorContext): AppError =>
-    appError('VALIDATION_FAILED', { ...ctx, details: { issues: [...issues], ...ctx?.details } }),
+    appError('VALIDATION_FAILED', { ...ctx, details: { ...ctx?.details, issues: [...issues] } }),
   notFound: (entity: string, opts: { purged?: boolean } = {}, ctx?: ErrorContext): AppError =>
-    appError('NOT_FOUND', { ...ctx, details: { entity, purged: opts.purged ?? false, ...ctx?.details } }),
+    appError('NOT_FOUND', { ...ctx, details: { ...ctx?.details, entity, purged: opts.purged ?? false } }),
   conflict: (details: Readonly<Record<string, unknown>> = {}, ctx?: ErrorContext): AppError =>
-    appError('CONFLICT', { ...ctx, details: { ...details, ...ctx?.details } }),
+    appError('CONFLICT', { ...ctx, details: { ...ctx?.details, ...details } }),
   limitReached: (limit: LimitKind, ctx?: ErrorContext): AppError =>
-    appError('LIMIT_REACHED', { ...ctx, details: { limit, ...ctx?.details } }),
+    appError('LIMIT_REACHED', { ...ctx, details: { ...ctx?.details, limit } }),
   permissionDenied: (reason: PermissionDeniedReason, ctx?: ErrorContext): AppError =>
-    appError('PERMISSION_DENIED', { ...ctx, details: { reason, ...ctx?.details } }),
+    appError('PERMISSION_DENIED', { ...ctx, details: { ...ctx?.details, reason } }),
   secureStorageUnavailable: (ctx?: ErrorContext): AppError => appError('SECURE_STORAGE_UNAVAILABLE', ctx),
   modelRefused: (providerId?: ProviderId, ctx?: ErrorContext): AppError =>
-    appError('MODEL_REFUSED', providerId === undefined ? ctx : { ...ctx, details: { providerId, ...ctx?.details } }),
-  internal: (correlationId: CorrelationId, ctx?: ErrorContext): AppError =>
-    appError('INTERNAL', { ...ctx, correlationId }),
+    appError(
+      'MODEL_REFUSED',
+      providerId === undefined ? ctx : { ...ctx, details: { ...ctx?.details, providerId } },
+    ),
+  /**
+   * `INTERNAL` carries only the correlation id (02 §B0). It takes no context: a message, details, or ids could leak
+   * internals (SQL errors, stacks, paths), and callers passing one at runtime have it ignored.
+   */
+  internal: (correlationId: CorrelationId): AppError => appError('INTERNAL', { correlationId }),
 } as const;
 
 /** Internal exception carrying an {@link AppError}; serialized at boundaries (IPC router, runner protocol server). */

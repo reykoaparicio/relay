@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { RUN_LIMIT_MAXIMUMS } from '../defaults.js';
 import { idSchema } from '../ids.js';
 import { nonNegativeMicrousdSchema } from '../money.js';
 import { findingsV1Schema } from '../outputs/findings.v1.js';
@@ -12,6 +11,7 @@ import { exclusionReasonSchema } from '../status.js';
 import { attemptViewSchema } from './attempt.js';
 import { runEventSchema } from './event.js';
 import { contextManifestSchema } from './manifest.js';
+import { runLimitsSchema } from './run.js';
 import { stepViewSchema } from './step.js';
 
 // Renderer-facing projections (02 §B2 "View DTOs"): no absolute paths, no secrets, money always Microusd.
@@ -73,14 +73,17 @@ export const appSettingsSchema = z.object({
 /** App settings. */
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 
-/** `raise_limits` recovery decision: at least one limit, each ≤ `RUN_LIMIT_MAXIMUMS`. */
+/** `raise_limits` recovery decision: at least one limit, each within the {@link runLimitsSchema} bounds. */
 const raiseLimitsDecisionSchema = z
   .object({
     kind: z.literal('raise_limits'),
-    maxAttempts: z.number().int().positive().max(RUN_LIMIT_MAXIMUMS.maxAttempts).optional(),
-    executionTimeoutSeconds: z.number().int().positive().max(RUN_LIMIT_MAXIMUMS.executionTimeoutSeconds).optional(),
+    maxAttempts: runLimitsSchema.shape.maxAttempts.optional(),
+    executionTimeoutSeconds: runLimitsSchema.shape.executionTimeoutSeconds.optional(),
   })
-  .refine((d) => d.maxAttempts !== undefined || d.executionTimeoutSeconds !== undefined, 'raise at least one limit');
+  .refine(
+    (d) => d.maxAttempts !== undefined || d.executionTimeoutSeconds !== undefined,
+    'raise at least one limit',
+  );
 
 /** `runs.resume` recovery decision (§12.5 "Run ID, recovery decision"). */
 export const recoveryDecisionSchema = z.discriminatedUnion('kind', [

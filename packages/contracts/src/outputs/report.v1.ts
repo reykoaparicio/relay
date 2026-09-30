@@ -3,7 +3,12 @@ import { costSummarySchema } from '../domain/ledger.js';
 import { idSchema } from '../ids.js';
 import { microusdSchema } from '../money.js';
 import { epochMsSchema, sha256Schema, stepKeySchema } from '../primitives.js';
-import { costCertaintySchema, providerIdSchema, stepStateSchema, terminalRunStatusSchema } from '../status.js';
+import {
+  costCertaintySchema,
+  providerIdSchema,
+  stepStateSchema,
+  terminalRunStatusSchema,
+} from '../status.js';
 import { reviewOutcomeSchema } from './review.v1.js';
 
 /**
@@ -17,7 +22,11 @@ export const reportV1Schema = z.object({
   goal: z.string(),
   status: terminalRunStatusSchema,
   verdict: reviewOutcomeSchema.nullable(), // latest review.v1 outcome; null if verify never ran
-  workflow: z.object({ id: idSchema('workflow'), version: z.number().int().positive(), contentHash: sha256Schema }),
+  workflow: z.object({
+    id: idSchema('workflow'),
+    version: z.number().int().positive(),
+    contentHash: sha256Schema,
+  }),
   steps: z.array(
     z.object({
       stepKey: stepKeySchema,

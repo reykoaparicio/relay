@@ -18,8 +18,26 @@ describe('validation helpers', () => {
 
     const issues = toValidationIssues(r.error?.issues ?? []);
 
-    expect(issues).toEqual([{ path: 'limits.budgetMicrousd', message: expect.any(String) as string, code: 'too_big' }]);
+    expect(issues).toEqual([
+      { path: 'limits.budgetMicrousd', message: expect.any(String) as string, code: 'too_big' },
+    ]);
     for (const i of issues) expect(validationIssueSchema.safeParse(i).success).toBe(true);
-    expect(toValidationIssues([{ path: [], message: 'm'.repeat(500), code: 'c' }])[0]?.message).toHaveLength(400);
+    expect(toValidationIssues([{ path: [], message: 'm'.repeat(500), code: 'c' }])[0]?.message).toHaveLength(
+      400,
+    );
+  });
+
+  it('splits unrecognized_keys into one field-specific issue per key (B10)', () => {
+    const r = z.strictObject({ steps: z.array(z.strictObject({ id: z.string() })) }).safeParse({
+      steps: [{ id: 'a', tempreature: 1, topP: 2 }],
+    });
+
+    const issues = toValidationIssues(r.error?.issues ?? []);
+
+    expect(issues.map((i) => i.path)).toEqual(['steps[0].tempreature', 'steps[0].topP']);
+    expect(issues.every((i) => i.code === 'unrecognized_keys')).toBe(true);
+    expect(toValidationIssues([{ path: ['x'], message: 'm', code: 'unrecognized_keys', keys: [] }])).toEqual([
+      { path: 'x', message: 'm', code: 'unrecognized_keys' },
+    ]);
   });
 });

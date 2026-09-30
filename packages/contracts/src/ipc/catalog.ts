@@ -83,7 +83,9 @@ export const runnerChannelSchema: z.ZodType<RunnerChannel> = z.enum(
   RUNNER_CHANNELS as unknown as readonly [RunnerChannel, ...RunnerChannel[]],
 );
 
-const CHANNEL_INDEX: ReadonlyMap<string, AnyOperationDef> = new Map(OPERATION_LIST.map((d) => [d.channel, d]));
+const CHANNEL_INDEX: ReadonlyMap<string, AnyOperationDef> = new Map(
+  OPERATION_LIST.map((d) => [d.channel, d]),
+);
 const RUNNER_INDEX: ReadonlyMap<string, AnyOperationDef> = new Map(
   [...OPERATION_LIST, ...INTERNAL_OPERATION_LIST]
     .filter((d) => (RUNNER_CHANNELS as readonly string[]).includes(d.channel))

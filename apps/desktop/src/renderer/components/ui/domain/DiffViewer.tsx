@@ -27,7 +27,6 @@ const SR_PREFIX: Readonly<Record<DiffLine['kind'], string>> = {
 
 const CHANGE_LABEL: Readonly<Record<PatchV1['files'][number]['changeType'], string>> = {
   modify: 'Modified',
-  add: 'New file',
   delete: 'Deleted',
 };
 
