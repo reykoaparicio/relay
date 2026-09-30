@@ -1,0 +1,54 @@
+{
+  "summary": "Validates age in createUser, returns 500 INTERNAL from listOrders on store failure, and makes elapsed() return milliseconds.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "startLine": 5,
+      "endLine": 34
+    },
+    {
+      "relPath": "src/handlers/orders.ts",
+      "startLine": 51,
+      "endLine": 57
+    },
+    {
+      "relPath": "src/lib/format.ts",
+      "startLine": 8,
+      "endLine": 10
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "patch",
+  "files": [
+    {
+      "relPath": "src/handlers/user.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/handlers/user.ts\n+++ b/src/handlers/user.ts\n@@ -2,7 +2,7 @@\n import type { ServerResponse } from 'node:http';\n import type { Request } from '../router.js';\n import { notFound, sendData } from '../errors.js';\n-import { requireEmail, requireObject, requireString } from '../lib/validate.js';\n+import { requireEmail, requireNonNegativeInteger, requireObject, requireString } from '../lib/validate.js';\n import { isoTimestamp } from '../lib/format.js';\n \n export interface User {\n@@ -31,7 +31,7 @@\n   const body = requireObject(req.body);\n   const name = requireString(body['name'], 'name', 100);\n   const email = requireEmail(body['email']);\n-  const age = body['age'] as number;\n+  const age = requireNonNegativeInteger(body['age'], 'age', 150);\n \n   const user: User = {\n     id: randomUUID(),\n"
+    },
+    {
+      "relPath": "src/handlers/orders.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/handlers/orders.ts\n+++ b/src/handlers/orders.ts\n@@ -51,9 +51,8 @@\n   try {\n     const orders = await store.list(userId, limit);\n     sendData(res, orders.map((o) => ({ ...o, amount: formatCents(o.amountCents) })));\n-  } catch {\n-    res.writeHead(200);\n-    res.end();\n+  } catch (err) {\n+    sendError(res, err);\n   }\n }\n \n"
+    },
+    {
+      "relPath": "src/lib/format.ts",
+      "changeType": "modify",
+      "unifiedDiff": "--- a/src/lib/format.ts\n+++ b/src/lib/format.ts\n@@ -6,7 +6,7 @@\n  * @returns the elapsed time in milliseconds\n  */\n export function elapsed(startMs: number, endMs: number): number {\n-  return Math.floor((endMs - startMs) / 1000);\n+  return endMs - startMs;\n }\n \n /** Formats integer cents as a fixed two-decimal string, e.g. 1999 -> \"19.99\". */\n"
+    }
+  ],
+  "testSuggestions": [
+    {
+      "relPath": "test/user.test.ts",
+      "description": "POST /users with age -1 returns 400 VALIDATION_FAILED."
+    },
+    {
+      "relPath": "test/orders.test.ts",
+      "description": "GET /orders with a store whose list() rejects returns 500 INTERNAL."
+    },
+    {
+      "relPath": null,
+      "description": "Unit test elapsed(0, 1500) === 1500."
+    }
+  ],
+  "notes": "Tests were suggested but not run."
+}

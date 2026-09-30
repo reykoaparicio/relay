@@ -1,0 +1,93 @@
+{
+  "catalogVersion": "2026-09-25",
+  "currency": "USD",
+  "notes": [
+    "Anthropic prices were taken at D2 from the claude-api skill model table (cached 2026-09-25): Opus 5.5 $4/$20 per MTok, cache read $0.20; Sonnet 5.5 $2/$10, cache read $0.20. Haiku 4.5 ($1/$5, cache read $0.10) is not in that table. Cache writes use the 1.25x input rate (5-minute TTL). The official page (source URL) could not be fetched from the D2 environment: every entry with priceVerification 'pending-official-page' must be re-checked against the source before M2 sign-off. If a number differs, add a new catalog version file; never edit this one.",
+    "OpenAI and Gemini entries are added in D6 / D10 from their official pricing pages."
+  ],
+  "entries": [
+    {
+      "providerId": "anthropic",
+      "modelId": "claude-opus-5-5",
+      "displayName": "Claude Opus 5.5",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": true,
+        "maxInputTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "supportsRequestLookup": false,
+        "supportsTokenCounting": true,
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "thinkingAlwaysOn": true
+      },
+      "prices": { "input": 4000000, "output": 20000000, "cacheRead": 200000, "cacheWrite": 5000000 },
+      "effectiveDate": "2026-09-25",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "sourceRetrievedAt": "2026-09-25",
+      "priceVerification": "pending-official-page"
+    },
+    {
+      "providerId": "anthropic",
+      "modelId": "claude-sonnet-5-5",
+      "displayName": "Claude Sonnet 5.5",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": true,
+        "maxInputTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "supportsRequestLookup": false,
+        "supportsTokenCounting": true,
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "thinkingAlwaysOn": true
+      },
+      "prices": { "input": 2000000, "output": 10000000, "cacheRead": 200000, "cacheWrite": 2500000 },
+      "effectiveDate": "2026-09-25",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "sourceRetrievedAt": "2026-09-25",
+      "priceVerification": "pending-official-page"
+    },
+    {
+      "providerId": "anthropic",
+      "modelId": "claude-haiku-4-5",
+      "displayName": "Claude Haiku 4.5",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": true,
+        "maxInputTokens": 200000,
+        "maxOutputTokens": 64000,
+        "supportsRequestLookup": false,
+        "supportsTokenCounting": true,
+        "effortLevels": [],
+        "thinkingAlwaysOn": false
+      },
+      "prices": { "input": 1000000, "output": 5000000, "cacheRead": 100000, "cacheWrite": 1250000 },
+      "effectiveDate": "2026-09-25",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "sourceRetrievedAt": "2026-09-25",
+      "priceVerification": "pending-official-page"
+    },
+    {
+      "providerId": "fake",
+      "modelId": "fake-model",
+      "displayName": "Fake model (scripted, not a live result)",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": false,
+        "maxInputTokens": 1000000,
+        "maxOutputTokens": 128000,
+        "supportsRequestLookup": false,
+        "supportsTokenCounting": false,
+        "effortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "thinkingAlwaysOn": false
+      },
+      "prices": { "input": 1000000, "output": 2000000, "cacheRead": 100000, "cacheWrite": 1250000 },
+      "effectiveDate": "2026-09-25",
+      "source": "https://relay.invalid/docs/fake-provider",
+      "sourceRetrievedAt": "2026-09-25"
+    }
+  ]
+}

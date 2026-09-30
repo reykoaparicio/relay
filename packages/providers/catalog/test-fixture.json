@@ -1,0 +1,27 @@
+{
+  "catalogVersion": "2000-01-01",
+  "currency": "USD",
+  "notes": ["TEST FIXTURE ONLY. Round, clearly fake prices for unit tests (04 §D6). Never loaded by loadCatalogEntries()."],
+  "entries": [
+    {
+      "providerId": "fake",
+      "modelId": "test-model",
+      "displayName": "Test model (fake prices)",
+      "capabilities": {
+        "structuredOutput": true,
+        "streaming": true,
+        "tools": false,
+        "maxInputTokens": 100000,
+        "maxOutputTokens": 10000,
+        "supportsRequestLookup": false,
+        "supportsTokenCounting": false,
+        "effortLevels": [],
+        "thinkingAlwaysOn": false
+      },
+      "prices": { "input": 1000000, "output": 10000000, "cacheRead": 100000, "cacheWrite": 1250000 },
+      "effectiveDate": "2000-01-01",
+      "source": "https://relay.invalid/test-fixture",
+      "sourceRetrievedAt": "2000-01-01"
+    }
+  ]
+}

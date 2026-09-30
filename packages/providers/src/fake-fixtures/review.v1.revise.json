@@ -1,0 +1,32 @@
+{
+  "summary": "The patch fixes F1 and F3, but the listOrders change needs a test for the failing-store path.",
+  "sourceRefs": [
+    {
+      "relPath": "src/handlers/orders.ts",
+      "startLine": 54,
+      "endLine": 56
+    }
+  ],
+  "unresolvedQuestions": [],
+  "outcome": "revise",
+  "verdictRationale": "The error path in listOrders changed behavior and should be covered before acceptance.",
+  "requestedChanges": [
+    {
+      "relPath": "src/handlers/orders.ts",
+      "description": "Keep the sendError change and note a failing-store test in testSuggestions."
+    }
+  ],
+  "checks": [
+    {
+      "name": "scope",
+      "passed": true,
+      "detail": "All changed files are in fileScope."
+    },
+    {
+      "name": "error-path-covered",
+      "passed": false,
+      "detail": "No test suggestion covers GET /orders with a failing store."
+    }
+  ],
+  "memoryProposals": []
+}
