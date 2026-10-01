@@ -74,6 +74,10 @@ export async function prepareFakeDemo(userDataDir: string, sampleRoot: string, s
       idempotencyKey: 'demo-prepare-project-0001', rootRealpath: sampleRoot, rootDisplayPath: sampleDisplayPath, name: DEMO_PROJECT.name,
       exclusions: [], allowedProviderIds: [...DEMO_PROJECT.allowedProviderIds], monthlyAllowanceMicrousd: microusd(DEMO_PROJECT.monthlyAllowanceMicrousd), isDemo: true,
     });
+    // Readiness checks (06 F13) need a credential ref per provider; fake mode never resolves a real key.
+    for (const providerId of DEMO_PROJECT.allowedProviderIds) {
+      await callOk(rt, 'relay/v1/providers.recordCredentialRef', { providerId, storageMode: 'session', vaultFile: null, redactedLabel: 'fake' });
+    }
     const rule = await callOk(rt, 'relay/v1/memory.create', {
       idempotencyKey: 'demo-prepare-rule-00001', projectId: project.id, type: 'user_rule', title: DEMO_RULE.title, content: DEMO_RULE.content,
       scope: { roles: 'all' }, pinned: true,

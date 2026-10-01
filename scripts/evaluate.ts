@@ -91,6 +91,13 @@ async function openWorkspace(scratch: string, name: string, mode: 'fake' | 'live
       idempotencyKey: `eval-project-${name}`.slice(0, 64).padEnd(10, '0'), rootRealpath: root, rootDisplayPath: '~/sample-api', name: 'Sample API (evaluation)',
       exclusions: [], allowedProviderIds: [...ALLOWED_PROVIDERS], monthlyAllowanceMicrousd: null, isDemo: false,
     });
+    // The engine checks for a credential ref before any run (06 F13); it never sees the key itself. Fake mode records
+    // one per allowed provider; live mode only for providers whose key is in this script's environment.
+    for (const providerId of ALLOWED_PROVIDERS) {
+      const hasKey = mode === 'fake' || (process.env[KEY_ENV[providerId] ?? '']?.trim() ?? '') !== '';
+      if (!hasKey) continue;
+      await callOk(rt, 'relay/v1/providers.recordCredentialRef', { providerId, storageMode: 'session', vaultFile: null, redactedLabel: mode === 'fake' ? 'fake' : '…env' });
+    }
     for (const [i, rule] of task.approvedRules.entries()) {
       const rec = await callOk(rt, 'relay/v1/memory.create', {
         idempotencyKey: `eval-rule-${String(i)}-${name}`.slice(0, 64), projectId: project.id, type: 'user_rule', title: rule.title, content: rule.content, scope: { roles: 'all' },
