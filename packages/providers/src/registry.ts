@@ -7,6 +7,7 @@ import { createMemoryCallLog } from './call-log.js';
 import { createOpenAIAdapter } from './openai.js';
 import type { FakeCallLog } from './call-log.js';
 import { createFakeProvider, createFakeScriptState } from './fake.js';
+import { createGeminiAdapter } from './gemini.js';
 import { FAKE_SCENARIOS } from './fake-scenarios.js';
 import type { FakeScenario } from './fake-scenarios.js';
 import { NOOP_LOGGER } from './safe-hook.js';
@@ -33,11 +34,12 @@ export interface ProviderRegistry {
   list(): ProviderId[];
 }
 
-/** Live adapters implemented so far (Gemini lands in D10). */
+/** Live adapters (Anthropic D4, OpenAI D5, Gemini D10). */
 const LIVE_FACTORIES: Partial<Record<ProviderId, (clock: Clock, logger: Logger) => ProviderAdapter>> = {
   // No `fetch` override: adapters read globalThis.fetch at call time (04 §D3), so the no-network guard applies.
   anthropic: (clock, logger) => createAnthropicAdapter({ clock, logger }),
   openai: (clock, logger) => createOpenAIAdapter({ clock, logger }),
+  gemini: (clock, logger) => createGeminiAdapter({ clock, logger }),
 };
 
 function resolveScenario(s: string | FakeScenario | undefined): FakeScenario {

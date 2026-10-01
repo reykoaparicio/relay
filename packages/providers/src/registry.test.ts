@@ -93,7 +93,7 @@ describe('createProviderRegistry (live mode)', () => {
 
     const registry = createProviderRegistry({ mode: 'live', clock: manualClock(), fakeScenario: 'nope-ignored', callLog });
 
-    expect(registry.list()).toEqual(['anthropic', 'openai']);
+    expect(registry.list()).toEqual(['anthropic', 'openai', 'gemini']);
     const adapter = registry.get('anthropic');
     expect(adapter.providerId).toBe('anthropic');
     expect('reconcile' in adapter).toBe(false);
@@ -102,6 +102,10 @@ describe('createProviderRegistry (live mode)', () => {
     expect(openai.providerId).toBe('openai');
     expect(typeof openai.reconcile).toBe('function');
     expect(registry.get('openai')).toBe(openai);
+    const gemini = registry.get('gemini');
+    expect(gemini.providerId).toBe('gemini');
+    expect('reconcile' in gemini).toBe(false); // no lookup endpoint: unknown outcomes go to the user (04 §D10)
+    expect(registry.get('gemini')).toBe(gemini);
     expect(append).not.toHaveBeenCalled();
   });
 
@@ -109,6 +113,5 @@ describe('createProviderRegistry (live mode)', () => {
     const registry = createProviderRegistry({ mode: 'live', clock: manualClock() });
 
     expect(() => registry.get('fake')).toThrow(/no live adapter/);
-    expect(() => registry.get('gemini')).toThrow(/no live adapter/);
   });
 });

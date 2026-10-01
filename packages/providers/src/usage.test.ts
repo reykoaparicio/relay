@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { localTokenEstimate, promptChars } from './estimate.js';
-import { ZERO_USAGE, normalizeAnthropicUsage, normalizeOpenAIUsage } from './usage.js';
+import { ZERO_USAGE, normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage } from './usage.js';
 
 describe('normalizeAnthropicUsage', () => {
   it('keeps input_tokens as uncached because Anthropic already excludes cache reads and writes', () => {
@@ -88,6 +88,52 @@ describe('double-count trap: the same token split through both providers', () =>
 
   it('OpenAI success fixture without cache: uncached = input_tokens; reasoning stays inside output', () => {
     expect(normalizeOpenAIUsage(openAIFixtureUsage('success'))).toEqual({ uncachedInputTokens: 1000, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 180, reasoningTokens: 120 });
+  });
+});
+
+/** The usageMetadata of the last chunk of a Gemini SSE fixture (the complete counts). */
+function geminiFixtureUsage(name: string): Parameters<typeof normalizeGeminiUsage>[0] {
+  const text = readFileSync(new URL(`./__fixtures__/gemini/${name}.sse`, import.meta.url), 'utf8');
+  const chunks = text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice('data: '.length)) as { usageMetadata?: Parameters<typeof normalizeGeminiUsage>[0] });
+  const last = chunks.reverse().find((c) => c.usageMetadata !== undefined);
+  if (last === undefined) throw new Error(`no usageMetadata in ${name}`);
+  return last.usageMetadata;
+}
+
+describe('normalizeGeminiUsage (third variant: cached inside prompt, thoughts OUTSIDE candidates)', () => {
+  it('Gemini success fixture: promptTokenCount 1200 incl. 200 cached → uncached 1000; thoughts 120 + candidates 60 → output 180', () => {
+    const raw = geminiFixtureUsage('success');
+
+    expect(raw).toMatchObject({ promptTokenCount: 1200, cachedContentTokenCount: 200, candidatesTokenCount: 60, thoughtsTokenCount: 120 });
+    expect(normalizeGeminiUsage(raw)).toEqual({ uncachedInputTokens: 1000, cacheReadInputTokens: 200, cacheWriteInputTokens: 0, outputTokens: 180, reasoningTokens: 120 });
+  });
+
+  it('matches the OpenAI and Anthropic mappings for the same billed split (disjoint, no double counting)', () => {
+    const g = normalizeGeminiUsage(geminiFixtureUsage('success'));
+    const o = normalizeOpenAIUsage({ input_tokens: 1200, input_tokens_details: { cached_tokens: 200 }, output_tokens: 180, output_tokens_details: { reasoning_tokens: 120 } });
+    const a = normalizeAnthropicUsage({ input_tokens: 1000, cache_read_input_tokens: 200, output_tokens: 180 });
+
+    expect(g).toEqual(o);
+    expect([g.uncachedInputTokens, g.cacheReadInputTokens, g.outputTokens]).toEqual([a.uncachedInputTokens, a.cacheReadInputTokens, a.outputTokens]);
+  });
+
+  it('thoughts are billed as output: adding them is the ONLY place they are counted', () => {
+    const u = normalizeGeminiUsage({ promptTokenCount: 10, candidatesTokenCount: 5, thoughtsTokenCount: 300 });
+
+    expect(u.outputTokens).toBe(305);
+    expect(u.reasoningTokens).toBe(300);
+    expect(u.uncachedInputTokens + u.cacheReadInputTokens + u.cacheWriteInputTokens).toBe(10);
+  });
+
+  it('counts tool-use prompt tokens as input, never negative, absent thoughts → no reasoningTokens', () => {
+    expect(normalizeGeminiUsage({ promptTokenCount: 10, toolUsePromptTokenCount: 7, candidatesTokenCount: 1 })).toEqual({
+      uncachedInputTokens: 17,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 1,
+    });
+    expect(normalizeGeminiUsage({ promptTokenCount: 10, cachedContentTokenCount: 50 }).uncachedInputTokens).toBe(0);
+    expect(normalizeGeminiUsage(undefined)).toEqual(ZERO_USAGE);
   });
 });
 

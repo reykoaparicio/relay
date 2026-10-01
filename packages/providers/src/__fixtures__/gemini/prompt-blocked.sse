@@ -1,0 +1,2 @@
+data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","safetyRatings":[]},"usageMetadata":{"promptTokenCount":40,"totalTokenCount":40},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_blocked_01"}
+

@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"No issue"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":1200,"cachedContentTokenCount":200,"totalTokenCount":1320,"thoughtsTokenCount":120,"promptTokensDetails":[{"modality":"TEXT","tokenCount":1200}],"cacheTokensDetails":[{"modality":"TEXT","tokenCount":200}]},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_success_01"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"s found\",\"findings\":[]}"}],"role":"model"},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1200,"cachedContentTokenCount":200,"candidatesTokenCount":60,"thoughtsTokenCount":120,"totalTokenCount":1380,"promptTokensDetails":[{"modality":"TEXT","tokenCount":1200}],"cacheTokensDetails":[{"modality":"TEXT","tokenCount":200}]},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_success_01"}
+

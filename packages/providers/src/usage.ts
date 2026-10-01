@@ -47,6 +47,34 @@ export function normalizeOpenAIUsage(u: OpenAIUsageLike | null | undefined): Nor
   return typeof reasoning === 'number' ? { ...base, reasoningTokens: count(reasoning) } : base;
 }
 
+/** Structural subset of Gemini `GenerateContentResponseUsageMetadata` (`@google/genai`). */
+export interface GeminiUsageLike {
+  readonly promptTokenCount?: number | null;
+  readonly cachedContentTokenCount?: number | null;
+  readonly candidatesTokenCount?: number | null;
+  readonly thoughtsTokenCount?: number | null;
+  readonly toolUsePromptTokenCount?: number | null;
+}
+
+/**
+ * Gemini, the third variant of the double-count trap (§8.4, 04 §D10): `promptTokenCount` INCLUDES the cached tokens
+ * (`cachedContentTokenCount`), so they are subtracted; thinking tokens (`thoughtsTokenCount`) are reported SEPARATELY
+ * from `candidatesTokenCount` but billed as output, so they are added to output. Tool-use prompt tokens (not part of
+ * `promptTokenCount`; Relay sends no tools, so normally absent) are billed input and counted as uncached input.
+ * Gemini has no per-token cache-write charge (explicit caches bill storage per hour, which Relay never creates).
+ */
+export function normalizeGeminiUsage(u: GeminiUsageLike | null | undefined): NormalizedUsage {
+  const cached = count(u?.cachedContentTokenCount);
+  const thoughts = count(u?.thoughtsTokenCount);
+  const base = {
+    uncachedInputTokens: Math.max(0, count(u?.promptTokenCount) - cached) + count(u?.toolUsePromptTokenCount),
+    cacheReadInputTokens: cached,
+    cacheWriteInputTokens: 0,
+    outputTokens: count(u?.candidatesTokenCount) + thoughts,
+  };
+  return typeof u?.thoughtsTokenCount === 'number' ? { ...base, reasoningTokens: thoughts } : base;
+}
+
 /** All-zero usage. */
 export const ZERO_USAGE: NormalizedUsage = Object.freeze({
   uncachedInputTokens: 0,

@@ -9,6 +9,7 @@ export const LIVE = process.env['RELAY_LIVE_TESTS'] === '1';
 const KEY_ENV: Partial<Record<ProviderId, string>> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  gemini: 'GEMINI_API_KEY',
 };
 
 /** The provider key from the test env, or `undefined` (the test is then skipped with a printed notice). */

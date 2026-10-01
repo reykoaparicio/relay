@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"Partial"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":1000,"totalTokenCount":1100,"thoughtsTokenCount":100},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_maxtok_01"}
+
+data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0,"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":20,"thoughtsTokenCount":100,"totalTokenCount":1120},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_maxtok_01"}
+

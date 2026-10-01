@@ -67,6 +67,26 @@ describe('loadCatalogEntries', () => {
     expect(cheapestCatalogModel('openai')?.modelId).toBe('gpt-6.1-sol');
   });
 
+  it('carries the D10 Gemini model from the official pricing page (standard tier, no prompt-length tiers)', () => {
+    const e = findCatalogEntry('gemini', 'gemini-3.5-flash');
+
+    expect(e?.source).toBe('https://ai.google.dev/gemini-api/docs/pricing');
+    expect(e?.sourceRetrievedAt).toBe('2026-09-30');
+    expect(e?.effectiveDate).toBe('2026-05-19');
+    // $1.50 input, $9.00 output (thinking billed as output), $0.15 context caching; no per-token cache-write charge.
+    expect(e?.prices).toEqual({ input: 1_500_000, output: 9_000_000, cacheRead: 150_000, cacheWrite: 1_500_000 });
+    expect(e?.capabilities).toMatchObject({
+      structuredOutput: true,
+      streaming: true,
+      maxInputTokens: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsRequestLookup: false,
+      supportsTokenCounting: true,
+      effortLevels: ['low', 'medium', 'high'],
+      thinkingAlwaysOn: true,
+    });
+  });
+
   it('prices cache writes at 1.25× input for every Anthropic entry', () => {
     for (const e of loadCatalogEntries().filter((x) => x.providerId === 'anthropic')) {
       expect(e.prices.cacheWrite * 4).toBe(e.prices.input * 5);
@@ -76,7 +96,7 @@ describe('loadCatalogEntries', () => {
   it('finds the newest version and the cheapest model of a provider', () => {
     expect(latestCatalogVersion()).toBe('2026-09-25');
     expect(cheapestCatalogModel('anthropic')?.modelId).toBe('claude-haiku-4-5');
-    expect(cheapestCatalogModel('gemini')).toBeUndefined();
+    expect(cheapestCatalogModel('gemini')?.modelId).toBe('gemini-3.5-flash');
   });
 });
 

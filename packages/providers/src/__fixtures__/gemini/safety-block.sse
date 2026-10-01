@@ -1,0 +1,2 @@
+data: {"candidates":[{"index":0,"finishReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","probability":"HIGH","blocked":true}]}],"usageMetadata":{"promptTokenCount":800,"candidatesTokenCount":0,"thoughtsTokenCount":40,"totalTokenCount":840},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_safety_01"}
+

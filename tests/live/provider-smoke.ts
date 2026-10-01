@@ -97,7 +97,12 @@ export function defineProviderSmoke(providerId: ProviderId, makeAdapter: () => P
       if (r.kind !== 'success') return;
       expect(earlyIds?.providerResponseId).toBeTruthy();
       expect(r.providerResponseId).toBe(earlyIds?.providerResponseId);
-      expect(r.providerRequestId).toMatch(/^req_/); // from the request-id / x-request-id header
+      if (providerId === 'gemini') {
+        // The Gemini API sends no request-id header; the responseId (asserted above) is its only id.
+        if (r.providerRequestId !== undefined) expect(r.providerRequestId).not.toBe('');
+      } else {
+        expect(r.providerRequestId).toMatch(/^req_/); // from the request-id / x-request-id header
+      }
       expect(r.json).toBeTypeOf('object');
       assertUsageSane(r.usage);
       expect(r.usage.uncachedInputTokens + r.usage.cacheReadInputTokens + r.usage.cacheWriteInputTokens).toBeGreaterThan(0);

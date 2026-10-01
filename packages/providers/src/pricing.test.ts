@@ -1,8 +1,9 @@
 import fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { catalogFileSchema, mulDivCeil } from '@relay/contracts';
 import type { ModelPrices } from '@relay/contracts';
 import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
+import * as catalogModule from './catalog.js';
 import { findCatalogEntry, maxProviderPrices } from './catalog.js';
 import { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, computeIterationsCost, upperBound } from './pricing.js';
 import type { NormalizedUsage } from './types.js';
@@ -126,7 +127,14 @@ describe('computeIterationsCost', () => {
     expect(cost.microusd).toBe(computeCost(iterations[0]!.usage, haiku).microusd + computeCost(iterations[1]!.usage, max).microusd);
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('uses the known iteration prices when the provider has no catalog entries at all, and throws with no price', () => {
+    // Every provider now has catalog entries (gemini since D10), so simulate a provider without any.
+    const all = catalogModule.loadCatalogEntries();
+    vi.spyOn(catalogModule, 'loadCatalogEntries').mockReturnValue(all.filter((e) => e.providerId !== 'gemini'));
     const iterations = [
       { modelId: 'known', usage: usage({ outputTokens: 1 }) },
       { modelId: 'unknown', usage: usage({ outputTokens: 1 }) },

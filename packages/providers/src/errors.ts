@@ -89,7 +89,8 @@ export function parseRetryAfterMs(headers: Headers | undefined, clock: Clock): n
 /** HTTP 502 Bad Gateway / 504 Gateway Timeout: the outcome at the provider is unknown (row 11a). */
 const GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 504]);
 
-const PROMPT_TOO_LONG = /prompt is too long|too many (input )?tokens|context (length|window)|maximum context/i;
+// Gemini: "The input token count (N) exceeds the maximum number of tokens allowed (M)."
+const PROMPT_TOO_LONG = /prompt is too long|too many (input )?tokens|context (length|window)|maximum context|input token count.*exceeds/i;
 
 interface Mapped {
   readonly code: ErrorCode;

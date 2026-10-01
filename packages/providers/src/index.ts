@@ -31,10 +31,11 @@ export {
 export { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, computeIterationsCost, upperBound } from './pricing.js';
 export type { CalculatedCost, IterationsCost } from './pricing.js';
 export { LOCAL_REQUEST_OVERHEAD_TOKENS, conservativeInputTokens, localTokenEstimate } from './estimate.js';
-export { normalizeAnthropicUsage, normalizeOpenAIUsage } from './usage.js';
+export { normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage } from './usage.js';
 export {
   CONNECTION_TEST_MAX_OUTPUT_TOKENS,
   CONNECTION_TEST_SCHEMA,
+  GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS,
   OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS,
   connectionTestMaxOutputTokens,
   connectionTestRequest,
@@ -51,6 +52,8 @@ export {
   supportsRequestLookupFor,
 } from './openai.js';
 export type { OpenAIAdapterOptions } from './openai.js';
+export { createGeminiAdapter, isGeminiPriceTierMismatch, mapGeminiEffort } from './gemini.js';
+export type { GeminiAdapterOptions } from './gemini.js';
 export { assertStrictCompatible, strictSchemaProblems } from './strict-schema.js';
 export { createJsonlCallLog, createMemoryCallLog } from './call-log.js';
 export type { FakeCall, FakeCallLog, FakeLogEntry, FakeReconcileCall } from './call-log.js';

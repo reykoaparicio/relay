@@ -12,9 +12,17 @@ export const CONNECTION_TEST_MAX_OUTPUT_TOKENS = 16;
  */
 export const OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS = 256;
 
+/**
+ * Gemini connection-test output allowance (04 §D10). Gemini 3.x models always think and `maxOutputTokens` caps thinking
+ * plus answer together, so 16 tokens can be spent thinking before `{"ok":true}`; same reasoning as OpenAI.
+ */
+export const GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS = 256;
+
 /** The connection-test output allowance for `providerId` (what `testConnection` sends; use it for N). */
 export function connectionTestMaxOutputTokens(providerId: ProviderId): number {
-  return providerId === 'openai' ? OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS : CONNECTION_TEST_MAX_OUTPUT_TOKENS;
+  if (providerId === 'openai') return OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS;
+  if (providerId === 'gemini') return GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS;
+  return CONNECTION_TEST_MAX_OUTPUT_TOKENS;
 }
 
 /** Step key recorded for connection tests (never a workflow step). */
