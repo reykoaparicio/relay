@@ -111,10 +111,10 @@ describe('SettingsPage (J10 M1 sections)', () => {
     expect(within(section).getByText('dev-fake')).toBeInTheDocument();
   });
 
-  it('unbuilt sections say "coming soon"; unknown sections redirect to providers', async () => {
+  it('section links mark the current section; unknown sections redirect to providers', async () => {
     const { router } = renderApp('/settings/projects', { scenario: 'awaiting-approval' });
-    expect(await screen.findByRole('heading', { level: 2, name: 'Projects' })).toBeInTheDocument();
-    expect(screen.getByText('Coming soon.')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 2, name: 'Example API' })).toBeInTheDocument();
+    expect(screen.queryByText('Coming soon.')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Projects' })).toHaveAttribute('aria-current', 'page');
     await router.navigate('/settings/nope');
     await providersReady();

@@ -36,6 +36,8 @@ export const FAKE_SCENARIOS = [
   'incomplete',
   'incomplete-report',
   'memory-conflict',
+  'memory-stale',
+  'workflow-draft',
   'no-secure-storage',
   'first-launch',
   'backend-stubs',
@@ -89,6 +91,14 @@ const PREFLIGHT_ISSUES = [
   { path: 'profileOverrides.plan', message: 'Planner: no working credential for OpenAI.', code: 'AUTH_REQUIRED' },
   { path: 'profileOverrides.implement', message: 'Implementer: max output exceeds the model limit.', code: 'MODEL_UNSUPPORTED' },
   { path: 'input', message: 'The selected context is too large for the Reviewer profile.', code: 'CONTEXT_TOO_LARGE' },
+];
+
+/** `workflows.validate` issues of the workflow editor `validation-errors` state (spec paths → editor fields). */
+const WORKFLOW_ISSUES = [
+  { path: 'steps[1].profile', message: "Plan: the Balanced profile's model is not in OpenAI's catalog.", code: 'MODEL_UNSUPPORTED' },
+  { path: 'steps[2]', message: 'Approve: an approval step must bind the plan hash before Implement.', code: 'approval_required' },
+  { path: 'steps[3].maxOutputTokens', message: "Implement: 16,000 output tokens exceeds the selected model's supported 8,192.", code: 'output_budget_low' },
+  { path: 'steps[3].profile', message: 'Implement: no credential is stored for Anthropic.', code: 'AUTH_REQUIRED' },
 ];
 
 /** Raw response of the invalid patch output (stored redacted, 05). */
@@ -306,6 +316,10 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
           }),
         }),
       );
+    case 'memory-stale':
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { memoryStale: true });
+    case 'workflow-draft':
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { workflowDraft: true });
     case 'no-secure-storage':
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { secureStorage: false });
     case 'first-launch':
@@ -314,7 +328,14 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       // A fresh install against the M1 runner: these channels still answer INTERNAL `not_implemented`.
       return { runs: [], memory: 'setup-only', fresh: true, notImplemented: BACKEND_STUBS };
     case 'validation-errors':
-      return { runs: [...HISTORY], memory: 'full', preflightIssues: PREFLIGHT_ISSUES };
+      // New run: preflight issues. Workflow editor: a saved draft whose validation fails.
+      return {
+        runs: [...HISTORY],
+        memory: 'full',
+        preflightIssues: PREFLIGHT_ISSUES,
+        workflowDraft: true,
+        workflowIssues: WORKFLOW_ISSUES,
+      };
   }
 }
 

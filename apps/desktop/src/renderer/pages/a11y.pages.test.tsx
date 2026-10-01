@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { axe, describeViolations } from '../components/ui/test-utils';
 import { FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
@@ -25,7 +26,13 @@ const CASES: readonly PageCase[] = [
   { name: 'Runs list', path: `${P}/runs`, scenario: 'awaiting-approval', ready: /Runs in Example API/ },
   { name: 'Runs filtered', path: `${P}/runs?status=attention`, scenario: 'budget-paused', ready: /Runs in Example API/ },
   { name: 'Runs empty', path: `${P}/runs`, scenario: 'empty', ready: 'No runs yet' },
-  { name: 'Memory placeholder', path: `${P}/memory`, scenario: 'completed', ready: 'Coming soon' },
+  { name: 'Memory approved', path: `${P}/memory`, scenario: 'awaiting-approval', ready: 'Revision history' },
+  { name: 'Memory suggestions', path: `${P}/memory?tab=suggested`, scenario: 'awaiting-approval', ready: /Review queue: 2 suggestions/ },
+  { name: 'Memory archived', path: `${P}/memory?tab=archived`, scenario: 'awaiting-approval', ready: /Superseded by/ },
+  { name: 'Memory conflict', path: `${P}/memory`, scenario: 'memory-conflict', ready: 'Two records give incompatible instructions' },
+  { name: 'Memory stale-source', path: `${P}/memory?record=${sid('memory', 4)}`, scenario: 'memory-stale', ready: 'Source changed since approval' },
+  { name: 'Workflow editor editing', path: `${P}/workflows/${sid('workflow', 1)}`, scenario: 'awaiting-approval', ready: 'Ordered steps' },
+  { name: 'Workflow editor draft', path: `${P}/workflows/${sid('workflow', 1)}`, scenario: 'workflow-draft', ready: /Draft revision 1 · based on v3/ },
   { name: 'Onboarding welcome', path: '/onboarding', scenario: 'first-launch', ready: 'Welcome to Relay' },
   { name: 'Onboarding start-point', path: '/onboarding/start-point', scenario: 'first-launch', ready: 'Choose a starting point' },
   { name: 'Onboarding connect-provider', path: '/onboarding/connect-provider', scenario: 'first-launch', ready: 'Where to keep the key' },
@@ -39,7 +46,10 @@ const CASES: readonly PageCase[] = [
   { name: 'Settings no-secure-storage', path: '/settings/providers', scenario: 'no-secure-storage', ready: 'OS credential protection is unavailable' },
   { name: 'Settings auth-failed', path: '/settings/providers', scenario: 'auth-failed', ready: 'OpenAI rejected the stored key' },
   { name: 'Settings diagnostics', path: '/settings/diagnostics', scenario: 'awaiting-approval', ready: 'Runner heartbeat' },
-  { name: 'Settings coming soon', path: '/settings/data', scenario: 'awaiting-approval', ready: 'Coming soon.' },
+  { name: 'Settings profiles', path: '/settings/profiles', scenario: 'awaiting-approval', ready: 'Default max output' },
+  { name: 'Settings projects', path: '/settings/projects', scenario: 'awaiting-approval', ready: 'Store responses at OpenAI' },
+  { name: 'Settings data', path: '/settings/data', scenario: 'awaiting-approval', ready: 'Retention and setup allowance' },
+  { name: 'Settings about', path: '/settings/about', scenario: 'awaiting-approval', ready: /local desktop prototype/ },
 ];
 
 const RUN = (n: number) => `${P}/runs/${sid('run', n)}`;
@@ -97,6 +107,97 @@ describe('page accessibility (axe, J11)', () => {
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.getByRole('main')).toHaveAttribute('id', 'main');
     const results = await axe(container);
+    expect(describeViolations(results)).toEqual([]);
+  });
+});
+
+/** Mock states reached by interaction (memory edit / delete-confirm / conflict, workflow validation-errors / validated). */
+interface InteractiveCase {
+  readonly name: string;
+  readonly path: string;
+  readonly scenario: FakeScenarioName;
+  readonly act: (user: ReturnType<typeof userEvent.setup>) => Promise<void>;
+}
+
+const WF = `${P}/workflows/${sid('workflow', 1)}`;
+
+const INTERACTIVE_CASES: readonly InteractiveCase[] = [
+  {
+    name: 'Memory edit',
+    path: `${P}/memory?record=${sid('memory', 3)}`,
+    scenario: 'awaiting-approval',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Edit' }));
+      await screen.findByText(/Saving creates revision 2/);
+    },
+  },
+  {
+    name: 'Memory delete-confirm',
+    path: `${P}/memory?record=${sid('memory', 3)}`,
+    scenario: 'awaiting-approval',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Delete…' }));
+      await screen.findByRole('dialog');
+    },
+  },
+  {
+    name: 'Memory conflict panel',
+    path: `${P}/memory`,
+    scenario: 'memory-conflict',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Resolve conflict' }));
+      await screen.findByText('Record A');
+    },
+  },
+  {
+    name: 'Memory add rule dialog',
+    path: `${P}/memory`,
+    scenario: 'awaiting-approval',
+    act: async (user) => {
+      await screen.findByText('Revision history');
+      await user.click(screen.getAllByRole('button', { name: 'Add project rule' })[0] as HTMLElement);
+      await screen.findByRole('dialog');
+    },
+  },
+  {
+    name: 'Workflow editor validation-errors',
+    path: WF,
+    scenario: 'validation-errors',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Validate' }));
+      await screen.findByText(/4 problems prevent/);
+    },
+  },
+  {
+    name: 'Workflow editor validated',
+    path: WF,
+    scenario: 'workflow-draft',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Validate' }));
+      await user.click(await screen.findByRole('button', { name: 'Publish as v4' }));
+      await screen.findByText(/v4 validated/);
+    },
+  },
+  {
+    name: 'Settings purge dialog',
+    path: '/settings/data',
+    scenario: 'awaiting-approval',
+    act: async (user) => {
+      await user.click(await screen.findByRole('button', { name: 'Purge project history…' }));
+      await screen.findByRole('dialog');
+    },
+  },
+];
+
+describe('interactive page states (axe, J11)', () => {
+  it.each(INTERACTIVE_CASES)('$name has no axe violations', async ({ path, scenario, act }) => {
+    const user = userEvent.setup();
+    renderApp(path, { scenario });
+    await act(user);
+    await waitFor(() => {
+      expect(screen.queryAllByText(/providers? connected/).length).toBeGreaterThan(0);
+    });
+    const results = await axe(document.body);
     expect(describeViolations(results)).toEqual([]);
   });
 });

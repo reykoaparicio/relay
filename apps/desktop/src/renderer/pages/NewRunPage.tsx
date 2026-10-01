@@ -457,6 +457,15 @@ export function NewRunPage() {
                       <span className="mono">{form.diff.files.join(', ')}</span>
                     </p>
                   )}
+                  {form.diff === null || form.diff.parseWarnings.length === 0 ? null : (
+                    <InlineAlert tone="warning" title="Relay read the file with warnings">
+                      <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
+                        {form.diff.parseWarnings.map((w) => (
+                          <li key={w}>{w}</li>
+                        ))}
+                      </ul>
+                    </InlineAlert>
+                  )}
                   {importDiff.error === null ? null : isNotImplemented(importDiff.error) ? (
                     <NotAvailableNotice error={importDiff.error}>
                       Use Selected files for now.

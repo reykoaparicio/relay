@@ -96,6 +96,34 @@ describe('ReportPage', () => {
     });
   });
 
+  it('export success names where the files were saved; a cancelled save dialog closes quietly', async () => {
+    const { bridge } = open('completed');
+    await ready();
+    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    expect(await screen.findByText('Export saved')).toBeInTheDocument();
+    expect(screen.getByText('~/Downloads/report.md')).toBeInTheDocument();
+    bridge.world.dialogCancels.add('artifacts.export');
+    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(2);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  it('artifacts.export not implemented in this build: says so in the dialog', async () => {
+    const { bridge } = open('completed');
+    await ready();
+    bridge.world.notImplemented.add('artifacts.export');
+    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export failed' });
+    expect(within(dialog).getByText('Not available yet in this build')).toBeInTheDocument();
+  });
+
   it('a patch-less run cannot export a patch', async () => {
     open('cancelled');
     await ready();

@@ -1,0 +1,177 @@
+import { describe, expect, it } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { appError } from '@relay/contracts';
+import { FAKE_PROJECT_ID, FAKE_WORKFLOW_ID } from '../api/fake-bridge';
+import { renderApp } from '../features/testing/render-app';
+
+const PATH = `/p/${FAKE_PROJECT_ID}/workflows/${FAKE_WORKFLOW_ID}`;
+
+async function ready() {
+  await screen.findByRole('heading', { level: 1, name: 'Workflow editor' });
+  return screen.findByRole('list', { name: 'Workflow steps' });
+}
+
+describe('WorkflowEditorPage (J10)', () => {
+  it('editing: ordered steps, structural controls disabled with the explanation, step detail fields', async () => {
+    renderApp(PATH, { scenario: 'awaiting-approval' });
+    const steps = await ready();
+    expect(within(steps).getAllByRole('button')).toHaveLength(5);
+    for (const name of ['Add step', 'Reorder steps', 'Remove step']) {
+      const b = screen.getByRole('button', { name });
+      expect(b).toHaveAttribute('aria-disabled', 'true');
+      expect(b).toHaveAccessibleDescription(/Structural editing arrives in a later release/);
+    }
+    expect(screen.getAllByText(/New edits affect future runs only/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { level: 2, name: 'Step 1: Review' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Model profile' })).toHaveValue('Economy');
+    expect(screen.getByRole('textbox', { name: 'Expected output schema' })).toHaveAttribute('readonly');
+    expect(screen.getByText(/None. Model steps read the selected context/)).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Transport retries' })).toHaveValue(1);
+    expect(screen.getByRole('radio', { name: 'Records for all roles' })).not.toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Only records scoped to Reviewer' })).toBeChecked();
+    expect(screen.getByText('Validated', { selector: '.badge' })).toBeInTheDocument();
+  });
+
+  it('save draft sends only the changed fields with expectedDraftRevision 0 (no draft yet)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const save = screen.getByRole('button', { name: 'Save draft' });
+    expect(save).toBeDisabled();
+    const tokens = screen.getByRole('spinbutton', { name: 'Output token maximum' });
+    await user.clear(tokens);
+    await user.type(tokens, '6000');
+    expect(screen.getByText('Draft, unsaved changes')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Step 4: Implement/ }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Model profile' }), 'Balanced');
+    const allowance = screen.getByRole('textbox', { name: /Run allowance/ });
+    await user.clear(allowance);
+    await user.type(allowance, '4.50');
+    await user.click(save);
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')[0]?.input).toEqual({
+      workflowId: FAKE_WORKFLOW_ID,
+      expectedDraftRevision: 0,
+      patch: {
+        limits: { budgetMicrousd: 4_500_000 },
+        steps: { review: { maxOutputTokens: 6000 }, implement: { profile: 'Balanced' } },
+      },
+    });
+    expect(await screen.findByText('Draft revision 1 saved')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Draft, not validated')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+  });
+
+  it('an existing draft is edited with its draft revision (expectedDraftRevision 1); edited prompts are sent', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'workflow-draft' });
+    await ready();
+    expect(await screen.findByText(/Draft revision 1 · based on v3/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'View and edit prompt' }));
+    const prompt = screen.getByRole('textbox', { name: /Reviewer instructions, reviewer.v1/ });
+    await user.type(prompt, ' Be brief.');
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')[0]?.input).toMatchObject({
+        expectedDraftRevision: 1,
+        patch: { prompts: { 'reviewer.v1': expect.stringMatching(/Be brief\.$/) as unknown } },
+      });
+    });
+  });
+
+  it('client bounds: out-of-range values show an error summary and nothing is saved', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const retries = screen.getByRole('spinbutton', { name: 'Transport retries' });
+    await user.clear(retries);
+    await user.type(retries, '9');
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    const summary = await screen.findByRole('alert');
+    expect(summary).toHaveTextContent('1 problem prevents saving this draft');
+    expect(retries).toHaveAttribute('aria-invalid', 'true');
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(0);
+  });
+
+  it('validation-errors: Validate → error summary; a link selects the step and focuses the field', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'validation-errors' });
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    const summary = await screen.findByRole('alert');
+    expect(summary).toHaveTextContent('4 problems prevent draft revision 1 from starting runs');
+    expect(summary).toHaveTextContent('Version 3 remains the version used by new runs');
+    expect(bridge.callsTo('relay/v1/workflows.validate')[0]?.input).toEqual({ workflowId: FAKE_WORKFLOW_ID, version: 'draft' });
+    expect(screen.getByText('4 validation errors')).toBeInTheDocument();
+    const implement = screen.getByRole('button', { name: /Step 4: Implement/ });
+    expect(implement).toHaveTextContent('2 errors');
+    await user.click(within(summary).getByRole('link', { name: /16,000 output tokens exceeds/ }));
+    expect(await screen.findByRole('heading', { level: 2, name: 'Step 4: Implement' })).toBeInTheDocument();
+    const tokens = screen.getByRole('spinbutton', { name: 'Output token maximum' });
+    await waitFor(() => {
+      expect(tokens).toHaveFocus();
+    });
+    expect(tokens).toHaveAttribute('aria-invalid', 'true');
+    expect(tokens).toHaveAccessibleDescription(/exceeds the selected model's supported 8,192/);
+    await user.click(within(summary).getByRole('link', { name: /an approval step must bind/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Step 3: Approve/ })).toHaveFocus();
+    });
+    expect(screen.getByRole('button', { name: 'Validate again' })).toBeInTheDocument();
+  });
+
+  it('validated: edit → Validate saves then validates → Publish → "v4 validated" with a start-run link', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    const publish = await screen.findByRole('button', { name: 'Publish as v4' });
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')[0]?.input).toMatchObject({ patch: { limits: { maxRevisionCycles: 3 } } });
+    expect(bridge.callsTo('relay/v1/workflows.validate')[0]?.input).toMatchObject({ version: 'draft' });
+    await user.click(publish);
+    expect(await screen.findByText(/v4 validated — new runs will snapshot v4; active runs keep their version\./)).toBeInTheDocument();
+    expect(bridge.callsTo('relay/v1/workflows.publish')[0]?.input).toEqual({
+      workflowId: FAKE_WORKFLOW_ID,
+      idempotencyKey: expect.any(String) as unknown,
+    });
+    expect(screen.getByRole('link', { name: 'Start a run with v4' })).toHaveAttribute('href', `/p/${FAKE_PROJECT_ID}/runs/new`);
+    expect(bridge.world.workflows[0]?.latestValidatedVersion).toBe(4);
+    await waitFor(() => {
+      expect(screen.getByRole('spinbutton', { name: /Revision cycles/ })).toHaveValue(3);
+    });
+  });
+
+  it('a stale draft revision answers CONFLICT and the edits stay in the form', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const tokens = screen.getByRole('spinbutton', { name: 'Output token maximum' });
+    await user.clear(tokens);
+    await user.type(tokens, '7000');
+    bridge.failNext('relay/v1/workflows.saveDraft', appError('CONFLICT'));
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('This item changed')).toBeInTheDocument();
+    expect(tokens).toHaveValue(7000);
+  });
+
+  it('saveDraft not implemented: "Not available yet in this build"', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    bridge.world.notImplemented.add('workflows.saveDraft');
+    const tokens = screen.getByRole('spinbutton', { name: 'Output token maximum' });
+    await user.clear(tokens);
+    await user.type(tokens, '7000');
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
+    expect(screen.getByText(/Your edits are still in the form/)).toBeInTheDocument();
+  });
+});

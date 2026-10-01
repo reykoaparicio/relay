@@ -2,7 +2,9 @@ import type { ReactNode } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 import { PageHeader } from '../components/ui';
 import { AboutSection, DiagnosticsSection } from '../features/settings/DiagnosticsSection';
-import { ComingSoonSection } from '../features/settings/ComingSoonSection';
+import { DataSection } from '../features/settings/DataSection';
+import { ProfilesSection } from '../features/settings/ProfilesSection';
+import { ProjectsSection } from '../features/settings/ProjectsSection';
 import { ProvidersSection } from '../features/settings/ProvidersSection';
 import { paths } from '../features/shell/paths';
 import type { SettingsSection } from '../features/shell/paths';
@@ -28,27 +30,12 @@ const CONTENT: Readonly<Record<SettingsSection, () => ReactNode>> = {
   providers: () => <ProvidersSection />,
   diagnostics: () => <DiagnosticsSection />,
   about: () => <AboutSection />,
-  profiles: () => (
-    <ComingSoonSection
-      title="Model profiles"
-      description="Editing Economy, Balanced and Capable profiles arrives in a later milestone. Until then, pick a profile per step when you start a run; the Providers section shows the capability check of each profile."
-    />
-  ),
-  projects: () => (
-    <ComingSoonSection
-      title="Projects"
-      description="Renaming projects, editing exclusions, allowed providers, the monthly allowance and the OpenAI response-storage option arrive in a later milestone."
-    />
-  ),
-  data: () => (
-    <ComingSoonSection
-      title="Storage & data"
-      description="Backups, project and ledger exports, raw-response retention, the setup allowance and purging project history arrive in a later milestone. Relay does not claim the full database is encrypted."
-    />
-  ),
+  profiles: () => <ProfilesSection />,
+  projects: () => <ProjectsSection />,
+  data: () => <DataSection />,
 };
 
-/** Settings (10 J10, lazy route). M1 sections: Providers (+ Models), Diagnostics, About; the rest say "coming soon". */
+/** Settings (10 J10, lazy route): Providers (+ Models), Model profiles, Projects, Storage & data, Diagnostics, About. */
 export function SettingsPage() {
   const { section } = useParams();
   const current: SettingsSection | null =

@@ -15,6 +15,7 @@ import {
   runEventSchema,
   toValidationIssues,
   workflowSummarySchema,
+  workflowVersionViewSchema,
 } from '@relay/contracts';
 import type {
   OPERATIONS,
@@ -31,12 +32,14 @@ import type {
   RunDetail,
   RunEvent,
   RunStatus,
+  WorkflowDraftPatch,
+  WorkflowVersionView,
 } from '@relay/contracts';
 import type { RelayBridge } from './bridge';
 import { allowedRunActions } from './fake-scenarios/allowed-actions';
 import { buildScenario, DEFAULT_FAKE_SCENARIO, isFakeScenarioName } from './fake-scenarios/scenarios';
 import type { FakeScenarioName } from './fake-scenarios/scenarios';
-import { buildRun, buildWorkflowVersion, costSummary, PROJECT_ID, sid, WORKFLOW_ID } from './fake-scenarios/world';
+import { buildRun, costSummary, PROJECT_ID, sha, sid, WORKFLOW_ID } from './fake-scenarios/world';
 import type { FakeWorld } from './fake-scenarios/world';
 
 export { FAKE_SCENARIOS, DEFAULT_FAKE_SCENARIO, isFakeScenarioName } from './fake-scenarios/scenarios';
@@ -181,6 +184,44 @@ function updateMemory(w: FakeWorld, ctx: HandlerContext, id: string, patch: Part
   return next;
 }
 
+/** The fake engine's `saveDraft`: the P0-editable fields of `patch` applied to `base` as a new draft revision. */
+function applyDraftPatch(base: WorkflowVersionView, patch: WorkflowDraftPatch, draftRevision: number): WorkflowVersionView {
+  const prompts = Object.fromEntries(
+    Object.entries(base.prompts).map(([iv, p]) => [iv, { ...p, text: patch.prompts?.[iv] ?? p.text }]),
+  );
+  const steps = base.spec.steps.map((step) => {
+    const edit = patch.steps?.[step.id];
+    if (step.kind !== 'model' || edit === undefined) return step;
+    return {
+      ...step,
+      ...(edit.profile === undefined ? {} : { profile: edit.profile }),
+      ...(edit.maxOutputTokens === undefined ? {} : { maxOutputTokens: edit.maxOutputTokens }),
+      ...(edit.retryPolicy === undefined ? {} : { retryPolicy: edit.retryPolicy }),
+      ...(edit.memoryScope === undefined ? {} : { memoryScope: edit.memoryScope }),
+    };
+  });
+  return workflowVersionViewSchema.parse({
+    ...base,
+    version: 'draft',
+    status: 'draft',
+    draftRevision,
+    spec: { ...base.spec, limits: { ...base.spec.limits, ...(patch.limits ?? {}) }, steps },
+    prompts,
+    contentHash: sha(`d4af${String(draftRevision)}`),
+  });
+}
+
+/** Minimal exclusion glob (fake only): `**` any path, `*` within a segment; a bare name matches any segment. */
+function globMatches(glob: string, relPath: string): boolean {
+  const g = glob.replace(/\/+$/, '');
+  const source = g
+    .split('**')
+    .map((part) => part.split('*').map((x) => x.replaceAll(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*'))
+    .join('.*');
+  const re = new RegExp(g.includes('/') ? `^${source}(/.*)?$` : `(^|/)${source}(/.*)?$`);
+  return re.test(relPath);
+}
+
 function page<T>(items: readonly T[], limit: number, cursor: string | undefined) {
   const start = cursor === undefined ? 0 : Number(cursor);
   const slice = items.slice(start, start + limit);
@@ -217,7 +258,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     createdAt: ctx.now(),
     sizeBytes: w.diagnostics.db.sizeBytes,
   }),
-  'app.exportDiagnostics': () => ({ exported: true, displayPath: '~/Downloads/relay-diagnostics.zip' }),
+  'app.exportDiagnostics': (w) =>
+    w.dialogCancels.has('app.exportDiagnostics') ? { exported: false } : { exported: true, displayPath: '~/Downloads/relay-diagnostics.zip' },
   'app.openExternal': () => ({ opened: true }),
   'app.getSettings': (w) => w.settings,
   'app.updateSettings': (w, patch) => {
@@ -230,7 +272,20 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'projects.pickDirectory': (_w, _i, ctx) => ({
     selection: { selectionId: ctx.newId('selection'), displayPath: '~/code/my-api', expiresAt: ctx.now() + 10 * 60_000 },
   }),
-  'projects.previewFiles': (w) => w.preview,
+  'projects.previewFiles': (w, input) => {
+    // Like the runner: a project's saved exclusions plus `extraExclusions` move matching files to excluded.
+    const saved = 'projectId' in input ? (w.projects.find((p) => p.id === input.projectId)?.exclusions ?? []) : [];
+    const patterns = [...saved, ...(input.extraExclusions ?? [])].filter((g) => g.trim() !== '');
+    if (patterns.length === 0) return w.preview;
+    const hit = (relPath: string) => patterns.some((g) => globMatches(g.trim(), relPath));
+    const included = w.preview.included.filter((f) => !hit(f.relPath));
+    const moved = w.preview.included.filter((f) => hit(f.relPath)).map((f) => ({ relPath: f.relPath, reason: 'user_pattern' as const }));
+    return {
+      included,
+      excluded: [...w.preview.excluded, ...moved],
+      totals: { ...w.preview.totals, files: included.length, bytes: included.reduce((sum, f) => sum + f.sizeBytes, 0) },
+    };
+  },
   'projects.create': (w, input, ctx) => {
     const project = projectSchema.parse({
       id: ctx.newId('project'),
@@ -275,6 +330,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   },
   'projects.export': (w, input) => {
     const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
+    if (w.dialogCancels.has('projects.export')) return { exported: false };
     return { exported: true, displayPath: `~/Downloads/${project.name.toLowerCase().replaceAll(/\s+/g, '-')}.relay.json` };
   },
   'projects.createSample': (w, _i, ctx) => {
@@ -393,20 +449,33 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const summary = w.workflows.find((x) => x.id === input.workflowId) ?? fail(errors.notFound('workflow'));
     const draft = w.workflowVersions.find((v) => v.version === 'draft');
     if ((draft?.draftRevision ?? 0) !== input.expectedDraftRevision) fail(errors.conflict({ entity: 'workflow draft' }));
-    const next = buildWorkflowVersion('draft', (draft?.draftRevision ?? 0) + 1);
+    const base = draft ?? w.workflowVersions.find((v) => v.version === summary.latestValidatedVersion) ?? fail(errors.notFound('workflow version'));
+    const next = applyDraftPatch(base, input.patch, (draft?.draftRevision ?? 0) + 1);
     w.workflowVersions = [...w.workflowVersions.filter((v) => v.version !== 'draft'), next];
+    // A saved edit is a new draft: the engine re-validates it, so earlier validation issues no longer apply.
+    w.workflowIssues = [];
     w.workflows = w.workflows.map((x) => (x.id === summary.id ? workflowSummarySchema.parse({ ...x, draftVersion: (summary.latestValidatedVersion ?? 0) + 1 }) : x));
     return next;
   },
   'workflows.validate': (w, input) => {
     if (!w.workflows.some((x) => x.id === input.workflowId)) fail(errors.notFound('workflow'));
-    return { valid: true, issues: [], warnings: [] };
+    if (input.version !== 'draft') return { valid: true, issues: [], warnings: [] };
+    if (!w.workflowVersions.some((v) => v.version === 'draft')) fail(errors.notFound('workflow draft'));
+    return { valid: w.workflowIssues.length === 0, issues: w.workflowIssues, warnings: [] };
   },
   'workflows.publish': (w, input) => {
     const summary = w.workflows.find((x) => x.id === input.workflowId) ?? fail(errors.notFound('workflow'));
     const draft = w.workflowVersions.find((v) => v.version === 'draft') ?? fail(errors.validationFailed([{ path: '', message: 'no draft to publish', code: 'custom' }]));
+    if (w.workflowIssues.length > 0) fail(errors.validationFailed(w.workflowIssues));
     const version = (summary.latestValidatedVersion ?? 0) + 1;
-    const published = buildWorkflowVersion(version, null);
+    const published = workflowVersionViewSchema.parse({
+      ...draft,
+      version,
+      status: 'validated',
+      draftRevision: null,
+      spec: { ...draft.spec, version },
+      contentHash: sha(`c0de${String(version)}`),
+    });
     w.workflowVersions = [...w.workflowVersions.filter((v) => v !== draft), published];
     w.workflows = w.workflows.map((x) => (x.id === summary.id ? workflowSummarySchema.parse({ ...x, latestValidatedVersion: version, draftVersion: null }) : x));
     return published;
@@ -637,7 +706,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
       ...(input.content === undefined ? {} : { content: input.content }),
       ...(input.scope === undefined ? {} : { scope: input.scope }),
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
-      ...(input.reviewAt === undefined ? {} : { reviewAt: input.reviewAt }),
+      // Recording a review ("Confirm still accurate") also re-tracks the cited source hash: no longer stale.
+      ...(input.reviewAt === undefined ? {} : { reviewAt: input.reviewAt, stale: false }),
       ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
       ...(input.unarchive === true ? { status: 'approved' as const } : {}),
     };
@@ -674,21 +744,63 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     return { deleted: true as const, retainedInRunSnapshots: current.usedByRuns };
   },
   'memory.resolveConflict': (w, input, ctx) => {
+    // 02 rules (07 G5): at most one suggestion; the service never auto-merges.
     const [a, b] = input.recordIds.map((id) => findMemory(w, id)) as [MemoryRecordDetail, MemoryRecordDetail];
+    if (a.status === 'suggested' && b.status === 'suggested') {
+      fail(errors.validationFailed([{ path: 'recordIds', message: 'at most one record may be a suggestion', code: 'custom' }]));
+    }
+    if ([a, b].some((m) => m.status !== 'suggested' && m.status !== 'approved')) fail(errors.conflict({ entity: 'memory' }));
+    /** Takes one input record out of use: a suggestion is rejected, an approved record is archived as superseded. */
+    const retire = (m: MemoryRecordDetail, by: MemoryRecordDetail['id']) =>
+      m.status === 'suggested'
+        ? updateMemory(w, ctx, m.id, { status: 'rejected', conflictsWith: [] }, 'rejected')
+        : updateMemory(w, ctx, m.id, { status: 'archived', supersededById: by, conflictsWith: [] }, 'conflict_resolved');
     const r = input.resolution;
     if ('keep' in r) {
       const drop = r.keep === a.id ? b : a;
-      updateMemory(w, ctx, drop.id, { status: 'archived', supersededById: r.keep, conflictsWith: [] }, 'conflict_resolved');
       updateMemory(w, ctx, r.keep, { status: 'approved', conflictsWith: [] }, 'conflict_resolved');
-    } else if ('rewrite' in r) {
-      const target = a.status === 'approved' ? a : b;
-      const other = target === a ? b : a;
-      updateMemory(w, ctx, target.id, { title: r.rewrite.title, content: r.rewrite.content, scope: r.rewrite.scope, conflictsWith: [] }, 'conflict_resolved');
-      updateMemory(w, ctx, other.id, { status: 'archived', supersededById: target.id, conflictsWith: [] }, 'conflict_resolved');
-    } else {
-      for (const entry of r.keepBothWithScopes) {
-        updateMemory(w, ctx, entry.recordId, { status: 'approved', scope: entry.scope, conflictsWith: [] }, 'conflict_resolved');
-      }
+      retire(drop, r.keep);
+      return input.recordIds.map((id) => toView(w.memory.find((m) => m.id === id) ?? findMemory(w, id)));
+    }
+    if ('rewrite' in r) {
+      const at = ctx.now();
+      const created = memoryRecordDetailSchema.parse({
+        id: ctx.newId('memory'),
+        projectId: a.projectId,
+        type: (a.status === 'approved' ? a : b).type,
+        status: 'approved',
+        title: r.rewrite.title,
+        excerpt: r.rewrite.content.slice(0, 140),
+        scope: r.rewrite.scope,
+        pinned: r.rewrite.pinned ?? false,
+        currentRevision: 1,
+        source: { kind: 'user' },
+        createdAt: at,
+        updatedAt: at,
+        expiresAt: null,
+        reviewAt: null,
+        supersededById: null,
+        stale: false,
+        conflictsWith: [],
+        content: r.rewrite.content,
+        revisions: [{ revision: 1, title: r.rewrite.title, content: r.rewrite.content, author: 'user', createdAt: at, sourceRefs: [] }],
+        events: [{ event: 'conflict_resolved', revision: 1, actor: 'user', createdAt: at }],
+        usedByRuns: 0,
+      });
+      w.memory = [...w.memory, created];
+      retire(a, created.id);
+      retire(b, created.id);
+      return [toView(created), ...input.recordIds.map((id) => toView(w.memory.find((m) => m.id === id) ?? findMemory(w, id)))];
+    }
+    const [x, y] = r.keepBothWithScopes;
+    const roles = (s: typeof x.scope) => (s.roles === 'all' ? null : new Set(s.roles));
+    const rx = roles(x.scope);
+    const ry = roles(y.scope);
+    if (rx === null || ry === null || [...rx].some((role) => ry.has(role))) {
+      fail(errors.validationFailed([{ path: 'resolution.keepBothWithScopes', message: 'the two scopes must not share a role', code: 'custom' }]));
+    }
+    for (const entry of r.keepBothWithScopes) {
+      updateMemory(w, ctx, entry.recordId, { status: 'approved', scope: entry.scope, conflictsWith: [] }, 'conflict_resolved');
     }
     return input.recordIds.map((id) => toView(findMemory(w, id)));
   },
@@ -699,14 +811,18 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
 
   // ---------- artifacts ----------
   'artifacts.get': (w, input) => w.artifacts.get(input.artifactId) ?? fail(errors.notFound('artifact')),
-  'artifacts.importDiff': (_w, _i, ctx) => ({
-    artifactId: ctx.newId('artifact'),
-    files: ['src/routes/users.ts', 'src/validation/schemas.ts'],
-    parseWarnings: [],
-  }),
+  'artifacts.importDiff': (w, _i, ctx) =>
+    w.dialogCancels.has('artifacts.importDiff')
+      ? null
+      : {
+          artifactId: ctx.newId('artifact'),
+          files: ['src/routes/users.ts', 'src/validation/schemas.ts'],
+          parseWarnings: [...w.importDiffWarnings],
+        },
   'artifacts.export': (w, input) => {
     findRun(w, input.runId);
     if (w.exportFails) fail(errors.artifactWriteFailed());
+    if (w.dialogCancels.has('artifacts.export')) return { exported: false, displayPaths: [] };
     const names = input.what === 'both' ? ['report.md', 'patch.diff'] : [input.what === 'report' ? 'report.md' : 'patch.diff'];
     return { exported: true, displayPaths: names.map((n) => `~/Downloads/${n}`) };
   },
@@ -735,6 +851,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'ledger.entries': (w, input) => page(w.ledger.get(input.runId) ?? [], input.limit, input.cursor),
   'ledger.export': (w, input) => {
     if ('runId' in input) findRun(w, input.runId);
+    if (w.dialogCancels.has('ledger.export')) return { exported: false };
     return { exported: true, displayPath: '~/Downloads/relay-ledger.csv' };
   },
 };

@@ -200,7 +200,7 @@ describe('NewRunPage (J7)', () => {
       expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
     });
     const started = { ...(bridge.callsTo('relay/v1/runs.start')[0]?.input as Record<string, unknown>) };
-    expect(started['idempotencyKey']).toEqual(expect.any(String));
+    expect(started['idempotencyKey']).toEqual(expect.any(String) as unknown);
     delete started['idempotencyKey'];
     expect(started['profileOverrides']).toEqual({ plan: PROFILES.economy.id });
     expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toEqual(started);
@@ -252,6 +252,36 @@ describe('NewRunPage (J7)', () => {
       expect(router.state.location.pathname).toBe('/settings/diagnostics');
     });
     expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+  });
+
+  it('diff import: a cancelled dialog changes nothing; parse warnings show; runs.start sends the imported diff', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review this change');
+    await user.click(screen.getByRole('radio', { name: /Import a \.diff\/\.patch file/ }));
+    bridge.world.dialogCancels.add('artifacts.importDiff');
+    await user.click(screen.getByRole('button', { name: 'Import a .diff/.patch file…' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.importDiff')).toHaveLength(1);
+    });
+    expect(screen.queryByText(/Imported diff touching/)).not.toBeInTheDocument();
+    expect(bridge.callsTo('relay/v1/artifacts.importDiff')[0]?.input).toEqual({ projectId: FAKE_PROJECT_ID });
+
+    bridge.world.dialogCancels.delete('artifacts.importDiff');
+    bridge.world.importDiffWarnings = ['Hunk 3 of src/routes/users.ts has no trailing newline.'];
+    await user.click(screen.getByRole('button', { name: 'Import a .diff/.patch file…' }));
+    expect(await screen.findByText(/Imported diff touching 2 files/)).toBeInTheDocument();
+    expect(screen.getByText('Relay read the file with warnings')).toBeInTheDocument();
+    expect(screen.getByText('Hunk 3 of src/routes/users.ts has no trailing newline.')).toBeInTheDocument();
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toMatch(/\/runs\/run_\w+$/);
+    });
+    expect(bridge.callsTo('relay/v1/runs.start')[0]?.input).toMatchObject({
+      input: { kind: 'diff', diffArtifactId: expect.stringMatching(/^art_/) as unknown },
+    });
   });
 
   it('B9: in diff mode an input problem links to the diff import button, which shows the error', async () => {

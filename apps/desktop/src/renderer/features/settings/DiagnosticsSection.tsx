@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { Link } from 'react-router';
 import { CircleCheck, Loader, TriangleAlert, CircleX } from 'lucide-react';
 import type { RunnerState } from '@relay/contracts';
 import { ErrorView, KeyValueList, RelativeTime, Skeleton } from '../../components/ui';
@@ -8,6 +9,7 @@ import { useAppInfo } from '../../hooks/useAppInfo';
 import { useDiagnostics } from '../../hooks/useDiagnostics';
 import { NOW_IDLE_INTERVAL_MS, useNow } from '../../hooks/useNow';
 import { formatBytes } from '../run-setup/PreviewPanel';
+import { paths } from '../shell/paths';
 
 const RUNNER: Readonly<Record<RunnerState, { label: string; tone: string; icon: typeof CircleCheck }>> = {
   ready: { label: 'Healthy', tone: 'success', icon: CircleCheck },
@@ -120,7 +122,8 @@ export function DiagnosticsSection() {
         <KeyValueList items={items} />
         <p className="small muted">
           Diagnostics exports include versions, migration state, error codes and attempt ids. They exclude API
-          keys, prompts, file contents and memory text. Export and backup arrive in a later milestone.
+          keys, prompts, file contents and memory text. Export diagnostics and create backups in{' '}
+          <Link to={paths.settings('data')}>Storage &amp; data</Link>.
         </p>
       </>
     );

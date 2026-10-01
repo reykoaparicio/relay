@@ -142,6 +142,62 @@ describe('fake bridge', () => {
     expect(c.ok).toBe(true);
   });
 
+  it('memory.resolveConflict follows the 02 rules: rewrite creates a record, a suggestion input is rejected, two suggestions fail', async () => {
+    const bridge = createFakeBridge('memory-conflict');
+    const m = (n: number) => `mem_${String(n).padStart(26, '0')}`;
+    const twoSuggestions = await bridge.invoke('relay/v1/memory.resolveConflict', {
+      idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZA',
+      recordIds: [m(9), m(10)],
+      resolution: { keep: m(9) },
+    });
+    expect(twoSuggestions.ok ? null : twoSuggestions.error.code).toBe('VALIDATION_FAILED');
+    const res = await bridge.invoke('relay/v1/memory.resolveConflict', {
+      idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZB',
+      recordIds: [m(10), m(2)],
+      resolution: { rewrite: { title: 'Validation', content: 'Use zod.', scope: { roles: 'all' } } },
+    });
+    expect(res.ok).toBe(true);
+    const created = res.ok ? res.data[0] : undefined;
+    expect(created?.status).toBe('approved');
+    expect(bridge.world.memory.find((r) => r.id === m(10))?.status).toBe('rejected');
+    const archived = bridge.world.memory.find((r) => r.id === m(2));
+    expect(archived?.status).toBe('archived');
+    expect(archived?.supersededById).toBe(created?.id);
+  });
+
+  it('workflows.saveDraft applies the patch to a new draft revision and validate/publish follow the draft issues', async () => {
+    const bridge = createFakeBridge('validation-errors');
+    const invalid = await bridge.invoke('relay/v1/workflows.validate', { workflowId: FAKE_WORKFLOW_ID, version: 'draft' });
+    expect(invalid.ok && invalid.data.valid).toBe(false);
+    const blocked = await bridge.invoke('relay/v1/workflows.publish', { idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZC', workflowId: FAKE_WORKFLOW_ID });
+    expect(blocked.ok ? null : blocked.error.code).toBe('VALIDATION_FAILED');
+    const stale = await bridge.invoke('relay/v1/workflows.saveDraft', { workflowId: FAKE_WORKFLOW_ID, expectedDraftRevision: 0, patch: {} });
+    expect(stale.ok ? null : stale.error.code).toBe('CONFLICT');
+    const saved = await bridge.invoke('relay/v1/workflows.saveDraft', {
+      workflowId: FAKE_WORKFLOW_ID,
+      expectedDraftRevision: 1,
+      patch: { limits: { maxAttempts: 12 }, steps: { implement: { maxOutputTokens: 8000 } } },
+    });
+    expect(saved.ok ? saved.data.draftRevision : null).toBe(2);
+    const step = saved.ok ? saved.data.spec.steps.find((x) => x.id === 'implement') : undefined;
+    expect(step?.kind === 'model' ? step.maxOutputTokens : null).toBe(8000);
+    expect(saved.ok ? saved.data.spec.limits.maxAttempts : null).toBe(12);
+    const valid = await bridge.invoke('relay/v1/workflows.validate', { workflowId: FAKE_WORKFLOW_ID, version: 'draft' });
+    expect(valid.ok && valid.data.valid).toBe(true);
+    const published = await bridge.invoke('relay/v1/workflows.publish', { idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZD', workflowId: FAKE_WORKFLOW_ID });
+    expect(published.ok ? published.data.version : null).toBe(4);
+  });
+
+  it('projects.previewFiles applies saved and extra exclusions as user_pattern', async () => {
+    const bridge = createFakeBridge('awaiting-approval');
+    const res = await bridge.invoke('relay/v1/projects.previewFiles', { projectId: PROJECT, extraExclusions: ['tests/**', '*.md'] });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const user = res.data.excluded.filter((e) => e.reason === 'user_pattern').map((e) => e.relPath);
+    expect(user.sort()).toEqual(['README.md', 'tests/users.test.ts']);
+    expect(res.data.included.some((f) => f.relPath === 'README.md')).toBe(false);
+  });
+
   it('reads the scenario from ?fake= in the search or the hash query', () => {
     expect(fakeScenarioFromUrl({ search: '?fake=interrupted', hash: '' })).toBe('interrupted');
     expect(fakeScenarioFromUrl({ search: '', hash: '#/p/x?fake=empty' })).toBe('empty');

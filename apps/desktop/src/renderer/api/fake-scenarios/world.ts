@@ -87,6 +87,8 @@ export interface FakeWorld {
   catalog: CatalogModel[];
   workflows: WorkflowSummary[];
   workflowVersions: WorkflowVersionView[];
+  /** `workflows.validate` issues of the draft; a saved draft clears them; `workflows.publish` fails while non-empty. */
+  workflowIssues: ValidationIssue[];
   /** Newest first. */
   runs: RunDetail[];
   steps: Map<string, StepDetail>;
@@ -103,6 +105,10 @@ export interface FakeWorld {
   notImplemented: Set<string>;
   /** `artifacts.export` fails with ARTIFACT_WRITE_FAILED (report `export-failed`). */
   exportFails: boolean;
+  /** Operation keys whose native open/save dialog the user cancels (`importDiff` → null, exports → `exported: false`). */
+  dialogCancels: Set<string>;
+  /** Parse warnings `artifacts.importDiff` reports for the imported file. */
+  importDiffWarnings: string[];
   /** Providers whose `providers.test` fails with AUTH_REQUIRED. */
   authFailing: Set<string>;
   /** idempotencyKey → first result (02 §B0: a replay returns the first result). */
@@ -285,7 +291,16 @@ function buildPreview(): PreviewResult {
 // ---------------------------------------------------------------------------------------------------------------
 // Memory
 
-export function buildMemory(now: number, count: 'setup-only' | 'full', conflict: boolean): MemoryRecordDetail[] {
+/** Memory variants of a scenario (Memory page mock states, 10 J5). */
+export interface MemoryOptions {
+  /** `conflict`: suggestion 10 conflicts with approved record 2 (memory `conflict` state). */
+  readonly conflict?: boolean;
+  /** `stale`: approved record 4 cites a source file that changed since approval, and its review date is due. */
+  readonly stale?: boolean;
+}
+
+export function buildMemory(now: number, count: 'setup-only' | 'full', o: MemoryOptions = {}): MemoryRecordDetail[] {
+  const conflict = o.conflict ?? false;
   const approved = [
     ['Preserve the existing public response format', 'Responses keep the `{ data, error }` envelope. Do not rename fields.', 'user_rule', true],
     ['Validate request bodies with zod', 'All route handlers parse bodies with the shared zod schemas in src/validation.', 'project_decision', false],
@@ -306,6 +321,9 @@ export function buildMemory(now: number, count: 'setup-only' | 'full', conflict:
       pinned,
       status: 'approved',
       conflictsWith: conflict && i === 1 ? [sid('memory', 10)] : [],
+      ...(o.stale === true && i === 3
+        ? { stale: true, sourceFile: 'src/routes/users.ts', reviewAt: now - DAY, previousContent: 'Route handlers delegate to services.' }
+        : {}),
     }),
   );
   if (count === 'full') {
@@ -328,6 +346,16 @@ export function buildMemory(now: number, count: 'setup-only' | 'full', conflict:
         status: 'suggested',
         conflictsWith: conflict ? [sid('memory', 2)] : [],
       }),
+      memoryRecord(now, {
+        n: 11,
+        title: 'Validate with express-validator',
+        content: 'Route handlers validate bodies with express-validator chains.',
+        type: 'project_decision',
+        pinned: false,
+        status: 'archived',
+        conflictsWith: [],
+        supersededById: sid('memory', 2),
+      }),
     );
   }
   return records;
@@ -339,14 +367,30 @@ interface MemorySpec {
   readonly content: string;
   readonly type: 'user_rule' | 'project_decision';
   readonly pinned: boolean;
-  readonly status: 'approved' | 'suggested';
+  readonly status: 'approved' | 'suggested' | 'archived';
   readonly conflictsWith: readonly string[];
+  readonly supersededById?: string;
+  readonly stale?: boolean;
+  /** A `source_refs` file (with the hash recorded at approval). */
+  readonly sourceFile?: string;
+  readonly reviewAt?: number;
+  /** When set, the record has two revisions: this text (rev 1) and `content` (rev 2). */
+  readonly previousContent?: string;
 }
 
 function memoryRecord(now: number, m: MemorySpec): MemoryRecordDetail {
   const createdAt = now - (20 - m.n) * DAY;
   const fromRun = m.status === 'suggested';
   const author = fromRun ? `run:${sid('run', 23)}` : 'user';
+  const sourceRefs = m.sourceFile === undefined ? [] : [{ kind: 'file' as const, relPath: m.sourceFile, sha256: sha('a19f') }];
+  const revisions =
+    m.previousContent === undefined
+      ? [{ revision: 1, title: m.title, content: m.content, author, createdAt, sourceRefs }]
+      : [
+          { revision: 1, title: m.title, content: m.previousContent, author, createdAt, sourceRefs },
+          { revision: 2, title: m.title, content: m.content, author: 'user', createdAt: createdAt + DAY, sourceRefs },
+        ];
+  const updatedAt = revisions.at(-1)?.createdAt ?? createdAt;
   return memoryRecordDetailSchema.parse({
     id: sid('memory', m.n),
     projectId: PROJECT_ID,
@@ -356,18 +400,22 @@ function memoryRecord(now: number, m: MemorySpec): MemoryRecordDetail {
     excerpt: m.content.slice(0, 140),
     scope: { roles: 'all' },
     pinned: m.pinned,
-    currentRevision: 1,
-    source: fromRun ? { kind: 'run', runId: sid('run', 23) } : { kind: 'user' },
+    currentRevision: revisions.length,
+    source: fromRun ? { kind: 'run', runId: sid('run', 23) } : m.sourceFile === undefined ? { kind: 'user' } : { kind: 'file', relPath: m.sourceFile },
     createdAt,
-    updatedAt: createdAt,
+    updatedAt,
     expiresAt: null,
-    reviewAt: null,
-    supersededById: null,
-    stale: false,
+    reviewAt: m.reviewAt ?? null,
+    supersededById: m.supersededById ?? null,
+    stale: m.stale ?? false,
     conflictsWith: [...m.conflictsWith],
     content: m.content,
-    revisions: [{ revision: 1, title: m.title, content: m.content, author, createdAt, sourceRefs: [] }],
-    events: [{ event: fromRun ? 'suggested' : 'approved', revision: 1, actor: author, createdAt }],
+    revisions,
+    events: [
+      { event: fromRun ? 'suggested' : 'approved', revision: 1, actor: author, createdAt },
+      ...(revisions.length > 1 ? [{ event: 'edited' as const, revision: 2, actor: 'user', createdAt: updatedAt }] : []),
+      ...(m.status === 'archived' ? [{ event: 'conflict_resolved' as const, revision: 1, actor: 'user', createdAt: createdAt + DAY }] : []),
+    ],
     usedByRuns: fromRun ? 0 : 3,
     ...(fromRun
       ? {
@@ -868,6 +916,12 @@ export interface WorldOptions {
   readonly runs: readonly RunSpec[];
   readonly memory: 'setup-only' | 'full';
   readonly memoryConflict?: boolean;
+  /** Memory `stale-source` state (approved record 4 cites a changed file; its review date is due). */
+  readonly memoryStale?: boolean;
+  /** A saved workflow draft exists (workflow editor `editing`). */
+  readonly workflowDraft?: boolean;
+  /** `workflows.validate` issues of the draft (workflow editor `validation-errors`). */
+  readonly workflowIssues?: readonly ValidationIssue[];
   /** Providers whose last connection test failed with AUTH_REQUIRED. */
   readonly authFailed?: readonly ('anthropic' | 'openai')[];
   readonly secureStorage?: boolean;
@@ -954,20 +1008,31 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     profiles: buildProfiles(now),
     catalog: buildCatalog(),
     workflows: [
-      workflowSummarySchema.parse({ id: WORKFLOW_ID, name: WORKFLOW_NAME, latestValidatedVersion: WORKFLOW_VERSION, draftVersion: null }),
+      workflowSummarySchema.parse({
+        id: WORKFLOW_ID,
+        name: WORKFLOW_NAME,
+        latestValidatedVersion: WORKFLOW_VERSION,
+        draftVersion: o.workflowDraft === true ? WORKFLOW_VERSION + 1 : null,
+      }),
     ],
-    workflowVersions: [buildWorkflowVersion(WORKFLOW_VERSION, null)],
+    workflowVersions: [
+      buildWorkflowVersion(WORKFLOW_VERSION, null),
+      ...(o.workflowDraft === true ? [buildWorkflowVersion('draft', 1)] : []),
+    ],
+    workflowIssues: [...(o.workflowIssues ?? [])],
     runs: built.map((b) => b.run).sort((a, b) => b.createdAt - a.createdAt),
     steps: new Map(built.flatMap((b) => b.steps.map((s) => [s.step.id as string, s] as const))),
     events: new Map(built.map((b) => [b.run.id as string, b.events])),
     ledger: new Map(built.map((b) => [b.run.id as string, b.ledger])),
-    memory: fresh ? [] : buildMemory(now, o.memory, o.memoryConflict ?? false),
+    memory: fresh ? [] : buildMemory(now, o.memory, { conflict: o.memoryConflict ?? false, stale: o.memoryStale ?? false }),
     artifacts: new Map(built.flatMap((b) => b.artifacts)),
     preview: buildPreview(),
     preflightBlocked: o.preflightBlocked ?? false,
     preflightIssues: [...(o.preflightIssues ?? [])],
     notImplemented: new Set(o.notImplemented ?? []),
     exportFails: false,
+    dialogCancels: new Set(),
+    importDiffWarnings: [],
     authFailing: authFailed,
     idempotency: new Map(),
     nextId: 5_000,
