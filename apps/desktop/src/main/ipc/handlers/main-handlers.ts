@@ -1,5 +1,5 @@
 // 08 H4 main-only handlers: app.getInfo, app.openExternal (https only, confirmed in main), projects.pickDirectory.
-import { errors, toIpc } from '@relay/contracts';
+import { invariant, toIpc } from '@relay/contracts';
 import type { AppInfo } from '@relay/contracts';
 import type { DialogService } from '../../dialogs.js';
 import type { HandlerTable, MainChannel } from '../types.js';
@@ -18,7 +18,10 @@ export function createMainHandlers(deps: MainHandlerDeps): HandlerTable<MainChan
   return {
     'relay/v1/app.getInfo': () => Promise.resolve({ ok: true, data: deps.appInfo() }),
     'relay/v1/app.openExternal': async ({ url }) => {
-      if (new URL(url).protocol !== 'https:') return { ok: false, error: errors.permissionDenied('outside_root') };
+      // The catalog input schema already admits only https URLs, so a non-https URL here is a bug in the pipeline, not
+      // user input: an invariant (→ INTERNAL at the router), never an error code the operation would have to declare.
+      // Kept as defense in depth: shell.openExternal must never see file:, javascript: or http: URLs.
+      invariant(new URL(url).protocol === 'https:', 'app.openExternal reached the handler with a non-https URL');
       if (!(await deps.confirmOpenExternal(url))) return { ok: true, data: { opened: false } };
       await deps.openExternal(url);
       return { ok: true, data: { opened: true } };

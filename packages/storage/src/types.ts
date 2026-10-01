@@ -982,12 +982,14 @@ export interface IdempotencyRecord {
 }
 
 export interface IdempotencyRepo {
+  /** The stored record, or undefined when the key is new or its row is older than `IDEMPOTENCY_TTL_MS` (02 §B0). */
   get(op: string, key: string): IdempotencyRecord | undefined;
   /**
    * Stores the result, or replays the stored one for the same key + hash. Same key + different hash → CONFLICT.
    * @throws RelayError VALIDATION_FAILED when the serialized result exceeds 2048 bytes.
    */
   put(op: string, key: string, requestHash: string, result: IdempotentResult): Result<IdempotentResult>;
+  /** Deletes rows created before `olderThan`; returns how many. */
   sweep(olderThan: EpochMs): number;
 }
 

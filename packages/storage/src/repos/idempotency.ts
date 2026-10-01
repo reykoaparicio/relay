@@ -1,4 +1,4 @@
-import { RelayError, err, errors, ok } from '@relay/contracts';
+import { IDEMPOTENCY_TTL_MS, RelayError, err, errors, ok } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
 import { RowReader } from '../mappers.js';
 import type { IdempotencyRecord, IdempotencyRepo, IdempotentResult } from '../types.js';
@@ -18,12 +18,18 @@ function isIdempotentResult(v: unknown): v is IdempotentResult {
 }
 
 export function createIdempotencyRepo(driver: SqlDriver, deps: RepoDeps): IdempotencyRepo {
+  /** 02 §B0: a row older than {@link IDEMPOTENCY_TTL_MS} is expired (same cut-off as the retention sweep). */
+  const expired = (createdAt: number): boolean => createdAt < deps.clock.now() - IDEMPOTENCY_TTL_MS;
   const get = (op: string, key: string): IdempotencyRecord | undefined => {
     const row = driver.prepare('SELECT * FROM idempotency_keys WHERE op = ? AND key = ?').get(op, key);
     if (row === undefined) {
       return undefined;
     }
     const r = new RowReader('idempotency_keys', row, 'key');
+    // An expired row the sweep has not removed yet is absent: a key reused after 24 h is a fresh request.
+    if (expired(r.ms('created_at'))) {
+      return undefined;
+    }
     return Object.freeze({
       requestHash: r.text('request_hash'),
       result: r.jsonGuard('result_json', isIdempotentResult),
@@ -45,6 +51,8 @@ export function createIdempotencyRepo(driver: SqlDriver, deps: RepoDeps): Idempo
           errors.validationFailed([{ path: 'result', message: 'idempotent result exceeds 2048 bytes', code: 'too_big' }]),
         );
       }
+      // Replace an expired row still on disk (get() reported it absent), else the INSERT would hit the primary key.
+      driver.prepare('DELETE FROM idempotency_keys WHERE op = ? AND key = ?').run(op, key);
       driver
         .prepare('INSERT INTO idempotency_keys (op, key, request_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)')
         .run(op, key, requestHash, json, deps.clock.now());

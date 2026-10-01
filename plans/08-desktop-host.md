@@ -97,7 +97,8 @@ async function invoke(channel, event, raw): Promise<IpcEnvelope<unknown>> {
     } catch (e) {
       logger.error({ event: 'ipc.error', channel, correlationId, outcome: 'error', err: redactDeep(serializeError(e)) });
       const mapped = toAppError(e, correlationId);                  // a thrown AppError (known code) passes through as is;
-      result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId) : mapped }; // anything else → INTERNAL, no internals leaked
+      if (e instanceof UndeclaredErrorCodeError) throw e;          // strict mode (tests): never masked as INTERNAL
+      result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId, internalReasonOf(mapped)) : mapped }; // anything else → INTERNAL (closed reason kept), no internals leaked
     }
   }
   logger[result.ok ? 'debug' : 'info']({ event: 'ipc.op', channel, correlationId, durationMs: Math.round(now() - t0),  // MAIN-01: ok → debug
@@ -106,7 +107,7 @@ async function invoke(channel, event, raw): Promise<IpcEnvelope<unknown>> {
 }
 
 async function pipeline(op, event, raw) {
-  if (!isTrustedSender(event, origin)) return { ok: false, error: PERMISSION_DENIED /* untrusted_sender */ }; // 1. sender check
+  if (!isTrustedSender(event, origin)) return { ok: false, error: errors.permissionDenied('untrusted_sender', { userMessage: 'This window may not call Relay.' }) }; // 1. sender check (PERMISSION_DENIED is universal)
   const taken = limiter.take(op.channel, op.rateLimit ?? RATE_LIMITS.default);                             // 2. token bucket
   if (!taken.ok) return { ok: false, error: errors.rateLimited(taken.retryAfterMs) };                       //    → RATE_LIMITED
   const input = op.input.safeParse(raw);                                                                     // 3. validation
@@ -116,7 +117,10 @@ async function pipeline(op, event, raw) {
                : await composite[op.channel](input.data);                                                    //    main+runner
   if (!isPackaged) {                                                                                         // 5. dev-only checks
     if (result.ok) op.output.parse(result.data);           // contract violation throws → INTERNAL (visible in dev)
-    else if (!documented(op, result.error.code)) logger.warn({ event: 'ipc.undocumented_error', channel: op.channel, code: result.error.code });
+    else if (![...op.errors, ...UNIVERSAL_ERROR_CODES].includes(result.error.code)) {
+      logger.warn({ event: 'ipc.undocumented_error', channel: op.channel, code: result.error.code });
+      if (strictErrorCodes) throw new UndeclaredErrorCodeError(op.channel, result.error.code); // default on under NODE_ENV=test / VITEST
+    }
   }
   return result;
 }
@@ -298,7 +302,7 @@ export interface RunnerSupervisor {
 | File | Must cover |
 |---|---|
 | `main/index.test.ts` | Boot order: userData override → `requestSingleInstanceLock` → `whenReady` → `ipc.register` called **before** `createMainWindow`. `supervisor.start()` rejecting still creates and shows the window. `before-quit`: first call `preventDefault` + awaits `shutdown` then `app.quit()`; second call does not prevent (no re-entry). DevTools not opened when `RELAY_E2E=1` |
-| `ipc/router.test.ts` | Null `senderFrame` rejected. Packaged: exact renderer file URL accepted, another `file://` URL rejected, dev URL rejected. Invalid input → `VALIDATION_FAILED` with issues. Thrown error → `INTERNAL` with correlationId and no stack in the result. The rate limit returns `retryAfterMs`. Each call logs `ipc.op` with `outcome`. No `INTERNAL_RUNNER_OPS` channel is registered with `ipcMain`. Unknown channel → `NOT_FOUND`. Dev only: an output violating the catalog schema → `INTERNAL` (packaged passes it through) and an undocumented error code logs `ipc.undocumented_error` |
+| `ipc/router.test.ts` | Null `senderFrame` rejected. Packaged: exact renderer file URL accepted, another `file://` URL rejected, dev URL rejected. Invalid input → `VALIDATION_FAILED` with issues. Thrown error → `INTERNAL` with correlationId and no stack in the result. The rate limit returns `retryAfterMs`. Each call logs `ipc.op` with `outcome`. No `INTERNAL_RUNNER_OPS` channel is registered with `ipcMain`. Unknown channel → `NOT_FOUND`. Dev only: an output violating the catalog schema → `INTERNAL` (packaged passes it through) and an undocumented error code logs `ipc.undocumented_error` (non-strict) or rejects the invoke with `UndeclaredErrorCodeError` (strict, the default under a test runner); a thrown INTERNAL keeps its closed reason. `app.openExternal`: the https-only check behind the schema is an invariant (a non-https URL reaching the handler throws → INTERNAL), not a declared error |
 | `ipc/handlers/composite.test.ts` | `projects.create` → `projects.createFromRoot` with the realpath and consumes the token (second use → `NOT_FOUND`). `projects.previewFiles` does not consume. `projects.export`/`ledger.export`/`artifacts.export` → the matching internal `*.exportTo` with a realpath destination; cancel → `exported: false`. `artifacts.importDiff` → `artifacts.importDiffText`. `providers.connect` → `recordCredentialRef`, and a runner failure removes the vault entry. `providers.disconnect` → `deleteCredentialRef`. `app.exportDiagnostics` writes a redacted file (a key seeded in a log line, an error message and an `apiKey` field never reach it). `projects.createSample` → `createFromRoot` with `isDemo: true`. `projects.previewFiles {projectId}` → `previewRoot {projectId}` without touching selections |
 | `ipc/handlers/main-handlers.test.ts` | Through the real router: `app.openExternal` https-only (non-https refused before any confirmation; the handler itself also refuses), cancel → `opened: false` and `shell.openExternal` never called, confirm → opens exactly that URL. `app.getInfo` output matches the catalog schema. `projects.pickDirectory` through the `__relayDialogs` seam returns a token + display path (never the realpath); cancel → `selection: null`; an unsafe root → `PERMISSION_DENIED` with no token |
 | `ipc/rate-limit.test.ts` | Token bucket refill math with fake timers |

@@ -1,4 +1,4 @@
-import { RelayError, appError, errors } from '@relay/contracts';
+import { RelayError, errors } from '@relay/contracts';
 
 /** SQLite primary result code for `SQLITE_BUSY` (extended codes keep it in the low byte). */
 const SQLITE_BUSY = 5;
@@ -76,12 +76,13 @@ export function mapSqliteError(e: unknown): unknown {
   return e;
 }
 
-/** Fatal integrity failure on open (03 §C1): the user must restore from `backups/`. */
+/**
+ * Fatal integrity failure on open (03 §C1): the user must restore from `backups/`. Built by `errors.internal` with the
+ * closed reason `integrity_check_failed`, whose static recovery `userMessage` ("Restore it from a backup in the backups
+ * folder") lives in contracts `INTERNAL_REASON_MESSAGES` — INTERNAL may carry a userMessage, but only a curated one
+ * keyed by its reason, never call-site text. SQLite's raw check output (which can name tables, indexes, and pages)
+ * stays on the never-serialized `cause` for in-process debugging.
+ */
 export function integrityError(result: string): RelayError {
-  return new RelayError(
-    appError('INTERNAL', {
-      userMessage: 'The Relay database failed its integrity check. Restore it from a backup in the backups folder.',
-      details: { reason: 'integrity_check_failed', result: result.slice(0, 200), recovery: 'restore_from_backups' },
-    }),
-  );
+  return new RelayError(errors.internal(undefined, 'integrity_check_failed'), { cause: new Error(result.slice(0, 200)) });
 }

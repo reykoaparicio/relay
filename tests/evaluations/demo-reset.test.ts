@@ -5,10 +5,10 @@ import { lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok } from '@relay/contracts';
+import { ok, toDisplayPath } from '@relay/contracts';
 import { createRuntime } from '@relay/engine';
 import { cleanupTempDirs, makeTempDir } from '../helpers/temp-dirs.js';
-import { runScript } from './run-script.js';
+import { REPO_ROOT, runScript } from './run-script.js';
 
 afterEach(async () => {
   await cleanupTempDirs();
@@ -93,6 +93,46 @@ describe('demo-reset refuses every non-demo path', () => {
 
     expect(r.code).toBe(3);
     expect(await listing(home)).toEqual([]);
+  });
+});
+
+describe('demo-reset failing after the move aside', () => {
+  /** A snapshot that passes every pre-flight check (valid snapshot.json) but has no userdata/, so the copy step fails. */
+  async function snapshotWithoutUserdata(): Promise<string> {
+    const snapshot = await makeTempDir('relay-demo-snap-');
+    await writeFile(join(snapshot, 'snapshot.json'), await readFile(join(REPO_ROOT, 'docs', 'demo', 'snapshot', 'snapshot.json'), 'utf8'));
+    return snapshot;
+  }
+
+  it('says where the previous profile was moved, and deletes nothing', async () => {
+    const home = await fakeHome();
+    const parent = join(home, 'Library', 'Application Support');
+    const target = join(parent, 'Relay-Demo');
+    await mkdir(target);
+    await writeFile(join(target, 'canary.txt'), 'keep me');
+    const snapshot = await snapshotWithoutUserdata();
+
+    const r = await runScript('demo-reset.ts', ['--snapshot', snapshot], { HOME: home, RELAY_USER_DATA_DIR: target });
+
+    expect(r.code, r.stdout).toBe(1);
+    const previous = (await listing(parent)).filter((n) => n.startsWith('Relay-Demo.previous-'));
+    expect(previous).toHaveLength(1);
+    const previousDir = join(parent, previous[0] ?? '');
+    expect(r.stderr).toContain(`demo-reset stopped after moving the demo dir aside; the previous demo profile is at ${toDisplayPath(previousDir, home)} (nothing was deleted).`);
+    expect(toDisplayPath(previousDir, home)).toMatch(/^~\/Library\/Application Support\/Relay-Demo\.previous-/); // home-relative, never the raw home path
+    expect(await readFile(join(previousDir, 'canary.txt'), 'utf8')).toBe('keep me');
+    expect(await listing(parent)).toEqual(previous); // the failed copy left no partial Relay-Demo behind
+  });
+
+  it('says there was no previous profile when there was no demo dir to move', async () => {
+    const home = await fakeHome();
+    const target = join(home, 'Library', 'Application Support', 'Relay-Demo');
+    const snapshot = await snapshotWithoutUserdata();
+
+    const r = await runScript('demo-reset.ts', ['--snapshot', snapshot], { HOME: home, RELAY_USER_DATA_DIR: target });
+
+    expect(r.code, r.stdout).toBe(1);
+    expect(r.stderr).toContain('demo-reset stopped after moving the demo dir aside; there was no previous demo profile (nothing was deleted).');
   });
 });
 

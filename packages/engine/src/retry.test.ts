@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { appError, epochMs, errors, microusd } from '@relay/contracts';
-import type { AttemptId, RetryPolicy } from '@relay/contracts';
+import type { AttemptId, ErrorCode, RetryPolicy } from '@relay/contracts';
 import type { ModelResult } from '@relay/providers';
 import type { AttemptRow } from '@relay/storage';
 import type { ClassifiedOutcome } from './retry.js';
@@ -12,8 +12,8 @@ const POLICY: RetryPolicy = { transport: 1, schemaRepair: 1, rateLimitWaits: 3 }
 const FRESH = { transportRetriesUsed: 0, schemaRepairsUsed: 0, rateLimitWaitsUsed: 0 };
 const NOW = epochMs(10_000);
 const o = { aborted: false, attemptId: ID };
-const errorResult = (code: Parameters<typeof appError>[0], phase: 'not_sent' | 'sent_no_response' | 'responded' | 'responded_partial', extra: object = {}): ModelResult =>
-  ({ kind: 'error', error: appError(code), phase, ...extra });
+const errorResult = (code: ErrorCode, phase: 'not_sent' | 'sent_no_response' | 'responded' | 'responded_partial', extra: object = {}): ModelResult =>
+  ({ kind: 'error', error: code === 'INTERNAL' ? errors.internal(undefined) : appError(code), phase, ...extra });
 const success: ModelResult = { kind: 'success', json: {}, rawText: '{}', usage: USAGE, rawUsage: {}, stopReason: 'end_turn', latencyMs: 1 };
 
 describe('classify (F7)', () => {
@@ -114,7 +114,7 @@ describe('purposes and error mapping', () => {
     expect(eventForError(errors.limitReached('deadline'))).toEqual(expect.objectContaining({ type: 'LIMIT_REACHED', reason: 'deadline' }));
     expect(eventForError(errors.limitReached('attempts'))).toEqual(expect.objectContaining({ reason: 'limit_attempts' }));
     expect(eventForError(errors.projectChanged())?.type).toBe('APPROVAL_STALE');
-    expect(eventForError(appError('INTERNAL'))?.type).toBe('UNRECOVERABLE');
+    expect(eventForError(errors.internal(undefined))?.type).toBe('UNRECOVERABLE');
   });
 
   it('F6 #7 / #9: a spent retry counter maps to the matching exhausted event, tool calls to SETUP_BLOCKED', () => {

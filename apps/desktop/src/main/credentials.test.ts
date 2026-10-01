@@ -168,11 +168,14 @@ describe('credential vault (H5)', () => {
     v.commit(P, kept.value);
     v.commit('openai', orphan.value);
     await writeFile(join(dir, 'secrets', 'README'), 'not a vault file');
+    // Near misses of the credentialRef id pattern (contracts `idBodyPattern`): lowercase, a non-ULID letter, wrong prefix.
+    const foreign = ['crd_01j0000000000000000000000a.bin', 'crd_01J000000000000000000000UA.bin', 'prf_01J0000000000000000000000A.bin'];
+    for (const f of foreign) await writeFile(join(dir, 'secrets', f), 'foreign');
 
     await v.pruneUnreferenced(new Set([kept.value.vaultFile]));
 
     const left = (await readdir(join(dir, 'secrets'))).sort();
-    expect(left).toEqual(['README', kept.value.vaultFile, inFlight.value.vaultFile].map((f) => f?.replace('secrets/', '') ?? '').sort());
+    expect(left).toEqual(['README', ...foreign, kept.value.vaultFile, inFlight.value.vaultFile].map((f) => f?.replace('secrets/', '') ?? '').sort());
   });
 
   it('answers AUTH_REQUIRED when nothing is stored', async () => {

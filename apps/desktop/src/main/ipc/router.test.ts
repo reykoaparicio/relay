@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { INTERNAL_OPERATION_LIST, OPERATION_LIST, createIdGen, epochMs } from '@relay/contracts';
+import { INTERNAL_OPERATION_LIST, OPERATION_LIST, RelayError, createIdGen, epochMs, errors } from '@relay/contracts';
 import type { AppInfo } from '@relay/contracts';
 import type { LogFields, MainLogger } from '../logger.js';
 import { createRateLimiter } from './rate-limit.js';
-import { createIpcRouter } from './router.js';
+import { UndeclaredErrorCodeError, createIpcRouter, isTestRun } from './router.js';
 import type { IpcEventLike, RouterDeps } from './router.js';
 import type { CompositeChannel, HandlerTable, MainChannel } from './types.js';
 
@@ -17,7 +17,7 @@ const INFO: AppInfo = {
 };
 const frame = (url: string, parent: unknown = null): IpcEventLike => ({ senderFrame: { url, parent } });
 
-function setup(o: { isPackaged?: boolean; getInfo?: () => Promise<unknown>; now?: () => number } = {}) {
+function setup(o: { isPackaged?: boolean; getInfo?: () => Promise<unknown>; now?: () => number; strictErrorCodes?: boolean } = {}) {
   const lines: LogFields[] = [];
   const levels: string[] = [];
   const at = (level: string) => (f: LogFields) => {
@@ -44,6 +44,7 @@ function setup(o: { isPackaged?: boolean; getInfo?: () => Promise<unknown>; now?
     mainHandlers,
     composite: {} as HandlerTable<CompositeChannel>,
     runner: runner as unknown as RouterDeps['runner'],
+    ...(o.strictErrorCodes === undefined ? {} : { strictErrorCodes: o.strictErrorCodes }),
   };
   return { router: createIpcRouter(deps), lines, levels, registered, runner };
 }
@@ -99,9 +100,9 @@ describe('IPC router (H4)', () => {
     expect(packaged.lines.some((l) => l.event === 'ipc.error')).toBe(false);
   });
 
-  it('dev only: warns about an error code the operation does not document, without changing the answer', async () => {
+  it('dev only (non-strict): warns about an error code the operation does not document, without changing the answer', async () => {
     const undocumented = () => Promise.resolve({ ok: false, error: { code: 'BUDGET_BLOCKED', userMessage: 'x', retryable: false, nextAction: 'none', alternatives: [] } });
-    const dev = setup({ isPackaged: false, getInfo: undocumented });
+    const dev = setup({ isPackaged: false, getInfo: undocumented, strictErrorCodes: false });
     const packaged = setup({ isPackaged: true, getInfo: undocumented });
 
     const d = await dev.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
@@ -110,6 +111,34 @@ describe('IPC router (H4)', () => {
     expect(!d.ok && d.error.code).toBe('BUDGET_BLOCKED');
     expect(dev.lines).toContainEqual({ event: 'ipc.undocumented_error', channel: 'relay/v1/app.getInfo', code: 'BUDGET_BLOCKED' });
     expect(packaged.lines.some((l) => l.event === 'ipc.undocumented_error')).toBe(false);
+  });
+
+  it('strict (the default under a test runner): an undeclared code REJECTS the invoke instead of being masked', async () => {
+    const undocumented = () => Promise.resolve({ ok: false, error: { code: 'BUDGET_BLOCKED', userMessage: 'x', retryable: false, nextAction: 'none', alternatives: [] } });
+    const dev = setup({ isPackaged: false, getInfo: undocumented });
+
+    await expect(dev.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {})).rejects.toThrow(UndeclaredErrorCodeError);
+    expect(isTestRun()).toBe(true);
+    expect(isTestRun({ NODE_ENV: 'test' })).toBe(true);
+    expect(isTestRun({ VITEST: 'true' })).toBe(true);
+    expect(isTestRun({ NODE_ENV: 'production' })).toBe(false);
+  });
+
+  it('an untrusted sender gets PERMISSION_DENIED untrusted_sender (universal, so never an undeclared code)', async () => {
+    const { router } = setup({ isPackaged: false });
+
+    const r = await router.invoke('relay/v1/app.getInfo', frame('https://evil.example/'), {});
+
+    expect(r.ok ? null : r.error).toEqual(expect.objectContaining({ code: 'PERMISSION_DENIED', userMessage: 'This window may not call Relay.', details: { reason: 'untrusted_sender' } }));
+  });
+
+  it('a thrown INTERNAL keeps its closed reason (and curated message) but gets the router correlation id', async () => {
+    const thrower = () => Promise.reject(new RelayError(errors.internal(undefined, 'not_implemented')));
+    const { router } = setup({ isPackaged: false, getInfo: thrower });
+
+    const r = await router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+
+    expect(r.ok ? null : r.error).toEqual(expect.objectContaining({ code: 'INTERNAL', details: { reason: 'not_implemented' }, correlationId: expect.stringMatching(/^cor_/) as unknown }));
   });
 
   it('dev: a documented or universal error code is not reported', async () => {

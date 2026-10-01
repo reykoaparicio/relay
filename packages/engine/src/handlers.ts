@@ -2,7 +2,7 @@
 // the table exhaustive: a missing channel is a compile error. Channels whose feature lands in a later wave return a
 // typed INTERNAL error with `details.reason = 'not_implemented'` (never a silent success). Project and run handlers
 // live in project-handlers.ts / run-handlers.ts; the export/import, memory, and run-action handlers in their modules.
-import { ARTIFACT_INLINE_MAX_BYTES, PROVIDER_IDS, appError, err, errors, ok } from '@relay/contracts';
+import { ARTIFACT_INLINE_MAX_BYTES, PROVIDER_IDS, err, errors, ok } from '@relay/contracts';
 import type {
   ArtifactContent,
   ArtifactMeta,
@@ -40,13 +40,14 @@ export type { Handler, HandlerTable, ParsedInputOf } from './handler-types.js';
 const LISTED_PROVIDERS: readonly ProviderId[] = PROVIDER_IDS.filter((p) => p !== 'fake');
 const DISPLAY_NAMES: Readonly<Record<ProviderId, string>> = { anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Google Gemini', fake: 'Fake provider' };
 
-/** The typed "not in this wave" error, naming the channel. */
-export function notImplemented(ctx: Pick<EngineCtx, 'ids'>, channel: RunnerChannel) {
-  return appError('INTERNAL', {
-    userMessage: 'This feature is not available in this build yet.',
-    correlationId: ctx.ids.next('correlation'),
-    details: { reason: 'not_implemented', channel },
-  });
+/**
+ * The typed "not in this wave" error: INTERNAL `not_implemented` (its static userMessage comes from contracts
+ * `INTERNAL_REASON_MESSAGES`). The channel is logged under the correlation id, never sent (02 §B0).
+ */
+export function notImplemented(ctx: Pick<EngineCtx, 'ids' | 'logger'>, channel: RunnerChannel) {
+  const correlationId = ctx.ids.next('correlation');
+  ctx.logger.warn('handler.not_implemented', { channel, correlationId });
+  return errors.internal(correlationId, 'not_implemented');
 }
 
 function toCredentialRef(row: CredentialRefRow): CredentialRef {

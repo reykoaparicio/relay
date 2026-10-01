@@ -7,6 +7,7 @@ import {
   errnoDetails,
   errnoOf,
   errors,
+  INTERNAL_REASON_MESSAGES,
   INTERNAL_REASONS,
   isRelayError,
   RelayError,
@@ -36,7 +37,7 @@ describe('error taxonomy', () => {
       expect(NEXT_ACTIONS).toContain(def.nextAction);
       expect(typeof def.retryable).toBe('boolean');
       expect(def.userMessage.length).toBeLessThanOrEqual(USER_MESSAGE_MAX);
-      expect(appErrorSchema.safeParse(appError(code)).success).toBe(true);
+      expect(appErrorSchema.safeParse(code === 'INTERNAL' ? errors.internal(undefined) : appError(code)).success).toBe(true);
     }
     expect(Object.keys(errors)).toHaveLength(ERROR_CODES.length);
   });
@@ -126,6 +127,22 @@ describe('error taxonomy', () => {
     expect(errors.internal(undefined, 'aborted').correlationId).toBeUndefined();
     expect(asUnknown(correlationId, 'SQLITE_CONSTRAINT at /Users/me/x').details).toBeUndefined();
     expect(INTERNAL_REASONS).toContain('not_implemented');
+  });
+
+  it('internal gives a curated static userMessage for not_implemented and integrity_check_failed only', () => {
+    expect(errors.internal(correlationId, 'not_implemented').userMessage).toBe(INTERNAL_REASON_MESSAGES.not_implemented);
+    expect(errors.internal(undefined, 'integrity_check_failed').userMessage).toMatch(/backup/);
+    expect(errors.internal(correlationId, 'artifact_invalid').userMessage).toBe(ERROR_DEFINITIONS.INTERNAL.userMessage);
+  });
+
+  it('appError refuses INTERNAL: the type excludes it, and a cast is routed through errors.internal (B13)', () => {
+    const unsafe = appError as unknown as (code: string, ctx: ErrorContext) => AppError;
+    // @ts-expect-error -- INTERNAL is built only by errors.internal
+    appError('INTERNAL');
+
+    const e = unsafe('INTERNAL', { userMessage: 'SQLITE at /Users/me/x.db', details: { reason: 'not_implemented', path: '/Users/me' }, correlationId, runId });
+
+    expect(e).toEqual(errors.internal(correlationId, 'not_implemented'));
   });
 
   it('typed factory fields win over ctx.details (B13)', () => {

@@ -193,8 +193,10 @@ export interface ErrorContext {
   readonly correlationId?: CorrelationId;
 }
 
-/** Builds an {@link AppError} for `code` from its {@link ERROR_DEFINITIONS} policy plus optional context. */
-export function appError(code: ErrorCode, ctx: ErrorContext = {}): AppError {
+/** Every {@link ErrorCode} except `INTERNAL`, which only {@link errors.internal} builds (02 §B0, B13). */
+export type PublicErrorCode = Exclude<ErrorCode, 'INTERNAL'>;
+
+function buildAppError(code: ErrorCode, ctx: ErrorContext): AppError {
   const def: ErrorDefinition = ERROR_DEFINITIONS[code];
   const e: AppError = {
     code,
@@ -208,6 +210,18 @@ export function appError(code: ErrorCode, ctx: ErrorContext = {}): AppError {
   if (ctx.details !== undefined) e.details = { ...ctx.details };
   if (ctx.correlationId !== undefined) e.correlationId = ctx.correlationId;
   return e;
+}
+
+/**
+ * Builds an {@link AppError} for `code` from its {@link ERROR_DEFINITIONS} policy plus optional context.
+ *
+ * `code` cannot be `'INTERNAL'`: an internal error must not carry free-form context (a message, details, or ids could
+ * leak SQL errors, stacks, or paths), so it is built only by {@link errors.internal}. A caller that gets past the type
+ * (a cast, untyped JS) is routed there too: everything but the correlation id and a known reason is dropped.
+ */
+export function appError(code: PublicErrorCode, ctx: ErrorContext = {}): AppError {
+  if ((code as ErrorCode) === 'INTERNAL') return errors.internal(ctx.correlationId, ctx.details?.['reason'] as InternalReason | undefined);
+  return buildAppError(code, ctx);
 }
 
 /** `PERMISSION_DENIED` `details.reason` values (§11). */
@@ -245,6 +259,16 @@ export const INTERNAL_REASONS = [
 export const internalReasonSchema = z.enum(INTERNAL_REASONS);
 /** `INTERNAL` reason. */
 export type InternalReason = z.infer<typeof internalReasonSchema>;
+
+/**
+ * Curated, static `userMessage`s for the INTERNAL reasons where the generic "Something went wrong" would mislead the
+ * user or hide the only recovery. They live here, not at the call site, so `INTERNAL` still never carries a caller's
+ * free-form text (02 §B0): the message is a fixed string chosen by the closed reason.
+ */
+export const INTERNAL_REASON_MESSAGES: Readonly<Partial<Record<InternalReason, string>>> = {
+  not_implemented: 'This feature is not available in this build yet.',
+  integrity_check_failed: 'The Relay database failed its integrity check. Restore it from a backup in the backups folder.',
+};
 
 /** `LIMIT_REACHED` `details.limit` values (§9.1). */
 export const LIMIT_KINDS = ['attempts', 'revisions', 'deadline', 'tool_calls'] as const;
@@ -313,13 +337,17 @@ export const errors = {
    * free-form context: a message, details, or ids could leak internals (SQL errors, stacks, paths), so anything else
    * passed at runtime is ignored. `correlationId` is `undefined` only where none exists (providers, tools); the
    * boundary that surfaces the error assigns one. `aborted` also sets `details.aborted: true` (read by callers of 04 §D3).
+   * A reason listed in {@link INTERNAL_REASON_MESSAGES} gets that static `userMessage`. This is the ONLY builder of
+   * `INTERNAL` ({@link appError} refuses the code).
    */
   internal: (correlationId: CorrelationId | undefined, reason?: InternalReason): AppError => {
     const known = typeof reason === 'string' && (INTERNAL_REASONS as readonly string[]).includes(reason) ? reason : undefined;
     const details = known === undefined ? undefined : { reason: known, ...(known === 'aborted' ? { aborted: true } : {}) };
-    return appError('INTERNAL', {
+    const userMessage = known === undefined ? undefined : INTERNAL_REASON_MESSAGES[known];
+    return buildAppError('INTERNAL', {
       ...(correlationId === undefined ? {} : { correlationId }),
       ...(details === undefined ? {} : { details }),
+      ...(userMessage === undefined ? {} : { userMessage }),
     });
   },
 } as const;

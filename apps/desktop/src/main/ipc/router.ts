@@ -1,7 +1,7 @@
 // 08 H4: the IPC pipeline per operation: senderCheck → rateLimit → validateInput → route (main | runner | composite)
 // → mapError → validateOutput (dev only). Only OPERATIONS are registered; INTERNAL_RUNNER_OPS never are.
-import { OPERATION_LIST, RATE_LIMITS, UNIVERSAL_ERROR_CODES, appError, errors, redactDeep, toAppError, toValidationIssues } from '@relay/contracts';
-import type { AnyOperationDef, AppError, IdGen, IpcEnvelope, RunnerChannel } from '@relay/contracts';
+import { INTERNAL_REASONS, OPERATION_LIST, RATE_LIMITS, UNIVERSAL_ERROR_CODES, errors, redactDeep, toAppError, toValidationIssues } from '@relay/contracts';
+import type { AnyOperationDef, AppError, ErrorCode, IdGen, IpcEnvelope, InternalReason, RunnerChannel } from '@relay/contracts';
 import type { MainLogger } from '../logger.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { CompositeChannel, HandlerTable, MainChannel, RunnerRequester } from './types.js';
@@ -38,6 +38,31 @@ export interface RouterDeps extends TrustedOrigin {
   readonly runner: RunnerRequester;
   /** Defaults to every renderer-exposed operation. */
   readonly operations?: readonly AnyOperationDef[];
+  /**
+   * Unpackaged only: an error code the operation does not declare (`op.errors ∪ UNIVERSAL_ERROR_CODES`, 02 §B5) makes
+   * `invoke` REJECT with {@link UndeclaredErrorCodeError} instead of only logging, so tests catch the violation.
+   * Defaults to on under a test runner (`NODE_ENV=test` or `VITEST`), off otherwise.
+   */
+  readonly strictErrorCodes?: boolean;
+}
+
+/** Thrown (strict mode) when a handler answers with an error code its operation does not declare. */
+export class UndeclaredErrorCodeError extends Error {
+  constructor(readonly channel: string, readonly code: ErrorCode) {
+    super(`error-code conformance: ${channel} returned undeclared ${code}`);
+    this.name = 'UndeclaredErrorCodeError';
+  }
+}
+
+/** True under a test runner: vitest sets `VITEST` and defaults `NODE_ENV` to `test`. */
+export function isTestRun(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env['NODE_ENV'] === 'test' || (env['VITEST'] !== undefined && env['VITEST'] !== '');
+}
+
+/** The closed INTERNAL reason of a mapped error, if any (kept when the router re-stamps the correlation id). */
+function internalReasonOf(e: AppError): InternalReason | undefined {
+  const reason = e.details?.['reason'];
+  return typeof reason === 'string' && (INTERNAL_REASONS as readonly string[]).includes(reason) ? (reason as InternalReason) : undefined;
 }
 
 /** The router. `invoke` runs the pipeline directly (tests; `register` wires it to `ipcMain`). */
@@ -94,21 +119,23 @@ export function createIpcRouter(deps: RouterDeps): IpcRouter {
     return handler(input);
   };
 
+  const strict = deps.strictErrorCodes ?? isTestRun();
   const devChecks = (op: AnyOperationDef, result: IpcEnvelope<unknown>): void => {
     if (deps.isPackaged) return;
     if (result.ok) {
       op.output.parse(result.data); // throws → INTERNAL (a contract bug, visible in dev)
       return;
     }
-    const documented: readonly string[] = [...op.errors, ...UNIVERSAL_ERROR_CODES, 'PERMISSION_DENIED'];
+    const documented: readonly ErrorCode[] = [...op.errors, ...UNIVERSAL_ERROR_CODES];
     if (!documented.includes(result.error.code)) {
       deps.logger.warn({ event: 'ipc.undocumented_error', channel: op.channel, code: result.error.code });
+      if (strict) throw new UndeclaredErrorCodeError(op.channel, result.error.code);
     }
   };
 
   const pipeline = async (op: AnyOperationDef, event: IpcEventLike, raw: unknown): Promise<IpcEnvelope<unknown>> => {
     if (!isTrustedSender(event, deps)) {
-      return { ok: false, error: appError('PERMISSION_DENIED', { userMessage: 'This window may not call Relay.', details: { reason: 'untrusted_sender' } }) };
+      return { ok: false, error: errors.permissionDenied('untrusted_sender', { userMessage: 'This window may not call Relay.' }) };
     }
     const taken = deps.limiter.take(op.channel, op.rateLimit ?? RATE_LIMITS.default);
     if (!taken.ok) return { ok: false, error: errors.rateLimited(taken.retryAfterMs) };
@@ -130,9 +157,10 @@ export function createIpcRouter(deps: RouterDeps): IpcRouter {
       try {
         result = await pipeline(op, event, raw);
       } catch (e) {
+        if (e instanceof UndeclaredErrorCodeError) throw e; // strict (tests): fail loudly, never mask as INTERNAL
         deps.logger.error({ event: 'ipc.error', channel, correlationId, outcome: 'error', err: redactDeep(serializeError(e)) });
         const mapped: AppError = toAppError(e, correlationId);
-        result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId) : mapped };
+        result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId, internalReasonOf(mapped)) : mapped };
       }
     }
     // Successful ops are debug (high volume; still written — the file logger has no level filter, only buffering);

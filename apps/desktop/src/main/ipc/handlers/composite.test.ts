@@ -1,14 +1,15 @@
 /* eslint-disable @typescript-eslint/unbound-method -- asserting on vi.fn() members */
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createIdGen, epochMs, errors, err, ok } from '@relay/contracts';
-import type { ProviderId, ProviderStatus, SelectionId } from '@relay/contracts';
+import { UNIVERSAL_ERROR_CODES, createIdGen, epochMs, errors, err, getOperation, ok } from '@relay/contracts';
+import type { IpcEnvelope, ProviderId, ProviderStatus, SelectionId } from '@relay/contracts';
+import type { CompositeChannel, HandlerTable } from '../types.js';
 import { createCredentialVault } from '../../credentials.js';
 import type { CredentialVault } from '../../credentials.js';
 import type { DialogService } from '../../dialogs.js';
 import type { SampleService } from '../../samples.js';
+import { makeTempDir, removeTempDir } from '../../testing/temp-dirs.js';
 import { createCompositeHandlers, createKeyedMutex } from './composite.js';
 import type { CompositeDeps } from './composite.js';
 
@@ -62,7 +63,24 @@ function setup(runnerReplies: Record<string, unknown> = {}) {
     writeTextFile: vi.fn(() => Promise.resolve()),
     notifyProvidersChanged: vi.fn(),
   };
-  return { h: createCompositeHandlers(deps), deps, request, dialogs, vault, setSelected: (v: boolean) => (selected = v) };
+  return { h: withErrorConformance(createCompositeHandlers(deps)), deps, request, dialogs, vault, setSelected: (v: boolean) => (selected = v) };
+}
+
+/**
+ * 02 §B5: every composite result in this suite must use a code its operation declares (`op.errors ∪
+ * UNIVERSAL_ERROR_CODES`) — the router's strict check, applied to direct handler calls.
+ */
+function withErrorConformance(table: HandlerTable<CompositeChannel>): HandlerTable<CompositeChannel> {
+  const wrapped: Record<string, (input: never) => Promise<IpcEnvelope<unknown>>> = {};
+  for (const [channel, handler] of Object.entries(table) as [string, (input: never) => Promise<IpcEnvelope<unknown>>][]) {
+    wrapped[channel] = async (input) => {
+      const res = await handler(input);
+      const declared: readonly string[] = [...(getOperation(channel)?.errors ?? []), ...UNIVERSAL_ERROR_CODES];
+      if (!res.ok && !declared.includes(res.error.code)) throw new Error(`error-code conformance: ${channel} returned undeclared ${res.error.code}`);
+      return res;
+    };
+  }
+  return wrapped as unknown as HandlerTable<CompositeChannel>;
 }
 
 describe('composite handlers (H4)', () => {
@@ -287,11 +305,11 @@ describe('providers.connect with a real vault (F5 regressions)', () => {
   const dec = (b: Buffer) => b.toString().slice(4);
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'relay-connect-'));
+    dir = await makeTempDir('connect');
     await mkdir(join(dir, 'secrets'));
   });
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await removeTempDir(dir); // ownership-guarded: only a dir makeTempDir created
   });
 
   /** A runner double holding credential refs; every call yields a few ticks so concurrent handlers can interleave. */

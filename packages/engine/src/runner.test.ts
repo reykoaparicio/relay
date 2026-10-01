@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { epochMs, errors } from '@relay/contracts';
+import { IDEMPOTENCY_TTL_MS, epochMs, errors } from '@relay/contracts';
 import type { StepKey } from '@relay/contracts';
 import type { StepRow } from '@relay/storage';
 import { createWakeSignal } from './clock.js';
@@ -177,6 +177,40 @@ describe('engine start/stop (F1)', () => {
     expect(h.timers.pending()).toBe(0); // the sweep interval (and the heartbeat) are cleared, not just ignored
     h.timers.advance(2 * RETENTION_SWEEP_INTERVAL_MS);
     expect(sweeps).toHaveLength(3);
+  });
+
+  it('the retention sweep deletes idempotency rows older than IDEMPOTENCY_TTL_MS at boot and every 24 h (02 §B0)', async () => {
+    h = await createHarness();
+    const lease = h.db.repos.lease;
+    (h.ctx as { db: EngineCtx['db'] }).db = { ...h.db, repos: { ...h.db.repos, lease: { ...lease, heartbeat: () => true } } };
+    const t0 = h.clock.now();
+    const at = <T>(ms: number, fn: () => T): T => {
+      const prev = h?.clock.now() ?? t0;
+      h?.clock.set(ms);
+      try {
+        return fn();
+      } finally {
+        h?.clock.set(prev);
+      }
+    };
+    const putAt = (ms: number, key: string): void => {
+      at(ms, () => h?.db.tx('immediate', (r) => r.idempotency.put('test.op', key, 'h', { ids: {} })));
+    };
+    // Rewinds the clock so get() would still return an unexpired row: undefined then means the row was DELETED.
+    const presentAt = (ms: number, key: string): boolean => at(ms, () => h?.db.repos.idempotency.get('test.op', key) !== undefined);
+    putAt(t0 - IDEMPOTENCY_TTL_MS - 1, 'stale');
+    putAt(t0 - IDEMPOTENCY_TTL_MS, 'boundary');
+
+    await h.engine.start();
+    expect(presentAt(t0 - IDEMPOTENCY_TTL_MS - 1, 'stale')).toBe(false); // boot sweep
+    expect(presentAt(t0 - IDEMPOTENCY_TTL_MS, 'boundary')).toBe(true); // exactly 24 h old: kept
+    putAt(t0 - 1, 'later');
+    putAt(t0, 'fresh');
+
+    h.timers.advance(RETENTION_SWEEP_INTERVAL_MS);
+    expect(presentAt(t0 - 1, 'later')).toBe(false); // interval sweep: 24 h + 1 ms old
+    expect(presentAt(t0 - 1, 'fresh')).toBe(true);
+    await h.engine.stop({ graceMs: 10 });
   });
 
   it('createEngine builds its own context; handle() maps an unexpected throw to INTERNAL with a correlation id', async () => {

@@ -1,6 +1,6 @@
 // 07 G1b: token counting, the input budget, and the fit algorithm (`fitToBudget`, pure). Files are included whole or
 // not at all: an item is never truncated (§10.2 "ask the user to narrow scope").
-import type { ProfileSnapshot } from '@relay/contracts';
+import type { EstimateBasis, ProfileSnapshot } from '@relay/contracts';
 
 /** 5% safety margin for estimator error (G1b). */
 const INPUT_BUDGET_SAFETY = 0.95;
@@ -8,7 +8,7 @@ const INPUT_BUDGET_SAFETY = 0.95;
 /** Token count + its basis (the manifest records the basis). */
 interface TokenCount {
   readonly tokens: number;
-  readonly basis: 'provider_count' | 'local_estimate';
+  readonly basis: EstimateBasis;
 }
 
 /** Counts input tokens for a rendered request. */

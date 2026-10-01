@@ -1,7 +1,7 @@
 // 02 §B0 idempotent mutations, shared by every keyed handler: look the key up (a replay returns the stored ids, the
 // same key with another request → CONFLICT `idempotency_key_reused`), and record the small result in the same tx as
 // the mutation. Callers hash the request ONCE (`requestHash`) and pass the hash to both halves.
-import { appError, err, errors, idSchema, invariant, ok } from '@relay/contracts';
+import { err, errors, idSchema, invariant, ok } from '@relay/contracts';
 import type { IdOf, IdPrefixKey, Result, Sha256 } from '@relay/contracts';
 import type { IdempotentResult, Repos } from '@relay/storage';
 import type { EngineCtx } from './ports.js';
@@ -25,14 +25,16 @@ export function storedResult(r: Repos, req: IdempotentRequest): Result<Idempoten
 }
 
 /**
- * A stored result id (`name` names it in the error), validated as a `prefix` id. A missing or malformed stored id is
+ * A stored result id (`name` names it in the log), validated as a `prefix` id. A missing or malformed stored id is
  * corruption (the engine only ever stores ids it minted), never caller input: INTERNAL with
- * `details.reason = 'idempotency_result_invalid'`.
+ * `details.reason = 'idempotency_result_invalid'` (the id's name is logged under the correlation id, not sent).
  */
-export function replayId<P extends IdPrefixKey>(ctx: Pick<EngineCtx, 'ids'>, value: unknown, prefix: P, name: string): Result<IdOf<P>> {
+export function replayId<P extends IdPrefixKey>(ctx: Pick<EngineCtx, 'ids' | 'logger'>, value: unknown, prefix: P, name: string): Result<IdOf<P>> {
   const parsed = idSchema(prefix).safeParse(value);
   if (parsed.success) return ok(parsed.data);
-  return err(appError('INTERNAL', { correlationId: ctx.ids.next('correlation'), details: { reason: 'idempotency_result_invalid', id: name } }));
+  const correlationId = ctx.ids.next('correlation');
+  ctx.logger.warn('idempotency.result_invalid', { correlationId, id: name });
+  return err(errors.internal(correlationId, 'idempotency_result_invalid'));
 }
 
 /**
@@ -40,7 +42,7 @@ export function replayId<P extends IdPrefixKey>(ctx: Pick<EngineCtx, 'ids'>, val
  * the CONFLICT / INTERNAL error) and the stored status.
  */
 export function replayStoredId<P extends IdPrefixKey>(
-  ctx: Pick<EngineCtx, 'ids'>,
+  ctx: Pick<EngineCtx, 'ids' | 'logger'>,
   r: Repos,
   req: IdempotentRequest,
   name: string,

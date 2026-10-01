@@ -1,9 +1,7 @@
+import { errnoOf } from '@relay/contracts';
+
 /** `process.kill`-shaped signal function (injectable for tests). */
 type KillFn = (pid: number, signal: number) => unknown;
-
-function errorCode(e: unknown): unknown {
-  return typeof e === 'object' && e !== null && 'code' in e ? e.code : undefined;
-}
 
 /**
  * Default PID liveness probe (03 §C4): `process.kill(pid, 0)`. `ESRCH` means dead; `EPERM` means **alive** (the
@@ -14,6 +12,6 @@ export function defaultIsPidAlive(pid: number, kill: KillFn = (p, s) => process.
     kill(pid, 0);
     return true;
   } catch (e) {
-    return errorCode(e) !== 'ESRCH';
+    return errnoOf(e) !== 'ESRCH';
   }
 }

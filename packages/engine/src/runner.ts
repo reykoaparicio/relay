@@ -1,6 +1,6 @@
 // 06 F13 + F1: the runner loop (one active run, §9.1 concurrency 1) and the engine factory. The loop is the queue:
 // running/cancelling first, else the oldest queued run. Waits use the injected timers; commands wake the loop.
-import { RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
+import { IDEMPOTENCY_TTL_MS, RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, epochMs, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
 import type { EpochMs, IpcResult, RunId, RunnerChannel, RunnerInputOf, StepKey, ValidationIssue } from '@relay/contracts';
 import type { Repos, RunRow, StepRow } from '@relay/storage';
 import { logSafe, redactingLogger } from './log-safe.js';
@@ -19,6 +19,7 @@ import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import type { Handler, ParsedInputOf } from './handler-types.js';
 import { createHandlers } from './handlers.js';
+import { undeclaredErrorCode } from './error-conformance.js';
 import { readSettings } from './settings.js';
 import { effectiveModelSteps, snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
@@ -29,7 +30,10 @@ import { runIntake } from './steps/intake.js';
 /** Default idle wait when there is no work (commands wake the loop earlier). */
 const IDLE_MS = 1_000;
 
-/** F1 step 4 / 03 C8 (R3-16): the raw-response retention sweep runs at boot and then every 24 h (injected timers). */
+/**
+ * F1 step 4 / 03 C8 (R3-16): the retention sweep runs at boot and then every 24 h (injected timers). It purges raw
+ * responses past the retention setting and idempotency rows older than `IDEMPOTENCY_TTL_MS` (02 §B0).
+ */
 export const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 /** What the loop should do next for a running run (pure). */
@@ -255,7 +259,11 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
   };
 
   const sweep = async (): Promise<void> => {
-    await ctx.maintenance.sweepRawResponses(ctx.clock.now(), readSettings(ctx.db.repos).rawResponseRetentionDays);
+    const now = ctx.clock.now();
+    // Idempotency first and on its own: a failing raw-response purge must not keep expired keys around.
+    const removed = ctx.db.tx('immediate', (r) => r.idempotency.sweep(epochMs(now - IDEMPOTENCY_TTL_MS)));
+    if (removed > 0) ctx.logger.info('retention.idempotency_swept', { removed });
+    await ctx.maintenance.sweepRawResponses(now, readSettings(ctx.db.repos).rawResponseRetentionDays);
   };
 
   return {
@@ -265,13 +273,19 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       const parsed = def.input.safeParse(input);
       if (!parsed.success) return { ok: false, error: errors.validationFailed(inputIssues(channel, parsed.error.issues)) };
       const handler: Handler<C> = handlers[channel];
+      let result: IpcResult<C>;
       try {
-        return toIpc(await handler(parsed.data as ParsedInputOf<C>));
+        result = toIpc(await handler(parsed.data as ParsedInputOf<C>));
       } catch (e) {
         const correlationId = ctx.ids.next('correlation');
         if (!isRelayError(e)) ctx.logger.error('handler.threw', { channel, correlationId, err: logSafe(e) });
-        return { ok: false, error: toAppError(e, correlationId) };
+        result = { ok: false, error: toAppError(e, correlationId) };
       }
+      // 02 §B5: a code the op does not declare is a contract bug (the renderer has no copy for it). Logged here; the
+      // test harnesses turn it into a failure.
+      const undeclared = undeclaredErrorCode(channel, result);
+      if (undeclared !== null) ctx.logger.error('handler.undeclared_error_code', { channel, code: undeclared });
+      return result;
     },
     async start() {
       if (started) return;

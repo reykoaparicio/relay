@@ -18,6 +18,7 @@ import { createArtifactStore } from '@relay/tools';
 import { createContextAssembler } from '../context.js';
 import { createMemoryService } from '../memory.js';
 import type { ContextAssemblerPort, CredentialResolver, EngineApi, EngineCtx, EngineTestHooks, Logger } from '../ports.js';
+import { undeclaredErrorCode } from '../error-conformance.js';
 import { createEngineContext, createEngineFromContext } from '../runner.js';
 import { createBackupPort, createExportPort, createProjectFs } from '../runtime.js';
 import { seedDatabase } from '../seed.js';
@@ -40,6 +41,23 @@ export function memoryLogger(): Logger & { entries: { level: string; event: stri
     entries.push(fields === undefined ? { level, event } : { level, event, fields });
   };
   return { entries, debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') };
+}
+
+/**
+ * Wraps `engine.handle` so EVERY result in the engine test suites is checked against its op's declared errors
+ * (`op.errors ∪ UNIVERSAL_ERROR_CODES`, 02 §B5): an undeclared code throws, failing the test that triggered it.
+ */
+export function withErrorConformance(engine: EngineApi): EngineApi {
+  return {
+    start: () => engine.start(),
+    stop: (o) => engine.stop(o),
+    async handle(channel, input) {
+      const result = await engine.handle(channel, input);
+      const undeclared = undeclaredErrorCode(channel, result);
+      if (undeclared !== null) throw new Error(`error-code conformance: ${channel} returned undeclared ${undeclared}`);
+      return result;
+    },
+  };
 }
 
 /** Options of {@link createHarness}. */
@@ -127,7 +145,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     requestLookup: supportsRequestLookupFor, connectionTestRequest, backup: createBackupPort({ db, userDataDir, clock, logger, homeDir: userDataDir }),
     exports: createExportPort(),
   });
-  const engine = createEngineFromContext(ctx);
+  const engine = withErrorConformance(createEngineFromContext(ctx));
   const created = await engine.handle('relay/v1/projects.createFromRoot', {
     idempotencyKey: 'harness-project-0001', rootRealpath: projectRoot, rootDisplayPath: '~/sample', name: 'Sample',
     exclusions: [], allowedProviderIds: [...(o.allowedProviderIds ?? ['anthropic', 'openai', 'gemini', 'fake'])],

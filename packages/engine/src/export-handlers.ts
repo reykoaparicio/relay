@@ -2,9 +2,10 @@
 // concatenated patch), `artifacts.importDiffText` (ADR-015), `projects.exportTo` (JSON bundle, secret-scanned), and
 // `ledger.exportTo` (CSV, exact 6-dp USD strings). Writes go through the injected ExportPort (tools `writeExportFile`:
 // realpath re-resolution, refusal inside/containing a project root, never overwriting). No credential ever leaves.
-import { appError, err, errors, isTerminalRunStatus, looksLikeSecret, ok, patchV1Schema, reportV1Schema } from '@relay/contracts';
+import { err, errors, isTerminalRunStatus, looksLikeSecret, ok, patchV1Schema, reportV1Schema } from '@relay/contracts';
 import type {
   ArtifactId,
+  InternalReason,
   ProjectId,
   ReportV1,
   Result,
@@ -24,13 +25,18 @@ import { toLedgerEntryView, toRunSummary } from './views.js';
 /** Max bytes read back from one stored report / patch artifact. */
 const MAX_EXPORT_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
-function unavailable(ctx: EngineCtx, channel: string) {
-  return appError('INTERNAL', { userMessage: 'This feature is not available in this build yet.', correlationId: ctx.ids.next('correlation'),
-    details: { reason: 'not_implemented', channel } });
+/**
+ * INTERNAL via `errors.internal` (closed reason only, 02 §B0). The channel / entity is logged under the same correlation
+ * id rather than sent to the renderer, so a bug report still says which one broke.
+ */
+function internal(ctx: EngineCtx, reason: InternalReason, where: { readonly channel?: string; readonly entity?: string }) {
+  const correlationId = ctx.ids.next('correlation');
+  ctx.logger.warn('export.internal', { correlationId, reason, ...where });
+  return errors.internal(correlationId, reason);
 }
 
-function internal(ctx: EngineCtx, reason: string, entity: string) {
-  return appError('INTERNAL', { correlationId: ctx.ids.next('correlation'), details: { reason, entity } });
+function unavailable(ctx: EngineCtx, channel: string) {
+  return internal(ctx, 'not_implemented', { channel });
 }
 
 function exportPort(ctx: EngineCtx, channel: string): Result<ExportPort> {
@@ -56,7 +62,7 @@ async function readJson(ctx: EngineCtx, id: ArtifactId, entity: string): Promise
   try {
     return ok(JSON.parse(text.value) as unknown);
   } catch {
-    return err(internal(ctx, 'artifact_not_json', entity));
+    return err(internal(ctx, 'artifact_not_json', { entity }));
   }
 }
 
@@ -73,7 +79,7 @@ async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>
   const json = await readJson(ctx, id, 'report');
   if (!json.ok) return json;
   const parsed = reportV1Schema.safeParse(json.value);
-  return parsed.success ? ok(parsed.data) : err(internal(ctx, 'artifact_invalid', 'report'));
+  return parsed.success ? ok(parsed.data) : err(internal(ctx, 'artifact_invalid', { entity: 'report' }));
 }
 
 /** The run's validated patch as one `.patch` text (each file's unified diff, newline-terminated, in order). */
@@ -83,7 +89,7 @@ async function runPatchText(ctx: EngineCtx, runId: RunId, report: ReportV1 | nul
   const json = await readJson(ctx, id, 'patch');
   if (!json.ok) return json;
   const parsed = patchV1Schema.safeParse(json.value);
-  if (!parsed.success) return err(internal(ctx, 'artifact_invalid', 'patch'));
+  if (!parsed.success) return err(internal(ctx, 'artifact_invalid', { entity: 'patch' }));
   return ok(parsed.data.files.map((f) => (f.unifiedDiff.endsWith('\n') ? f.unifiedDiff : `${f.unifiedDiff}\n`)).join(''));
 }
 

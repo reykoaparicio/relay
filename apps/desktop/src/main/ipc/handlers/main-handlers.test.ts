@@ -96,14 +96,22 @@ describe('app.openExternal (H4, §11.4)', () => {
     expect(deps.openExternal).not.toHaveBeenCalled();
   });
 
-  it('the handler itself is https-only (defense in depth behind input validation)', async () => {
+  it('the handler itself is https-only: reaching it with another scheme is an invariant violation, never an open', async () => {
     const { handlers, deps } = setup({ confirm: true });
 
-    const r = await handlers['relay/v1/app.openExternal']({ url: 'http://example.com/' });
+    const r = handlers['relay/v1/app.openExternal']({ url: 'http://example.com/' });
 
-    expect(!r.ok && r.error.code).toBe('PERMISSION_DENIED');
+    await expect(r).rejects.toThrow(/Invariant violation/);
     expect(deps.confirmOpenExternal).not.toHaveBeenCalled();
     expect(deps.openExternal).not.toHaveBeenCalled();
+  });
+
+  it('a non-https URL never reaches the handler: the router answers VALIDATION_FAILED (universal; the op declares no errors)', async () => {
+    const { router } = setup({ confirm: true });
+
+    const r = await router.invoke('relay/v1/app.openExternal', FRAME, { url: 'http://example.com/' });
+
+    expect(!r.ok && r.error.code).toBe('VALIDATION_FAILED');
   });
 });
 

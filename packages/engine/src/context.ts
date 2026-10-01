@@ -7,6 +7,7 @@ import { OUTPUT_SCHEMAS, err, errors, ok } from '@relay/contracts';
 import type {
   AppError,
   ArtifactId,
+  EstimateBasis,
   FindingsV1,
   ModelOutputSchemaId,
   OutputSchemaId,
@@ -392,7 +393,7 @@ function render(m: Material, extra: ReadonlySet<string>): string {
 const itemKey = (i: FitItem) => `${i.kind}:${i.ref}`;
 
 /** Step 7: G1b fit, then the estimator count (6); a provider count above the budget drops optional items from the end. */
-async function fit(m: Material, estimator: TokenEstimator, input: AssembleInput, budget: number): Promise<Result<{ user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: 'provider_count' | 'local_estimate' } }>> {
+async function fit(m: Material, estimator: TokenEstimator, input: AssembleInput, budget: number): Promise<Result<{ user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: EstimateBasis } }>> {
   const mandatoryTokens = localTokens(m.system.length + render(m, new Set()).length);
   const optional: FitItem[] = [
     ...m.memory.filter((x) => !x.mandatory).map((x) => ({ kind: 'memory' as const, ref: x.id, tokens: x.tokens })),
@@ -429,7 +430,7 @@ function tooLarge(d: { mandatoryTokens: number; budget: number; largestItems: re
  * reason `excluded_by_policy`: those removed by the step's memoryScope / role scope (`policy`) and the run summaries
  * beyond the per-step cap (`excess`).
  */
-function manifestOf(m: Material, input: AssembleInput, roleText: string, fitted: { user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: 'provider_count' | 'local_estimate' } }, extra: { excess: readonly RetrievableRecord[]; policy: readonly RetrievableRecord[]; budget: number }): ManifestInput {
+function manifestOf(m: Material, input: AssembleInput, roleText: string, fitted: { user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: EstimateBasis } }, extra: { excess: readonly RetrievableRecord[]; policy: readonly RetrievableRecord[]; budget: number }): ManifestInput {
   const { run, step, stepSpec, snapshot: profile } = input;
   const goal = tokenize(run.goal);
   const inputs = new Set(m.files.map((f) => f.relPath));

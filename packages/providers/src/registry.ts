@@ -8,7 +8,7 @@ import { createOpenAIAdapter } from './openai.js';
 import type { FakeCallLog } from './call-log.js';
 import { createFakeProvider, createFakeScriptState } from './fake.js';
 import { createGeminiAdapter } from './gemini.js';
-import { FAKE_SCENARIOS } from './fake-scenarios.js';
+import { DEFAULT_FAKE_SCENARIO, FAKE_SCENARIOS } from './fake-scenarios.js';
 import type { FakeScenario } from './fake-scenarios.js';
 import { NOOP_LOGGER } from './safe-hook.js';
 import type { Logger, ProviderAdapter, Timers } from './types.js';
@@ -43,7 +43,7 @@ const LIVE_FACTORIES: Partial<Record<ProviderId, (clock: Clock, logger: Logger) 
 };
 
 function resolveScenario(s: string | FakeScenario | undefined): FakeScenario {
-  if (s === undefined) return FAKE_SCENARIOS['happy-path'] as FakeScenario;
+  if (s === undefined) return DEFAULT_FAKE_SCENARIO;
   if (typeof s !== 'string') return s;
   const found = FAKE_SCENARIOS[s];
   if (found === undefined) throw new Error(`unknown fake scenario: ${s}`);

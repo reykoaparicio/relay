@@ -1,4 +1,4 @@
-import { epochMs, isRelayError } from '@relay/contracts';
+import { IDEMPOTENCY_TTL_MS, epochMs, isRelayError } from '@relay/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FixtureDb } from '../testing/fixtures.js';
 import { openFixtureDb } from '../testing/fixtures.js';
@@ -60,5 +60,31 @@ describe('IdempotencyRepo', () => {
     expect(removed).toBe(1);
     expect(repo.get('op', 'old')).toBeUndefined();
     expect(repo.get('op', 'new')).toBeDefined();
+  });
+
+  it('treats a row older than IDEMPOTENCY_TTL_MS as absent (02 §B0: 24 h)', () => {
+    const repo = f.db.repos.idempotency;
+    f.clock.set(1000);
+    repo.put('op', 'k', 'h1', { ids: { runId: 'run_a' } });
+
+    f.clock.set(1000 + IDEMPOTENCY_TTL_MS);
+    const atTtl = repo.get('op', 'k');
+    f.clock.set(1000 + IDEMPOTENCY_TTL_MS + 1);
+    const pastTtl = repo.get('op', 'k');
+
+    expect(atTtl?.requestHash).toBe('h1');
+    expect(pastTtl).toBeUndefined();
+  });
+
+  it('a key reused after the TTL is a fresh request, even with another payload', () => {
+    const repo = f.db.repos.idempotency;
+    f.clock.set(1000);
+    repo.put('op', 'k', 'h1', { ids: { runId: 'run_a' } });
+    f.clock.set(1000 + IDEMPOTENCY_TTL_MS + 1);
+
+    const reused = repo.put('op', 'k', 'h2', { ids: { runId: 'run_b' } });
+
+    expect(reused).toEqual({ ok: true, value: { ids: { runId: 'run_b' } } });
+    expect(repo.get('op', 'k')).toMatchObject({ requestHash: 'h2', createdAt: 1000 + IDEMPOTENCY_TTL_MS + 1 });
   });
 });

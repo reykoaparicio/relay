@@ -53,11 +53,11 @@ Design rules (adapted from the `api-design` skill, which is REST-oriented; each 
 | Pagination | **Cursor-based** for append-heavy lists (runs, events, ledger entries): `{ limit ≤ 100, cursor? } → { items, nextCursor: string \| null }`. Cursor = opaque base64url of `(created_at, id)`. Offset pagination is not used |
 | Filtering / sorting | Typed filter objects (`{ status?: RunStatus[] }`) and whitelisted `sort: 'created_desc' \| 'created_asc'` |
 | Versioning | `v1` in the channel. Breaking change → `v2` channel added alongside, and `v1` kept for one release |
-| Idempotency | Every non-idempotent command takes `idempotencyKey: string` (ULID from renderer). Runner stores `(op, key) → small result (ids + status)` for 24 h (`idempotency_keys` table, 03). Double-clicking "Start run" creates exactly one run |
+| Idempotency | Every non-idempotent command takes `idempotencyKey: string` (ULID from renderer). Runner stores `(op, key) → small result (ids + status)` for 24 h (`idempotency_keys` table, 03). Double-clicking "Start run" creates exactly one run. TTL (`IDEMPOTENCY_TTL_MS`): `IdempotencyRepo.get` treats a row older than 24 h as absent (a key reused after 24 h is a fresh request; `put` replaces the expired row), and the runner's retention sweep (boot + every 24 h) deletes those rows via `IdempotencyRepo.sweep` |
 | Optimistic concurrency | Mutations of versioned entities take `expectedRevision` (memory, workflow drafts, profiles). A mismatch returns `CONFLICT` with `details.currentRevision` |
 | Rate limiting | Token buckets per channel in main (B6). Exceeded → `RATE_LIMITED` with `details.retryAfterMs` (the `Retry-After` equivalent) |
 | AuthN / AuthZ | Single local user. The **sender check** (frame URL must be the app's own renderer origin) replaces authentication. **Capability checks** in the engine (project provider policy, path confinement, approval binding, budget admission) replace authorization |
-| No internal leakage | No stack traces, SQL errors, absolute user paths, or raw provider payloads in `error`. `INTERNAL` carries only a `correlationId` for logs |
+| No internal leakage | No stack traces, SQL errors, absolute user paths, or raw provider payloads in `error`. `INTERNAL` carries only a `correlationId` for logs and, optionally, a closed `details.reason` (`INTERNAL_REASONS`). It is built ONLY by `errors.internal(correlationId, reason?)`: `appError`'s code parameter is `PublicErrorCode = Exclude<ErrorCode, 'INTERNAL'>` (a cast is routed to `errors.internal` at runtime). INTERNAL may carry a `userMessage`, but only a curated static one keyed by its reason (`INTERNAL_REASON_MESSAGES`: `not_implemented` → "not available in this build yet", `integrity_check_failed` → restore from `backups/`), never call-site text; call-site context (channel, entity) is logged under the correlation id instead |
 | Docs | This file is the API reference. `pnpm --filter @relay/contracts gen:api-doc` emits `docs/architecture/ipc-api.md` from the catalog, generating JSON Schema via `z.toJSONSchema(schema, { io: 'input' })` |
 
 ## B1. Primitives (`src/ids.ts`, `src/money.ts`, `src/time.ts`, `src/primitives.ts`, `src/result.ts`, `src/assert.ts`)
@@ -542,7 +542,9 @@ Spec §12.6 codes plus the minimum extensions needed for a typed IPC boundary. `
 | `PERMISSION_DENIED` | ext: path outside root, excluded file, provider not allowed for project, export inside/containing a project, unsafe project root (§11). `details.reason` ∈ `outside_root` · `excluded` · `provider_not_allowed` · `inside_project` · `contains_project` · `unsafe_root` | false | `none` (+ `edit_policy`) | 403 |
 | `SECURE_STORAGE_UNAVAILABLE` | ext: §18.2 fail closed | false | `use_session_key` | 503 |
 | `MODEL_REFUSED` | ext: provider `refusal` stop reason | false | `choose_profile` (+ `edit_goal`) | 422 |
-| `INTERNAL` | ext | false | `report_bug` (`correlationId`) | 500 |
+| `INTERNAL` | ext; `details.reason` ∈ `INTERNAL_REASONS` (closed) | false | `report_bug` (`correlationId`) | 500 |
+
+Error-code conformance: every error a handler returns must be in `op.errors ∪ UNIVERSAL_ERROR_CODES`. The engine logs `handler.undeclared_error_code`; the engine test harness (`withErrorConformance`) and the main router's strict mode (default under `NODE_ENV=test` / `VITEST`) turn a violation into a test failure, and `engine/src/error-conformance.test.ts` drives every runner-routed channel's error branches.
 
 ```ts
 export const appErrorSchema = z.object({

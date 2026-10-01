@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import type { SqlDriver } from './driver.js';
-import { CONNECTION_PRAGMAS, applyPragmas } from './pragmas.js';
+import { ERROR_DEFINITIONS, INTERNAL_REASON_MESSAGES, isRelayError } from '@relay/contracts';
+import { CONNECTION_PRAGMAS, applyPragmas, quickCheck } from './pragmas.js';
 import { openTestDb } from './unit-of-work.js';
 import type { TestDb } from './unit-of-work.js';
 
@@ -51,5 +52,28 @@ describe('connection pragmas (03 §C1)', () => {
 
   it('runs every pragma in the documented order (WAL first, temp_store last)', () => {
     expect(CONNECTION_PRAGMAS.map((p) => p.replace(/^PRAGMA (\w+).*$/, '$1'))).toEqual(['journal_mode', 'synchronous', 'foreign_keys', 'busy_timeout', 'trusted_schema', 'temp_store']);
+  });
+
+  it('a failed quick_check throws INTERNAL integrity_check_failed with the curated restore hint, never the raw output', () => {
+    const raw = 'row 7 missing from index secret_idx on /Users/me/relay.db';
+    const driver = { prepare: () => ({ all: () => [{ quick_check: raw }] }) } as unknown as SqlDriver;
+
+    let thrown: unknown;
+    try {
+      quickCheck(driver);
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(isRelayError(thrown) && thrown.appError).toEqual({
+      code: 'INTERNAL',
+      userMessage: INTERNAL_REASON_MESSAGES.integrity_check_failed,
+      retryable: false,
+      nextAction: ERROR_DEFINITIONS.INTERNAL.nextAction,
+      alternatives: [],
+      details: { reason: 'integrity_check_failed' },
+    });
+    expect(JSON.stringify(isRelayError(thrown) ? thrown.appError : null)).not.toContain('secret_idx');
+    expect(isRelayError(thrown) && (thrown.cause as Error).message).toBe(raw); // in-process debugging only
   });
 });

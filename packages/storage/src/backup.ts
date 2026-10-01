@@ -1,5 +1,6 @@
 import { copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
+import { errnoOf } from '@relay/contracts';
 import type { Clock, EpochMs } from '@relay/contracts';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import { readInt } from './mappers.js';
@@ -34,7 +35,7 @@ export interface CreateBackupOptions {
 const ARTIFACTS_PREFIX = 'artifacts/';
 
 function isMissing(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && 'code' in e && e.code === 'ENOENT';
+  return errnoOf(e) === 'ENOENT';
 }
 
 async function uniqueDir(root: string, stamp: string): Promise<string> {
@@ -44,7 +45,7 @@ async function uniqueDir(root: string, stamp: string): Promise<string> {
       await mkdir(dir, { recursive: false });
       return dir;
     } catch (e) {
-      if (!(typeof e === 'object' && e !== null && 'code' in e && e.code === 'EEXIST')) {
+      if (errnoOf(e) !== 'EEXIST') {
         throw e;
       }
     }

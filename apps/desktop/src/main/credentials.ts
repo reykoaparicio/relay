@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { chmod, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { err, errors, ok, redactedLabel, vaultFileSchema } from '@relay/contracts';
+import { err, errors, idBodyPattern, ok, redactedLabel, vaultFileSchema } from '@relay/contracts';
 import type { AppError, CredentialStorageMode, IdGen, ProviderId, Result } from '@relay/contracts';
 
 /** Electron `safeStorage`, with the async variants optional (feature-detected). */
@@ -78,7 +78,8 @@ export interface VaultDeps {
 }
 
 const SECRET_FILE_MODE = 0o600;
-const VAULT_FILE_NAME = /^crd_[0-9A-HJKMNP-TV-Z]{26}\.bin$/;
+/** `<credentialRef id>.bin`, from the contracts id pattern (one definition of the ULID alphabet). */
+const VAULT_FILE_NAME = new RegExp(`^${idBodyPattern('credentialRef')}\\.bin$`);
 
 function temporarilyUnavailable(): AppError {
   return { ...errors.secureStorageUnavailable(), retryable: true };
