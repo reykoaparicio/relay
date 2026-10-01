@@ -29,6 +29,8 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
+    "@electron/asar": "3.4.1",
+    "@electron/fuses": "1.8.0",
     "@playwright/test": "^1.63.0",
     "@relay/contracts": "workspace:*",
     "@relay/engine": "workspace:*",
