@@ -110,6 +110,20 @@ export class NewRun {
   async submit(): Promise<void> {
     await this.form().getByRole('button', { name: 'Start run' }).click();
   }
+
+  /** "Approved memory records to include" (MemoryPicker): one checkbox per approved record, pinned ones locked on. */
+  memoryPicker(): Locator {
+    return this.form().getByRole('group', { name: 'Approved memory records to include' });
+  }
+
+  memoryCheckbox(title: string): Locator {
+    return this.memoryPicker().getByRole('checkbox', { name: title, exact: true });
+  }
+
+  /** The preflight's "Memory records this run includes" list (Input summary card). */
+  preflightMemory(): Locator {
+    return this.form().getByRole('list', { name: 'Memory records this run includes' });
+  }
 }
 
 /** Run inspector (J8): see ./run-inspector.ts. */
@@ -208,6 +222,68 @@ export class Settings {
 
   async test(displayName: string): Promise<void> {
     await this.providerCard(displayName).getByRole('button', { name: 'Test connection' }).click();
+  }
+
+  // ---- Model profiles ----------------------------------------------------------------------------------------------
+
+  profilesSection(): Locator {
+    return this.page.getByRole('region', { name: 'Model profiles', exact: true });
+  }
+
+  /** "Edit <name>" on a profile row; returns the edit form. */
+  async editProfile(name: string): Promise<Locator> {
+    await this.profilesSection().getByRole('button', { name: `Edit ${name}`, exact: true }).click();
+    const form = this.page.getByRole('form', { name: `Edit ${name}` });
+    await expect(form).toBeVisible();
+    return form;
+  }
+
+  /** The Projects / Storage & data project picker (shown with two or more projects; `?project=` drives it). */
+  projectPicker(): Locator {
+    return this.page.getByRole('main').getByRole('combobox', { name: 'Project', exact: true });
+  }
+
+  /** "Acts on project …" note shown when Settings fell back to the active project (no `?project=`). */
+  fallbackProjectNote(): Locator {
+    return this.page.getByRole('status').filter({ hasText: /^Acts on project “/ });
+  }
+
+  // ---- Projects ----------------------------------------------------------------------------------------------------
+
+  projectsSection(): Locator {
+    return this.page.getByRole('region', { name: 'Projects', exact: true });
+  }
+
+  projectForm(): Locator {
+    return this.projectsSection().getByRole('form', { name: 'Project settings' });
+  }
+
+  /** "Archive project…" → confirm "Archive project"; returns the (still open on failure) confirm dialog. */
+  async archiveProject(name: string): Promise<Locator> {
+    await this.projectForm().getByRole('button', { name: 'Archive project…' }).click();
+    const dialog = this.page.getByRole('alertdialog', { name: `Archive “${name}”?` }).or(this.page.getByRole('dialog', { name: `Archive “${name}”?` }));
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Archive project', exact: true }).click();
+    return dialog;
+  }
+
+  // ---- Storage & data ----------------------------------------------------------------------------------------------
+
+  data(): Locator {
+    return this.page.getByRole('region', { name: 'Storage & data', exact: true });
+  }
+
+  /** Exports → "Export project…" (the save dialog must already be stubbed with `exportDir`). */
+  async exportProject(): Promise<void> {
+    await this.data().getByRole('button', { name: 'Export project…' }).click();
+  }
+
+  /** Purge project history → opens the confirm dialog; returns it. */
+  async openPurge(): Promise<Locator> {
+    await this.data().getByRole('button', { name: 'Purge project history…' }).click();
+    const dialog = this.page.getByRole('dialog', { name: /^Purge the history of “.+”\?$/ });
+    await expect(dialog).toBeVisible();
+    return dialog;
   }
 
   async disconnect(displayName: string): Promise<void> {

@@ -40,6 +40,11 @@ export class Shell {
     return this.page.getByRole('link', { name: /providers? connected|No providers connected/ });
   }
 
+  /** A toast by its title, inside the Radix toast viewport ("Notifications (F8)"). */
+  toast(title: string | RegExp): Locator {
+    return this.page.getByRole('region', { name: /^Notifications/ }).getByText(title, { exact: typeof title === 'string' });
+  }
+
   runnerBanner(): Locator {
     return this.page.getByText(/Background runner restarting|The background runner is unavailable/);
   }

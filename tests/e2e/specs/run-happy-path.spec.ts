@@ -106,18 +106,28 @@ test.describe('run happy path', { tag: '@m2' }, () => {
       await safeRemove(exportDir);
     }
 
-    // Project export (Settings → Storage & data): projects.export has no UI in this build; the section says so.
+    // Project export (Settings → Storage & data → Export project…): one JSON bundle in the stubbed save folder,
+    // secret-free and without the project's absolute folder path (02 `projects.export`: "project (no realpath)").
     await new Shell(page).nav('Settings');
     const settings = new Settings(page);
     await settings.expectLoaded();
     await settings.section('Storage & data');
-    const data = page.getByRole('region', { name: 'Storage & data' });
-    await expect(data.getByText('Coming soon.')).toBeVisible();
-    await expect(data).toContainText('project and ledger exports');
-    await expect(data.getByRole('button', { name: /Export project/ })).toHaveCount(0);
-    testInfo.annotations.push({
-      type: 'projects.export',
-      description: 'not available in this build (Coming soon notice asserted)',
-    });
+    const bundleDir = await makeTempDir('export-project-');
+    try {
+      await stubDialogs({ exportDir: bundleDir });
+      await settings.exportProject();
+      await expect(new Shell(page).toast('Project export saved')).toBeVisible();
+      await expect.poll(async () => readdir(bundleDir)).toEqual([`relay-project-${project.name}.json`]);
+      const body = await readFile(path.join(bundleDir, `relay-project-${project.name}.json`), 'utf8');
+      const bundle: unknown = JSON.parse(body);
+      expect(bundle).toBeTruthy();
+      await testInfo.attach('project-export.json', { body, contentType: 'application/json' });
+      expect(body).toContain(`"${project.name}"`);
+      for (const needle of ['sk-', 'AIza', FAKE_ANTHROPIC_KEY, SECRET_VALUE, project.dir]) {
+        expect(body, `project export must not contain ${needle}`).not.toContain(needle);
+      }
+    } finally {
+      await safeRemove(bundleDir);
+    }
   });
 });

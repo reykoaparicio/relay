@@ -1,4 +1,5 @@
 import { AxeBuilder } from '@axe-core/playwright';
+import path from 'node:path';
 import type { Page, TestInfo } from '@playwright/test';
 import { test, expect } from '../fixtures.js';
 import { FAKE_ANTHROPIC_KEY, startRunViaNewRun } from '../flows.js';
@@ -6,7 +7,10 @@ import { NewRun, Overview, Runs, Settings } from '../pages/app-pages.js';
 import { Onboarding } from '../pages/onboarding.js';
 import { Report } from '../pages/report.js';
 import { RunInspector } from '../pages/run-inspector.js';
+import { Memory } from '../pages/memory.js';
 import { Shell } from '../pages/shell.js';
+import { WorkflowEditor } from '../pages/workflow-editor.js';
+import { makeTempDir, safeRemove } from '../safe-remove.js';
 
 const GOAL = 'Validate the user id parameter in the user handler.';
 const WCAG = ['wcag2a', 'wcag2aa', 'wcag21aa'];
@@ -228,17 +232,81 @@ test.describe('accessibility', { tag: '@a11y' }, () => {
     await expectNoViolations(page, 'inspector-1100px-output', testInfo);
   });
 
-  test('New run with a not-available notice: ErrorView text meets 4.5:1 contrast', async ({
+  test('an export error: ErrorView text meets 4.5:1 contrast', async ({ page, stubDialogs, project }) => {
+    // Deterministic ErrorView: the stubbed save folder does not exist, so `projects.export` fails with NOT_FOUND and
+    // Storage & data renders the error (title, message and "Error code") in an ErrorView.
+    await setupWithAxe(page, stubDialogs, project.dir, test.info());
+    await new Shell(page).nav('Settings');
+    const settings = new Settings(page);
+    await settings.expectLoaded();
+    await settings.section('Storage & data');
+    const parent = await makeTempDir('export-missing-');
+    try {
+      await stubDialogs({ exportDir: path.join(parent, 'does-not-exist') });
+      await settings.exportProject();
+      const errorView = settings.data().getByRole('alert').filter({ hasText: /Error code/ });
+      await expect(errorView).toBeVisible();
+      await expect(errorView.getByText(/Error code/)).toBeVisible();
+      const contrast = (await axeViolations(page)).filter((v) => v.id === 'color-contrast');
+      expect(contrast).toEqual([]);
+    } finally {
+      await safeRemove(parent);
+    }
+  });
+
+  test('axe: 0 violations on Memory (records, suggestions, edit), the workflow editor and every Settings section', async ({
     page,
     stubDialogs,
     project,
-  }) => {
-    await setupWithAxe(page, stubDialogs, project.dir, test.info());
-    await new Shell(page).nav('Runs');
-    await new Runs(page).startWorkflow();
-    await new NewRun(page).expectLoaded();
-    await expect(page.getByText(/Error code/).first()).toBeVisible();
-    const contrast = (await axeViolations(page)).filter((v) => v.id === 'color-contrast');
-    expect(contrast).toEqual([]);
+  }, testInfo) => {
+    test.setTimeout(120_000);
+    await setupWithAxe(page, stubDialogs, project.dir, testInfo);
+    const shell = new Shell(page);
+
+    // A completed run leaves a memory suggestion and a run summary.
+    await startRunViaNewRun(page, GOAL);
+    const inspector = new RunInspector(page);
+    await inspector.expectAwaitingApproval();
+    await inspector.approve();
+    await inspector.waitForStatus('Completed');
+
+    await shell.nav('Memory');
+    const memory = new Memory(page);
+    await memory.expectLoaded();
+    await memory.addRule({ title: 'Response format', content: 'Preserve the existing public response format.', pinned: true });
+    await expect(memory.detail('Response format')).toBeVisible();
+    await expectNoViolations(page, 'memory-approved-detail', testInfo);
+    await memory.openAddRule();
+    await expectNoViolations(page, 'memory-add-rule-dialog', testInfo);
+    await page.keyboard.press('Escape');
+    await expect(memory.ruleDialog()).toBeHidden();
+    await memory.startEdit('Response format');
+    await expectNoViolations(page, 'memory-edit', testInfo);
+    await memory.editForm().getByRole('button', { name: 'Cancel' }).click();
+    await memory.openTab('Suggested');
+    await expect(memory.suggestion('Validate request fields with validate.ts helpers')).toBeVisible();
+    await expectNoViolations(page, 'memory-suggestions', testInfo);
+    await memory.openTab('Archived');
+    await expectNoViolations(page, 'memory-archived-empty', testInfo);
+
+    const editor = new WorkflowEditor(page);
+    await editor.open();
+    await expectNoViolations(page, 'workflow-editor', testInfo);
+    await editor.limitField('Maximum attempts').fill('8');
+    await editor.validate();
+    await expect(editor.validAlert()).toBeVisible();
+    await expectNoViolations(page, 'workflow-editor-validated-draft', testInfo);
+
+    await shell.nav('Settings');
+    const settings = new Settings(page);
+    await settings.expectLoaded();
+    for (const section of ['Providers', 'Model profiles', 'Projects', 'Storage & data', 'Diagnostics', 'About'] as const) {
+      await settings.section(section);
+      await expect(page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: section, exact: true })).toHaveAttribute('aria-current', 'page');
+      await expectNoViolations(page, `settings-${section.toLowerCase().replace(/[^a-z]+/g, '-')}`, testInfo);
+    }
+    await settings.section('Model profiles');
+    await settings.editProfile('Economy');
+    await expectNoViolations(page, 'settings-model-profiles-edit', testInfo);
   });
 });

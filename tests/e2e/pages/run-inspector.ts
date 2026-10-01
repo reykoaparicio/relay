@@ -121,6 +121,12 @@ export class RunInspector {
     return this.page.getByRole('region', { name, exact: true });
   }
 
+  /** A Context summary key/value ("Source files", "Approved memory records", …) of the selected step. */
+  async contextSummaryValue(term: string): Promise<Locator> {
+    const panel = await this.secondaryPanel('Context summary');
+    return panel.getByRole('term').filter({ hasText: new RegExp(`^${term}$`) }).locator('xpath=following-sibling::dd[1]');
+  }
+
   /** Names of the tabs in the step-details tab strip. */
   async secondaryPanelTabs(): Promise<string[]> {
     return (await this.tabList().getByRole('tab').allTextContents()).map((t) => t.trim());
