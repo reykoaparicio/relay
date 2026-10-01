@@ -61,7 +61,7 @@ Default exclusion set (§3.4, §11.1). Every exclusion carries a **reason**, and
 | `dependency_dir` | `node_modules/`, `vendor/`, `.pnpm-store/`, `bower_components/`, `.venv/`, `venv/`, `__pycache__/`, `target/` |
 | `build_output` | `dist/`, `build/`, `out/`, `.next/`, `.nuxt/`, `coverage/`, `.turbo/`, `*.min.js`, `*.map`, `*.bundle.js` |
 | `vcs_internal` | `.git/`, `.hg/`, `.svn/` |
-| `secret` | `.env`, `.env.*` (except `.env.example`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `.aws/`, `.ssh/`, `.gnupg/`, `credentials*`, `*secret*` (case-insensitive), `*.keystore`, `service-account*.json` |
+| `secret` | `.env`, `.env.*` / `.env-*` / `.env_*` (except `.env.example`), `*.env`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `.npmrc`, `.pypirc`, `.netrc`, `.pgpass`, `.git-credentials`, `.dev.vars`, `.yarnrc.yml`, `credentials*`, `*secret*` (case-insensitive), `service-account*.json`; directories: the same credential-dir runs `paths.ts` refuses as roots (`.aws/`, `.ssh/`, `.gnupg/`, `keychains/`, `.config/gcloud/`, `.kube/`, `.docker/`) — one shared list (`SECRET_ROOT_SEGMENTS`) |
 | `os_file` | `.DS_Store`, `Thumbs.db`, `desktop.ini`, `._*` |
 | `binary` | first 8 KiB contains a NUL byte **or** has >30% non-text bytes; also extensions `png jpg jpeg gif webp ico pdf zip gz tar 7z jar exe dll so dylib wasm mp4 mov woff woff2 ttf otf sqlite db` |
 | `too_large` | `size > INPUT_CAPS.maxFileBytes` (64 KiB) |

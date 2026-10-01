@@ -35,7 +35,7 @@ const CONTAINER_DIRS = ['/private', '/private/var', '/opt', '/Volumes', '/Users'
  * Credential directories (B4). A root whose realpath passes through one of these is refused, and every classification
  * under such a root is `secret` (defense in depth). Multi-segment entries match consecutive segments.
  */
-const SECRET_ROOT_SEGMENTS: readonly (readonly string[])[] = [
+export const SECRET_ROOT_SEGMENTS: readonly (readonly string[])[] = [
   ['.aws'],
   ['.ssh'],
   ['.gnupg'],

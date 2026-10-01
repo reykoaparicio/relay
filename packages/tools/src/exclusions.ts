@@ -1,5 +1,6 @@
 import picomatch from 'picomatch';
 import type { ExclusionReason } from '@relay/contracts';
+import { SECRET_ROOT_SEGMENTS } from './paths.js';
 
 /** §3.4: the binary sniff looks at the first 8 KiB of a file. */
 export const SNIFF_BYTES = 8 * 1024;
@@ -44,14 +45,25 @@ const DEPENDENCY_DIRS = new Set(['node_modules', 'vendor', '.pnpm-store', 'bower
 const BUILD_DIRS = new Set(['dist', 'build', 'out', '.next', '.nuxt', 'coverage', '.turbo']);
 const BUILD_FILE = /(\.min\.js|\.map|\.bundle\.js)$/;
 const VCS_DIRS = new Set(['.git', '.hg', '.svn']);
-const SECRET_DIRS = new Set(['.aws', '.ssh', '.gnupg']);
-const SECRET_NAMES = new Set(['.env', '.npmrc', '.pypirc', '.netrc']);
+/** Credential directories: the same runs that `paths.ts` refuses as roots (multi-segment runs match consecutively). */
+const SECRET_DIR_RUNS = SECRET_ROOT_SEGMENTS;
+const SECRET_NAMES = new Set([
+  '.env',
+  '.envrc',
+  '.npmrc',
+  '.pypirc',
+  '.netrc',
+  '.pgpass',
+  '.git-credentials',
+  '.dev.vars',
+  '.yarnrc.yml',
+]);
 /** Secret name patterns; matched case-insensitively against every segment (§11.1: fail closed). */
 const SECRET_PATTERNS: readonly RegExp[] = [
-  /^\.env\..+$/,
-  /\.(pem|key|p12|pfx|keystore)$/,
-  /^id_rsa/,
-  /^id_ed25519/,
+  /^\.env[._-].+$/,
+  /\.env$/,
+  /\.(pem|key|p12|pfx|keystore|jks|tfvars)$/,
+  /^id_(rsa|dsa|ecdsa|ed25519)/,
   /^credentials/,
   /secret/,
   /^service-account.*\.json$/,
@@ -65,7 +77,13 @@ const BINARY_EXTENSIONS = new Set(
 function isSecretSegment(segment: string): boolean {
   const s = segment.toLowerCase();
   if (SECRET_ALLOWED.has(s)) return false;
-  return SECRET_NAMES.has(s) || SECRET_DIRS.has(s) || SECRET_PATTERNS.some((re) => re.test(s));
+  return SECRET_NAMES.has(s) || SECRET_PATTERNS.some((re) => re.test(s));
+}
+
+/** True when the segments contain a credential-directory run (`.aws`, `.config/gcloud`, …), case-insensitive. */
+function hasSecretDirRun(segments: readonly string[]): boolean {
+  const lower = segments.map((x) => x.toLowerCase());
+  return SECRET_DIR_RUNS.some((run) => lower.some((_, i) => run.every((seg, j) => lower[i + j] === seg)));
 }
 
 function isOsFile(name: string): boolean {
@@ -91,7 +109,7 @@ export function classifyByName(rawRelPath: string, isDirectory: boolean, ctx: Cl
   const name = segments[segments.length - 1] ?? relPath;
   // Directory-only rules apply to ancestors always, and to the entry itself when it is a directory.
   const dirSegments = isDirectory ? segments : segments.slice(0, -1);
-  if (segments.some(isSecretSegment)) return 'secret';
+  if (segments.some(isSecretSegment) || hasSecretDirRun(segments)) return 'secret';
   if (segments.some((s) => VCS_DIRS.has(s.toLowerCase()))) return 'vcs_internal';
   if (dirSegments.some((s) => DEPENDENCY_DIRS.has(s))) return 'dependency_dir';
   if (dirSegments.some((s) => BUILD_DIRS.has(s)) || (!isDirectory && BUILD_FILE.test(name))) return 'build_output';
