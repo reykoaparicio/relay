@@ -135,7 +135,9 @@ export function createIpcRouter(deps: RouterDeps): IpcRouter {
         result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId) : mapped };
       }
     }
-    deps.logger.info({
+    // Successful ops are debug (high volume; still written — the file logger has no level filter, only buffering);
+    // failures stay info.
+    deps.logger[result.ok ? 'debug' : 'info']({
       event: 'ipc.op', channel, correlationId, durationMs: Math.round(deps.now() - t0),
       outcome: result.ok ? 'ok' : 'error', ...(result.ok ? {} : { code: result.error.code }),
     });

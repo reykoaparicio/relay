@@ -19,7 +19,12 @@ const frame = (url: string, parent: unknown = null): IpcEventLike => ({ senderFr
 
 function setup(o: { isPackaged?: boolean; getInfo?: () => Promise<unknown>; now?: () => number } = {}) {
   const lines: LogFields[] = [];
-  const logger: MainLogger = { debug: (f) => lines.push(f), info: (f) => lines.push(f), warn: (f) => lines.push(f), error: (f) => lines.push(f) };
+  const levels: string[] = [];
+  const at = (level: string) => (f: LogFields) => {
+    levels.push(level);
+    lines.push(f);
+  };
+  const logger: MainLogger = { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') };
   const registered: string[] = [];
   const runner = { request: vi.fn(() => Promise.resolve({ ok: true as const, data: [] })) };
   const mainHandlers = {
@@ -40,7 +45,7 @@ function setup(o: { isPackaged?: boolean; getInfo?: () => Promise<unknown>; now?
     composite: {} as HandlerTable<CompositeChannel>,
     runner: runner as unknown as RouterDeps['runner'],
   };
-  return { router: createIpcRouter(deps), lines, registered, runner };
+  return { router: createIpcRouter(deps), lines, levels, registered, runner };
 }
 
 describe('IPC router (H4)', () => {
@@ -155,8 +160,8 @@ describe('IPC router (H4)', () => {
     expect(last !== undefined && !last.ok && typeof last.error.details?.['retryAfterMs']).toBe('number');
   });
 
-  it('logs one ipc.op line per call with outcome and code', async () => {
-    const { router, lines } = setup();
+  it('logs one ipc.op line per call with outcome and code (success at debug, failure at info)', async () => {
+    const { router, lines, levels } = setup();
 
     await router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
     await router.invoke('relay/v1/app.getInfo', { senderFrame: null }, {});
@@ -166,6 +171,7 @@ describe('IPC router (H4)', () => {
     expect(ops[0]).toMatchObject({ channel: 'relay/v1/app.getInfo', outcome: 'ok' });
     expect(ops[1]).toMatchObject({ outcome: 'error', code: 'PERMISSION_DENIED' });
     expect(typeof ops[0]?.['correlationId']).toBe('string');
+    expect(lines.flatMap((l, i) => (l.event === 'ipc.op' ? [levels[i]] : []))).toEqual(['debug', 'info']);
   });
 
   it('routes runner-routed channels to the supervisor', async () => {

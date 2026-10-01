@@ -39,6 +39,15 @@ export function createProductionServices(cfg: BootConfig): BootServices {
   const home = homedir();
   const paths = appPaths(userData, samplesRoot(userData, app.getPath('documents'), cfg.userDataOverridden));
   const logger = createFileLogger(paths.logs);
+  // The buffered logger must not lose queued lines on the way out. `uncaughtExceptionMonitor` observes without
+  // replacing Electron's default uncaught-exception handling; 'quit' is the last chance after before-quit's flush.
+  process.on('uncaughtExceptionMonitor', (err) => {
+    logger.error({ event: 'main.uncaught_exception', outcome: 'error', err: err.message, name: err.name }); // sync
+    logger.flushSync();
+  });
+  app.on('quit', () => {
+    logger.flushSync();
+  });
   const ids = createIdGen(systemClock, (n) => new Uint8Array(randomBytes(n)));
   const origin: TrustedOrigin = {
     isPackaged: app.isPackaged,
@@ -178,6 +187,9 @@ export function createProductionServices(cfg: BootConfig): BootServices {
       if (win.isMinimized()) win.restore();
       win.focus();
     },
-    flushLogs: () => Promise.resolve(), // the file logger writes synchronously
+    flushLogs: () => {
+      logger.flushSync(); // before-quit: everything queued reaches disk before app.quit()
+      return Promise.resolve();
+    },
   };
 }

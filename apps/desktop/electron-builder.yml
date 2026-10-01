@@ -1,4 +1,5 @@
-# 08 H9 packaging (electron-builder 26). Everything is bundled into out/**; only the sample project ships beside it.
+# 08 H9 packaging (electron-builder 26). Everything is bundled into out/**; only the sample project and the Electron/
+# Chromium license files ship beside it.
 appId: dev.relay.prototype
 productName: Relay
 directories:
@@ -6,8 +7,14 @@ directories:
   buildResources: resources
 files:
   - "out/**/*"
+  - "!out/**/*.map" # hidden sourcemaps stay in out/ for symbolication; never shipped (PERF-01)
   - "package.json"
 extraResources:
+  # Electron's own license and the Chromium/third-party notices, referenced from Settings → About (LIC-01).
+  - from: "node_modules/electron/dist/LICENSE"
+    to: "LICENSE.electron.txt"
+  - from: "node_modules/electron/dist/LICENSES.chromium.html"
+    to: "LICENSES.chromium.html"
   # Bundled sample (§4.1); the fixture .env is never shipped.
   - from: "../../tests/fixtures/sample-api"
     to: "sample-api"

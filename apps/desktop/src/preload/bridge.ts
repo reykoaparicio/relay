@@ -15,6 +15,24 @@ const ALLOWED: ReadonlySet<string> = new Set(OPERATION_LIST.map((o) => o.channel
 
 /** Builds the `window.relay` API over `ipc`. */
 export function createRelayApi(ipc: IpcRendererLike, platform: NodeJS.Platform) {
+  // Push events: ONE ipcRenderer listener (attached lazily on the first subscribe, removed when the last subscriber
+  // leaves) parses each payload once and fans the result out. Each subscribe() gets its own entry, so subscribing the
+  // same function twice behaves like two subscriptions.
+  const subscribers = new Set<{ readonly listener: (e: PushEvent) => void }>();
+  const handler = (_event: unknown, payload: unknown): void => {
+    const parsed = pushEventSchema.safeParse(payload);
+    if (!parsed.success) return;
+    for (const s of [...subscribers]) {
+      if (!subscribers.has(s)) continue; // unsubscribed by an earlier subscriber during this dispatch
+      try {
+        s.listener(parsed.data);
+      } catch (err) {
+        queueMicrotask(() => {
+          throw err; // surface it (window.onerror) without starving the other subscribers
+        });
+      }
+    }
+  };
   return {
     invoke<C extends Channel>(channel: C, input: InputOf<C>): Promise<IpcResult<C>> {
       if (!ALLOWED.has(channel)) {
@@ -23,13 +41,12 @@ export function createRelayApi(ipc: IpcRendererLike, platform: NodeJS.Platform) 
       return ipc.invoke(channel, input) as Promise<IpcResult<C>>; // main validates; the preload does not trust itself
     },
     subscribe(listener: (e: PushEvent) => void): () => void {
-      const handler = (_event: unknown, payload: unknown): void => {
-        const parsed = pushEventSchema.safeParse(payload);
-        if (parsed.success) listener(parsed.data);
-      };
-      ipc.on(EVENTS_CHANNEL, handler);
+      const entry = { listener };
+      if (subscribers.size === 0) ipc.on(EVENTS_CHANNEL, handler);
+      subscribers.add(entry);
       return () => {
-        ipc.removeListener(EVENTS_CHANNEL, handler);
+        if (!subscribers.delete(entry)) return; // idempotent
+        if (subscribers.size === 0) ipc.removeListener(EVENTS_CHANNEL, handler);
       };
     },
     platform, // keyboard hints only

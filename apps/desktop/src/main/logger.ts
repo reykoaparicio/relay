@@ -1,6 +1,7 @@
 // 08 logging: structured JSONL lines (00b §3 fields incl. `outcome`) in logs/<YYYY-MM-DD>.jsonl, redacted before
-// writing (02 §B8). Daily files; 14 days kept.
-import { appendFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+// writing (02 §B8). Daily files; 14 days kept. The file logger is buffered (one async append per flush window, per
+// day file); error lines and flushSync() write synchronously so the lines that explain a crash survive it.
+import { appendFileSync, mkdirSync, promises as fsp, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { redactDeep } from '@relay/contracts';
 
@@ -51,22 +52,150 @@ export function pruneLogs(dir: string, nowMs: number): void {
   }
 }
 
-/** A JSONL file logger writing synchronously (lines survive a crash; O_APPEND keeps concurrent writers line-atomic). */
-export function createFileLogger(dir: string, now: () => number = Date.now): MainLogger {
+/** The buffered file logger: a {@link MainLogger} plus explicit flushing. */
+export interface FileLogger extends MainLogger {
+  /** Writes every queued line (after any in-flight batch, so file order is kept). Never rejects. */
+  flush(): Promise<void>;
+  /**
+   * Writes every queued line synchronously (quit, uncaught exception). A batch already handed to the OS by an async
+   * flush cannot be recalled; it completes on its own.
+   */
+  flushSync(): void;
+}
+
+/** Tunables of {@link createFileLogger} (tests inject a fake fs). */
+export interface FileLoggerOptions {
+  /** Max time a non-error line waits in memory before its batch is appended. */
+  readonly flushIntervalMs?: number;
+  readonly fs?: {
+    appendFileSync(path: string, data: string): void;
+    appendFile(path: string, data: string): Promise<void>;
+    mkdirSync(path: string, opts: { recursive: true }): unknown;
+  };
+}
+
+/** Default flush window of the buffered file logger. */
+export const LOG_FLUSH_INTERVAL_MS = 100;
+
+const realFs: NonNullable<FileLoggerOptions['fs']> = {
+  appendFileSync: (p, d) => {
+    appendFileSync(p, d);
+  },
+  appendFile: (p, d) => fsp.appendFile(p, d),
+  mkdirSync: (p, o) => mkdirSync(p, o),
+};
+
+/**
+ * A buffered JSONL file logger. debug/info/warn lines are queued (already formatted and redacted, so later mutation
+ * of `fields` cannot change them) and appended at most every `flushIntervalMs`, one `appendFile` per day file. Error
+ * lines are written synchronously together with everything queued before them — unless an async batch is in flight,
+ * in which case they join the queue and are written right after it (file order always matches call order). O_APPEND
+ * keeps concurrent writers line-atomic. Logging never throws.
+ */
+export function createFileLogger(dir: string, now: () => number = Date.now, opts: FileLoggerOptions = {}): FileLogger {
+  const fs = opts.fs ?? realFs;
+  const intervalMs = opts.flushIntervalMs ?? LOG_FLUSH_INTERVAL_MS;
   let ensured = false;
-  const write = (level: LogLevel) => (fields: LogFields): void => {
-    const ts = now();
+  /** Queued lines in call order: [file, line]. */
+  let queue: [string, string][] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  /** The async batch currently being appended (null when idle). */
+  let inflight: Promise<void> | null = null;
+
+  const ensureDir = (): boolean => {
+    if (ensured) return true;
     try {
-      if (!ensured) {
-        mkdirSync(dir, { recursive: true });
-        ensured = true;
-      }
-      appendFileSync(join(dir, `${logDate(ts)}.jsonl`), formatLogLine(level, ts, fields));
+      fs.mkdirSync(dir, { recursive: true });
+      ensured = true;
     } catch {
-      // Logging must never take the app down.
+      // Logging must never take the app down; lines are dropped while the dir cannot be created.
+    }
+    return ensured;
+  };
+
+  /** Groups lines by day file, preserving the order of files and of lines within each file. */
+  const group = (batch: [string, string][]): Map<string, string> => {
+    const byFile = new Map<string, string>();
+    for (const [file, line] of batch) byFile.set(file, (byFile.get(file) ?? '') + line);
+    return byFile;
+  };
+
+  const takeQueue = (): [string, string][] => {
+    const batch = queue;
+    queue = [];
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    return batch;
+  };
+
+  const writeSync = (batch: [string, string][]): void => {
+    if (batch.length === 0 || !ensureDir()) return;
+    for (const [file, data] of group(batch)) {
+      try {
+        fs.appendFileSync(join(dir, file), data);
+      } catch {
+        // dropped (never throws)
+      }
     }
   };
-  return { debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error') };
+
+  const flushAsync = (): Promise<void> => {
+    if (inflight !== null) return inflight.then(flushAsync);
+    const batch = takeQueue();
+    if (batch.length === 0 || !ensureDir()) return Promise.resolve();
+    const run = async (): Promise<void> => {
+      for (const [file, data] of group(batch)) {
+        try {
+          await fs.appendFile(join(dir, file), data);
+        } catch {
+          // dropped (never throws)
+        }
+      }
+    };
+    const p = run().finally(() => {
+      inflight = null;
+      // Lines (incl. errors) that arrived while this batch was in flight go out next, in order.
+      if (queue.length > 0) schedule(0);
+    });
+    inflight = p;
+    return p;
+  };
+
+  function schedule(ms: number): void {
+    if (timer !== null) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void flushAsync();
+    }, ms);
+    timer.unref();
+  }
+
+  const write = (level: LogLevel) => (fields: LogFields): void => {
+    let entry: [string, string];
+    try {
+      const ts = now();
+      entry = [`${logDate(ts)}.jsonl`, formatLogLine(level, ts, fields)];
+    } catch {
+      return; // never throws
+    }
+    queue.push(entry);
+    if (level === 'error' && inflight === null) {
+      writeSync(takeQueue()); // the line that explains a crash must survive it
+      return;
+    }
+    schedule(level === 'error' ? 0 : intervalMs);
+  };
+
+  return {
+    debug: write('debug'),
+    info: write('info'),
+    warn: write('warn'),
+    error: write('error'),
+    flush: () => flushAsync(),
+    flushSync: () => {
+      writeSync(takeQueue());
+    },
+  };
 }
 
 /** Logger that discards everything (before userData is known, and in tests). */

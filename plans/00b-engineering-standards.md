@@ -119,7 +119,7 @@ The renderer tsconfig overrides `module: "ESNext"`, `moduleResolution: "Bundler"
 - Forms are controlled, submitted via `<form onSubmit>` with `preventDefault`, and every control has a `<label htmlFor>`. Errors appear next to the field, and a summary with anchors appears at the top (ui-ux-pro-max `error-feedback`, `form-labels`).
 - **Status is never shown by color alone (gate):** use `<StatusBadge>` everywhere (icon + text), per spec §3.3 and §5.7.
 - Use lazy-loaded route components (`React.lazy`) for Workflow editor, Report/Diff viewer, and Settings.
-- Markdown from models is rendered with `react-markdown`, `skipHtml`, and a link renderer that shows the URL as text and opens it only through `relay/v1/app.openExternal` after a confirmation (spec §11.4). `dangerouslySetInnerHTML` is forbidden (gate: eslint `react/no-danger: error`).
+- Model output is rendered as structured views and plain text, never as HTML or Markdown (no Markdown renderer is bundled). If one is added later it must use `skipHtml` and a link renderer that shows the URL as text and opens it only through `relay/v1/app.openExternal` after a confirmation (spec §11.4). `dangerouslySetInnerHTML` is forbidden (gate: eslint `react/no-danger: error`).
 - **Accessibility (ui-ux-pro-max CRITICAL tier):** visible `:focus-visible` ring, logical tab order, a skip link, `aria-live="polite"` for run status (announce completion and pauses, never tokens), 4.5:1 contrast (already true of the tokens), `prefers-reduced-motion` respected, and no information that exists only in tooltips.
 - Use no emoji as icons. Use `lucide-react` only, at a consistent 16/18/20 px size.
 - Long lists (run events, diff lines > 500) are virtualized with `@tanstack/react-virtual`.

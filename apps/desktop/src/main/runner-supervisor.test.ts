@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errors, ok } from '@relay/contracts';
 import type { PushEvent, Result } from '@relay/contracts';
 import type { LogFields, MainLogger } from './logger.js';
-import { createRunnerSupervisor, minimalEnv } from './runner-supervisor.js';
+import { RESTART_BACKOFF_MS, createRunnerSupervisor, minimalEnv } from './runner-supervisor.js';
 import type { SupervisorDeps } from './runner-supervisor.js';
 
 vi.mock('electron', () => ({}));
@@ -141,6 +141,9 @@ describe('runner supervisor (H6)', () => {
     expect(children[0]?.killed).toBe(true);
     expect(children).toHaveLength(1);
     children[0]?.emit('exit', 1);
+    expect(children).toHaveLength(1); // backoff: still restarting, no fork yet
+    expect(sup.state()).toMatchObject({ state: 'restarting', restarts: 1 });
+    await vi.advanceTimersByTimeAsync(RESTART_BACKOFF_MS[0] ?? 0);
 
     expect(children).toHaveLength(2);
     expect(sup.state()).toMatchObject({ state: 'restarting', restarts: 1 });
@@ -169,6 +172,7 @@ describe('runner supervisor (H6)', () => {
     expect(sup.state().state).toBe('restarting');
     expect(children).toHaveLength(1);
     children[0]?.emit('exit', 137);
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(children).toHaveLength(2);
     expect(events).toContainEqual({ type: 'runner.state', state: 'restarting' });
@@ -179,11 +183,73 @@ describe('runner supervisor (H6)', () => {
     const started = sup.start();
     started.catch(() => undefined);
 
-    for (let i = 0; i < 4; i += 1) children[i]?.emit('exit', 1);
+    for (let i = 0; i < 4; i += 1) {
+      children[i]?.emit('exit', 1);
+      await vi.advanceTimersByTimeAsync(8_000); // ≥ every backoff step; 4 crashes stay well inside 60 s
+    }
 
     expect(children).toHaveLength(4);
     expect(sup.state().state).toBe('unavailable');
     await expect(started).rejects.toThrow();
+    const r = await sup.request('relay/v1/projects.list', {});
+    expect(!r.ok && r.error.code).toBe('RUNNER_UNAVAILABLE');
+  });
+
+  it('backs off 0.5 s / 2 s / 8 s between rapid crashes instead of exhausting restarts instantly', async () => {
+    const { sup, children, lines } = setup();
+    const started = sup.start();
+    started.catch(() => undefined);
+
+    children[0]?.emit('exit', 1);
+    children[0]?.emit('exit', 1); // a duplicate exit of the dead generation is ignored
+    expect(sup.state()).toMatchObject({ state: 'restarting', restarts: 1 });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(children).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children).toHaveLength(2);
+
+    children[1]?.emit('exit', 1); // crashes right after the fork
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(children).toHaveLength(2);
+    expect(sup.state().state).toBe('restarting'); // stays restarting during the delay
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children).toHaveLength(3);
+
+    children[2]?.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(children).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children).toHaveLength(4);
+    expect(lines.filter((l) => l.event === 'runner.restart_scheduled').map((l) => l['delayMs'])).toEqual([500, 2_000, 8_000]);
+    expect(sup.state().state).not.toBe('unavailable');
+  });
+
+  it('a healthy runner older than the restart window starts the backoff over at 0.5 s', async () => {
+    const { sup, children, ready } = setup();
+    void sup.start().catch(() => undefined);
+    children[0]?.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(500);
+    ready(children[1]);
+    for (let i = 0; i < 7; i += 1) {
+      await vi.advanceTimersByTimeAsync(9_000);
+      children[1]?.port.deliver({ kind: 'heartbeat', at: Date.now(), activeRunId: null });
+    }
+
+    children[1]?.emit('exit', 1); // > 60 s after the first restart
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(children).toHaveLength(3);
+  });
+
+  it('shutdown during a backoff cancels the pending fork', async () => {
+    const { sup, children } = setup();
+    void sup.start().catch(() => undefined);
+    children[0]?.emit('exit', 1);
+
+    await sup.shutdown({ graceMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(children).toHaveLength(1);
     const r = await sup.request('relay/v1/projects.list', {});
     expect(!r.ok && r.error.code).toBe('RUNNER_UNAVAILABLE');
   });
@@ -399,7 +465,8 @@ describe('runner supervisor — sleep/resume and races (injected clocks)', () =>
     const old = children[0] as FakeChild;
     old.port.deliver({ kind: 'credential.request', id: 'cred-1', providerId: 'anthropic', purpose: 'dispatch', attemptId: null });
 
-    old.emit('exit', 1); // restart: generation 2 forks with a fresh port
+    old.emit('exit', 1); // restart: generation 2 forks with a fresh port (after the first backoff step)
+    clk.advance(500);
     const fresh = children[1] as FakeChild;
     ready(fresh);
     release(ok('sk-late-key'));

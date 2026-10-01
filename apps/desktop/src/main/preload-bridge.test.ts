@@ -1,7 +1,7 @@
 // Tests the preload bridge (08 H2). Lives under main/ because the vitest `unit` project only collects
 // apps/desktop/src/{main,runner}/**/*.test.ts; the bridge module itself is Electron-free.
 import { describe, expect, it, vi } from 'vitest';
-import { EVENTS_CHANNEL, INTERNAL_OPERATION_LIST, OPERATION_LIST } from '@relay/contracts';
+import { EVENTS_CHANNEL, INTERNAL_OPERATION_LIST, OPERATION_LIST, pushEventSchema } from '@relay/contracts';
 import type { Channel } from '@relay/contracts';
 // eslint-disable-next-line boundaries/dependencies -- test-only: exercises the preload bridge from the unit project
 import { createRelayApi } from '../preload/bridge.js';
@@ -91,5 +91,74 @@ describe('preload bridge (H2)', () => {
 
     expect(count(EVENTS_CHANNEL)).toBe(0);
     expect(got).not.toHaveBeenCalled();
+  });
+
+  it('fans one parsed event out to every subscriber over a single ipcRenderer listener', () => {
+    const { ipc, emit, count } = fakeIpc();
+    const api = createRelayApi(ipc, 'darwin');
+    const parse = vi.spyOn(pushEventSchema, 'safeParse');
+    const a = vi.fn();
+    const b = vi.fn();
+    api.subscribe(a);
+    api.subscribe(b);
+    api.subscribe(a); // the same function twice = two subscriptions
+
+    emit(EVENTS_CHANNEL, { type: 'providers.changed' });
+
+    expect(count(EVENTS_CHANNEL)).toBe(1);
+    expect(ipc.on).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(a).toHaveBeenCalledTimes(2);
+    expect(b).toHaveBeenCalledExactlyOnceWith({ type: 'providers.changed' });
+    parse.mockRestore();
+  });
+
+  it('removes the ipcRenderer listener only when the last subscriber leaves, and re-attaches lazily', () => {
+    const { ipc, emit, count } = fakeIpc();
+    const api = createRelayApi(ipc, 'darwin');
+    const a = vi.fn();
+    const b = vi.fn();
+    const offA = api.subscribe(a);
+    const offB = api.subscribe(b);
+
+    offA();
+    offA(); // idempotent: must not drop b's subscription
+    emit(EVENTS_CHANNEL, { type: 'providers.changed' });
+    expect(count(EVENTS_CHANNEL)).toBe(1);
+    expect(a).not.toHaveBeenCalled();
+    expect(b).toHaveBeenCalledTimes(1);
+    offB();
+    expect(count(EVENTS_CHANNEL)).toBe(0);
+
+    const c = vi.fn();
+    api.subscribe(c);
+    emit(EVENTS_CHANNEL, { type: 'providers.changed' });
+    expect(count(EVENTS_CHANNEL)).toBe(1);
+    expect(c).toHaveBeenCalledTimes(1);
+  });
+
+  it('a subscriber that unsubscribes another mid-dispatch, or throws, does not break the fan-out', async () => {
+    const { ipc, emit } = fakeIpc();
+    const api = createRelayApi(ipc, 'darwin');
+    const late = vi.fn();
+    let offLate: () => void = () => undefined;
+    const thrown: unknown[] = [];
+    const onErr = (e: unknown) => thrown.push(e);
+    process.on('uncaughtException', onErr);
+    api.subscribe(() => {
+      offLate();
+      throw new Error('subscriber bug');
+    });
+    const after = vi.fn();
+    offLate = api.subscribe(late);
+    api.subscribe(after);
+
+    emit(EVENTS_CHANNEL, { type: 'providers.changed' });
+    await new Promise((r) => setTimeout(r, 0));
+    process.off('uncaughtException', onErr);
+
+    expect(late).not.toHaveBeenCalled();
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(thrown).toHaveLength(1);
   });
 });

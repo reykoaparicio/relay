@@ -130,6 +130,8 @@ describe('boot @m1', () => {
     const second = app.fire('before-quit');
 
     expect(calls.filter((c) => c === 'quit')).toHaveLength(1);
+    expect(calls.indexOf('flush')).toBeGreaterThan(calls.indexOf('supervisor.shutdown')); // logs flushed on quit…
+    expect(calls.indexOf('flush')).toBeLessThan(calls.indexOf('quit')); // …before the app actually quits
     expect(second.prevented).toBe(false);
     expect(calls.filter((c) => c === 'supervisor.shutdown')).toHaveLength(1);
   });
