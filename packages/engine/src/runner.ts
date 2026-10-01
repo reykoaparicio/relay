@@ -125,7 +125,10 @@ async function advance(ctx: EngineCtx, run: RunRow): Promise<void> {
       if (kind === 'approval') return openApproval(ctx, run.id, next.step.id);
       if (kind === 'finalize') return runFinalize(ctx, run.id, next.step.id);
       if (kind === 'model') {
-        await executeModelAttempt(ctx, run.id, next.step.id);
+        const out = await executeModelAttempt(ctx, run.id, next.step.id);
+        // A conflict (the step is not dispatchable, e.g. still `reserved`, or the attempt moved meanwhile) changed
+        // nothing: back off until woken or idle, instead of re-preparing (and re-counting tokens) in a hot loop.
+        if (out.kind === 'blocked' && out.why === 'conflict') await ctx.wake.wait(ctx.idleMs ?? IDLE_MS);
         return;
       }
       return applyTx(ctx, run.id, { type: 'UNRECOVERABLE', error: errors.internal(ctx.ids.next('correlation')) }, ['running']);
@@ -243,6 +246,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       started = true;
       stopping = false;
       ctx.lease.owned = true;
+      ctx.lease.ownerId = ownerId;
       intervals.push(ctx.timers.setInterval(() => {
         if (!ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now())) ctx.lease.owned = false; // taken over: stop dispatching
       }, RUNNER_HEARTBEAT_MS));

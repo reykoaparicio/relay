@@ -1,7 +1,7 @@
 // 06 F4 step 7 + F9b: the ONE post-validation outcome function shared by the live settle (checkpoints.ts) and the
 // reconcile path (recovery.ts), so both apply the same F7 plan, the same F10 approval-scope rule, the same revision
 // trigger, and the same §9.5 overrun rule (BH-6). Runs inside the caller's settlement transaction.
-import type { AppError, ArtifactId, AttemptId, AttemptPurpose, EpochMs, Microusd, RetryPolicy } from '@relay/contracts';
+import type { ArtifactId, AttemptId, AttemptPurpose, EpochMs, Microusd, RetryPolicy } from '@relay/contracts';
 import type { Repos, StepRow } from '@relay/storage';
 import { invalidateApproval } from './approval-binding.js';
 import type { SettleAmount } from './budget.js';
@@ -105,36 +105,28 @@ export function applyPostValidation(
   return { plan, event: runEventFor(i.outcome, plan, i.cost, i.N, i.attemptId) };
 }
 
-/** Event payload marker: a pause a reconciled outcome requires, applied once the run's unknowns are resolved. */
+/** Event payload marker of the audit event a deferred pause appends (`error.recorded { kind }`). */
 export const DEFERRED_PAUSE_MARK = 'deferred_pause';
 
+type DeferrableEvent = Extract<RunMachineEvent, { type: 'BUDGET_OVERRUN' | 'APPROVAL_STALE' }>;
+
 /** Run events a reconciled outcome turns into a pause of its own (never auto-resumed): overrun and scope change. */
-export function isDeferrablePause(ev: RunMachineEvent | null): ev is Extract<RunMachineEvent, { type: 'BUDGET_OVERRUN' | 'APPROVAL_STALE' }> {
+export function isDeferrablePause(ev: RunMachineEvent | null): ev is DeferrableEvent {
   return ev?.type === 'BUDGET_OVERRUN' || ev?.type === 'APPROVAL_STALE';
 }
 
 /**
- * Records a pause a reconciled outcome requires (the run is `paused(unknown_outcome)` or `interrupted`, not
- * `running`): `error.recorded { kind: deferred_pause }`. `resumeIfUnknownsResolved` applies it INSTEAD of
- * RESUME_RESOLVED once no unknown attempt remains (BH-2, BH-6).
+ * Records a pause a reconciled outcome requires while the run is not `running` (06 F2 clarification 14): DURABLY on
+ * the run row (`runs.deferred_pause`), plus an `error.recorded { kind: deferred_pause }` audit event. An overrun wins
+ * over a scope change (§9.5 precedence, as live) and is never replaced by one. `applyRunEvent` applies the stored
+ * pause INSTEAD of any event that would let the run continue (RESUME_RESOLVED, RECOVERY_DECIDED, CHECKS_PASSED), so
+ * no resume path can bypass it; only the user's resolution of that very pause clears it (BH-2, BH-6).
  */
-export function deferPause(r: Repos, fx: PostCommitEffect[], runId: StepRow['runId'], ev: Extract<RunMachineEvent, { type: 'BUDGET_OVERRUN' | 'APPROVAL_STALE' }>): void {
+export function deferPause(r: Repos, fx: PostCommitEffect[], runId: StepRow['runId'], ev: DeferrableEvent): void {
+  const reason = ev.type === 'BUDGET_OVERRUN' ? 'budget_overrun' : 'approval_stale';
+  const cur = r.runs.get(runId).deferredPause;
+  if (cur?.reason !== 'budget_overrun') r.runs.setDeferredPause(runId, { reason, detail: ev.error });
   appendRunEvent(r, fx, runId, 'error.recorded', {
     kind: DEFERRED_PAUSE_MARK, event: ev.type, code: ev.error.code, error: ev.error, ...(ev.type === 'BUDGET_OVERRUN' ? { attemptId: ev.attemptId } : {}),
   });
-}
-
-/**
- * The deferred pause recorded since the run entered its current status (its latest `run.status_changed`), or null.
- * An overrun wins over a scope change (§9.5 precedence, as live).
- */
-export function pendingDeferredPause(r: Repos, runId: StepRow['runId']): RunMachineEvent | null {
-  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
-  const since = events.findLast((e) => e.type === 'run.status_changed')?.seq ?? 0;
-  const marks = events.filter((e) => e.seq > since && e.type === 'error.recorded' && e.payload['kind'] === DEFERRED_PAUSE_MARK);
-  const pick = marks.find((e) => e.payload['event'] === 'BUDGET_OVERRUN') ?? marks.find((e) => e.payload['event'] === 'APPROVAL_STALE');
-  if (pick === undefined) return null;
-  const error = pick.payload['error'] as AppError;
-  if (pick.payload['event'] === 'BUDGET_OVERRUN') return { type: 'BUDGET_OVERRUN', attemptId: pick.payload['attemptId'] as AttemptId, error };
-  return { type: 'APPROVAL_STALE', error };
 }

@@ -27,9 +27,9 @@ import { applyStepEvent } from './step-machine.js';
 import { validateOutput } from './steps/validate-output.js';
 import { errors } from '@relay/contracts';
 
-/** What `executeModelAttempt` did. */
+/** What `executeModelAttempt` did. `lease_lost`: this process no longer owns the runner lease; nothing was written. */
 export type AttemptOutcome =
-  | { readonly kind: 'blocked'; readonly why: 'paused' | 'not_running' | 'conflict' }
+  | { readonly kind: 'blocked'; readonly why: 'paused' | 'not_running' | 'conflict' | 'lease_lost' }
   | { readonly kind: 'settled'; readonly attemptId: AttemptId; readonly outcome: OutcomeKind; readonly plan: AttemptPlan['kind'] };
 
 /** Result of one artifact write (5.). */
@@ -65,17 +65,23 @@ export function fingerprintRequest(request: ModelRequest): string {
   return sha256Hex(canonicalJson({ ...request, metadata: { ...request.metadata, attemptId: undefined } }));
 }
 
-/** Applies `ev` (CAS from running) in its own tx; returns `blocked`. */
+/**
+ * Applies `ev` (CAS from running) in its own tx; returns `blocked`. It runs after `prepare`'s awaits, so the lease is
+ * re-checked INSIDE the tx (B3): a process that lost it writes nothing (the new owner's recovery decides).
+ */
 async function pauseRun(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent | null, extra?: (r: Repos, now: EpochMs, fx: PostCommitEffect[]) => void): Promise<AttemptOutcome> {
   if (ev === null) return { kind: 'blocked', why: 'conflict' };
   const fx: PostCommitEffect[] = [];
-  ctx.db.tx('immediate', (r) => {
+  const owned = ctx.db.tx('immediate', (r) => {
+    if (!ownsLeaseInTx(ctx, r)) return false;
     const now = ctx.clock.now();
     const cur = r.runs.get(runId);
-    if (cur.status !== 'running') return;
+    if (cur.status !== 'running') return true;
     extra?.(r, now, fx);
     applyRunEvent(r, cur, ev, now, fx);
+    return true;
   });
+  if (!owned) return { kind: 'blocked', why: 'lease_lost' };
   await runEffects(ctx, fx);
   return { kind: 'blocked', why: 'paused' };
 }
@@ -188,9 +194,14 @@ function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; st
 
 export { outcomeLabel } from './outcome.js';
 
-type Admitted = { readonly ok: true; readonly seq: number } | { readonly ok: false; readonly why: 'paused' | 'not_running' | 'conflict' };
+type Admitted = { readonly ok: true; readonly seq: number } | { readonly ok: false; readonly why: 'paused' | 'not_running' | 'conflict' | 'lease_lost' };
 
-/** 2. One tx: re-check the run INSIDE the tx, admit (§9.3), create the attempt + reservation. */
+/**
+ * 2. One tx: re-check the lease and the run INSIDE the tx, admit (§9.3), create the attempt + reservation. It runs
+ * after `prepare`'s awaits (context, credential, the network token count), during which `stop()` or a takeover may
+ * have released the lease: then nothing is written (B3). The `{ok:false}` outcomes other than `lease_lost` COMMIT
+ * their pause (not a rolled-back txResult).
+ */
 function reserve(
   ctx: EngineCtx,
   fx: PostCommitEffect[],
@@ -198,6 +209,7 @@ function reserve(
     stepSnap: ModelStepSnapshot; request: ModelRequest; estimate: UsageEstimate },
 ): Admitted {
   return ctx.db.tx('immediate', (r): Admitted => {
+    if (!ownsLeaseInTx(ctx, r)) return { ok: false, why: 'lease_lost' }; // before any write
     const now = ctx.clock.now();
     const cur = r.runs.get(i.runId);
     if (cur.status !== 'running') return { ok: false, why: 'not_running' }; // cancel/pause won the race
@@ -454,6 +466,20 @@ function progressReporter(ctx: EngineCtx, runId: RunId, attemptId: AttemptId, st
 /** B3: whether this process still owns the runner lease (re-read at every use; `stop()` flips it concurrently). */
 function ownsLease(ctx: Pick<EngineCtx, 'lease'>): boolean {
   return ctx.lease.owned;
+}
+
+/**
+ * Inside a write tx: the in-memory flag AND the lease row. The flag only flips on a heartbeat, so a process that stalled
+ * past the stale window (and was taken over) must not trust it before its next heartbeat.
+ */
+function ownsLeaseInTx(ctx: Pick<EngineCtx, 'lease'>, r: Repos): boolean {
+  if (!ctx.lease.owned) return false;
+  const { ownerId } = ctx.lease;
+  if (ownerId !== undefined && !r.lease.isHeldBy(ownerId)) {
+    ctx.lease.owned = false;
+    return false;
+  }
+  return true;
 }
 
 /**

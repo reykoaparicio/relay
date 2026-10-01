@@ -14,7 +14,7 @@ import type {
   RunId,
   RunStatus,
 } from '@relay/contracts';
-import type { Repos, RunRow } from '@relay/storage';
+import type { DeferredPause, Repos, RunRow } from '@relay/storage';
 import { logSafe } from './log-safe.js';
 import type { EngineCtx } from './ports.js';
 
@@ -31,7 +31,8 @@ export type RunMachineEvent =
   | { readonly type: 'REJECTED' }
   | { readonly type: 'REVISION_REQUESTED' }
   | { readonly type: 'BUDGET_BLOCKED'; readonly scope: 'run' | 'project'; readonly error: AppError }
-  | { readonly type: 'BUDGET_OVERRUN'; readonly attemptId: AttemptId; readonly error: AppError }
+  /** `attemptId` is the overrunning attempt (absent only for a deferred pause whose stored detail lacks it). */
+  | { readonly type: 'BUDGET_OVERRUN'; readonly attemptId?: AttemptId | undefined; readonly error: AppError }
   | { readonly type: 'USER_PAUSE' }
   | { readonly type: 'AUTH_FAILED'; readonly error: AppError }
   | { readonly type: 'RATE_LIMIT_EXHAUSTED'; readonly error: AppError }
@@ -100,6 +101,9 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
     CHECKS_PASSED: always(to('running')),
     SETUP_BLOCKED: (ev) => (ev.type === 'SETUP_BLOCKED' ? paused(ev.reason) : ILLEGAL), // clarification 9
     CANCEL_REQUESTED: always(to('cancelled')), // clarification 1: nothing in flight
+    // Clarification 14: a pause deferred while the run waited in the queue is applied instead of CHECKS_PASSED.
+    BUDGET_OVERRUN: always(paused('budget_overrun')),
+    APPROVAL_STALE: always(paused('approval_stale')),
   },
   running: {
     ...RUNNING_PAUSES,
@@ -185,8 +189,17 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
   }
 }
 
-/** Server-computed actions (`RunDetail.availableActions`); the UI renders only these (F2 truth table). */
+/**
+ * Server-computed actions (`RunDetail.availableActions`); the UI renders only these (F2 truth table), and every
+ * decision op (`runs.resume`, `runs.retryStep`, `runs.decideUnknown`) refuses an action not listed here for the run's
+ * current state (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree. An unresolved
+ * unknown attempt is decidable from ANY pause (clarification 15).
+ */
 export function allowedRunActions(run: Pick<RunRow, 'status' | 'pauseReason'>, f: RunActionFacts): RunAction[] {
+  if (run.status === 'paused' && f.unknownAttempts > 0) {
+    const base = run.pauseReason === null ? ['stop' as const] : pausedActions(run.pauseReason, f);
+    return base.includes('decide_unknown') ? base : [...base.filter((a) => a !== 'stop'), 'decide_unknown', 'stop'];
+  }
   switch (run.status) {
     case 'queued':
       return ['cancel'];
@@ -285,13 +298,37 @@ function statusDetailOf(ev: RunMachineEvent): AppError | null {
   return 'error' in ev ? ev.error : null;
 }
 
+/** The run event that applies a stored deferred pause (clarification 14). */
+export function deferredPauseEvent(p: DeferredPause): RunMachineEvent {
+  return p.reason === 'budget_overrun' ? { type: 'BUDGET_OVERRUN', attemptId: p.detail.attemptId, error: p.detail } : { type: 'APPROVAL_STALE', error: p.detail };
+}
+
+/** Events that let a blocked or queued run continue toward `running`. */
+const CONTINUES: ReadonlySet<RunMachineEventType> = new Set(['RESUME_RESOLVED', 'RECOVERY_DECIDED', 'CHECKS_PASSED']);
+
+/**
+ * Clarification 14 guard: while the run carries a durable deferred pause, an event that would let it continue is
+ * replaced by that pause, whichever path emitted it (a resume decision, retryStep, review_recovery, the auto-resume
+ * once unknowns resolve, the loop's CHECKS_PASSED). The user resolving THAT pause (e.g. acknowledge_overrun or an
+ * allowance increase from `paused(budget_overrun)`) is the only way it is cleared.
+ */
+function effectiveEvent(run: RunRow, ev: RunMachineEvent): { readonly ev: RunMachineEvent; readonly clearDeferred: boolean } {
+  const deferred = run.deferredPause;
+  if (deferred === null || !CONTINUES.has(ev.type)) return { ev, clearDeferred: false };
+  // The user resolved exactly this pause: it is cleared together with the transition.
+  if (run.status === 'paused' && run.pauseReason === deferred.reason) return { ev, clearDeferred: true };
+  return { ev: deferredPauseEvent(deferred), clearDeferred: false };
+}
+
 /**
  * The ONLY code that writes `runs.status` (call inside a db.tx). CAS from `run.status`; returns false when the CAS
  * lost (the caller re-reads). Also accrues execution time (F12), clears `pause_requested`, appends
- * `run.status_changed`, and queues post-commit effects.
+ * `run.status_changed`, and queues post-commit effects. A durable deferred pause replaces any continuing event
+ * ({@link effectiveEvent}, clarification 14).
  * @throws Error (invariant) when the transition is ILLEGAL — a caller bug.
  */
-export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: EpochMs, fx: PostCommitEffect[]): boolean {
+export function applyRunEvent(r: Repos, run: RunRow, requested: RunMachineEvent, now: EpochMs, fx: PostCommitEffect[]): boolean {
+  const { ev, clearDeferred } = effectiveEvent(run, requested);
   const t = transitionRun(run.status, ev);
   invariant(!('error' in t), `illegal run transition ${run.status} + ${ev.type}`);
   if (t.to === 'running') {
@@ -305,6 +342,7 @@ export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: E
     ...(t.to === 'running' && run.startedAt === null ? { startedAt: now } : {}),
   });
   if (!changed) return false;
+  if (clearDeferred) r.runs.setDeferredPause(run.id, null);
   if (t.to === 'running') r.runs.enterRunning(run.id, now);
   if (run.status === 'running' && t.to !== 'running') r.runs.leaveRunning(run.id, leaveRunningAt(ev, now));
   const terminal = isTerminal(t.to);

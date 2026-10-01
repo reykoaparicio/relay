@@ -104,6 +104,34 @@ describe('limits @m3', () => {
     expectNoNegativeReserved(h.db);
   });
 
+  // Referee wave 3, finding 2: a step failed at attemptCount == maxAttempts used to refuse retry_step / choose_profile
+  // (LIMIT_REACHED) while raise_limits was refused for its pause reason — no working action. The retry now reaches
+  // the reserve checkpoint, which pauses limit_attempts, from which raise_limits continues.
+  it.each([
+    ['retry_step', false],
+    ['choose_profile', true],
+  ] as const)('(e) output_invalid at attemptCount == maxAttempts (malformed-twice, maxAttempts 2) → %s → paused(limit_attempts) → raise_limits → completes @m3', async (_label, withProfile) => {
+    h = await createHarness({ scenario: 'malformed-twice', limits: { maxAttempts: 2 } });
+    const x = h;
+    const runId = await x.startRun();
+    const failed = await x.waitFor(runId, settled);
+    expect([failed.status, failed.pauseReason, failed.attemptCount]).toEqual(['paused', 'output_invalid', 2]);
+    const economy = x.db.repos.profiles.getByName('Economy');
+
+    const retried = await x.retryStep(runId, 'review', withProfile ? { profileId: economy!.id } : {});
+
+    expect(retried.ok ? null : retried.error).toBeNull();
+    const limited = await x.waitFor(runId, (r) => r.status === 'paused' && r.pauseReason === 'limit_attempts');
+    expect(limited.attemptCount).toBe(2);
+    const raised = await x.resume(runId, { kind: 'raise_limits', maxAttempts: 10 });
+    expect(raised.ok ? null : raised.error).toBeNull();
+    await x.waitFor(runId, 'awaiting_approval');
+    await x.approve(runId);
+    expect((await x.waitFor(runId, settled)).status).toBe('completed');
+    if (withProfile) expect(x.steps(runId, 'review').at(-1)?.profileName).toBe('Economy');
+    expectNoNegativeReserved(x.db);
+  });
+
   it('(d) maxConcurrentSteps = 1: two queued runs execute sequentially (running intervals never overlap) @m3', async () => {
     h = await createHarness();
     const a = await h.startRun({ key: 'concurrency-run-a-01' });

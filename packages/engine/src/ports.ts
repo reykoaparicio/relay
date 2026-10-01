@@ -288,9 +288,10 @@ export interface EngineCtx extends EngineDeps {
   /**
    * Runner-lease ownership (B3). `owned` turns false when `stop()` releases the lease (or a heartbeat finds it taken);
    * from then on no attempt is dispatched or settled by this process — the next owner's recovery handles them.
-   * True for a context that never started (direct `tick` in tests).
+   * True for a context that never started (direct `tick` in tests). `ownerId` is set by `start()`; in-tx checks then also
+   * re-read the lease row, so a stalled process whose heartbeat has not fired yet still sees a takeover.
    */
-  readonly lease: { owned: boolean };
+  readonly lease: { owned: boolean; ownerId?: string };
   /** Post-commit effect of every terminal transition (F17 report). */
   onTerminal(runId: RunId): Promise<void>;
 }

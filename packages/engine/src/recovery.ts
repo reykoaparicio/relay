@@ -14,30 +14,35 @@ import { isJsonText, putArtifact } from './checkpoints.js';
 import { canonicalJson, utf8 } from './hash.js';
 import { logSafe } from './log-safe.js';
 import type { EngineCtx } from './ports.js';
-import { applyPostValidation, deferPause, isDeferrablePause, pendingDeferredPause } from './outcome.js';
+import { applyPostValidation, deferPause, isDeferrablePause } from './outcome.js';
 import type { ClassifiedOutcome, ResultFlags, Validation } from './retry.js';
 import { flagsOf, validatedOutcome } from './retry.js';
 import { effectiveStepSnapshot } from './snapshot.js';
 import { validateOutput } from './steps/validate-output.js';
 import { loadValidationInputs } from './steps/validation-inputs.js';
 import type { PostCommitEffect } from './run-machine.js';
-import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
+import { appendRunEvent, applyRunEvent, deferredPauseEvent, runEffects } from './run-machine.js';
 import { applyStepEvent, skipOpenSteps } from './step-machine.js';
 
-function recoverAttempt(r: Repos, fx: PostCommitEffect[], a: AttemptRow, now: EpochMs): void {
+/**
+ * Recovers one attempt. The attempt CAS goes FIRST and the ledger moves only when it wins (like `settle`,
+ * `forceUnknown`, and `commitReconciled`): `a` was read before the tx, so another writer may have moved it since.
+ * Exported for tests (not from the barrel).
+ */
+export function recoverAttempt(r: Repos, fx: PostCommitEffect[], a: AttemptRow, now: EpochMs): void {
   const N = r.ledger.attemptBalances(a.id).reserved;
   const run = r.runs.get(a.runId);
   const refs = { reservation: N, attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now };
   const step = r.steps.get(a.stepRunId);
   if (a.state === 'created' || a.state === 'reserved') {
+    if (!r.attempts.transition(a.id, [a.state], 'failed_before_dispatch', { finishedAt: now })) return;
     r.ledger.append(settlementEntries({ ...refs, cost: { kind: 'not_charged' } }));
-    r.attempts.transition(a.id, [a.state], 'failed_before_dispatch', { finishedAt: now });
     if (step.state === 'reserved') applyStepEvent(r, fx, step, 'RESERVATION_RELEASED');
     return;
   }
   if (a.state === 'dispatching') {
+    if (!r.attempts.transition(a.id, ['dispatching'], 'unknown', { error: errors.requestOutcomeUnknown(a.id), finishedAt: now })) return;
     r.ledger.append(settlementEntries({ ...refs, cost: { kind: 'unknown' } }));
-    r.attempts.transition(a.id, ['dispatching'], 'unknown', { error: errors.requestOutcomeUnknown(a.id), finishedAt: now });
     if (step.state === 'executing') applyStepEvent(r, fx, step, 'OUTCOME_UNKNOWN', { error: errors.requestOutcomeUnknown(a.id) });
     appendRunEvent(r, fx, a.runId, 'attempt.unknown', { attemptId: a.id, stepRunId: a.stepRunId, recovered: true });
   }
@@ -177,15 +182,15 @@ export function reconciledAmount(res: Resolution, prices: AttemptRow['profileSna
  * Once the last unknown attempt of a `paused(unknown_outcome)` run is resolved (reconciled or decided): a pause a
  * reconciled outcome deferred (an overrun X > liability → `budget_overrun`, a quality revision outside the approved
  * scope → `approval_stale`) is applied INSTEAD of resuming — never auto-resumed (BH-2, BH-6). Otherwise
- * RESUME_RESOLVED when no step is failed or unknown.
+ * RESUME_RESOLVED when no step is failed or unknown. Other pause reasons keep waiting for their own decision (the
+ * durable deferred pause still wins over it, `applyRunEvent`).
  */
 export function resumeIfUnknownsResolved(r: Repos, fx: PostCommitEffect[], runId: RunId, now: EpochMs): void {
   const run = r.runs.get(runId);
   if (run.status !== 'paused' || run.pauseReason !== 'unknown_outcome') return;
   if (r.attempts.listForRun(runId).some((x) => x.state === 'unknown')) return;
-  const deferred = pendingDeferredPause(r, runId);
-  if (deferred !== null) {
-    applyRunEvent(r, run, deferred, now, fx);
+  if (run.deferredPause !== null) {
+    applyRunEvent(r, run, deferredPauseEvent(run.deferredPause), now, fx);
     return;
   }
   if (r.steps.latestPerStepKey(runId).some((s) => s.state === 'failed' || s.state === 'unknown')) return;
@@ -253,7 +258,13 @@ function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileIn
     const step = r.steps.get(a.stepRunId);
     const { event } = applyPostValidation(r, fx, ctx, { source: 'reconcile', stepRunId: a.stepRunId, runId: a.runId, attemptId: a.id, outcome,
       policy: effectiveStepSnapshot(r, run, step.stepKey).retryPolicy, purpose: a.purpose, output: i.output, cost, N: liability, now });
-    if (isDeferrablePause(event)) deferPause(r, fx, a.runId, event);
+    if (isDeferrablePause(event)) {
+      // A running run (e.g. resumed meanwhile) takes the pause now, exactly like a live settle; otherwise it is
+      // stored durably and applied by the next event that would let the run continue (clarification 14).
+      const cur = r.runs.get(a.runId);
+      if (cur.status === 'running') applyRunEvent(r, cur, event, now, fx);
+      else deferPause(r, fx, a.runId, event);
+    }
     resumeIfUnknownsResolved(r, fx, a.runId, now);
     return true;
   });

@@ -103,3 +103,41 @@ describe('unknown reconcile @m3', () => {
     expect(h.calls({ runId, stepKey: 'implement' })).toHaveLength(1);
   });
 });
+
+describe('deferred reconciled overrun (Referee wave 3, finding 1) @m3', () => {
+  it('deadline abort → unknown + paused(deadline); restart → reconcile X > N; raise_limits pauses budget_overrun instead of resuming → acknowledge_overrun → completes @m3', async () => {
+    const mc = createManualClock();
+    const o: HarnessOptions = {
+      scenario: { name: 'deadline-overrun', capabilityOverrides: LOOKUP,
+        steps: [{ match: { stepKey: 'review', purpose: 'initial' }, result: { kind: 'hang' }, usage: { outputTokens: 100_000 }, reconcile: ['completed'] }] },
+      clock: mc,
+      limits: { executionTimeoutSeconds: 60, budgetMicrousd: 50_000_000 },
+    };
+    const first = await open(o);
+    const runId = await first.startRun();
+    await first.waitUntil(() => first.attempts(runId, 'review')[0]?.state === 'dispatching', 10_000, 'review in flight');
+    mc.advance(61_000);
+    const paused = await first.waitFor(runId, (r) => !['queued', 'running'].includes(r.status));
+    expect([paused.status, paused.pauseReason]).toEqual(['paused', 'deadline']);
+    expect(first.attempts(runId, 'review')[0]?.state).toBe('unknown');
+    await first.dispose();
+
+    const h = await open({ ...o, userDataDir: first.userDataDir, projectRoot: first.projectRoot });
+    await h.waitUntil(() => h.db.repos.runs.get(runId).deferredPause !== null, 10_000, 'reconciled overrun deferred');
+    const [a] = h.attempts(runId, 'review');
+    expect(a?.state).toBe('reconciled_succeeded');
+    expect(h.db.repos.runs.get(runId).pauseReason).toBe('deadline');
+
+    const raised = await h.resume(runId, { kind: 'raise_limits', executionTimeoutSeconds: 600 });
+
+    expect(raised.ok ? raised.data.status : raised.error.code).toBe('paused');
+    expect(h.db.repos.runs.get(runId).pauseReason).toBe('budget_overrun');
+    const acked = await h.resume(runId, { kind: 'acknowledge_overrun' });
+    expect(acked.ok ? null : acked.error).toBeNull();
+    await h.waitFor(runId, 'awaiting_approval');
+    await h.approve(runId);
+    expect((await h.waitFor(runId, (r) => !['queued', 'running'].includes(r.status))).status).toBe('completed');
+    expect(h.calls({ runId, stepKey: 'review' })).toHaveLength(1); // the reconciled review was never re-sent
+    expectNoNegativeReserved(h.db);
+  });
+});

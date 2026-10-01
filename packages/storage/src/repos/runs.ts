@@ -21,9 +21,10 @@ const UPDATE_STATUS_SQL = `UPDATE runs SET status = ?, pause_reason = ?, status_
     started_at = COALESCE(?, started_at), updated_at = ?
   WHERE id = ? AND status IN (SELECT value FROM json_each(?))`;
 
-function readBalances(row: unknown): { balances: Balances; settled: Record<CostCertainty, Microusd> } {
+function readBalances(row: unknown): { balances: Balances; settled: Record<CostCertainty, Microusd>; overran: boolean } {
   const r = new RowReader('ledger_entries', row, 'l');
   return {
+    overran: r.bool('overran'),
     balances: { L: r.money('l'), C: r.money('c'), R: r.money('r'), U: r.money('u') },
     settled: {
       reported: r.money('s_reported'),
@@ -122,6 +123,7 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       attempts,
       balances: costs.balances,
       settledByCertainty: costs.settled,
+      attemptsOverran: costs.overran,
       pendingApproval: approval === undefined ? null : mapApproval(approval),
       reportArtifactId: report === undefined ? null : new RowReader('artifacts', report).as('id', idSchema('artifact')),
     };
@@ -170,6 +172,10 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
     },
     setRevisionCycle(id, cycle) {
       touch('UPDATE runs SET revision_cycle = ?, updated_at = ? WHERE id = ?', cycle, deps.clock.now(), id);
+    },
+    setDeferredPause(id, pause) {
+      touch('UPDATE runs SET deferred_pause = ?, deferred_pause_detail_json = ?, updated_at = ? WHERE id = ?',
+        pause?.reason ?? null, pause === null ? null : toJson(pause.detail), deps.clock.now(), id);
     },
     setPauseRequested(id, requested) {
       touch('UPDATE runs SET pause_requested = ?, updated_at = ? WHERE id = ?', bit(requested), deps.clock.now(), id);

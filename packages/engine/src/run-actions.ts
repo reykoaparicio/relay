@@ -13,6 +13,7 @@ import type {
   Microusd,
   PauseReason,
   ProfileId,
+  RunAction,
   ProfileSnapshot,
   RecoveryDecision,
   Result,
@@ -32,17 +33,16 @@ import { executionMsAt } from './deadline.js';
 import { requestHash } from './hash.js';
 import type { EngineCtx } from './ports.js';
 import { toModelProfile } from './profiles.js';
-import { pendingDeferredPause } from './outcome.js';
 import { resumeIfUnknownsResolved } from './recovery.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
-import { appendRunEvent, applyRunEvent, isTerminal, runEffects } from './run-machine.js';
+import { allowedRunActions, appendRunEvent, applyRunEvent, isTerminal, runEffects } from './run-machine.js';
 import { resolveProfile } from './run-start.js';
 import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
 import type { Snapshotted } from './steps/intake.js';
 import { diffReferencedPaths, inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
-import { allLedgerEntries, attemptsOverran, costSummaryOf, toRunDetail } from './views.js';
+import { costSummaryOf, toRunDetail } from './views.js';
 
 // ---------------------------------------------------------------- shared helpers
 
@@ -70,6 +70,32 @@ function remember(r: Repos, op: string, input: { readonly idempotencyKey: string
 
 const notApplicable = (run: RunRow, decision: string): AppError =>
   errors.conflict({ reason: 'decision_not_applicable', decision, status: run.status, pauseReason: run.pauseReason });
+
+/**
+ * The F2 truth-table gate shared with `RunDetail.availableActions`: a decision whose action is not offered for the
+ * run's current state is refused (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree.
+ */
+function offered(r: Repos, run: RunRow, action: RunAction, decision: string): AppError | null {
+  const unknownAttempts = r.attempts.listForRun(run.id).filter((a) => a.state === 'unknown').length;
+  const hasFailedStep = r.steps.latestPerStepKey(run.id).some((s) => s.state === 'failed');
+  const actions = allowedRunActions(run, { unknownAttempts, hasFailedStep, hasPatchArtifact: false });
+  return actions.includes(action) ? null : notApplicable(run, decision);
+}
+
+/** The `allowedRunActions` action a `runs.resume` decision performs. */
+function actionOf(run: RunRow, d: RecoveryDecision): RunAction {
+  switch (d.kind) {
+    case 'continue':
+      return run.status === 'interrupted' ? 'review_recovery' : 'resume';
+    case 'switch_profile':
+      return 'choose_profile';
+    case 'use_preserved_snapshot':
+    case 'resnapshot_and_replan':
+    case 'raise_limits':
+    case 'acknowledge_overrun':
+      return d.kind;
+  }
+}
 
 const isPausedFor = (run: RunRow, reasons: readonly PauseReason[]): boolean =>
   run.status === 'paused' && run.pauseReason !== null && reasons.includes(run.pauseReason);
@@ -165,9 +191,9 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
     // F2: RECOVERY_DECIDED only when every unknown attempt has been decided (review_recovery).
     const unknownAttempts = r.attempts.listForRun(run.id).filter((a) => a.state === 'unknown').length;
     if (unknownAttempts > 0) return err(errors.conflict({ reason: 'unknown_attempts', unknownAttempts }));
-    // A reconciled overrun (X > liability) or scope change is never acknowledged by review_recovery: the run pauses
-    // with that reason (budget_overrun → acknowledge_overrun), the same invariant as a live run (BH-2, BH-6).
-    applyRunEvent(r, run, pendingDeferredPause(r, run.id) ?? { type: 'RECOVERY_DECIDED' }, now, fx);
+    // A reconciled overrun (X > liability) or scope change is never acknowledged by review_recovery: `applyRunEvent`
+    // applies the durable deferred pause instead (budget_overrun → acknowledge_overrun), as for a live run (BH-2, BH-6).
+    applyRunEvent(r, run, { type: 'RECOVERY_DECIDED' }, now, fx);
     return ok(undefined);
   }
   if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked'])) return err(notApplicable(run, 'continue'));
@@ -294,6 +320,8 @@ function resumeRaiseLimits(
 }
 
 function applyResume(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, d: RecoveryDecision, pre: Prepared, now: EpochMs): Result<void> {
+  const refused = offered(r, run, actionOf(run, d), d.kind);
+  if (refused !== null) return err(refused);
   switch (d.kind) {
     case 'continue':
       return resumeContinue(r, fx, run, now);
@@ -363,7 +391,7 @@ export interface IncreaseAllowanceInput {
 }
 
 function costNow(r: Repos, runId: RunId): CostSummary {
-  return costSummaryOf(r.ledger.runBalances(runId), r.ledger.settledByCertainty(runId), attemptsOverran(allLedgerEntries(r, runId)));
+  return costSummaryOf(r.ledger.runBalances(runId), r.ledger.settledByCertainty(runId), r.ledger.attemptsOverran(runId));
 }
 
 /**
@@ -436,6 +464,9 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
   const a = r.attempts.find(input.attemptId);
   if (a?.runId !== run.id) return err(errors.notFound('attempt'));
   if (a.state !== 'unknown') return err(errors.conflict({ reason: 'attempt_not_unknown', state: a.state }));
+  // Clarification 15: decidable from any pause (deadline, user, …) or interrupted while an unknown attempt is open.
+  const refused = offered(r, run, 'decide_unknown', input.decision);
+  if (refused !== null) return err(refused);
   const step = r.steps.get(a.stepRunId);
   const unknownError = errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } });
   switch (input.decision) {
@@ -462,14 +493,14 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
   return ok(undefined);
 }
 
-/** `runs.decideUnknown` (§4.4, §7.5) on `paused(unknown_outcome)` or `interrupted`. */
+/** `runs.decideUnknown` (§4.4, §7.5) on a paused or `interrupted` run with an unresolved unknown attempt. */
 export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): Promise<Result<RunDetail>> {
   const OP = 'runs.decideUnknown';
   const replay = storedFor(ctx.db.repos, OP, input);
   if (replay !== null) return replay.ok ? ok(runDetail(ctx, input.runId)) : replay;
   const res = await inTx(ctx, (r, fx, now) => {
     const run = r.runs.get(input.runId);
-    if (!(isPausedFor(run, ['unknown_outcome']) || run.status === 'interrupted')) return err(notApplicable(run, input.decision));
+    if (run.status !== 'paused' && run.status !== 'interrupted') return err(notApplicable(run, input.decision));
     const applied = applyUnknownDecision(r, fx, run, input, now);
     if (!applied.ok) return applied;
     remember(r, OP, input, run.id);
@@ -499,6 +530,8 @@ const RETRYABLE_PAUSES: readonly PauseReason[] = ['output_invalid', 'provider_un
 
 function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, input: RetryStepInput, profile: ProfileSnapshot | null, now: EpochMs): Result<void> {
   if (!isPausedFor(run, RETRYABLE_PAUSES)) return err(notApplicable(run, 'retry_step'));
+  const refused = offered(r, run, profile === null ? 'retry_step' : 'choose_profile', 'retry_step');
+  if (refused !== null) return err(refused);
   const step = r.steps.find(input.stepId);
   if (step?.runId !== run.id) return err(errors.notFound('step'));
   const latest = r.steps.latestFor(run.id, step.stepKey);
@@ -507,7 +540,8 @@ function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: R
     return err(errors.conflict({ reason: 'step_not_failed', state: step.state }));
   }
   if (r.attempts.listForRun(run.id).some((a) => a.state === 'unknown')) return err(errors.conflict({ reason: 'unknown_attempts' }));
-  if (run.attemptCount >= run.limits.maxAttempts) return err(errors.limitReached('attempts'));
+  // No attempt-limit pre-check (finding 2): at `maxAttempts` the retried row reaches the F4 reserve checkpoint, which
+  // pauses `limit_attempts` — from which raise_limits continues. Refusing here left no working action.
   if (profile !== null) reviseConfig(r, fx, run, step.stepKey, profile, revisionReason(run));
   const next = r.steps.insertRetry(step, { id: ctx.ids.next('stepRun'), state: 'ready', profileName: profile?.name ?? step.profileName, createdAt: now });
   appendRunEvent(r, fx, run.id, 'step.state_changed', { stepRunId: next.id, stepKey: next.stepKey, from: null, to: 'ready', trigger: 'USER_RETRY_STEP',

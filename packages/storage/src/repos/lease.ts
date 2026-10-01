@@ -33,6 +33,9 @@ export function createLeaseRepo(driver: SqlDriver, deps: RepoDeps): LeaseRepo {
     heartbeat(ownerId, now) {
       return driver.prepare('UPDATE runner_lease SET heartbeat_at = ? WHERE id = 1 AND owner_id = ?').run(now, ownerId).changes > 0;
     },
+    isHeldBy(ownerId) {
+      return driver.prepare('SELECT 1 FROM runner_lease WHERE id = 1 AND owner_id = ?').get(ownerId) !== undefined;
+    },
     release(ownerId) {
       return driver.prepare('DELETE FROM runner_lease WHERE id = 1 AND owner_id = ?').run(ownerId).changes > 0;
     },

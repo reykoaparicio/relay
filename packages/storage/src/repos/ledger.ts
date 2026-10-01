@@ -103,6 +103,9 @@ export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo 
       return { reserved: r.money('reserved'), unknown: r.money('unknown'), settled: r.money('settled') };
     },
     list,
+    attemptsOverran(runId) {
+      return new RowReader('ledger_entries', driver.prepare(RUN_COSTS_SQL).get(runId), 'l').bool('overran');
+    },
     settledByCertainty(runId): Readonly<Record<CostCertainty, Microusd>> {
       const r = new RowReader('ledger_entries', driver.prepare(RUN_COSTS_SQL).get(runId), 'l');
       return {

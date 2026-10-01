@@ -45,6 +45,17 @@ describe('LeaseRepo', () => {
     expect(lease.acquire('b', 2, epochMs(1000 + STALE + 1), STALE)).toBe('acquired');
   });
 
+  it('isHeldBy reflects the current owner, including after a stale takeover and a release', async () => {
+    const lease = await open(true);
+    expect(lease.isHeldBy('a')).toBe(false);
+    lease.acquire('a', 1, epochMs(1000), STALE);
+    expect(lease.isHeldBy('a')).toBe(true);
+    lease.acquire('b', 2, epochMs(1000 + STALE + 1), STALE);
+    expect([lease.isHeldBy('a'), lease.isHeldBy('b')]).toEqual([false, true]);
+    lease.release('b');
+    expect(lease.isHeldBy('b')).toBe(false);
+  });
+
   it('ignores a heartbeat and release by a non-owner', async () => {
     const lease = await open(true);
     lease.acquire('a', 1, epochMs(1000), STALE);

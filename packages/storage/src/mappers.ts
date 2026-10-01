@@ -49,6 +49,7 @@ import type {
   CatalogRow,
   ConfigRevisionRow,
   CredentialRefRow,
+  DeferredPause,
   LedgerEntryRow,
   MemoryEventRow,
   MemoryItem,
@@ -64,7 +65,7 @@ import type {
   WorkflowRow,
   WorkflowVersionRow,
 } from './types.js';
-import { CONFIG_REVISION_REASONS } from './types.js';
+import { CONFIG_REVISION_REASONS, DEFERRED_PAUSE_REASONS } from './types.js';
 
 /** Structural view of a Zod schema (storage does not depend on `zod` directly; schemas come from contracts). */
 export interface Schema<T> {
@@ -332,6 +333,12 @@ export function mapConfigRevision(row: unknown): ConfigRevisionRow {
   });
 }
 
+function deferredPauseOf(r: RowReader): DeferredPause | null {
+  const reason = r.oneOfN('deferred_pause', DEFERRED_PAUSE_REASONS);
+  const detail = r.jsonN('deferred_pause_detail_json', appErrorSchema);
+  return reason === null || detail === null ? null : { reason, detail };
+}
+
 export function mapRun(row: unknown): RunRow {
   const r = new RowReader('runs', row);
   return freeze({
@@ -351,6 +358,7 @@ export function mapRun(row: unknown): RunRow {
     executionMsUsed: r.int('execution_ms_used'),
     runningSince: r.msN('running_since'),
     pauseRequested: r.bool('pause_requested'),
+    deferredPause: deferredPauseOf(r),
     idempotencyKey: r.text('idempotency_key'),
     createdAt: r.ms('created_at'),
     startedAt: r.msN('started_at'),

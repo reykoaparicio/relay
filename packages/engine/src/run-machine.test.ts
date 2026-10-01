@@ -50,6 +50,8 @@ const TABLE: readonly Row[] = [
   ['queued', sb('budget_run'), 'paused', 'budget_run'],
   ['queued', sb('budget_project'), 'paused', 'budget_project'],
   ['queued', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
+  ['queued', SAMPLES.BUDGET_OVERRUN, 'paused', 'budget_overrun'], // clarification 14 (deferred while queued)
+  ['queued', SAMPLES.APPROVAL_STALE, 'paused', 'approval_stale'],
   ['running', SAMPLES.PLAN_READY, 'awaiting_approval', null],
   ['running', sb('setup_blocked'), 'paused', 'setup_blocked'],
   ['running', sb('auth_required'), 'paused', 'auth_required'],

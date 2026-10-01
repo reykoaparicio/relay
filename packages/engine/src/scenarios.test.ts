@@ -196,7 +196,7 @@ describe('runs.decideUnknown (§7.5)', () => {
 });
 
 describe('runs.retryStep guards (F7)', () => {
-  it('CONFLICT on a step that is not failed (budget pause keeps the row: switch_profile instead) and LIMIT_REACHED at maxAttempts', async () => {
+  it('CONFLICT on a step that is not failed (budget pause keeps the row: switch_profile instead); at maxAttempts the retry pauses limit_attempts', async () => {
     const { x, runId } = await start({ scenario: 'malformed-twice' });
     await drive(x, runId, ['paused']);
     const r = x.db.repos;
@@ -207,12 +207,15 @@ describe('runs.retryStep guards (F7)', () => {
     x.db.tx('immediate', (tx) => {
       tx.runs.setLimits(runId, { ...tx.runs.get(runId).limits, maxAttempts: tx.runs.get(runId).attemptCount });
     });
-    const limit = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'retry-guard-0002', runId, stepId: failed?.id ?? '' });
     const missing = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'retry-guard-0003', runId, stepId: 'stp_01J9ZZZZZZZZZZZZZZZZZZZZZ0' });
+    const limit = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'retry-guard-0002', runId, stepId: failed?.id ?? '' });
 
     expect(notFailed.ok ? null : [notFailed.error.code, notFailed.error.details?.['reason']]).toEqual(['CONFLICT', 'step_not_failed']);
-    expect(limit.ok ? null : limit.error.code).toBe('LIMIT_REACHED');
     expect(missing.ok ? null : missing.error.code).toBe('NOT_FOUND');
+    // Finding 2: no LIMIT_REACHED dead end — the retry is accepted and the reserve checkpoint pauses limit_attempts.
+    expect(limit.ok).toBe(true);
+    expect(await drive(x, runId, ['paused'])).toBe('paused');
+    expect(r.runs.get(runId).pauseReason).toBe('limit_attempts');
   });
 
   it('rejects a profile whose provider the project does not permit (PERMISSION_DENIED) without writing anything', async () => {

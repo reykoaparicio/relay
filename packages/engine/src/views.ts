@@ -187,7 +187,10 @@ export function latestPerKey(steps: readonly StepRow[]): StepRow[] {
   return [...latest.values()].sort((a, b) => a.ordinal - b.ordinal);
 }
 
-/** RunSummary (list row) from an inspector projection. */
+/**
+ * RunSummary (list row) from an inspector projection. `cost.overrun` uses the projection's one-statement
+ * `attemptsOverran` aggregate, so `runs.list` and project-export summaries agree with `runs.get` (no ledger scan).
+ */
 export function toRunSummary(p: InspectorProjection): RunSummary {
   const latest = latestPerKey(p.steps);
   return {
@@ -198,7 +201,7 @@ export function toRunSummary(p: InspectorProjection): RunSummary {
     status: p.run.status,
     pauseReason: p.run.pauseReason,
     stepProgress: { done: latest.filter((s) => s.state === 'succeeded' || s.state === 'skipped').length, total: latest.length },
-    cost: costSummaryOf(p.balances, p.settledByCertainty),
+    cost: costSummaryOf(p.balances, p.settledByCertainty, p.attemptsOverran),
     createdAt: p.run.createdAt,
     startedAt: p.run.startedAt,
     endedAt: p.run.endedAt,
@@ -217,7 +220,6 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const entries = allLedgerEntries(r, p.run.id);
   return {
     ...toRunSummary(p),
-    cost: costSummaryOf(p.balances, p.settledByCertainty, attemptsOverran(entries)),
     limits: p.run.limits,
     input: p.run.input,
     contextHash: p.run.contextHash,

@@ -114,13 +114,16 @@ CREATE TABLE runs (
   execution_ms_used    INTEGER NOT NULL DEFAULT 0 CHECK (execution_ms_used >= 0), -- §9.1 elapsed EXECUTION time; accrues only while status='running'
   running_since        INTEGER,                                            -- start of the current running segment (null when not running)
   pause_requested      INTEGER NOT NULL DEFAULT 0 CHECK (pause_requested IN (0,1)),  -- 06 F11 durable user pause flag
+  deferred_pause       TEXT CHECK (deferred_pause IS NULL OR deferred_pause IN ('budget_overrun','approval_stale')), -- 06 F2 clarification 14
+  deferred_pause_detail_json TEXT CHECK (deferred_pause_detail_json IS NULL OR json_valid(deferred_pause_detail_json)), -- its AppError
   idempotency_key      TEXT NOT NULL UNIQUE,
   created_at           INTEGER NOT NULL,
   started_at           INTEGER,
   ended_at             INTEGER,
   updated_at           INTEGER NOT NULL,
   CHECK ((status IN ('completed','incomplete','cancelled','failed')) = (ended_at IS NOT NULL)),
-  CHECK ((status = 'paused') = (pause_reason IS NOT NULL))       -- a paused run always has a reason; no other status has one
+  CHECK ((status = 'paused') = (pause_reason IS NOT NULL)),      -- a paused run always has a reason; no other status has one
+  CHECK ((deferred_pause IS NULL) = (deferred_pause_detail_json IS NULL))
 ) STRICT;
 CREATE INDEX runs_project_created_idx ON runs(project_id, created_at DESC, id DESC);
 CREATE INDEX runs_active_idx ON runs(status) WHERE status IN ('queued','running','cancelling','awaiting_approval','paused','interrupted');

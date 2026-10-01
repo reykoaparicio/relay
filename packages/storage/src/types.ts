@@ -311,11 +311,26 @@ export interface RunRow {
   readonly executionMsUsed: number;
   readonly runningSince: EpochMs | null;
   readonly pauseRequested: boolean;
+  /**
+   * 06 F2 clarification 14: a pause a reconciled outcome requires (an overrun, a scope change) while the run could not
+   * take it. Durable until the user resolves that pause; every resume path applies it instead of continuing.
+   */
+  readonly deferredPause: DeferredPause | null;
   readonly idempotencyKey: string;
   readonly createdAt: EpochMs;
   readonly startedAt: EpochMs | null;
   readonly endedAt: EpochMs | null;
   readonly updatedAt: EpochMs;
+}
+
+/** Pause reasons a reconciled outcome can defer (06 F2 clarification 14). */
+export const DEFERRED_PAUSE_REASONS = ['budget_overrun', 'approval_stale'] as const;
+export type DeferredPauseReason = (typeof DEFERRED_PAUSE_REASONS)[number];
+
+/** `runs.deferred_pause` + `deferred_pause_detail_json`. */
+export interface DeferredPause {
+  readonly reason: DeferredPauseReason;
+  readonly detail: AppError;
 }
 
 export interface RunInsert {
@@ -370,6 +385,8 @@ export interface InspectorProjection {
   readonly attempts: readonly AttemptRow[];
   readonly balances: Balances;
   readonly settledByCertainty: Readonly<Record<CostCertainty, Microusd>>;
+  /** Some attempt settled more than it reserved (§9.5), from the same ledger statement as the balances. */
+  readonly attemptsOverran: boolean;
   readonly pendingApproval: ApprovalRow | null;
   readonly reportArtifactId: ArtifactId | null;
 }
@@ -387,6 +404,8 @@ export interface RunRepo {
   listActive(): readonly RunRow[];
   incrementAttemptCount(id: RunId): void;
   setRevisionCycle(id: RunId, cycle: number): void;
+  /** Sets (or clears with null) the durable deferred pause (06 F2 clarification 14). */
+  setDeferredPause(id: RunId, pause: DeferredPause | null): void;
   setPauseRequested(id: RunId, requested: boolean): void;
   setContextHash(id: RunId, hash: Sha256): void;
   /** Overwrites the run limits (user `raise_limits`, 06). */
@@ -615,6 +634,8 @@ export interface LedgerRepo {
   attemptBalances(attemptId: AttemptId): AttemptBalances;
   list(runId: RunId, page: PageRequest): Result<Page<LedgerEntryRow>>;
   settledByCertainty(runId: RunId): Readonly<Record<CostCertainty, Microusd>>;
+  /** Some attempt of the run settled more than it reserved (§9.5 overrun), in one aggregate statement. */
+  attemptsOverran(runId: RunId): boolean;
 }
 
 // ---------------------------------------------------------------- artifacts
@@ -893,6 +914,8 @@ export interface LeaseRepo {
   acquire(ownerId: string, pid: number, now: EpochMs, staleAfterMs: number): LeaseAcquireResult;
   heartbeat(ownerId: string, now: EpochMs): boolean;
   release(ownerId: string): boolean;
+  /** True when `ownerId` holds the lease row now (a stale takeover replaced it otherwise). */
+  isHeldBy(ownerId: string): boolean;
 }
 
 // ---------------------------------------------------------------- aggregate
