@@ -4,6 +4,13 @@ import { OUTPUT_SCHEMA_IDS } from '../outputs/common.js';
 import { relPathSchema, sha256Schema, stepKeySchema } from '../primitives.js';
 import { attemptPurposeSchema, memoryTypeSchema, providerIdSchema } from '../status.js';
 
+
+/** Where an input-token estimate came from: the provider's token-count endpoint, or the local heuristic. */
+export const ESTIMATE_BASES = ['provider_count', 'local_estimate'] as const;
+/** Schema for {@link EstimateBasis}. */
+export const estimateBasisSchema = z.enum(ESTIMATE_BASES);
+/** Estimate basis. */
+export type EstimateBasis = z.infer<typeof estimateBasisSchema>;
 /** Why a file entered the context. */
 export const MANIFEST_FILE_REASONS = ['selected', 'plan_scope', 'referenced_by_findings'] as const;
 /** Why an item was omitted from the context. */
@@ -54,7 +61,7 @@ export const contextManifestSchema = z.object({
   tokens: z.object({
     estimatedInput: z.number(),
     budget: z.number(),
-    basis: z.enum(['provider_count', 'local_estimate']),
+    basis: estimateBasisSchema,
   }),
   contextHash: sha256Schema, // sha256(system + "\n\0\n" + user)
   providersReceivingContext: z.array(providerIdSchema), // honesty: where data goes (§6.2)

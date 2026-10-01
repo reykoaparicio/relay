@@ -108,6 +108,18 @@ describe('readSelected', () => {
     ]);
   });
 
+  it('checks every ancestor prefix of a requested path (it never sets ancestorsVetted)', async () => {
+    // `vendor-x` and `logs/` match only the DIRECTORY, so only the prefix walk can deny the files below them.
+    const { root } = await makeRoot({ '.gitignore': 'logs/\n', 'logs/app.txt': 'l', 'vendor-x/lib.ts': 'v', 'ok.ts': 'o' });
+
+    const r = await readSelected(root, ['logs/app.txt', 'vendor-x/lib.ts', 'ok.ts'], { exclusions: ['vendor-x'] });
+
+    expect(r.ok || r.error.details?.['denied']).toEqual([
+      { relPath: 'logs/app.txt', reason: 'gitignored' },
+      { relPath: 'vendor-x/lib.ts', reason: 'user_pattern' },
+    ]);
+  });
+
   it('reads gitignored files when respectGitignore is off', async () => {
     const { root } = await makeRoot({ '.gitignore': 'ignored.ts\n', 'ignored.ts': 'i' });
 

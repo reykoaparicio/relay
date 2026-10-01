@@ -4,7 +4,10 @@ import {
   appError,
   appErrorSchema,
   ERROR_DEFINITIONS,
+  errnoDetails,
+  errnoOf,
   errors,
+  INTERNAL_REASONS,
   isRelayError,
   RelayError,
   toAppError,
@@ -96,7 +99,7 @@ describe('error taxonomy', () => {
   });
 
   it('internal carries only the correlation id, ignoring userMessage, details, and ids from ctx (B13)', () => {
-    const internalWithCtx = errors.internal as (c: CorrelationId, ctx: ErrorContext) => AppError;
+    const internalWithCtx = errors.internal as unknown as (c: CorrelationId, ctx: ErrorContext) => AppError;
 
     const e = internalWithCtx(correlationId, {
       userMessage: 'SQLITE_CONSTRAINT at /Users/me/secret.db',
@@ -113,6 +116,16 @@ describe('error taxonomy', () => {
       alternatives: [],
       correlationId,
     });
+  });
+
+  it('internal accepts a closed InternalReason and nothing else', () => {
+    const asUnknown = errors.internal as (c: CorrelationId | undefined, reason?: unknown) => AppError;
+
+    expect(errors.internal(correlationId, 'snapshot_hash_mismatch').details).toEqual({ reason: 'snapshot_hash_mismatch' });
+    expect(errors.internal(undefined, 'aborted')).toEqual(expect.objectContaining({ code: 'INTERNAL', details: { reason: 'aborted', aborted: true } }));
+    expect(errors.internal(undefined, 'aborted').correlationId).toBeUndefined();
+    expect(asUnknown(correlationId, 'SQLITE_CONSTRAINT at /Users/me/x').details).toBeUndefined();
+    expect(INTERNAL_REASONS).toContain('not_implemented');
   });
 
   it('typed factory fields win over ctx.details (B13)', () => {
@@ -179,5 +192,41 @@ describe('RelayError', () => {
     expect(e.correlationId).toBe(correlationId);
     expect(JSON.stringify(e)).not.toContain('/Users/me');
     expect(isRelayError('nope')).toBe(false);
+  });
+});
+
+describe('errnoOf / errnoDetails', () => {
+  it('returns only the errno code of a Node system error, never its message or path', () => {
+    const e = Object.assign(new Error("EACCES: permission denied, open '/Users/someone/secret'"), {
+      code: 'EACCES',
+      path: '/Users/someone/secret',
+    });
+
+    expect(errnoOf(e)).toBe('EACCES');
+    expect(errnoDetails(e)).toEqual({ errno: 'EACCES' });
+    expect(JSON.stringify(errnoDetails(e))).not.toContain('/Users');
+  });
+
+  it('ignores values without an errno-shaped code', () => {
+    expect(errnoOf(new Error('x'))).toBeUndefined();
+    expect(errnoOf({ code: 'ERR_INVALID_ARG_TYPE' })).toBeUndefined();
+    expect(errnoOf({ code: 42 })).toBeUndefined();
+    expect(errnoOf(null)).toBeUndefined();
+    expect(errnoOf('ENOENT')).toBeUndefined();
+    expect(errnoDetails(undefined)).toEqual({});
+  });
+});
+
+describe('RelayError cause', () => {
+  it('keeps the cause in-process but toAppError serializes only the AppError', () => {
+    const cause = Object.assign(new Error('401 from upstream'), { headers: { authorization: 'Bearer x' } });
+    const appErr = errors.providerUnavailable('openai');
+
+    const e = new RelayError(appErr, { cause });
+
+    expect(e.cause).toBe(cause);
+    expect(toAppError(e, 'cor_01J9ZZZZZZZZZZZZZZZZZZZZZZ' as CorrelationId)).toBe(appErr);
+    expect(JSON.stringify(toAppError(e, 'cor_01J9ZZZZZZZZZZZZZZZZZZZZZZ' as CorrelationId))).not.toContain('upstream');
+    expect(new RelayError(appErr).cause).toBeUndefined();
   });
 });

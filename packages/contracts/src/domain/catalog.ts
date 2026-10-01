@@ -10,6 +10,10 @@ export const modelCapabilitiesSchema = z.object({
   streaming: z.boolean(),
   tools: z.boolean(),
   maxInputTokens: z.number().int().positive().optional(),
+  // Prompts above this many input tokens are billed at a higher tier than `prices` (e.g. gpt-6.1-sol: 2x input above
+  // 272K). Absent = no prompt-length price tier. The catalog then caps `maxInputTokens` at or below it, and an estimate
+  // without a provider count uses the conservative 1 token/char bound (04 §D1 R4-12, ADR note "Count-failure fallback").
+  priceCliffInputTokens: z.number().int().positive().optional(),
   maxOutputTokens: z.number().int().positive().optional(),
   supportsRequestLookup: z.boolean(), // can reconcile by response id after a crash (§7.5)
   supportsTokenCounting: z.boolean(), // provider count endpoint for estimates
@@ -49,8 +53,6 @@ export const catalogFileSchema = z.object({
   currency: z.literal('USD'),
   entries: z.array(catalogEntrySchema).min(1),
 });
-/** Catalog file. */
-export type CatalogFile = z.infer<typeof catalogFileSchema>;
 
 /** `providers.catalog` row: an entry plus the catalog version it came from. */
 export const catalogModelSchema = catalogEntrySchema.extend({ catalogVersion: z.string() });

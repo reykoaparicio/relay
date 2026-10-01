@@ -27,3 +27,6 @@ export const artifactContentSchema = z.discriminatedUnion('kind', [
 ]);
 /** Artifact content. */
 export type ArtifactContent = z.infer<typeof artifactContentSchema>;
+
+/** The `<artifact>.purged` tombstone file of the artifact store (05 E6, B11): when the file was purged. */
+export const artifactTombstoneSchema = z.object({ purgedAt: epochMsSchema });

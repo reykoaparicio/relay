@@ -18,7 +18,7 @@ import { cp, lstat, mkdir, readdir, readFile, realpath, writeFile } from 'node:f
 import { homedir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { SECRET_PATTERNS, toDisplayPath } from '@relay/contracts';
+import { redactString, SECRET_PATTERNS, toDisplayPath } from '@relay/contracts';
 import {
   RESET_MARKER,
   SAMPLE_MARKER,
@@ -80,6 +80,9 @@ async function scanSnapshot(dir: string, forbiddenStrings: readonly string[]): P
     for (const re of SECRET_PATTERNS) {
       const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
       for (const m of text.matchAll(new RegExp(re.source, flags))) {
+        // Candidates only: some rules also check the char after the value, so confirm by redacting the match plus it.
+        const candidate = text.slice(m.index, m.index + m[0].length + 1);
+        if (redactString(candidate) === candidate) continue;
         if (!m[0].includes('sk-fixture-DO-NOT-READ')) problems.push(`${rel}: secret-like string ${m[0].slice(0, 12)}…`);
       }
     }
@@ -87,7 +90,10 @@ async function scanSnapshot(dir: string, forbiddenStrings: readonly string[]): P
   return problems;
 }
 
-async function main(): Promise<number> {
+type Generator = 'fake-provider' | 'hand-prepared';
+
+/** Parsed CLI options, or the exit code of a usage error. */
+function parseOptions(): { generate: boolean; from: string | undefined; out: string } | number {
   const { values } = parseArgs({
     options: { 'generate-fake': { type: 'boolean', default: false }, from: { type: 'string' }, out: { type: 'string' } },
     strict: true,
@@ -102,97 +108,126 @@ async function main(): Promise<number> {
     process.stderr.write(`refusing --out ${out}: the snapshot dir must be named "snapshot"\n`);
     return 2;
   }
+  return { generate, from: values.from, out };
+}
+
+/** Step 1: the userData dir to snapshot, in `work` (generated with the fake provider, or a copy of `--from`). */
+async function prepareWork(scratch: string, work: string, from: string | undefined): Promise<Generator> {
+  if (from === undefined) {
+    const sampleRoot = join(scratch, 'Relay-Demo-samples', 'sample-api');
+    await mkdir(join(scratch, 'Relay-Demo-samples'), { recursive: true });
+    await cp(FIXTURE_SAMPLE, sampleRoot, { recursive: true, filter: sampleFilter, verbatimSymlinks: true });
+    const real = await realpath(sampleRoot);
+    process.stdout.write('Preparing the four demo states with the fake provider (no network, no spend)…\n');
+    await prepareFakeDemo(work, real, toDisplayPath(real, homedir()));
+    return 'fake-provider';
+  }
+  const source = await realpath(resolve(from));
+  if (await exists(join(source, 'SingletonLock'))) process.stdout.write('note: SingletonLock present; make sure Relay is not running on this profile\n');
+  // Work on a copy (never secrets/): opening a runtime writes to its DB.
+  await cp(source, work, { recursive: true, filter: copyFilter, verbatimSymlinks: true });
+  return 'hand-prepared';
+}
+
+/**
+ * Step 2: assert the prepared states, then stage a self-contained DB copy (demo project bound to the placeholder root)
+ * and the artifacts. Returns null when a required state is missing.
+ */
+async function stageUserData(work: string, staging: string): Promise<{ sampleRoot: string; schemaVersion: number } | null> {
+  await mkdir(join(staging, 'userdata'), { recursive: true });
+  const dbCopy = join(staging, 'userdata', 'relay.sqlite');
+  const rt = await openFakeRuntime(work);
+  let staged: { sampleRoot: string; schemaVersion: number };
+  try {
+    const checks = await verifyDemoState(rt, work, { checkProjectRoot: true });
+    if (!printChecklist('Prepared demo states', checks)) return null;
+    const demo = rt.db.repos.projects.list({ includeArchived: false }).find((p) => p.isDemo);
+    if (demo === undefined) throw new Error('no demo project');
+    staged = { sampleRoot: rt.db.repos.projects.getWithRoot(demo.id).rootRealpath, schemaVersion: rt.db.schemaVersion() };
+    await rt.db.backupTo(dbCopy);
+  } finally {
+    await rt.dispose();
+  }
+  rebindDemoProject(dbCopy, SNAPSHOT_ROOT_PLACEHOLDER, SNAPSHOT_DISPLAY_PLACEHOLDER);
+  makeSelfContained(dbCopy);
+  if (await exists(join(work, 'artifacts'))) await cp(join(work, 'artifacts'), join(staging, 'userdata', 'artifacts'), { recursive: true, filter: copyFilter });
+  return staged;
+}
+
+/** Step 3: `snapshot.json` (what the snapshot holds and how it was produced). */
+async function writeManifest(staging: string, generator: Generator, dbSchemaVersion: number): Promise<void> {
+  const fixtureManifest = JSON.parse(await readFile(join(FIXTURE_SAMPLE, '.relay-fixture.json'), 'utf8')) as { treeHash?: unknown };
+  const manifest = {
+    kind: SNAPSHOT_KIND,
+    schemaVersion: 1,
+    dbSchemaVersion,
+    generator,
+    createdAt: new Date().toISOString(),
+    sampleRootPlaceholder: SNAPSHOT_ROOT_PLACEHOLDER,
+    sampleSource: 'tests/fixtures/sample-api',
+    fixtureTreeHash: typeof fixtureManifest.treeHash === 'string' ? fixtureManifest.treeHash : null,
+    states: ['sample project + 1 approved rule', 'completed run with report', 'budget-blocked run (paused, budget_run)', 'interrupted run checkpointed after Plan'],
+    note: generator === 'fake-provider'
+      ? 'Every prepared run was produced by the deterministic FAKE provider. Label them "Prepared (fake provider)" in the demo; never present them as live model results (§22.2).'
+      : 'Prepared by hand; label these runs "Prepared" in the demo (§22.2).',
+  };
+  await writeFile(join(staging, SNAPSHOT_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+}
+
+/** Step 4: the built-in scan, then check-no-secrets. True when both are clean. */
+async function verifyStaging(staging: string, forbidden: readonly string[]): Promise<boolean> {
+  const problems = await scanSnapshot(staging, forbidden);
+  if (problems.length > 0) {
+    process.stderr.write(`demo-snapshot: ${String(problems.length)} finding(s); nothing was written\n${problems.map((p) => `  ${p}`).join('\n')}\n`);
+    return false;
+  }
+  const scanner = join(REPO_ROOT, 'scripts', 'check-no-secrets.ts');
+  if (!(await exists(scanner))) {
+    process.stdout.write('note: scripts/check-no-secrets.ts not present; ran the built-in scan only\n');
+    return true;
+  }
+  const r = spawnSync(process.execPath, ['--import', 'tsx', '--conditions=development', scanner, staging], { cwd: REPO_ROOT, encoding: 'utf8' });
+  process.stdout.write(r.stdout);
+  if (r.status !== 0) {
+    process.stderr.write(`demo-snapshot: check-no-secrets failed (exit ${String(r.status)}); nothing was written\n${r.stderr}`);
+    return false;
+  }
+  return true;
+}
+
+/** Step 5: replace `out` with the verified staging dir (the old snapshot is removed only through the guarded helper). */
+async function publish(staging: string, out: string): Promise<void> {
+  if (await exists(out)) {
+    const st = await lstat(out);
+    if (!st.isDirectory()) throw new Error(`${out} exists and is not a directory`);
+    await removeSnapshotDir(out);
+  }
+  await cp(staging, out, { recursive: true });
+}
+
+async function main(): Promise<number> {
+  const opts = parseOptions();
+  if (typeof opts === 'number') return opts;
   const scratch = await makeScratchDir('relay-demo-snap-');
   try {
     const work = join(scratch, 'Relay-Demo');
-    let generator: 'fake-provider' | 'hand-prepared';
-    if (generate) {
-      generator = 'fake-provider';
-      const sampleRoot = join(scratch, 'Relay-Demo-samples', 'sample-api');
-      await mkdir(join(scratch, 'Relay-Demo-samples'), { recursive: true });
-      await cp(FIXTURE_SAMPLE, sampleRoot, { recursive: true, filter: sampleFilter, verbatimSymlinks: true });
-      const real = await realpath(sampleRoot);
-      process.stdout.write('Preparing the four demo states with the fake provider (no network, no spend)…\n');
-      await prepareFakeDemo(work, real, toDisplayPath(real, homedir()));
-    } else {
-      generator = 'hand-prepared';
-      const from = await realpath(resolve(values.from ?? ''));
-      if (await exists(join(from, 'SingletonLock'))) process.stdout.write('note: SingletonLock present; make sure Relay is not running on this profile\n');
-      // Work on a copy (never secrets/): opening a runtime writes to its DB.
-      await cp(from, work, { recursive: true, filter: copyFilter, verbatimSymlinks: true });
-    }
-
     const staging = join(scratch, 'snapshot');
-    await mkdir(join(staging, 'userdata'), { recursive: true });
-    const rt = await openFakeRuntime(work);
-    let sampleRoot: string;
-    let schemaVersion: number;
-    try {
-      const checks = await verifyDemoState(rt, work, { checkProjectRoot: true });
-      if (!printChecklist('Prepared demo states', checks)) {
-        process.stderr.write('demo-snapshot: the prepared dir is missing a required state; nothing was written\n');
-        return 1;
-      }
-      const demo = rt.db.repos.projects.list({ includeArchived: false }).find((p) => p.isDemo);
-      if (demo === undefined) throw new Error('no demo project');
-      sampleRoot = rt.db.repos.projects.getWithRoot(demo.id).rootRealpath;
-      schemaVersion = rt.db.schemaVersion();
-      await rt.db.backupTo(join(staging, 'userdata', 'relay.sqlite'));
-    } finally {
-      await rt.dispose();
+    const generator = await prepareWork(scratch, work, opts.generate ? undefined : opts.from);
+    const staged = await stageUserData(work, staging);
+    if (staged === null) {
+      process.stderr.write('demo-snapshot: the prepared dir is missing a required state; nothing was written\n');
+      return 1;
     }
-    const dbCopy = join(staging, 'userdata', 'relay.sqlite');
-    rebindDemoProject(dbCopy, SNAPSHOT_ROOT_PLACEHOLDER, SNAPSHOT_DISPLAY_PLACEHOLDER);
-    makeSelfContained(dbCopy);
-    if (await exists(join(work, 'artifacts'))) await cp(join(work, 'artifacts'), join(staging, 'userdata', 'artifacts'), { recursive: true, filter: copyFilter });
-    const drift = await sampleDrift(sampleRoot);
+    const drift = await sampleDrift(staged.sampleRoot);
     if (drift.length > 0) {
       process.stderr.write(`demo-snapshot: the demo project's files differ from tests/fixtures/sample-api; nothing was written\n${drift.map((d) => `  ${d}`).join('\n')}\n`);
       return 1;
     }
-    const fixtureManifest = JSON.parse(await readFile(join(FIXTURE_SAMPLE, '.relay-fixture.json'), 'utf8')) as { treeHash?: unknown };
-    const manifest = {
-      kind: SNAPSHOT_KIND,
-      schemaVersion: 1,
-      dbSchemaVersion: schemaVersion,
-      generator,
-      createdAt: new Date().toISOString(),
-      sampleRootPlaceholder: SNAPSHOT_ROOT_PLACEHOLDER,
-      sampleSource: 'tests/fixtures/sample-api',
-      fixtureTreeHash: typeof fixtureManifest.treeHash === 'string' ? fixtureManifest.treeHash : null,
-      states: ['sample project + 1 approved rule', 'completed run with report', 'budget-blocked run (paused, budget_run)', 'interrupted run checkpointed after Plan'],
-      note: generator === 'fake-provider'
-        ? 'Every prepared run was produced by the deterministic FAKE provider. Label them "Prepared (fake provider)" in the demo; never present them as live model results (§22.2).'
-        : 'Prepared by hand; label these runs "Prepared" in the demo (§22.2).',
-    };
-    await writeFile(join(staging, SNAPSHOT_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-
+    await writeManifest(staging, generator, staged.schemaVersion);
     const home = homedir();
-    const forbidden = [home, scratch, sampleRoot, work, 'demo-fake-key-not-a-secret'];
-    const problems = await scanSnapshot(staging, forbidden);
-    if (problems.length > 0) {
-      process.stderr.write(`demo-snapshot: ${String(problems.length)} finding(s); nothing was written\n${problems.map((p) => `  ${p}`).join('\n')}\n`);
-      return 1;
-    }
-    const scanner = join(REPO_ROOT, 'scripts', 'check-no-secrets.ts');
-    if (await exists(scanner)) {
-      const r = spawnSync(process.execPath, ['--import', 'tsx', '--conditions=development', scanner, staging], { cwd: REPO_ROOT, encoding: 'utf8' });
-      process.stdout.write(r.stdout);
-      if (r.status !== 0) {
-        process.stderr.write(`demo-snapshot: check-no-secrets failed (exit ${String(r.status)}); nothing was written\n${r.stderr}`);
-        return 1;
-      }
-    } else {
-      process.stdout.write('note: scripts/check-no-secrets.ts not present; ran the built-in scan only\n');
-    }
-
-    if (await exists(out)) {
-      const st = await lstat(out);
-      if (!st.isDirectory()) throw new Error(`${out} exists and is not a directory`);
-      await removeSnapshotDir(out);
-    }
-    await cp(staging, out, { recursive: true });
-    process.stdout.write(`\nSnapshot written to ${toDisplayPath(out, home)} (${generator}, 0 findings)\n`);
+    if (!(await verifyStaging(staging, [home, scratch, staged.sampleRoot, work, 'demo-fake-key-not-a-secret']))) return 1;
+    await publish(staging, opts.out);
+    process.stdout.write(`\nSnapshot written to ${toDisplayPath(opts.out, home)} (${generator}, 0 findings)\n`);
     return 0;
   } finally {
     await cleanupScratchDirs();

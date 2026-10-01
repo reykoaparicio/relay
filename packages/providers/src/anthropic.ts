@@ -1,56 +1,38 @@
 // 04 §D4: Anthropic Messages API adapter (@anthropic-ai/sdk). SDK objects never leave this file (§8.3).
 import Anthropic from '@anthropic-ai/sdk';
-import { RelayError, errors } from '@relay/contracts';
-import type { Clock, ModelCapabilities, ModelPrices } from '@relay/contracts';
-import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
+import { PROVIDER_REQUEST_TIMEOUT_MS } from '@relay/contracts';
+import type { ModelPrices } from '@relay/contracts';
+import { emitProgress, emitResponseId, guardListener, optionalIds, progressTokens, startTrackedCall, successResult } from './adapter-kit.js';
+import { findCatalogEntry } from './catalog.js';
+import { catalogCapabilities, estimateWith } from './catalog-facet.js';
 import { connectionTestRequest } from './connection-test.js';
-import { mapProviderError } from './errors.js';
-import type { SdkErrorClasses } from './errors.js';
-import { buildEstimate, localEstimate } from './estimate.js';
-import { NOOP_LOGGER, safeHook } from './safe-hook.js';
+import { mapProviderError, sdkErrorClasses } from './errors.js';
+import { tryParseJson } from './json.js';
+import { NOOP_LOGGER } from './safe-hook.js';
 import { createTrackedFetch } from './tracked-fetch.js';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type {
   EstimateContext,
   FallbackInfo,
   GenerateContext,
-  Logger,
   ModelRequest,
   ModelResult,
   NormalizedUsage,
   ProviderAdapter,
+  ProviderAdapterOptions,
   UsageEstimate,
 } from './types.js';
 import { normalizeAnthropicUsage } from './usage.js';
 import type { AnthropicUsageLike } from './usage.js';
 
-/** Factory options. `fetch` is the injected base fetch; when omitted, `globalThis.fetch` is read at call time. */
-export interface AnthropicAdapterOptions {
-  readonly clock: Clock;
-  readonly logger?: Logger;
-  readonly fetch?: typeof fetch;
-}
+/** Factory options (the shared {@link ProviderAdapterOptions}). */
+export type AnthropicAdapterOptions = ProviderAdapterOptions;
 
-/** ADR-013: the engine owns every retry, so each HTTP attempt is an Attempt row with its own reservation. */
-const REQUEST_TIMEOUT_MS = 600_000;
 const API_BASE_URL = 'https://api.anthropic.com';
 /** ADR-016 refusal fallback, scalar `fallbacks: 'default'` form (requires exactly this beta header). */
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
-/** Rough chars-per-token used only for progress display (never for money). */
-const PROGRESS_CHARS_PER_TOKEN = 4;
 
-const ANTHROPIC_ERRORS: SdkErrorClasses = {
-  APIError: Anthropic.APIError,
-  APIUserAbortError: Anthropic.APIUserAbortError,
-  APIConnectionError: Anthropic.APIConnectionError,
-  RateLimitError: Anthropic.RateLimitError,
-  AuthenticationError: Anthropic.AuthenticationError,
-  PermissionDeniedError: Anthropic.PermissionDeniedError,
-  NotFoundError: Anthropic.NotFoundError,
-  BadRequestError: Anthropic.BadRequestError,
-  UnprocessableEntityError: Anthropic.UnprocessableEntityError,
-  InternalServerError: Anthropic.InternalServerError,
-};
+const ANTHROPIC_ERRORS = sdkErrorClasses(Anthropic);
 
 // Structural views of the SDK stream/message, so the SDK's types stay inside this module.
 interface IterationLike extends AnthropicUsageLike {
@@ -110,14 +92,6 @@ function textOf(message: MessageLike): string {
     .join('');
 }
 
-function tryParseJson(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
 /** ADR-016: which model(s) served the turn when fallbacks were enabled. */
 function fallbackInfo(message: MessageLike, req: ModelRequest): FallbackInfo | undefined {
   const iterations = message.usage.iterations ?? [];
@@ -134,25 +108,13 @@ function fallbackInfo(message: MessageLike, req: ModelRequest): FallbackInfo | u
 function toResult(message: MessageLike, req: ModelRequest, tracker: DispatchTracker, stream: StreamLike, now: number): ModelResult {
   const usage = normalizeAnthropicUsage(message.usage);
   const rawText = textOf(message);
-  const requestId = tracker.requestId ?? stream.request_id ?? undefined;
-  const ids = { providerResponseId: message.id, ...(requestId === undefined ? {} : { providerRequestId: requestId }) };
+  const ids = optionalIds({ providerResponseId: message.id, providerRequestId: tracker.requestId ?? stream.request_id ?? undefined });
   const fb = req.refusalFallback === 'default' ? fallbackInfo(message, req) : undefined;
   const extra = { rawUsage: message.usage, ...ids, ...(fb === undefined ? {} : { fallback: fb }) };
   const stopReason = message.stop_reason ?? 'none';
   switch (stopReason) {
-    case 'end_turn': {
-      const start = tracker.dispatchedAt ?? now;
-      return {
-        kind: 'success',
-        json: tryParseJson(rawText),
-        rawText,
-        usage,
-        stopReason: 'end_turn',
-        latencyMs: now - start,
-        ...(tracker.firstByteAt === undefined ? {} : { firstByteMs: tracker.firstByteAt - start }),
-        ...extra,
-      };
-    }
+    case 'end_turn':
+      return successResult(tracker, now, { json: tryParseJson(rawText), rawText, usage }, extra);
     case 'refusal': {
       const category = message.stop_details?.category ?? undefined; // stop_details is null unless refused
       return { kind: 'refused', usage, ...(category === undefined ? {} : { category }), ...extra };
@@ -179,7 +141,7 @@ export function createAnthropicAdapter(opts: AnthropicAdapterOptions): ProviderA
       authToken: null,
       baseURL: API_BASE_URL,
       maxRetries: 0,
-      timeout: REQUEST_TIMEOUT_MS,
+      timeout: PROVIDER_REQUEST_TIMEOUT_MS, // ADR-013: the engine owns every retry; one HTTP call = one Attempt
       fetch: trackedFetch,
       logLevel: 'off',
     });
@@ -204,36 +166,28 @@ export function createAnthropicAdapter(opts: AnthropicAdapterOptions): ProviderA
   const onStreamEvent = (event: StreamEventLike, snapshot: MessageLike, state: CallState, ctx: GenerateContext, tracker: DispatchTracker, stream: StreamLike, startedAt: number): void => {
     state.partialUsage = normalizeAnthropicUsage(snapshot.usage);
     if (event.type === 'message_start' && event.message !== undefined) {
-      const providerResponseId = event.message.id;
-      state.providerResponseId = providerResponseId;
-      const providerRequestId = tracker.requestId ?? stream.request_id ?? undefined;
-      safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId, ...(providerRequestId === undefined ? {} : { providerRequestId }) }), logger);
+      state.providerResponseId = event.message.id;
+      emitResponseId(ctx, logger, event.message.id, tracker.requestId ?? stream.request_id ?? undefined);
       return;
     }
     if (event.type !== 'content_block_delta' && event.type !== 'message_delta') return;
     state.outputChars += deltaTextLength(event.delta);
-    const outputTokensSoFar = Math.max(snapshot.usage.output_tokens ?? 0, Math.ceil(state.outputChars / PROGRESS_CHARS_PER_TOKEN));
-    safeHook('onProgress', () => ctx.hooks?.onProgress?.({ outputTokensSoFar, elapsedMs: clock.now() - startedAt }), logger);
+    // Anthropic reports running output usage: show whichever is larger, the reported count or the chars estimate.
+    emitProgress(ctx, logger, clock, startedAt, Math.max(snapshot.usage.output_tokens ?? 0, progressTokens(state.outputChars)));
   };
 
   const generate = async (req: ModelRequest, ctx: GenerateContext): Promise<ModelResult> => {
     assertRequest(req);
-    const startedAt = clock.now();
-    const { fetch: trackedFetch, tracker } = createTrackedFetch(baseFetch(), {
-      clock,
-      logger,
-      onDispatched: () => ctx.hooks?.onDispatched?.(),
-    });
+    const { trackedFetch, tracker, startedAt } = startTrackedCall(baseFetch(), clock, logger, ctx);
     const state: CallState = { outputChars: 0 };
     try {
       const stream = openStream(makeClient(ctx.apiKey, trackedFetch), req, ctx.signal);
-      stream.on('streamEvent', (event, snapshot) => {
-        try {
+      stream.on(
+        'streamEvent',
+        guardListener(logger, (event: StreamEventLike, snapshot: MessageLike) => {
           onStreamEvent(event, snapshot, state, ctx, tracker, stream, startedAt);
-        } catch (err) {
-          logger.warn('provider.stream_listener_failed', { errorName: err instanceof Error ? err.name : typeof err });
-        }
-      });
+        }),
+      );
       const message = await stream.finalMessage();
       return toResult(message, req, tracker, stream, clock.now());
     } catch (err) {
@@ -259,38 +213,14 @@ export function createAnthropicAdapter(opts: AnthropicAdapterOptions): ProviderA
     return res.input_tokens;
   };
 
-  const estimate = async (
-    req: ModelRequest,
-    prices: ModelPrices,
-    ctx?: EstimateContext,
-  ): Promise<UsageEstimate> => {
-    const entry = findCatalogEntry('anthropic', req.modelId);
-    const version = priceCatalogVersionFor('anthropic', req.modelId, prices, ctx?.priceCatalogVersion);
-    if (ctx?.apiKey !== undefined && entry?.capabilities.supportsTokenCounting === true) {
-      try {
-        const inputTokens = await countTokens(req, ctx.apiKey, ctx.signal);
-        return buildEstimate(inputTokens, req, prices, 'provider_count', version);
-      } catch (err) {
-        // Counting is free but rate-limited; any failure falls back to the local heuristic (R4-12).
-        logger.warn('provider.count_tokens_failed', { providerId: 'anthropic', errorName: err instanceof Error ? err.name : typeof err });
-      }
-    }
-    return localEstimate(req, prices, version);
-  };
-
-  const capabilities = (modelId: string): Promise<ModelCapabilities> => {
-    const entry = findCatalogEntry('anthropic', modelId);
-    if (entry === undefined) {
-      return Promise.reject(new RelayError(errors.modelUnsupported({ providerId: 'anthropic', modelId, reason: 'not_in_catalog' })));
-    }
-    return Promise.resolve(entry.capabilities);
-  };
+  const estimate = (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> =>
+    estimateWith({ providerId: 'anthropic', logger, countTokens }, req, prices, ctx);
 
   // reconcile: not implemented. There is no endpoint to look up a past Messages request (supportsRequestLookup: false),
   // so unknown Anthropic outcomes always go to the user decision flow (§7.5).
   return {
     providerId: 'anthropic',
-    capabilities,
+    capabilities: (modelId) => catalogCapabilities('anthropic', modelId),
     estimate,
     generate,
     testConnection: (ctx) =>

@@ -9,7 +9,6 @@ import {
   nonNegativeMicrousdSchema,
   subMicrousd,
   usd,
-  ZERO_MICROUSD,
 } from './money.js';
 
 describe('usd', () => {
@@ -105,7 +104,7 @@ describe('mulDivCeil', () => {
 describe('addMicrousd / subMicrousd', () => {
   it('adds and subtracts exactly', () => {
     expect(addMicrousd(microusd(1), microusd(2), microusd(3))).toBe(6);
-    expect(addMicrousd()).toBe(ZERO_MICROUSD);
+    expect(addMicrousd()).toBe(microusd(0));
     expect(subMicrousd(microusd(1), microusd(3))).toBe(-2);
   });
 

@@ -1,7 +1,7 @@
 // 04 §D7: deterministic, scriptable fake provider (spec §13.2, §17). Never presented as a live result (§22.2):
 // it is selectable only through the registry's fake mode, which packaged builds ignore unless RELAY_E2E=1 (08 §H1).
 import { createHash } from 'node:crypto';
-import { appError, assertNever } from '@relay/contracts';
+import { appError, assertNever, errors } from '@relay/contracts';
 import type { AttemptPurpose, CatalogModel, ModelCapabilities, ModelPrices, ProviderId } from '@relay/contracts';
 import type { Clock } from '@relay/contracts';
 import { createMemoryCallLog } from './call-log.js';
@@ -10,6 +10,7 @@ import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
 import { CONNECTION_TEST_STEP_KEY } from './connection-test.js';
 import { localEstimate, localTokenEstimate, promptChars } from './estimate.js';
 import { FAKE_FIXTURES } from './fake-fixtures/index.js';
+import { tryParseJson } from './json.js';
 import type { FakeScenario, FakeScriptStep, FakeStepResult } from './fake-scenarios.js';
 import { NOOP_LOGGER, safeHook } from './safe-hook.js';
 import type {
@@ -149,7 +150,7 @@ function withUsage(base: NormalizedUsage, override: Partial<NormalizedUsage> | u
   return { ...base, ...override };
 }
 
-function fakeError(code: 'AUTH_REQUIRED' | 'RATE_LIMITED' | 'PROVIDER_UNAVAILABLE' | 'REQUEST_OUTCOME_UNKNOWN' | 'INTERNAL', phase: DispatchPhase, details: Record<string, unknown>, extra: Partial<ModelError> = {}): ModelError {
+function fakeError(code: 'AUTH_REQUIRED' | 'RATE_LIMITED' | 'PROVIDER_UNAVAILABLE' | 'REQUEST_OUTCOME_UNKNOWN', phase: DispatchPhase, details: Record<string, unknown>, extra: Partial<ModelError> = {}): ModelError {
   return { kind: 'error', error: appError(code, { details }), phase, ...extra };
 }
 
@@ -195,7 +196,10 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
     outputTokens: Math.min(DEFAULT_OUTPUT_TOKENS, req.maxOutputTokens),
   });
 
-  const aborted = (phase: DispatchPhase): ModelError => fakeError('INTERNAL', phase, { providerId, aborted: true });
+  // Same shape as the real adapters' D3 row 1 (errors.internal 'aborted' + providerId).
+  const abortedError = errors.internal(undefined, 'aborted');
+  const aborted = (phase: DispatchPhase): ModelError =>
+    ({ kind: 'error', error: { ...abortedError, details: { providerId, ...abortedError.details } }, phase });
 
   const produce = async (step: FakeScriptStep | undefined, req: ModelRequest, ctx: GenerateContext, startedAt: number): Promise<ModelResult> => {
     const attemptId = req.metadata.attemptId;
@@ -217,7 +221,7 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
         return success(json, JSON.stringify(json), { ...usage, outputTokens: result.outputTokens });
       }
       case 'malformed':
-        return success(parseOrUndefined(result.text), result.text, usage);
+        return success(tryParseJson(result.text), result.text, usage);
       case 'truncated': {
         const text = JSON.stringify(successFixture(undefined, served));
         const u = { ...usage, outputTokens: req.maxOutputTokens };
@@ -329,12 +333,4 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
     reconcile,
     testConnection,
   };
-}
-
-function parseOrUndefined(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
 }

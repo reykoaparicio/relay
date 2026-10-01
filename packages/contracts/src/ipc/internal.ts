@@ -72,7 +72,7 @@ export const INTERNAL_RUNNER_OPS = {
       isDemo: z.boolean(),
     }),
     output: projectSchema,
-    errors: ['VALIDATION_FAILED', 'CONFLICT', 'PERMISSION_DENIED'],
+    errors: ['VALIDATION_FAILED', 'CONFLICT', 'PERMISSION_DENIED', 'NOT_FOUND'],
     idempotent: true,
   }),
   'projects.previewRoot': op({
@@ -96,7 +96,7 @@ export const INTERNAL_RUNNER_OPS = {
       fileName: z.string().max(255),
     }),
     output: diffImportResultSchema,
-    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED'],
+    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED', 'NOT_FOUND', 'ARTIFACT_WRITE_FAILED'],
     idempotent: false,
   }),
   'artifacts.exportTo': op({

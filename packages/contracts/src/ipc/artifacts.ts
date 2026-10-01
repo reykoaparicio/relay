@@ -17,8 +17,6 @@ export const diffImportResultSchema = z.object({
   files: z.array(z.string()),
   parseWarnings: z.array(z.string()),
 });
-/** Diff import result. */
-export type DiffImportResult = z.infer<typeof diffImportResultSchema>;
 
 /** `artifacts.*` operations. */
 export const artifactOps = {
@@ -40,7 +38,7 @@ export const artifactOps = {
     route: 'main+runner',
     input: z.object({ projectId: idSchema('project') }),
     output: diffImportResultSchema.nullable(), // null = dialog cancelled
-    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED'],
+    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED', 'NOT_FOUND', 'ARTIFACT_WRITE_FAILED'],
     idempotent: false,
   }),
   'artifacts.export': op({

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppError, Result } from '@relay/contracts';
-import { err, errors, ok } from '@relay/contracts';
+import { err, errnoOf, errors, ok } from '@relay/contracts';
 import type { ArtifactStore } from './artifact-store.js';
 import { detectCaseInsensitive, relationOf } from './paths.js';
 
@@ -11,10 +11,6 @@ export const EXPORT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_NAME_SUFFIX = 1000;
 /** Max UTF-8 bytes of an export file name (common filesystem limit). */
 const MAX_FILE_NAME_BYTES = 255;
-
-function isErrno(e: unknown, code: string): boolean {
-  return e instanceof Error && 'code' in e && e.code === code;
-}
 
 /** A single safe file name: no separator, no NUL, not `.`/`..`, 1–255 bytes. */
 export function isSafeFileName(name: string): boolean {
@@ -73,7 +69,7 @@ async function writeExclusive(dir: string, name: string, bytes: Uint8Array): Pro
       await fs.promises.writeFile(path.join(dir, fileName), bytes, { flag: 'wx' });
       return fileName;
     } catch (e) {
-      if (!isErrno(e, 'EEXIST')) throw e;
+      if (errnoOf(e) !== 'EEXIST') throw e;
     }
   }
   throw new Error('no free export file name');

@@ -52,8 +52,6 @@ export type CostSummary = z.infer<typeof costSummarySchema>;
 
 /** An amount with its FR-09 certainty label. */
 export const costWithCertaintySchema = z.object({ microusd: microusdSchema, certainty: costCertaintySchema });
-/** Cost with certainty. */
-export type CostWithCertainty = z.infer<typeof costWithCertaintySchema>;
 
 /** One immutable ledger entry as shown in the Ledger tab / export. */
 export const ledgerEntryViewSchema = z.object({

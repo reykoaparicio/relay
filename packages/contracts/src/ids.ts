@@ -91,9 +91,22 @@ const RANDOM_BYTES = 10;
 const MAX_ULID_TIME = 2 ** 48 - 1;
 const RANDOM_LIMIT = 1n << 80n;
 
-/** Regex matching a full id for prefix key `p`. */
+/** Unanchored regex body of an id for prefix key `p` (`run_<ULID>`), for composing larger patterns. */
+export function idBodyPattern(p: IdPrefixKey): string {
+  return `${ID_PREFIX[p]}_${ULID_PATTERN}`;
+}
+
+/** One compiled pattern per prefix: ids are validated on every IPC call and DB read. Non-global, so stateless. */
+const ID_PATTERNS = new Map<IdPrefixKey, RegExp>();
+
+/** Regex matching a full id for prefix key `p` (memoized; never global, so `test` has no `lastIndex` state). */
 export function idPattern(p: IdPrefixKey): RegExp {
-  return new RegExp(`^${ID_PREFIX[p]}_${ULID_PATTERN}$`);
+  let re = ID_PATTERNS.get(p);
+  if (re === undefined) {
+    re = new RegExp(`^${idBodyPattern(p)}$`);
+    ID_PATTERNS.set(p, re);
+  }
+  return re;
 }
 
 /** Type guard: `value` is a well-formed id with prefix `p`. */

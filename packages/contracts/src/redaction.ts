@@ -11,14 +11,21 @@ const NB = '(?<![A-Za-z0-9])';
 const Q = `(?:\\\\?["'])?`;
 /** Characters of a credential-shaped token (base64/base64url, JWT, and API key alphabets). */
 const CRED = 'A-Za-z0-9_\\-+/=.~';
+// Value patterns are plain greedy runs with nothing after them, so each match is the maximal run and never backtracks.
+// The conditions that used to be lookaheads (a letter and a digit somewhere in the run; not followed by `(`) are
+// checked in code after the match ({@link SecretRule.value}). As lookaheads they rescanned the rest of the run from
+// every start position, so 256 KB of `authorization=` or `api_key=…(` took seconds to minutes (quadratic), and such
+// text can arrive in provider error bodies. A failed check rejects the whole run, which is exactly what the
+// lookaheads did: every later start inside the run sees a suffix of it, with the same next char and fewer letters.
+
 /**
- * A credential-shaped value: ≥ 16 credential chars with at least one letter and one digit, not followed by more
- * token chars or `(` (so identifiers and calls like `getAuthorizationHeader(req)` never match). Used where only the
- * key name hints at a secret (02 §B8; memory guard false positives, §5.5).
+ * A credential-token run: ≥ 16 credential chars. With `value: 'credential'` it must also contain a letter and a
+ * digit and not be followed by `(` (so identifiers and calls like `getAuthorizationHeader(req)` never match). Used
+ * where only the key name hints at a secret (02 §B8; memory guard false positives, §5.5).
  */
-const CREDENTIAL_VALUE = `(?!\\[REDACTED)(?=[${CRED}]*\\d)(?=[${CRED}]*[A-Za-z])[${CRED}]{16,}(?![${CRED}(])`;
-/** A value of any shape after an explicit API-key name: ≥ 8 chars, ended by a delimiter (not `(`, so calls never match). */
-const LOOSE_VALUE = `(?!\\[REDACTED)[^\\s"'\\\\,;{}()\\[\\]<>]{8,}(?![^\\s"'\\\\,;{}\\[\\]<>)])`;
+const CREDENTIAL_VALUE = `(?!\\[REDACTED)[${CRED}]{16,}`;
+/** A value of any shape after an explicit API-key name: ≥ 8 chars. With `value: 'delimited'`, not followed by `(`. */
+const LOOSE_VALUE = `(?!\\[REDACTED)[^\\s"'\\\\,;{}()\\[\\]<>]{8,}`;
 const API_KEY_NAME = `(?<keep>(?:api[_-]?key|x-api-key)${Q}\\s*[:=]\\s*${Q})`;
 const AUTHZ_NAME = `\\bauthorization${Q}\\s*[:=]\\s*${Q}`;
 
@@ -35,6 +42,36 @@ interface SecretRule {
   readonly redact?: boolean;
   /** Applied by {@link looksLikeSecret} (default true). */
   readonly detect?: boolean;
+  /**
+   * Post-match check on the `secret` group: `delimited` = not followed by `(`; `credential` = that plus a letter
+   * and a digit in the value. Absent: the regex match is final.
+   */
+  readonly value?: 'credential' | 'delimited';
+  /** Finds the next match at or after `from` in code instead of with `re` (for rules a regex cannot keep linear). */
+  readonly find?: (text: string, from: number) => Span | null;
+}
+
+/** A match found by {@link SecretRule.find}: `text.slice(start, end)` is the secret. */
+interface Span {
+  readonly start: number;
+  readonly end: number;
+}
+
+const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g;
+const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/g;
+
+/**
+ * The next PEM private-key block: the first BEGIN line at or after `from`, through the first END line after it,
+ * which is exactly what `BEGIN[\s\S]*?END` matches. That regex retried every later BEGIN line when no END followed
+ * (quadratic); here, when the first BEGIN has no END after it, no later BEGIN can have one either, so the search stops.
+ */
+function findPemBlock(text: string, from: number): Span | null {
+  PEM_BEGIN.lastIndex = from;
+  const begin = PEM_BEGIN.exec(text);
+  if (begin === null) return null;
+  PEM_END.lastIndex = begin.index + begin[0].length;
+  const end = PEM_END.exec(text);
+  return end === null ? null : { start: begin.index, end: end.index + end[0].length };
 }
 
 const RULES: readonly SecretRule[] = [
@@ -56,22 +93,40 @@ const RULES: readonly SecretRule[] = [
     label: 'plain',
   },
   // Authorization header/key with a raw credential-shaped value.
-  { re: new RegExp(`(?<keep>${AUTHZ_NAME})(?<secret>${CREDENTIAL_VALUE})`, 'gi'), label: 'plain' },
+  {
+    re: new RegExp(`(?<keep>${AUTHZ_NAME})(?<secret>${CREDENTIAL_VALUE})`, 'gi'),
+    label: 'plain',
+    value: 'credential',
+  },
   { re: new RegExp(`(?<keep>\\bBearer\\s+)(?!\\[REDACTED)(?<secret>[${CRED}]{16,})`, 'gi'), label: 'plain' },
   // Explicit API-key names: logs redact any delimited value; the memory guard needs a credential-shaped one.
-  { re: new RegExp(`${API_KEY_NAME}(?<secret>${LOOSE_VALUE})`, 'gi'), label: 'plain', detect: false },
-  { re: new RegExp(`${API_KEY_NAME}(?<secret>${CREDENTIAL_VALUE})`, 'gi'), label: 'plain', redact: false },
-  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, label: 'pem' },
+  { re: new RegExp(`${API_KEY_NAME}(?<secret>${LOOSE_VALUE})`, 'gi'), label: 'plain', detect: false, value: 'delimited' },
+  {
+    re: new RegExp(`${API_KEY_NAME}(?<secret>${CREDENTIAL_VALUE})`, 'gi'),
+    label: 'plain',
+    redact: false,
+    value: 'credential',
+  },
+  // PEM private keys. redactString/looksLikeSecret use findPemBlock (same matches, linear time); this regex is the
+  // SECRET_PATTERNS candidate for scanners, and its body never crosses another BEGIN line so it is linear too.
+  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S])*?-----END [A-Z ]*PRIVATE KEY-----/g, label: 'pem', find: findPemBlock },
   { re: /AKIA[0-9A-Z]{16}/g, label: 'akia' },
 ];
 
-/** Canonical redaction patterns (00b §6). All are global regexes; use them only with `String.prototype.replace`. */
-export const SECRET_PATTERNS: readonly RegExp[] = RULES.filter((r) => r.redact !== false).map((r) => r.re);
-
 const REDACT_RULES = RULES.filter((r) => r.redact !== false);
-/** Non-global copies (no `lastIndex` state) for {@link looksLikeSecret}. */
-const DETECT_PATTERNS: readonly RegExp[] = RULES.filter((r) => r.detect !== false).map(
-  (r) => new RegExp(r.re.source, r.re.flags.replace('g', '')),
+const DETECT_RULES = RULES.filter((r) => r.detect !== false);
+
+/**
+ * Canonical redaction patterns (00b §6). All are global regexes; use them only with `String.prototype.replace` or
+ * `matchAll`. They are candidate finders: some rules add a post-match check that looks one char past
+ * the match, so confirm a hit with {@link looksLikeSecret} on the match plus its next char (as `check:secrets` does)
+ * rather than trusting a bare match.
+ */
+export const SECRET_PATTERNS: readonly RegExp[] = REDACT_RULES.map((r) => r.re);
+
+/** Non-global copies (no `lastIndex` state) for rules without a post-match check: `test` stops at the first hit. */
+const DETECT_PATTERNS: ReadonlyMap<SecretRule, RegExp> = new Map(
+  DETECT_RULES.map((r) => [r, new RegExp(r.re.source, r.re.flags.replace('g', ''))]),
 );
 
 const LAST_CHARS = 4;
@@ -106,23 +161,64 @@ function label(kind: LabelKind, secret: string): string {
 
 type Groups = Partial<Record<'keep' | 'secret', string>>;
 
-function replacer(kind: LabelKind): (match: string, ...rest: unknown[]) => string {
+/** A letter and a digit somewhere in `value`. */
+function isCredentialShaped(value: string): boolean {
+  return /\d/.test(value) && /[A-Za-z]/.test(value);
+}
+
+/** The post-match half of a rule; `next` is the char right after the match ('' at the end of the text). */
+function passesValueCheck(rule: SecretRule, secret: string, next: string): boolean {
+  if (rule.value === undefined) return true;
+  if (next === '(') return false;
+  return rule.value === 'delimited' || isCredentialShaped(secret);
+}
+
+function replacer(rule: SecretRule): (match: string, ...rest: unknown[]) => string {
   return (match, ...rest) => {
+    // With named groups the trailing replacer args are (…captures, offset, input, groups).
     const last = rest.at(-1);
     const groups: Groups = typeof last === 'object' && last !== null ? last : {};
     const keep = groups.keep ?? '';
     const secret = groups.secret ?? match.slice(keep.length);
-    return `${keep}[REDACTED:${label(kind, secret)}]`;
+    const offset = rest.at(-3);
+    const input = rest.at(-2);
+    const next = typeof offset === 'number' && typeof input === 'string' ? input.charAt(offset + match.length) : '';
+    if (!passesValueCheck(rule, secret, next)) return match;
+    return `${keep}[REDACTED:${label(rule.label, secret)}]`;
   };
+}
+
+function replaceSpans(text: string, rule: SecretRule, find: (text: string, from: number) => Span | null): string {
+  let out = '';
+  let at = 0;
+  for (let span = find(text, 0); span !== null; span = find(text, at)) {
+    out += `${text.slice(at, span.start)}[REDACTED:${label(rule.label, text.slice(span.start, span.end))}]`;
+    at = span.end;
+  }
+  return at === 0 ? text : out + text.slice(at);
 }
 
 /** Replaces every secret-looking substring, e.g. `sk-ant-api03-…a1F9` → `[REDACTED:sk-…a1F9]`. Idempotent. */
 export function redactString(s: string): string {
   let out = s;
   for (const rule of REDACT_RULES) {
-    out = out.replace(rule.re, replacer(rule.label));
+    out = rule.find === undefined ? out.replace(rule.re, replacer(rule)) : replaceSpans(out, rule, rule.find);
   }
   return out;
+}
+
+function matchPasses(rule: SecretRule, m: RegExpExecArray, text: string): boolean {
+  const secret = m.groups?.['secret'] ?? m[0];
+  return passesValueCheck(rule, secret, text.charAt(m.index + m[0].length));
+}
+
+function ruleDetects(rule: SecretRule, text: string): boolean {
+  if (rule.find !== undefined) return rule.find(text, 0) !== null;
+  if (rule.value === undefined) return DETECT_PATTERNS.get(rule)?.test(text) ?? false;
+  for (const m of text.matchAll(rule.re)) {
+    if (matchPasses(rule, m, text)) return true;
+  }
+  return false;
 }
 
 /**
@@ -130,7 +226,7 @@ export function redactString(s: string): string {
  * key/value pairs: the value must look like a credential, so prose such as "read apiKey: fromVault()" passes.
  */
 export function looksLikeSecret(text: string): boolean {
-  return DETECT_PATTERNS.some((p) => p.test(text));
+  return DETECT_RULES.some((rule) => ruleDetects(rule, text));
 }
 
 /** Keys that are always removed by {@link redactDeep} (case-insensitive, `-`/`_` ignored). */

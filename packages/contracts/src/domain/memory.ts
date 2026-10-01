@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MEMORY_LIMITS } from '../defaults.js';
-import { idSchema } from '../ids.js';
+import { idBodyPattern, idSchema } from '../ids.js';
 import { epochMsSchema, relPathSchema, sha256Schema } from '../primitives.js';
 import { memoryEventTypeSchema, memoryStatusSchema, memoryTypeSchema, roleSchema } from '../status.js';
 
@@ -19,7 +19,7 @@ export type MemoryRecordScope = z.infer<typeof memoryRecordScopeSchema>;
 /** Actor/author of a memory revision or event: `user` or `run:<runId>`. */
 export const memoryActorSchema = z
   .string()
-  .regex(/^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$/, 'user or run:<runId>');
+  .regex(new RegExp(`^(user|run:${idBodyPattern('run')})$`), 'user or run:<runId>');
 
 /** Where a memory record came from. */
 export const memorySourceSchema = z.discriminatedUnion('kind', [

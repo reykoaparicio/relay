@@ -1,8 +1,10 @@
-import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppError, ArtifactId, Clock, EpochMs, RelPath, Result, RunId, Sha256 } from '@relay/contracts';
-import { INPUT_CAPS, ULID_PATTERN, appError, err, errors, isIdOf, ok } from '@relay/contracts';
+import { INPUT_CAPS, err, errnoDetails, errnoOf, errors, idBodyPattern, isIdOf, ok } from '@relay/contracts';
+import { FILE_MODE_READONLY, fsyncDir, isErrno, unlinkTemp, unlinkWritable, writeReadOnlyTemp } from './artifact-fs.js';
+import { TOMBSTONE_SUFFIX, ensureTombstone, purgedAtOf, readTombstone } from './artifact-tombstones.js';
+import type { TombstoneDeps } from './artifact-tombstones.js';
 import { sha256Hex } from './hash.js';
 
 /** Store-relative scope directory: `artifacts/<runId|projectId>`. */
@@ -33,7 +35,7 @@ export interface PutInput {
 /** Immutable, crash-safe artifact store under `userData/artifacts/` (§12.3, §7.5). */
 export interface ArtifactStore {
   put(input: PutInput): Promise<Result<{ relPath: string; sha256: Sha256; sizeBytes: number }>>;
-  /** Purged → `NOT_FOUND` with `details = { purged: true, purgedAt }`. */
+  /** Never throws. Purged → `NOT_FOUND` with `details = { purged: true, purgedAt }`; fs failure → `NOT_FOUND` + `details.errno`. */
   read(relPath: string, maxBytes: number): Promise<Result<Uint8Array>>;
   exists(relPath: string): Promise<boolean>;
   purge(relPath: string): Promise<Result<{ purgedAt: EpochMs }>>;
@@ -82,14 +84,7 @@ export interface ArtifactStoreOptions {
 export const INPUT_FILE_MEDIA_TYPE = 'text/plain; charset=utf-8';
 /** §7.4: an orphan (file without a committed row) is swept at runner boot only once older than 1 h. */
 export const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000;
-const FILE_MODE_READONLY = 0o444;
-const FILE_MODE_WRITABLE = 0o644;
-const TOMBSTONE_SUFFIX = '.purged';
-const SCOPE_DIR_RE = new RegExp(`^artifacts/(run|prj)_${ULID_PATTERN}$`);
-
-function isErrno(e: unknown, code: string): boolean {
-  return e instanceof Error && 'code' in e && e.code === code;
-}
+const SCOPE_DIR_RE = new RegExp(`^artifacts/(${idBodyPattern('run')}|${idBodyPattern('project')})$`);
 
 function invalidRelPath(): AppError {
   return errors.validationFailed([{ path: 'relPath', message: 'Not a valid artifact path.', code: 'invalid_artifact_path' }]);
@@ -101,44 +96,13 @@ function isArtifactRelPath(relPath: string): boolean {
   return SCOPE_DIR_RE.test(relPath.slice(0, slash)) && isIdOf('artifact', relPath.slice(slash + 1));
 }
 
-async function fsyncDir(dir: string): Promise<void> {
-  const fh = await fs.promises.open(dir, 'r');
-  try {
-    await fh.sync();
-  } finally {
-    await fh.close();
-  }
-}
-
-/** Tombstone state: absent, valid, or present but unreadable/empty/garbled (e.g. a crash mid-write before B11). */
-type TombstoneState = { readonly kind: 'absent' } | { readonly kind: 'valid'; readonly purgedAt: EpochMs } | { readonly kind: 'broken' };
-
-async function readTombstone(file: string): Promise<TombstoneState> {
-  let text: string;
-  try {
-    text = await fs.promises.readFile(`${file}${TOMBSTONE_SUFFIX}`, 'utf8');
-  } catch (e) {
-    if (isErrno(e, 'ENOENT')) return { kind: 'absent' };
-    return { kind: 'broken' };
-  }
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed === 'object' && parsed !== null && 'purgedAt' in parsed && typeof parsed.purgedAt === 'number') {
-      return { kind: 'valid', purgedAt: parsed.purgedAt as EpochMs };
-    }
-  } catch {
-    // fall through: garbled
-  }
-  return { kind: 'broken' };
-}
-
 async function readAll(file: string, maxBytes: number): Promise<Result<Uint8Array> | 'missing'> {
   let fh: fs.promises.FileHandle;
   try {
     fh = await fs.promises.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   } catch (e) {
     if (isErrno(e, 'ENOENT')) return 'missing';
-    return err(errors.notFound('artifact'));
+    return err(errors.notFound('artifact', {}, { details: errnoDetails(e) }));
   }
   try {
     const st = await fh.stat();
@@ -150,20 +114,6 @@ async function readAll(file: string, maxBytes: number): Promise<Result<Uint8Arra
   } finally {
     await fh.close();
   }
-}
-
-/** Unlinks a temp name WITHOUT chmod: after `link` it shares the committed inode, whose `0o444` must survive. */
-async function unlinkTemp(file: string): Promise<void> {
-  await fs.promises.unlink(file).catch((e: unknown) => {
-    if (!isErrno(e, 'ENOENT')) throw e;
-  });
-}
-
-async function unlinkWritable(file: string): Promise<void> {
-  await fs.promises.chmod(file, FILE_MODE_WRITABLE).catch(() => undefined);
-  await fs.promises.unlink(file).catch((e: unknown) => {
-    if (!isErrno(e, 'ENOENT')) throw e;
-  });
 }
 
 /** Lists every file two levels under `artifacts/` (`<scope>/<name>`), relative to userData, POSIX separators. */
@@ -196,61 +146,11 @@ async function listStoreFiles(artifactsDir: string): Promise<string[]> {
 export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
   const abs = (relPath: string): string => path.join(opts.userDataDir, ...relPath.split('/'));
   const log = opts.log ?? (() => undefined);
-  const tmpName = (target: string): string => `${target}.tmp-${randomBytes(6).toString('hex')}`;
-
-  /** Writes `bytes` to a fresh read-only temp file next to `target` (O_EXCL, fsync, chmod 0o444) and returns it. */
-  async function writeReadOnlyTemp(target: string, bytes: Uint8Array | string): Promise<string> {
-    const tmp = tmpName(target);
-    const fh = await fs.promises.open(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, FILE_MODE_WRITABLE);
-    try {
-      await fh.writeFile(bytes);
-      await fh.sync();
-    } finally {
-      await fh.close();
-    }
-    await opts.faults?.afterTempWrite?.();
-    await fs.promises.chmod(tmp, FILE_MODE_READONLY);
-    return tmp;
-  }
-
-  /**
-   * Publishes a tombstone for `file` (B11: tmp + fsync + link, so a crash never leaves an empty one). An existing valid
-   * tombstone wins (its `purgedAt` is returned); an existing broken one is replaced atomically (repair).
-   */
-  async function ensureTombstone(file: string): Promise<EpochMs> {
-    const tombstone = `${file}${TOMBSTONE_SUFFIX}`;
-    const current = await readTombstone(file);
-    if (current.kind === 'valid') return current.purgedAt;
-    const purgedAt = opts.clock.now();
-    const tmp = await writeReadOnlyTemp(tombstone, JSON.stringify({ purgedAt }));
-    try {
-      if (current.kind === 'broken') {
-        await fs.promises.rename(tmp, tombstone);
-        log('artifact.tombstone.repaired', {});
-      } else {
-        try {
-          await fs.promises.link(tmp, tombstone);
-        } catch (e) {
-          if (!isErrno(e, 'EEXIST')) throw e;
-          const raced = await readTombstone(file);
-          if (raced.kind === 'valid') return raced.purgedAt;
-          await fs.promises.rename(tmp, tombstone);
-        }
-      }
-    } finally {
-      await unlinkTemp(tmp);
-    }
-    await fsyncDir(path.dirname(file));
-    return purgedAt;
-  }
-
-  /** Tombstone present (valid, or broken → repaired) → its `purgedAt`; absent → null. */
-  async function purgedAtOf(file: string): Promise<EpochMs | null> {
-    const t = await readTombstone(file);
-    if (t.kind === 'absent') return null;
-    if (t.kind === 'valid') return t.purgedAt;
-    return ensureTombstone(file);
-  }
+  const tombstones: TombstoneDeps = {
+    now: () => opts.clock.now(),
+    log,
+    ...(opts.faults?.afterTempWrite === undefined ? {} : { afterTempWrite: opts.faults.afterTempWrite }),
+  };
 
   /** Existing final file: same bytes → idempotent ok (restoring `0o444`, B12); different bytes → failure. */
   async function checkExisting(finalPath: string, relPath: string, sha: Sha256): Promise<Result<true> | null> {
@@ -269,7 +169,7 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
 
   /** Commits a new file (B9): `link` never replaces, so two concurrent puts with different bytes cannot both win. */
   async function commitNew(finalPath: string, relPath: string, bytes: Uint8Array, sha: Sha256): Promise<Result<true>> {
-    const tmp = await writeReadOnlyTemp(finalPath, bytes);
+    const tmp = await writeReadOnlyTemp(finalPath, bytes, opts.faults?.afterTempWrite);
     let linked = false;
     try {
       await opts.faults?.beforeLink?.();
@@ -302,26 +202,36 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
     const done = ok({ relPath, sha256: sha, sizeBytes: input.bytes.byteLength });
     try {
       await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
-      if ((await purgedAtOf(finalPath)) !== null) return purgedError();
+      if ((await purgedAtOf(finalPath, tombstones)) !== null) return purgedError();
       const existing = await checkExisting(finalPath, relPath, sha);
       if (existing !== null) return existing.ok ? done : existing;
       const committed = await commitNew(finalPath, relPath, input.bytes, sha);
       return committed.ok ? done : committed;
     } catch (e) {
       if (e instanceof FaultInjected) throw e;
-      log('artifact.put.failed', { relPath, code: e instanceof Error && 'code' in e ? e.code : undefined });
+      log('artifact.put.failed', { relPath, code: errnoOf(e) });
       return err(errors.artifactWriteFailed());
     }
   };
 
-  const read: ArtifactStore['read'] = async (relPath, maxBytes) => {
+  const readChecked = async (relPath: string, maxBytes: number): Promise<Result<Uint8Array>> => {
     if (!isArtifactRelPath(relPath)) return err(invalidRelPath());
     const file = abs(relPath);
     // Tombstone FIRST (B10): a file mid-purge (tombstone written, unlink pending) is already purged.
-    const purgedAt = await purgedAtOf(file).catch(() => null);
+    const purgedAt = await purgedAtOf(file, tombstones).catch(() => null);
     if (purgedAt !== null) return err(errors.notFound('artifact', { purged: true }, { details: { purgedAt } }));
     const r = await readAll(file, maxBytes);
     return r === 'missing' ? err(errors.notFound('artifact')) : r;
+  };
+
+  /** Never throws: an fs failure after open (EIO, EISDIR, …) is `NOT_FOUND` with `details.errno` (code only). */
+  const read: ArtifactStore['read'] = async (relPath, maxBytes) => {
+    try {
+      return await readChecked(relPath, maxBytes);
+    } catch (e) {
+      log('artifact.read.failed', { relPath, code: errnoOf(e) });
+      return err(errors.notFound('artifact', {}, { details: errnoDetails(e) }));
+    }
   };
 
   const exists: ArtifactStore['exists'] = async (relPath) => {
@@ -341,7 +251,7 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
       // Tombstone BEFORE unlink (B10): a concurrent put's post-commit re-check then always sees it. Idempotent: an
       // existing valid tombstone keeps its purgedAt, and the unlink is repeated (crash between the two steps is safe).
-      const purgedAt = await ensureTombstone(file);
+      const purgedAt = await ensureTombstone(file, tombstones);
       await opts.faults?.afterTombstone?.();
       await unlinkWritable(file);
       return ok({ purgedAt });
@@ -358,7 +268,7 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
       if (refs.has(f.sha256)) continue;
       if (sha256Hex(f.bytes) !== f.sha256) {
         log('artifact.snapshot.hash_mismatch', { runId });
-        return err(appError('INTERNAL', { runId, details: { reason: 'snapshot_input_hash_mismatch' } }));
+        return err(errors.internal(undefined, 'snapshot_input_hash_mismatch'));
       }
       const artifactId = newId();
       const stored = await put({ scopeDir: `artifacts/${runId}`, artifactId, bytes: f.bytes, mediaType: INPUT_FILE_MEDIA_TYPE });
@@ -377,9 +287,9 @@ export function createArtifactStore(opts: ArtifactStoreOptions): ArtifactStore {
   const readSnapshot: ArtifactStore['readSnapshot'] = async (ref) => {
     const r = await read(ref.storeRelPath, INPUT_CAPS.maxFileBytes);
     if (!r.ok) return r;
-    const breach = (reason: string) => {
+    const breach = (reason: 'snapshot_hash_mismatch' | 'snapshot_not_utf8') => {
       log('artifact.snapshot.invariant_breach', { reason, artifactId: ref.artifactId });
-      return err(appError('INTERNAL', { details: { reason } }));
+      return err(errors.internal(undefined, reason));
     };
     if (sha256Hex(r.value) !== ref.sha256) return breach('snapshot_hash_mismatch');
     try {

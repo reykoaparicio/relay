@@ -175,3 +175,65 @@ describe('scanProject', () => {
     expect(ms).toBeLessThan(2000);
   }, 60_000);
 });
+
+describe('scanProject: lazy UTF-8, gitignore loading, fan-out (impr items 11, 20)', () => {
+  it('validates UTF-8 past the 8 KiB sniff window for admitted files only', async () => {
+    const valid = 'a'.repeat(9000);
+    const invalidTail = Buffer.concat([Buffer.from('b'.repeat(9000)), Buffer.from([0xc3, 0x28])]);
+    const bigInvalid = Buffer.concat([Buffer.from('c'.repeat(12_000)), Buffer.from([0xc3, 0x28])]);
+    const { root } = await makeRoot({ 'a-valid.ts': valid, 'b-invalid-tail.ts': invalidTail, 'c-over-cap.ts': bigInvalid });
+    const open = vi.spyOn(fs.promises, 'open');
+
+    const r = await scan(root, { caps: { maxFileBytes: 64 * 1024, maxTotalBytes: 18_500, maxFiles: 200 } });
+
+    expect(r.included.map((f) => f.relPath)).toEqual(['a-valid.ts']);
+    expect(r.excluded).toEqual([
+      { relPath: 'b-invalid-tail.ts', reason: 'binary', isDirectory: false },
+      // Not admitted by the total cap (the binary file freed none): never fully read, reported as cap_exceeded.
+      { relPath: 'c-over-cap.ts', reason: 'cap_exceeded', isDirectory: false },
+    ]);
+    const opens = (name: string) => open.mock.calls.filter(([p]) => String(p).endsWith(name)).length;
+    expect([opens('a-valid.ts'), opens('b-invalid-tail.ts'), opens('c-over-cap.ts')]).toEqual([2, 2, 1]); // probe (+ UTF-8 read)
+  });
+
+  it('applies nested .gitignore files (re-include with !) and skips directories without one', async () => {
+    const { root } = await makeRoot({
+      '.gitignore': '*.log\n',
+      'a.log': 'x',
+      'sub/.gitignore': '!keep.log\n',
+      'sub/keep.log': 'k',
+      'sub/drop.log': 'd',
+      'other/x.log': 'x',
+      'other/y.ts': 'y',
+    });
+
+    const r = await scan(root);
+
+    expect(r.included.map((f) => f.relPath)).toEqual(['.gitignore', 'other/y.ts', 'sub/.gitignore', 'sub/keep.log']);
+    expect(r.excluded.filter((e) => e.reason === 'gitignored').map((e) => e.relPath)).toEqual(['a.log', 'other/x.log', 'sub/drop.log']);
+  });
+
+  it('opens at most 64 entries of one directory at a time and still lists all of them', async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 300; i += 1) files[`f${String(i).padStart(3, '0')}.ts`] = 'x';
+    const { root } = await makeRoot(files);
+    const open = fs.promises.open.bind(fs.promises);
+    let inFlight = 0;
+    let peak = 0;
+    vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        return await open(...args);
+      } finally {
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight -= 1;
+      }
+    });
+
+    const r = await scan(root, { caps: { maxFileBytes: 1024, maxTotalBytes: 1024 * 1024, maxFiles: 1000 } });
+
+    expect(r.included).toHaveLength(300);
+    expect(peak).toBeLessThanOrEqual(64);
+  });
+});

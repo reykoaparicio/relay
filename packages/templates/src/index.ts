@@ -1,4 +1,6 @@
 // Public API of @relay/templates (07 G6). Re-exports only.
+export { EVAL_TASK_CATEGORIES, EVAL_TASK_ID_PATTERN, evalTaskSchema } from './eval-task.js';
+export type { EvalTask } from './eval-task.js';
 export { REPORT_LIMITATIONS } from './limitations.js';
 export type { ReportLimitationKey, ReportLimitations } from './limitations.js';
 export { createTemplateRegistry } from './registry.js';

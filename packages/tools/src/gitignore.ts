@@ -13,27 +13,52 @@ export function parseGitignore(text: string): Ignore {
   return ignore().add(text.normalize('NFC'));
 }
 
+/** A `.gitignore` matcher that rule files can be added to while a walk discovers them (no rebuild per file). */
+export interface IncrementalGitignore {
+  /** Registers the rules of `<dir>/.gitignore` (`dir` = project-relative, `''` = root; NFC-normalized here). */
+  add(dir: string, rules: Ignore): void;
+  /** Whether `relPath` is ignored. Only the rules of `relPath`'s proper ancestor directories apply. */
+  readonly isGitignored: (relPath: string, isDirectory: boolean) => boolean;
+}
+
 /**
- * Builds the `isGitignored` matcher for exclusions. Rules are applied from the shallowest directory to the deepest, so
- * a deeper `!pattern` re-includes what a shallower file ignored (git semantics).
+ * Creates an {@link IncrementalGitignore}. For each path, the rules of its ancestor directories are applied from the
+ * shallowest to the deepest, so a deeper `!pattern` re-includes what a shallower file ignored (git semantics). Only
+ * ancestors can apply, so a lookup is O(depth) map probes, independent of how many rule files exist.
  */
-export function makeGitignoreMatcher(rules: GitignoreRules): (relPath: string, isDirectory: boolean) => boolean {
-  const ordered = [...rules.entries()]
-    .map(([dir, ig]) => [dir.normalize('NFC'), ig] as const)
-    .sort(([a], [b]) => a.split('/').length - b.split('/').length || a.localeCompare(b));
-  return (rawRelPath, isDirectory) => {
+export function createIncrementalGitignore(): IncrementalGitignore {
+  const byDir = new Map<string, Ignore>();
+  const isGitignored = (rawRelPath: string, isDirectory: boolean): boolean => {
     const relPath = rawRelPath.normalize('NFC');
+    if (relPath === '') return false;
     let ignored = false;
-    for (const [dir, ig] of ordered) {
-      const sub = dir === '' ? relPath : relPath.slice(dir.length + 1);
-      const applies = dir === '' || relPath.startsWith(`${dir}/`);
-      if (!applies || sub === '') continue;
-      const r = ig.test(isDirectory ? `${sub}/` : sub);
-      if (r.ignored) ignored = true;
-      if (r.unignored) ignored = false;
-    }
+    // `end` walks the separators: dir = '' then every proper ancestor (a/b/c → '', 'a', 'a/b'); sub = the rest.
+    let end = -1;
+    do {
+      const ig = byDir.get(end === -1 ? '' : relPath.slice(0, end));
+      if (ig !== undefined) {
+        const sub = relPath.slice(end + 1);
+        const r = ig.test(isDirectory ? `${sub}/` : sub);
+        if (r.ignored) ignored = true;
+        if (r.unignored) ignored = false;
+      }
+      end = relPath.indexOf('/', end + 1);
+    } while (end !== -1);
     return ignored;
   };
+  return {
+    add: (dir, rules) => {
+      byDir.set(dir.normalize('NFC'), rules);
+    },
+    isGitignored,
+  };
+}
+
+/** Builds the `isGitignored` matcher for a fixed set of rule files (see {@link createIncrementalGitignore}). */
+export function makeGitignoreMatcher(rules: GitignoreRules): (relPath: string, isDirectory: boolean) => boolean {
+  const matcher = createIncrementalGitignore();
+  for (const [dir, ig] of rules) matcher.add(dir, ig);
+  return matcher.isGitignored;
 }
 
 /**

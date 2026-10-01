@@ -29,6 +29,13 @@ export interface ClassifyContext {
   readonly isUserExcluded?: (relPath: string) => boolean;
   /** Project `.gitignore` matcher (see `gitignore.ts`); omitted when `respectGitignore` is off. */
   readonly isGitignored?: (relPath: string, isDirectory: boolean) => boolean;
+  /**
+   * Every ancestor directory of the entry was already classified with this context and was NOT excluded, so the
+   * user-pattern and gitignore rules need checking for the entry itself only. Set ONLY by `scanProject`, whose walk
+   * never descends into an excluded directory. Direct reads (`readSelected`) never set it: a requested path's
+   * ancestors have not been vetted, so every prefix is checked.
+   */
+  readonly ancestorsVetted?: boolean;
   /** Totals caps (`INPUT_CAPS.maxTotalBytes` / `maxFiles`) and the running totals already included. */
   readonly caps?: {
     readonly maxTotalBytes: number;
@@ -114,13 +121,12 @@ export function classifyByName(rawRelPath: string, isDirectory: boolean, ctx: Cl
   if (dirSegments.some((s) => DEPENDENCY_DIRS.has(s))) return 'dependency_dir';
   if (dirSegments.some((s) => BUILD_DIRS.has(s)) || (!isDirectory && BUILD_FILE.test(name))) return 'build_output';
   if (!isDirectory && isOsFile(name)) return 'os_file';
-  const prefixes = prefixesOf(segments);
+  // Directory-ness per prefix: every proper prefix is a directory; the entry itself is what the caller says.
+  const prefixes = ctx.ancestorsVetted === true ? [relPath] : prefixesOf(segments);
+  const last = prefixes.length - 1;
   const { isUserExcluded, isGitignored } = ctx;
   if (isUserExcluded !== undefined && prefixes.some((p) => isUserExcluded(p))) return 'user_pattern';
-  if (isGitignored !== undefined) {
-    const last = prefixes.length - 1;
-    if (prefixes.some((p, i) => isGitignored(p, i < last || isDirectory))) return 'gitignored';
-  }
+  if (isGitignored !== undefined && prefixes.some((p, i) => isGitignored(p, i < last || isDirectory))) return 'gitignored';
   if (!isDirectory && hasBinaryExtension(name)) return 'binary';
   return null;
 }
@@ -149,22 +155,22 @@ export function classify(relPath: string, stat: EntryStat, sniff: Sniff | null, 
   return reason === null ? { included: true } : { included: false, reason };
 }
 
-function isNonTextByte(b: number): boolean {
-  // Control characters other than \t \n \v \f \r and ESC; bytes >= 0x80 count as text (UTF-8).
-  return (b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1b) || b === 0x7f);
-}
+/**
+ * 1 for a non-text byte, else 0: control characters other than \t \n \v \f \r and ESC, plus DEL. Bytes >= 0x80
+ * count as text (UTF-8). A table lookup keeps the hot loop branch-free.
+ */
+const NON_TEXT_BYTE: Uint8Array = Uint8Array.from({ length: 256 }, (_, b) =>
+  b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1b) || b === 0x7f ? 1 : 0,
+);
 
 /** Sniffs the first {@link SNIFF_BYTES} of `bytes` for NUL and the non-text ratio. Pure. */
 export function sniffBytes(bytes: Uint8Array): Sniff {
   const window = bytes.subarray(0, SNIFF_BYTES);
-  if (window.length === 0) return { hasNul: false, nonTextRatio: 0 };
+  const n = window.length;
+  if (n === 0) return { hasNul: false, nonTextRatio: 0 };
   let nonText = 0;
-  let hasNul = false;
-  for (const b of window) {
-    if (b === 0) hasNul = true;
-    if (isNonTextByte(b)) nonText += 1;
-  }
-  return { hasNul, nonTextRatio: nonText / window.length };
+  for (let i = 0; i < n; i += 1) nonText += NON_TEXT_BYTE[window[i] ?? 0] ?? 0;
+  return { hasNul: window.includes(0), nonTextRatio: nonText / n };
 }
 
 /** Compiles project `exclusions` globs (picomatch, `dot: true`). Globs and paths are matched in NFC (B3). */

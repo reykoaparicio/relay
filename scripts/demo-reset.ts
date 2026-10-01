@@ -33,6 +33,7 @@ import {
   runningAppPid,
   stamp,
 } from './lib/demo-fs.js';
+import type { TargetSource } from './lib/demo-fs.js';
 import { callOk, openFakeRuntime } from './lib/demo-runtime.js';
 import { REPO_ROOT } from './lib/demo-state.js';
 
@@ -62,7 +63,22 @@ async function previousCredentialRefs(previousDir: string): Promise<CredentialRe
   }
 }
 
-async function main(): Promise<number> {
+/** Everything checked before anything on disk changes. */
+interface ResetPlan {
+  readonly home: string;
+  readonly target: string;
+  readonly parent: string;
+  readonly source: TargetSource;
+  readonly snapshot: string;
+  readonly generator: unknown;
+  readonly samplesDir: string;
+  readonly sampleDir: string;
+  /** A sample copy made by an earlier demo:reset exists (it moves into the previous dir). */
+  readonly hasSample: boolean;
+}
+
+/** Step 0: resolve and validate every input; refuses (throws) before any write. */
+async function planReset(): Promise<ResetPlan> {
   const { values } = parseArgs({
     options: { dir: { type: 'string' }, 'samples-dir': { type: 'string' }, snapshot: { type: 'string' } },
     strict: true,
@@ -89,68 +105,89 @@ async function main(): Promise<number> {
   if (sampleSt !== null && (sampleSt.isSymbolicLink() || !(await exists(join(sampleDir, SAMPLE_MARKER))))) {
     throw new DemoPathRefused(`refusing to replace ${sampleDir}: it was not created by demo:reset (no ${SAMPLE_MARKER})`);
   }
+  return { home, target, parent, source, snapshot, generator: manifest.generator, samplesDir, sampleDir, hasSample: sampleSt !== null };
+}
 
-  // 1. Move the current demo dir aside (never deleted here).
-  const now = new Date();
-  const previousName = `${DEMO_DIR_NAME}.previous-${stamp(now)}`;
-  const previous = join(parent, previousName);
+/** The current demo dir, moved aside (never deleted here). */
+interface MovedAside {
+  readonly previous: string;
+  readonly hadTarget: boolean;
+  /** Creates `previous` (with RESET_MARKER) when there was no demo dir to move but something must be kept in it. */
+  readonly ensure: () => Promise<void>;
+}
+
+/** Step 1: move the current demo dir aside to `Relay-Demo.previous-<stamp>`. */
+async function moveAside(plan: ResetPlan, now: Date): Promise<MovedAside> {
+  const previous = join(plan.parent, `${DEMO_DIR_NAME}.previous-${stamp(now)}`);
   if (await exists(previous)) throw new Error(`${previous} already exists; retry in a moment`);
-  const hadTarget = await exists(target);
-  if (hadTarget) await rename(target, previous);
+  const hadTarget = await exists(plan.target);
+  if (hadTarget) await rename(plan.target, previous);
   // A dir moved aside keeps whatever it had: only a dir demo-reset restored carries RESET_MARKER, so a user's own
   // `Relay-Demo` that was moved aside is never deleted by the pruning below. A previous dir created here (to hold the
   // old sample copy when there was no demo dir) gets the marker.
-  const ensurePrevious = async (): Promise<void> => {
+  const ensure = async (): Promise<void> => {
     if (await exists(previous)) return;
     await mkdir(previous);
     await writeFile(join(previous, RESET_MARKER), `${JSON.stringify({ createdBy: 'demo-reset', at: now.toISOString(), role: 'previous' })}\n`);
   };
+  return { previous, hadTarget, ensure };
+}
 
-  // 2. Copy the snapshot's userData (never secrets/).
-  await cp(join(snapshot, 'userdata'), target, { recursive: true, errorOnExist: true, force: false, filter: (p) => basename(p) !== 'secrets' });
-  await writeFile(join(target, RESET_MARKER), `${JSON.stringify({ createdBy: 'demo-reset', at: now.toISOString(), snapshotGenerator: manifest.generator ?? null })}\n`);
+/** Step 2: copy the snapshot's userData (never secrets/) and mark it as restored by demo-reset. */
+async function restoreUserData(plan: ResetPlan, now: Date): Promise<void> {
+  await cp(join(plan.snapshot, 'userdata'), plan.target, { recursive: true, errorOnExist: true, force: false, filter: (p) => basename(p) !== 'secrets' });
+  await writeFile(join(plan.target, RESET_MARKER), `${JSON.stringify({ createdBy: 'demo-reset', at: now.toISOString(), snapshotGenerator: plan.generator ?? null })}\n`);
+}
 
-  // 3. Restore the sample project outside userData; the old copy moves into the previous dir.
-  await mkdir(samplesDir, { recursive: true });
-  if (sampleSt !== null) {
-    await ensurePrevious();
-    await rename(sampleDir, join(previous, `previous-${SAMPLE_DIR_NAME}`));
+/** Step 3: restore the sample project outside userData (the old copy moves into the previous dir); rebind the DB. */
+async function restoreSample(plan: ResetPlan, aside: MovedAside, now: Date): Promise<string> {
+  await mkdir(plan.samplesDir, { recursive: true });
+  if (plan.hasSample) {
+    await aside.ensure();
+    await rename(plan.sampleDir, join(aside.previous, `previous-${SAMPLE_DIR_NAME}`));
   }
-  await cp(SAMPLE_SOURCE, sampleDir, {
+  await cp(SAMPLE_SOURCE, plan.sampleDir, {
     recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, filter: (p) => !['.env', '.relay-fixture.json'].includes(basename(p)),
   });
-  await writeFile(join(sampleDir, SAMPLE_MARKER), `${JSON.stringify({ createdBy: 'demo-reset', at: now.toISOString() })}\n`);
-  const sampleReal = await realpath(sampleDir);
-  rebindDemoProject(join(target, 'relay.sqlite'), sampleReal, toDisplayPath(sampleReal, home));
+  await writeFile(join(plan.sampleDir, SAMPLE_MARKER), `${JSON.stringify({ createdBy: 'demo-reset', at: now.toISOString() })}\n`);
+  const sampleReal = await realpath(plan.sampleDir);
+  rebindDemoProject(join(plan.target, 'relay.sqlite'), sampleReal, toDisplayPath(sampleReal, plan.home));
+  return sampleReal;
+}
 
-  // 4. Carry secrets/ (OS-protected key files) and their credential refs over from the previous dir.
-  let carried = 0;
-  const prevSecrets = join(previous, 'secrets');
-  const prevSecretsSt = hadTarget ? await lstat(prevSecrets).catch(() => null) : null;
-  if (prevSecretsSt?.isDirectory() === true && !prevSecretsSt.isSymbolicLink()) {
-    if (await exists(join(target, 'secrets'))) await rmdir(join(target, 'secrets')); // empty: the copy filter skips secrets/
-    await rename(prevSecrets, join(target, 'secrets'));
-    await chmod(join(target, 'secrets'), SECRETS_DIR_MODE);
-    const refs = await previousCredentialRefs(previous);
-    const rt = await openFakeRuntime(target);
-    try {
-      for (const ref of refs) {
-        if (ref.storageMode !== 'os_protected' || ref.vaultFile === null) continue; // session keys never persist
-        if (!(await exists(join(target, ref.vaultFile)))) continue;
-        await callOk(rt, 'relay/v1/providers.recordCredentialRef', {
-          providerId: ref.providerId, storageMode: ref.storageMode, vaultFile: ref.vaultFile, redactedLabel: ref.redactedLabel,
-        });
-        carried += 1;
-      }
-    } finally {
-      await rt.dispose();
-    }
-  } else {
-    await mkdir(join(target, 'secrets'), { recursive: true, mode: SECRETS_DIR_MODE });
-    await chmod(join(target, 'secrets'), SECRETS_DIR_MODE);
+/** Step 4: carry secrets/ (OS-protected key files) and their credential refs over from the previous dir. */
+async function carrySecrets(plan: ResetPlan, aside: MovedAside): Promise<number> {
+  const secrets = join(plan.target, 'secrets');
+  const prevSecrets = join(aside.previous, 'secrets');
+  const prevSecretsSt = aside.hadTarget ? await lstat(prevSecrets).catch(() => null) : null;
+  if (prevSecretsSt?.isDirectory() !== true || prevSecretsSt.isSymbolicLink()) {
+    await mkdir(secrets, { recursive: true, mode: SECRETS_DIR_MODE });
+    await chmod(secrets, SECRETS_DIR_MODE);
+    return 0;
   }
+  if (await exists(secrets)) await rmdir(secrets); // empty: the copy filter skips secrets/
+  await rename(prevSecrets, secrets);
+  await chmod(secrets, SECRETS_DIR_MODE);
+  const refs = await previousCredentialRefs(aside.previous);
+  const rt = await openFakeRuntime(plan.target);
+  let carried = 0;
+  try {
+    for (const ref of refs) {
+      if (ref.storageMode !== 'os_protected' || ref.vaultFile === null) continue; // session keys never persist
+      if (!(await exists(join(plan.target, ref.vaultFile)))) continue;
+      await callOk(rt, 'relay/v1/providers.recordCredentialRef', {
+        providerId: ref.providerId, storageMode: ref.storageMode, vaultFile: ref.vaultFile, redactedLabel: ref.redactedLabel,
+      });
+      carried += 1;
+    }
+  } finally {
+    await rt.dispose();
+  }
+  return carried;
+}
 
-  // 5. Keep one previous dir: delete older ones only through the guarded helper.
+/** Step 5: keep one previous dir; older ones are deleted only through the guarded helper. */
+async function pruneOlderPrevious(parent: string): Promise<{ keep: string | undefined; pruned: string[] }> {
   const previousDirs = (await readdir(parent)).filter((n) => PREVIOUS_DIR_RE.test(n)).sort();
   const keep = previousDirs.at(-1);
   const pruned: string[] = [];
@@ -163,17 +200,37 @@ async function main(): Promise<number> {
       process.stdout.write(`note: kept ${name} (${e instanceof Error ? e.message : String(e)})\n`);
     }
   }
+  return { keep, pruned };
+}
 
-  const show = (p: string): string => toDisplayPath(p, home);
+async function main(): Promise<number> {
+  const plan = await planReset();
+  const now = new Date();
+  const aside = await moveAside(plan, now);
+  const show = (p: string): string => toDisplayPath(p, plan.home);
+  let sampleReal: string;
+  let carried: number;
+  try {
+    await restoreUserData(plan, now);
+    sampleReal = await restoreSample(plan, aside, now);
+    carried = await carrySecrets(plan, aside);
+  } catch (e) {
+    // Nothing was deleted: say where the previous profile is, so the user can move it back.
+    const where = aside.hadTarget ? `the previous demo profile is at ${show(aside.previous)}` : 'there was no previous demo profile';
+    process.stderr.write(`demo-reset stopped after moving the demo dir aside; ${where} (nothing was deleted).\n`);
+    throw e;
+  }
+  const { keep, pruned } = await pruneOlderPrevious(plan.parent);
+
   process.stdout.write(
     [
-      `Demo reset done (${source === 'env' ? 'RELAY_USER_DATA_DIR' : source === 'arg' ? '--dir' : 'default path'}).`,
-      `  userData:        ${show(target)}`,
+      `Demo reset done (${plan.source === 'env' ? 'RELAY_USER_DATA_DIR' : plan.source === 'arg' ? '--dir' : 'default path'}).`,
+      `  userData:        ${show(plan.target)}`,
       `  sample project:  ${show(sampleReal)}`,
-      `  previous kept:   ${keep === undefined ? 'none' : show(join(parent, keep))}`,
+      `  previous kept:   ${keep === undefined ? 'none' : show(join(plan.parent, keep))}`,
       `  older removed:   ${pruned.length === 0 ? 'none' : pruned.join(', ')}`,
       `  saved keys:      ${String(carried)} credential ref(s) carried over${carried === 0 ? ' (connect providers before the live segment)' : ''}`,
-      `  snapshot:        ${typeof manifest.generator === 'string' ? manifest.generator : 'unknown'} — label prepared runs accordingly (§22.2)`,
+      `  snapshot:        ${typeof plan.generator === 'string' ? plan.generator : 'unknown'} — label prepared runs accordingly (§22.2)`,
       '',
     ].join('\n'),
   );

@@ -211,4 +211,34 @@ describe('sniffBytes', () => {
     expect(sniffBytes(bytes).hasNul).toBe(false);
     expect(sniffBytes(new Uint8Array())).toEqual({ hasNul: false, nonTextRatio: 0 });
   });
+
+  it('matches the previous per-byte implementation on random buffers (table lookup is a pure speedup)', () => {
+    // Oracle: the pre-table implementation, verbatim.
+    const isNonTextByte = (b: number): boolean => b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1b) || b === 0x7f;
+    const oldSniff = (bytes: Uint8Array): Sniff => {
+      const window = bytes.subarray(0, SNIFF_BYTES);
+      if (window.length === 0) return { hasNul: false, nonTextRatio: 0 };
+      let nonText = 0;
+      let hasNul = false;
+      for (const b of window) {
+        if (b === 0) hasNul = true;
+        if (isNonTextByte(b)) nonText += 1;
+      }
+      return { hasNul, nonTextRatio: nonText / window.length };
+    };
+    const buffers = fc.oneof(
+      fc.uint8Array({ maxLength: 64 }),
+      fc.uint8Array({ minLength: SNIFF_BYTES - 4, maxLength: SNIFF_BYTES + 64 }),
+      fc.array(fc.constantFrom(0, 9, 10, 13, 27, 31, 32, 65, 126, 127, 128, 255), { maxLength: 300 }).map((a) => Uint8Array.from(a)),
+    );
+
+    fc.assert(
+      fc.property(buffers, fc.nat(16), (bytes, offset) => {
+        const view = bytes.subarray(Math.min(offset, bytes.length)); // non-zero byteOffset views too
+
+        expect(sniffBytes(view)).toEqual(oldSniff(view));
+      }),
+      { numRuns: 500 },
+    );
+  });
 });

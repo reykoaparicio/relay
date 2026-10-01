@@ -35,8 +35,6 @@ export function microusd(n: number): Microusd {
   return n as Microusd;
 }
 
-/** Zero µUSD. */
-export const ZERO_MICROUSD = microusd(0);
 
 const USD_PATTERN = /^(-?)(\d+)(?:\.(\d{1,6}))?$/;
 

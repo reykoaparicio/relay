@@ -2,7 +2,9 @@
 import type {
   AppError,
   AttemptPurpose,
+  Clock,
   Effort,
+  EstimateBasis,
   Microusd,
   ModelCapabilities,
   ModelPrices,
@@ -12,6 +14,16 @@ import type {
 /** Minimal structured logger the providers package needs (the engine's logger is a structural superset). */
 export interface Logger {
   warn(event: string, fields?: Readonly<Record<string, unknown>>): void;
+}
+
+/**
+ * Options of every HTTP adapter factory (`createAnthropicAdapter`, `createOpenAIAdapter`, `createGeminiAdapter`).
+ * `fetch` is the injected base fetch; when omitted, `globalThis.fetch` is read at call time (never at module load).
+ */
+export interface ProviderAdapterOptions {
+  readonly clock: Clock;
+  readonly logger?: Logger;
+  readonly fetch?: typeof fetch;
 }
 
 /** Injected timer source (06 R4-36): the fake provider's `delayMs` uses only this, never global fake timers. */
@@ -55,7 +67,7 @@ export interface UsageEstimate {
   readonly inputTokens: number;
   readonly maxOutputTokens: number;
   readonly upperAllowanceMicrousd: Microusd;
-  readonly basis: 'provider_count' | 'local_estimate';
+  readonly basis: EstimateBasis;
   readonly priceCatalogVersion: string;
 }
 

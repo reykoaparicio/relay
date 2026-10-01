@@ -7,6 +7,7 @@ import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
 import { createMockFetch, jsonResponse, streamBody, tickingClock } from './__fixtures__/mock-fetch.js';
 import type { MockFetchCall, StreamBodyOptions } from './__fixtures__/mock-fetch.js';
 import { GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS } from './connection-test.js';
+import * as catalogModule from './catalog.js';
 import { LOCAL_REQUEST_OVERHEAD_TOKENS, conservativeInputTokens, localInputTokens } from './estimate.js';
 import { createGeminiAdapter, isGeminiPriceTierMismatch, mapGeminiEffort, toTypedGeminiError } from './gemini.js';
 import type { GenerateHooks, ModelError, ModelRequest, ModelResult } from './types.js';
@@ -570,14 +571,23 @@ describe('gemini adapter: estimate', () => {
     expect(est).toMatchObject({ basis: 'local_estimate', inputTokens: localInputTokens(request()) });
   });
 
-  it('count failure → conservative one-token-per-code-unit bound (never under the heuristic)', async () => {
+  it('count failure on a model without a price tier (gemini-3.5-flash) → the chars/3.2 heuristic, logged', async () => {
     const warn = vi.fn();
     const { fetch } = createMockFetch(() => jsonResponse(500, errorBody(500, 'INTERNAL', 'x')));
     const est = await createGeminiAdapter({ clock: tickingClock(), fetch, logger: { warn } }).estimate(request(), PRICES, { apiKey: API_KEY });
 
+    expect(est).toMatchObject({ basis: 'local_estimate', inputTokens: localInputTokens(request()) });
+    expect(warn).toHaveBeenCalledWith('provider.count_tokens_failed', expect.objectContaining({ providerId: 'gemini' }));
+  });
+
+  it('count failure on a model with a price tier → conservative one-token-per-code-unit bound', async () => {
+    const entry = catalogModule.findCatalogEntry('gemini', MODEL)!;
+    vi.spyOn(catalogModule, 'findCatalogEntry').mockReturnValue({ ...entry, capabilities: { ...entry.capabilities, priceCliffInputTokens: 200_000 } });
+    const { fetch } = createMockFetch(() => jsonResponse(500, errorBody(500, 'INTERNAL', 'x')));
+    const est = await createGeminiAdapter({ clock: tickingClock(), fetch }).estimate(request(), PRICES, { apiKey: API_KEY });
+
     expect(est).toMatchObject({ basis: 'local_estimate', inputTokens: conservativeInputTokens(request()) });
     expect(est.inputTokens).toBeGreaterThanOrEqual(localInputTokens(request()));
-    expect(warn).toHaveBeenCalledWith('provider.count_tokens_failed', expect.objectContaining({ providerId: 'gemini' }));
   });
 
   it('a count response without totalTokens is a count failure', async () => {

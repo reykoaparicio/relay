@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PAGE_LIMITS, RATE_LIMITS } from '../defaults.js';
 import { runEventSchema } from '../domain/event.js';
 import { budgetBreakdownSchema, costSummarySchema } from '../domain/ledger.js';
+import { estimateBasisSchema } from '../domain/manifest.js';
 import { memoryRefSchema } from '../domain/memory.js';
 import { runDetailSchema, runStartInputSchema, runSummarySchema } from '../domain/run.js';
 import { recoveryDecisionSchema, stepDetailSchema } from '../domain/views.js';
@@ -12,14 +13,12 @@ import { providerIdSchema, runStatusSchema } from '../status.js';
 import { validationIssueSchema } from '../validation.js';
 import { op, pageOf, pageRequestShape } from './common.js';
 
-/** Errors shared by `runs.preflight` and `runs.start`. */
-const PREFLIGHT_ERRORS = [
-  'CONTEXT_TOO_LARGE',
-  'BUDGET_BLOCKED',
-  'MODEL_UNSUPPORTED',
-  'AUTH_REQUIRED',
-  'PERMISSION_DENIED',
-] as const;
+/**
+ * Errors shared by `runs.preflight` and `runs.start` (profile resolution and file reads). Budget, credential and
+ * context-size problems are not errors here: preflight reports them as `issues`, and a started run pauses on them at
+ * dispatch (`budget_*`, `auth_required`, `setup_blocked`).
+ */
+const PREFLIGHT_ERRORS = ['MODEL_UNSUPPORTED', 'PERMISSION_DENIED'] as const;
 
 /** `runs.preflight` output: drives the new-run form states. */
 export const runPreflightSchema = z.object({
@@ -32,7 +31,7 @@ export const runPreflightSchema = z.object({
   }),
   firstReservation: z.object({
     N: nonNegativeMicrousdSchema,
-    basis: z.enum(['provider_count', 'local_estimate']),
+    basis: estimateBasisSchema,
   }),
   budget: budgetBreakdownSchema,
   issues: z.array(validationIssueSchema),
@@ -55,7 +54,7 @@ export const runOps = {
     route: 'runner',
     input: runStartInputSchema.omit({ idempotencyKey: true }),
     output: runPreflightSchema,
-    errors: [...PREFLIGHT_ERRORS, 'NOT_FOUND'],
+    errors: [...PREFLIGHT_ERRORS, 'NOT_FOUND', 'CONFLICT'],
     idempotent: false,
   }),
   'runs.start': op({
@@ -120,15 +119,13 @@ export const runOps = {
     }),
     output: z.object({ status: runStatusSchema }),
     errors: [
-      'BUDGET_BLOCKED',
       'AUTH_REQUIRED',
-      'APPROVAL_STALE',
-      'PROJECT_CHANGED',
       'VALIDATION_FAILED',
       'CONFLICT',
       'NOT_FOUND',
       'MODEL_UNSUPPORTED',
       'PERMISSION_DENIED',
+      'ARTIFACT_WRITE_FAILED',
     ],
     idempotent: true,
     rateLimit: RATE_LIMITS.dispatch,
@@ -189,14 +186,7 @@ export const runOps = {
       profileId: idSchema('profile').optional(),
     }),
     output: runDetailSchema,
-    errors: [
-      'LIMIT_REACHED',
-      'BUDGET_BLOCKED',
-      'MODEL_UNSUPPORTED',
-      'PERMISSION_DENIED',
-      'CONFLICT',
-      'NOT_FOUND',
-    ],
+    errors: ['MODEL_UNSUPPORTED', 'PERMISSION_DENIED', 'CONFLICT', 'NOT_FOUND'],
     idempotent: true,
     rateLimit: RATE_LIMITS.dispatch,
   }),

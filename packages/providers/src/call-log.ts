@@ -4,6 +4,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AttemptPurpose, ProviderId } from '@relay/contracts';
+import { tryParseJson } from './json.js';
 
 /** One fake `generate` call (12 §L6 / 11 read these to prove completed steps are not re-executed). */
 export interface FakeCall {
@@ -62,14 +63,33 @@ export function createMemoryCallLog(): FakeCallLog {
   };
 }
 
-/** JSONL call log: `appendFileSync` one JSON line per call; reads re-read the file (survives restarts). */
+const isRecord = (v: unknown): v is Readonly<Record<string, unknown>> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const hasStrings = (o: Readonly<Record<string, unknown>>, keys: readonly string[]): boolean => keys.every((k) => typeof o[k] === 'string');
+
+/**
+ * One log line, or `null` when it is torn (a crash mid-append leaves a partial last line), not JSON, or not a log
+ * entry: `kind` must be `generate`, `reconcile`, or absent (older logs), with the identifying fields present.
+ */
+export function parseCallLogLine(line: string): FakeLogEntry | null {
+  const v = tryParseJson(line);
+  if (!isRecord(v) || typeof v['at'] !== 'number') return null;
+  const kind = v['kind'];
+  if (kind === 'reconcile') return hasStrings(v, ['attemptId', 'providerId']) ? (v as unknown as FakeReconcileCall) : null;
+  if (kind !== undefined && kind !== 'generate') return null;
+  return hasStrings(v, ['runId', 'attemptId', 'stepKey', 'purpose', 'providerId', 'modelId', 'systemSha256']) ? (v as unknown as FakeCall) : null;
+}
+
+/**
+ * JSONL call log: `appendFileSync` one JSON line per call; reads re-read the file (survives restarts) and skip torn
+ * or foreign lines ({@link parseCallLogLine}) instead of failing the whole read.
+ */
 export function createJsonlCallLog(filePath: string): FakeCallLog {
   const readAll = (): FakeLogEntry[] => {
     if (!existsSync(filePath)) return [];
     return readFileSync(filePath, 'utf8')
       .split('\n')
       .filter((line) => line.trim() !== '')
-      .map((line) => JSON.parse(line) as FakeLogEntry);
+      .flatMap((line) => parseCallLogLine(line) ?? []);
   };
   return {
     append: (entry) => {

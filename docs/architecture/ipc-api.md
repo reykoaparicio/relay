@@ -2,12 +2,12 @@
 |---|---|---|---|---|---|
 | `relay/v1/app.getInfo` | query | main | — | — | default |
 | `relay/v1/app.getDiagnostics` | query | main+runner | — | `RUNNER_UNAVAILABLE` | default |
-| `relay/v1/app.createBackup` | command | runner | required | `ARTIFACT_WRITE_FAILED` | 5 / refill 0.2 per s |
-| `relay/v1/app.exportDiagnostics` | command | main+runner | — | `ARTIFACT_WRITE_FAILED` | 5 / refill 0.2 per s |
-| `relay/v1/app.openExternal` | command | main | — | `PERMISSION_DENIED` | default |
+| `relay/v1/app.createBackup` | command | runner | required | `ARTIFACT_WRITE_FAILED`, `CONFLICT` | 5 / refill 0.2 per s |
+| `relay/v1/app.exportDiagnostics` | command | main+runner | — | `ARTIFACT_WRITE_FAILED`, `NOT_FOUND` | 5 / refill 0.2 per s |
+| `relay/v1/app.openExternal` | command | main | — | — | default |
 | `relay/v1/app.getSettings` | query | runner | — | — | default |
 | `relay/v1/app.updateSettings` | command | runner | — | `VALIDATION_FAILED` | default |
-| `relay/v1/projects.pickDirectory` | command | main | — | `PERMISSION_DENIED` | default |
+| `relay/v1/projects.pickDirectory` | command | main | — | `PERMISSION_DENIED`, `NOT_FOUND` | default |
 | `relay/v1/projects.previewFiles` | query | main+runner | — | `NOT_FOUND`, `PERMISSION_DENIED` | default |
 | `relay/v1/projects.create` | command | main+runner | required | `VALIDATION_FAILED`, `NOT_FOUND`, `CONFLICT`, `PERMISSION_DENIED` | default |
 | `relay/v1/projects.list` | query | runner | — | — | default |
@@ -17,9 +17,9 @@
 | `relay/v1/projects.export` | command | main+runner | — | `ARTIFACT_WRITE_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND` | 5 / refill 0.2 per s |
 | `relay/v1/projects.createSample` | command | main+runner | required | `ARTIFACT_WRITE_FAILED`, `CONFLICT`, `PERMISSION_DENIED` | default |
 | `relay/v1/providers.list` | query | main+runner | — | — | default |
-| `relay/v1/providers.connect` | command | main+runner | — | `SECURE_STORAGE_UNAVAILABLE`, `VALIDATION_FAILED` | 10 / refill 0.1667 per s |
-| `relay/v1/providers.test` | command | main+runner | — | `AUTH_REQUIRED`, `RATE_LIMITED`, `BUDGET_BLOCKED` | 5 / refill 0.0833 per s |
-| `relay/v1/providers.disconnect` | command | main+runner | — | — | default |
+| `relay/v1/providers.connect` | command | main+runner | — | `SECURE_STORAGE_UNAVAILABLE`, `VALIDATION_FAILED`, `NOT_FOUND` | 10 / refill 0.1667 per s |
+| `relay/v1/providers.test` | command | main+runner | — | `AUTH_REQUIRED`, `RATE_LIMITED`, `BUDGET_BLOCKED`, `MODEL_UNSUPPORTED` | 5 / refill 0.0833 per s |
+| `relay/v1/providers.disconnect` | command | main+runner | — | `NOT_FOUND` | default |
 | `relay/v1/providers.catalog` | query | runner | — | — | default |
 | `relay/v1/profiles.list` | query | runner | — | — | default |
 | `relay/v1/profiles.upsert` | command | runner | — | `MODEL_UNSUPPORTED`, `CONFLICT`, `NOT_FOUND` | default |
@@ -29,31 +29,31 @@
 | `relay/v1/workflows.saveDraft` | command | runner | — | `VALIDATION_FAILED`, `CONFLICT`, `NOT_FOUND` | default |
 | `relay/v1/workflows.validate` | query | runner | — | `NOT_FOUND` | default |
 | `relay/v1/workflows.publish` | command | runner | required | `VALIDATION_FAILED`, `NOT_FOUND`, `CONFLICT` | default |
-| `relay/v1/runs.preflight` | query | runner | — | `CONTEXT_TOO_LARGE`, `BUDGET_BLOCKED`, `MODEL_UNSUPPORTED`, `AUTH_REQUIRED`, `PERMISSION_DENIED`, `NOT_FOUND` | default |
-| `relay/v1/runs.start` | command | runner | required | `CONTEXT_TOO_LARGE`, `BUDGET_BLOCKED`, `MODEL_UNSUPPORTED`, `AUTH_REQUIRED`, `PERMISSION_DENIED`, `VALIDATION_FAILED`, `NOT_FOUND`, `CONFLICT` | 10 / refill 0.5 per s |
+| `relay/v1/runs.preflight` | query | runner | — | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `NOT_FOUND`, `CONFLICT` | default |
+| `relay/v1/runs.start` | command | runner | required | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `VALIDATION_FAILED`, `NOT_FOUND`, `CONFLICT` | 10 / refill 0.5 per s |
 | `relay/v1/runs.list` | query | runner | — | — | default |
 | `relay/v1/runs.get` | query | runner | — | `NOT_FOUND` | default |
 | `relay/v1/runs.getStep` | query | runner | — | `NOT_FOUND` | default |
 | `relay/v1/runs.pause` | command | runner | — | `CONFLICT`, `NOT_FOUND` | default |
-| `relay/v1/runs.resume` | command | runner | required | `BUDGET_BLOCKED`, `AUTH_REQUIRED`, `APPROVAL_STALE`, `PROJECT_CHANGED`, `VALIDATION_FAILED`, `CONFLICT`, `NOT_FOUND`, `MODEL_UNSUPPORTED`, `PERMISSION_DENIED` | 10 / refill 0.5 per s |
+| `relay/v1/runs.resume` | command | runner | required | `AUTH_REQUIRED`, `VALIDATION_FAILED`, `CONFLICT`, `NOT_FOUND`, `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `ARTIFACT_WRITE_FAILED` | 10 / refill 0.5 per s |
 | `relay/v1/runs.cancel` | command | runner | — | `CONFLICT`, `NOT_FOUND` | default |
 | `relay/v1/runs.increaseAllowance` | command | runner | required | `VALIDATION_FAILED`, `NOT_FOUND`, `CONFLICT` | default |
 | `relay/v1/runs.decideUnknown` | command | runner | required | `CONFLICT`, `NOT_FOUND` | default |
-| `relay/v1/runs.retryStep` | command | runner | required | `LIMIT_REACHED`, `BUDGET_BLOCKED`, `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `CONFLICT`, `NOT_FOUND` | 10 / refill 0.5 per s |
+| `relay/v1/runs.retryStep` | command | runner | required | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `CONFLICT`, `NOT_FOUND` | 10 / refill 0.5 per s |
 | `relay/v1/runs.events` | query | runner | — | — | default |
 | `relay/v1/approvals.decide` | command | runner | required | `APPROVAL_STALE`, `PROJECT_CHANGED`, `CONFLICT`, `NOT_FOUND` | default |
 | `relay/v1/memory.list` | query | runner | — | — | default |
 | `relay/v1/memory.get` | query | runner | — | `NOT_FOUND` | default |
-| `relay/v1/memory.create` | command | runner | required | `VALIDATION_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND` | default |
+| `relay/v1/memory.create` | command | runner | required | `VALIDATION_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND`, `CONFLICT` | default |
 | `relay/v1/memory.update` | command | runner | — | `CONFLICT`, `VALIDATION_FAILED`, `NOT_FOUND` | default |
 | `relay/v1/memory.approve` | command | runner | — | `CONFLICT`, `VALIDATION_FAILED`, `NOT_FOUND` | default |
 | `relay/v1/memory.reject` | command | runner | — | `CONFLICT`, `NOT_FOUND` | default |
 | `relay/v1/memory.archive` | command | runner | — | `CONFLICT`, `NOT_FOUND` | default |
-| `relay/v1/memory.delete` | command | runner | — | `NOT_FOUND` | default |
+| `relay/v1/memory.delete` | command | runner | — | `NOT_FOUND`, `CONFLICT` | default |
 | `relay/v1/memory.resolveConflict` | command | runner | required | `CONFLICT`, `VALIDATION_FAILED`, `NOT_FOUND` | default |
 | `relay/v1/memory.purgeProjectHistory` | command | runner | — | `NOT_FOUND` | default |
 | `relay/v1/artifacts.get` | query | runner | — | `NOT_FOUND` | default |
-| `relay/v1/artifacts.importDiff` | command | main+runner | — | `VALIDATION_FAILED`, `PERMISSION_DENIED` | default |
+| `relay/v1/artifacts.importDiff` | command | main+runner | — | `VALIDATION_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND`, `ARTIFACT_WRITE_FAILED` | default |
 | `relay/v1/artifacts.export` | command | main+runner | — | `ARTIFACT_WRITE_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND` | 5 / refill 0.2 per s |
 | `relay/v1/ledger.runSummary` | query | runner | — | `NOT_FOUND` | default |
 | `relay/v1/ledger.projectSummary` | query | runner | — | `NOT_FOUND` | default |
@@ -64,7 +64,7 @@
 
 > Generated by `pnpm gen:api-doc` from `@relay/contracts` `OPERATIONS`. Do not edit by hand.
 
-Every operation may also return `VALIDATION_FAILED`, `RATE_LIMITED`, `RUNNER_UNAVAILABLE`, `INTERNAL`.
+Every operation may also return `VALIDATION_FAILED`, `RATE_LIMITED`, `RUNNER_UNAVAILABLE`, `PERMISSION_DENIED`, `INTERNAL`.
 Results use the envelope `{ ok: true, data, meta? } | { ok: false, error: AppError }`.
 
 ## `app.getInfo`
@@ -365,7 +365,7 @@ Channel `relay/v1/app.exportDiagnostics` · command · route `main+runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     }
   }
@@ -465,7 +465,7 @@ Channel `relay/v1/app.getSettings` · query · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -528,7 +528,7 @@ Channel `relay/v1/app.updateSettings` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -580,7 +580,7 @@ Channel `relay/v1/app.updateSettings` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -648,7 +648,7 @@ Channel `relay/v1/projects.pickDirectory` · command · route `main`
           "properties": {
             "selectionId": {
               "type": "string",
-              "pattern": "^sel_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^sel_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "displayPath": {
               "type": "string"
@@ -700,7 +700,7 @@ Channel `relay/v1/projects.previewFiles` · query · route `main+runner`
         },
         "selectionId": {
           "type": "string",
-          "pattern": "^sel_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^sel_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       },
       "required": [
@@ -720,7 +720,7 @@ Channel `relay/v1/projects.previewFiles` · query · route `main+runner`
         },
         "projectId": {
           "type": "string",
-          "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       },
       "required": [
@@ -863,7 +863,7 @@ Channel `relay/v1/projects.create` · command · route `main+runner`
     },
     "selectionId": {
       "type": "string",
-      "pattern": "^sel_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^sel_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -921,7 +921,7 @@ Channel `relay/v1/projects.create` · command · route `main+runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -1057,7 +1057,7 @@ Channel `relay/v1/projects.list` · query · route `runner`
     "properties": {
       "id": {
         "type": "string",
-        "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "name": {
         "type": "string",
@@ -1178,7 +1178,7 @@ Channel `relay/v1/projects.get` · query · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -1196,7 +1196,7 @@ Channel `relay/v1/projects.get` · query · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -1299,7 +1299,7 @@ Channel `relay/v1/projects.get` · query · route `runner`
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             {
               "type": "null"
@@ -1360,7 +1360,7 @@ Channel `relay/v1/projects.update` · command · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "expectedUpdatedAt": {
       "type": "integer",
@@ -1442,7 +1442,7 @@ Channel `relay/v1/projects.update` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -1562,7 +1562,7 @@ Channel `relay/v1/projects.archive` · command · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -1580,7 +1580,7 @@ Channel `relay/v1/projects.archive` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -1700,13 +1700,13 @@ Channel `relay/v1/projects.export` · command · route `main+runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "runIds": {
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     }
   },
@@ -1768,7 +1768,7 @@ Channel `relay/v1/projects.createSample` · command · route `main+runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "name": {
       "type": "string",
@@ -2275,11 +2275,11 @@ Channel `relay/v1/providers.test` · command · route `main+runner`
         },
         "attemptId": {
           "type": "string",
-          "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "runId": {
           "type": "string",
-          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "details": {
           "type": "object",
@@ -2290,7 +2290,7 @@ Channel `relay/v1/providers.test` · command · route `main+runner`
         },
         "correlationId": {
           "type": "string",
-          "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       },
       "required": [
@@ -2523,6 +2523,11 @@ Channel `relay/v1/providers.catalog` · query · route `runner`
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991
           },
+          "priceCliffInputTokens": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
           "maxOutputTokens": {
             "type": "integer",
             "exclusiveMinimum": 0,
@@ -2651,7 +2656,7 @@ Channel `relay/v1/profiles.list` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "name": {
             "type": "string",
@@ -2749,7 +2754,7 @@ Channel `relay/v1/profiles.list` · query · route `runner`
               "anyOf": [
                 {
                   "type": "string",
-                  "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+                  "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                 },
                 {
                   "type": "null"
@@ -2861,7 +2866,7 @@ Channel `relay/v1/profiles.upsert` · command · route `runner`
         },
         "id": {
           "type": "string",
-          "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       },
       "required": [
@@ -2895,7 +2900,7 @@ Channel `relay/v1/profiles.upsert` · command · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "name": {
           "type": "string",
@@ -2993,7 +2998,7 @@ Channel `relay/v1/profiles.upsert` · command · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -3046,7 +3051,7 @@ Channel `relay/v1/profiles.delete` · command · route `runner`
   "properties": {
     "profileId": {
       "type": "string",
-      "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -3098,7 +3103,7 @@ Channel `relay/v1/workflows.list` · query · route `runner`
     "properties": {
       "id": {
         "type": "string",
-        "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "name": {
         "type": "string"
@@ -3151,7 +3156,7 @@ Channel `relay/v1/workflows.get` · query · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "version": {
       "anyOf": [
@@ -3182,7 +3187,7 @@ Channel `relay/v1/workflows.get` · query · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "version": {
       "anyOf": [
@@ -3269,7 +3274,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
               "minimum": 0,
               "maximum": 0
             }
-          }
+          },
+          "additionalProperties": false
         },
         "steps": {
           "minItems": 1,
@@ -3353,7 +3359,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
                       "transport",
                       "schemaRepair",
                       "rateLimitWaits"
-                    ]
+                    ],
+                    "additionalProperties": false
                   },
                   "memoryScope": {
                     "default": {},
@@ -3390,7 +3397,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
                           ]
                         }
                       }
-                    }
+                    },
+                    "additionalProperties": false
                   },
                   "allowedTools": {
                     "default": [],
@@ -3406,9 +3414,9 @@ Channel `relay/v1/workflows.get` · query · route `runner`
                   "kind",
                   "role",
                   "profile",
-                  "outputSchema",
-                  "instructionVersion"
-                ]
+                  "outputSchema"
+                ],
+                "additionalProperties": false
               },
               {
                 "type": "object",
@@ -3446,7 +3454,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
                   "kind",
                   "dependsOn",
                   "bindTo"
-                ]
+                ],
+                "additionalProperties": false
               }
             ]
           }
@@ -3485,7 +3494,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
             "repeatSteps",
             "approvalInvalidation",
             "onLimit"
-          ]
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3496,7 +3506,8 @@ Channel `relay/v1/workflows.get` · query · route `runner`
         "limits",
         "steps",
         "revisionPolicy"
-      ]
+      ],
+      "additionalProperties": false
     },
     "contentHash": {
       "type": "string",
@@ -3596,7 +3607,7 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "expectedDraftRevision": {
       "type": "integer",
@@ -3693,7 +3704,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                   "transport",
                   "schemaRepair",
                   "rateLimitWaits"
-                ]
+                ],
+                "additionalProperties": false
               },
               "memoryScope": {
                 "type": "object",
@@ -3729,7 +3741,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                       ]
                     }
                   }
-                }
+                },
+                "additionalProperties": false
               }
             },
             "additionalProperties": false
@@ -3756,7 +3769,7 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "version": {
       "anyOf": [
@@ -3843,7 +3856,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
               "minimum": 0,
               "maximum": 0
             }
-          }
+          },
+          "additionalProperties": false
         },
         "steps": {
           "minItems": 1,
@@ -3927,7 +3941,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                       "transport",
                       "schemaRepair",
                       "rateLimitWaits"
-                    ]
+                    ],
+                    "additionalProperties": false
                   },
                   "memoryScope": {
                     "default": {},
@@ -3964,7 +3979,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                           ]
                         }
                       }
-                    }
+                    },
+                    "additionalProperties": false
                   },
                   "allowedTools": {
                     "default": [],
@@ -3980,9 +3996,9 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                   "kind",
                   "role",
                   "profile",
-                  "outputSchema",
-                  "instructionVersion"
-                ]
+                  "outputSchema"
+                ],
+                "additionalProperties": false
               },
               {
                 "type": "object",
@@ -4020,7 +4036,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
                   "kind",
                   "dependsOn",
                   "bindTo"
-                ]
+                ],
+                "additionalProperties": false
               }
             ]
           }
@@ -4059,7 +4076,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
             "repeatSteps",
             "approvalInvalidation",
             "onLimit"
-          ]
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -4070,7 +4088,8 @@ Channel `relay/v1/workflows.saveDraft` · command · route `runner`
         "limits",
         "steps",
         "revisionPolicy"
-      ]
+      ],
+      "additionalProperties": false
     },
     "contentHash": {
       "type": "string",
@@ -4170,7 +4189,7 @@ Channel `relay/v1/workflows.validate` · query · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "version": {
       "anyOf": [
@@ -4247,7 +4266,7 @@ Channel `relay/v1/workflows.validate` · query · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -4306,7 +4325,7 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
     },
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -4325,7 +4344,7 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
   "properties": {
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "version": {
       "anyOf": [
@@ -4412,7 +4431,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
               "minimum": 0,
               "maximum": 0
             }
-          }
+          },
+          "additionalProperties": false
         },
         "steps": {
           "minItems": 1,
@@ -4496,7 +4516,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
                       "transport",
                       "schemaRepair",
                       "rateLimitWaits"
-                    ]
+                    ],
+                    "additionalProperties": false
                   },
                   "memoryScope": {
                     "default": {},
@@ -4533,7 +4554,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
                           ]
                         }
                       }
-                    }
+                    },
+                    "additionalProperties": false
                   },
                   "allowedTools": {
                     "default": [],
@@ -4549,9 +4571,9 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
                   "kind",
                   "role",
                   "profile",
-                  "outputSchema",
-                  "instructionVersion"
-                ]
+                  "outputSchema"
+                ],
+                "additionalProperties": false
               },
               {
                 "type": "object",
@@ -4589,7 +4611,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
                   "kind",
                   "dependsOn",
                   "bindTo"
-                ]
+                ],
+                "additionalProperties": false
               }
             ]
           }
@@ -4628,7 +4651,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
             "repeatSteps",
             "approvalInvalidation",
             "onLimit"
-          ]
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -4639,7 +4663,8 @@ Channel `relay/v1/workflows.publish` · command · route `runner`
         "limits",
         "steps",
         "revisionPolicy"
-      ]
+      ],
+      "additionalProperties": false
     },
     "contentHash": {
       "type": "string",
@@ -4739,11 +4764,11 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "workflowVersion": {
       "type": "integer",
@@ -4789,7 +4814,7 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
             },
             "diffArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -4841,7 +4866,7 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
       },
       "additionalProperties": {
         "type": "string",
-        "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "memoryRecordIds": {
@@ -4849,7 +4874,7 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     }
   },
@@ -4895,7 +4920,7 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
             "properties": {
               "id": {
                 "type": "string",
-                "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               "revision": {
                 "type": "integer",
@@ -5077,11 +5102,11 @@ Channel `relay/v1/runs.start` · command · route `runner`
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "workflowId": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "workflowVersion": {
       "type": "integer",
@@ -5127,7 +5152,7 @@ Channel `relay/v1/runs.start` · command · route `runner`
             },
             "diffArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -5179,7 +5204,7 @@ Channel `relay/v1/runs.start` · command · route `runner`
       },
       "additionalProperties": {
         "type": "string",
-        "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "memoryRecordIds": {
@@ -5187,7 +5212,7 @@ Channel `relay/v1/runs.start` · command · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     }
   },
@@ -5211,7 +5236,7 @@ Channel `relay/v1/runs.start` · command · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "status": {
       "type": "string",
@@ -5249,7 +5274,7 @@ Channel `relay/v1/runs.list` · query · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "status": {
       "type": "array",
@@ -5309,11 +5334,11 @@ Channel `relay/v1/runs.list` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "projectId": {
             "type": "string",
-            "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "goal": {
             "type": "string"
@@ -5323,7 +5348,7 @@ Channel `relay/v1/runs.list` · query · route `runner`
             "properties": {
               "id": {
                 "type": "string",
-                "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               "version": {
                 "type": "integer",
@@ -5525,7 +5550,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -5543,11 +5568,11 @@ Channel `relay/v1/runs.get` · query · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "goal": {
       "type": "string"
@@ -5557,7 +5582,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "version": {
           "type": "integer",
@@ -5792,7 +5817,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
             },
             "diffArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -5820,7 +5845,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -5889,7 +5914,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -5991,11 +6016,11 @@ Channel `relay/v1/runs.get` · query · route `runner`
                   },
                   "attemptId": {
                     "type": "string",
-                    "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "runId": {
                     "type": "string",
-                    "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "details": {
                     "type": "object",
@@ -6006,7 +6031,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
                   },
                   "correlationId": {
                     "type": "string",
-                    "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   }
                 },
                 "required": [
@@ -6044,7 +6069,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
           "properties": {
             "id": {
               "type": "string",
-              "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "planHash": {
               "type": "string",
@@ -6076,7 +6101,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
             },
             "planArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "decision": {
               "anyOf": [
@@ -6122,11 +6147,11 @@ Channel `relay/v1/runs.get` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepRunId": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -6422,11 +6447,11 @@ Channel `relay/v1/runs.get` · query · route `runner`
             },
             "attemptId": {
               "type": "string",
-              "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "details": {
               "type": "object",
@@ -6437,7 +6462,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
             },
             "correlationId": {
               "type": "string",
-              "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -6456,7 +6481,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -6532,11 +6557,11 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "stepId": {
       "type": "string",
-      "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -6558,7 +6583,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "stepKey": {
           "type": "string",
@@ -6627,7 +6652,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             {
               "type": "null"
@@ -6729,11 +6754,11 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                 },
                 "attemptId": {
                   "type": "string",
-                  "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                  "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                 },
                 "runId": {
                   "type": "string",
-                  "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                  "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                 },
                 "details": {
                   "type": "object",
@@ -6744,7 +6769,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                 },
                 "correlationId": {
                   "type": "string",
-                  "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+                  "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                 }
               },
               "required": [
@@ -7198,7 +7223,6 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                             "type": "string",
                             "enum": [
                               "modify",
-                              "add",
                               "delete"
                             ]
                           },
@@ -7442,11 +7466,11 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "projectId": {
                       "type": "string",
-                      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "goal": {
                       "type": "string"
@@ -7480,7 +7504,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                       "properties": {
                         "id": {
                           "type": "string",
-                          "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         "version": {
                           "type": "integer",
@@ -7662,7 +7686,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                         "properties": {
                           "attemptId": {
                             "type": "string",
-                            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                           },
                           "stepKey": {
                             "type": "string",
@@ -7696,7 +7720,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                           "anyOf": [
                             {
                               "type": "string",
-                              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                             },
                             {
                               "type": "null"
@@ -7707,7 +7731,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                           "anyOf": [
                             {
                               "type": "string",
-                              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                             },
                             {
                               "type": "null"
@@ -7718,7 +7742,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                           "anyOf": [
                             {
                               "type": "string",
-                              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                             },
                             {
                               "type": "null"
@@ -7729,7 +7753,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                           "anyOf": [
                             {
                               "type": "string",
-                              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                             },
                             {
                               "type": "null"
@@ -7758,6 +7782,140 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                       "type": "integer",
                       "minimum": 0,
                       "maximum": 9007199254740991
+                    },
+                    "approvals": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "approvalId": {
+                            "type": "string",
+                            "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+                          },
+                          "stepKey": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                          },
+                          "planArtifactId": {
+                            "type": "string",
+                            "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+                          },
+                          "planHash": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "decision": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "approved",
+                                  "revision_requested",
+                                  "rejected"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "decidedAt": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "note": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 2000
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "invalidatedReason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "plan_changed",
+                                  "scope_changed",
+                                  "project_changed",
+                                  "provider_changed"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "createdAt": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "approvalId",
+                          "stepKey",
+                          "planArtifactId",
+                          "planHash",
+                          "decision",
+                          "decidedAt",
+                          "note",
+                          "invalidatedReason",
+                          "createdAt"
+                        ]
+                      }
+                    },
+                    "revisions": {
+                      "type": "object",
+                      "properties": {
+                        "cycles": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "maxCycles": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "planRevisions": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "incompleteCause": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "revision_limit",
+                                "verifier_incomplete"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "cycles",
+                        "maxCycles",
+                        "planRevisions",
+                        "incompleteCause"
+                      ]
                     }
                   },
                   "required": [
@@ -7801,7 +7959,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "stepKey": {
               "type": "string",
@@ -7915,7 +8073,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                 "properties": {
                   "recordId": {
                     "type": "string",
-                    "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "revision": {
                     "type": "number"
@@ -7964,7 +8122,7 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                   },
                   "artifactId": {
                     "type": "string",
-                    "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "schemaId": {
                     "type": "string",
@@ -8090,11 +8248,11 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepRunId": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -8292,11 +8450,11 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "runId": {
             "type": "string",
-            "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "seq": {
             "type": "integer",
@@ -8378,7 +8536,7 @@ Channel `relay/v1/runs.pause` · command · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -8443,7 +8601,7 @@ Channel `relay/v1/runs.resume` · command · route `runner`
     },
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "decision": {
       "oneOf": [
@@ -8496,7 +8654,7 @@ Channel `relay/v1/runs.resume` · command · route `runner`
             },
             "profileId": {
               "type": "string",
-              "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -8514,12 +8672,12 @@ Channel `relay/v1/runs.resume` · command · route `runner`
             },
             "maxAttempts": {
               "type": "integer",
-              "exclusiveMinimum": 0,
+              "minimum": 1,
               "maximum": 50
             },
             "executionTimeoutSeconds": {
               "type": "integer",
-              "exclusiveMinimum": 0,
+              "minimum": 60,
               "maximum": 7200
             }
           },
@@ -8592,7 +8750,7 @@ Channel `relay/v1/runs.cancel` · command · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -8622,7 +8780,7 @@ Channel `relay/v1/runs.cancel` · command · route `runner`
         "properties": {
           "attemptId": {
             "type": "string",
-            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "liabilityMicrousd": {
             "type": "integer",
@@ -8662,7 +8820,7 @@ Channel `relay/v1/runs.increaseAllowance` · command · route `runner`
     },
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "newAllowanceMicrousd": {
       "type": "integer",
@@ -8843,11 +9001,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
     },
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "attemptId": {
       "type": "string",
-      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "decision": {
       "type": "string",
@@ -8876,11 +9034,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "goal": {
       "type": "string"
@@ -8890,7 +9048,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "version": {
           "type": "integer",
@@ -9125,7 +9283,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
             },
             "diffArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -9153,7 +9311,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -9222,7 +9380,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -9324,11 +9482,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
                   },
                   "attemptId": {
                     "type": "string",
-                    "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "runId": {
                     "type": "string",
-                    "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "details": {
                     "type": "object",
@@ -9339,7 +9497,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
                   },
                   "correlationId": {
                     "type": "string",
-                    "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   }
                 },
                 "required": [
@@ -9377,7 +9535,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
           "properties": {
             "id": {
               "type": "string",
-              "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "planHash": {
               "type": "string",
@@ -9409,7 +9567,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
             },
             "planArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "decision": {
               "anyOf": [
@@ -9455,11 +9613,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepRunId": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -9755,11 +9913,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
             },
             "attemptId": {
               "type": "string",
-              "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "details": {
               "type": "object",
@@ -9770,7 +9928,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
             },
             "correlationId": {
               "type": "string",
-              "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -9789,7 +9947,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -9870,15 +10028,15 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
     },
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "stepId": {
       "type": "string",
-      "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "profileId": {
       "type": "string",
-      "pattern": "^prf_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -9898,11 +10056,11 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "goal": {
       "type": "string"
@@ -9912,7 +10070,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "version": {
           "type": "integer",
@@ -10147,7 +10305,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
             },
             "diffArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -10175,7 +10333,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -10244,7 +10402,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -10346,11 +10504,11 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
                   },
                   "attemptId": {
                     "type": "string",
-                    "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "runId": {
                     "type": "string",
-                    "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   },
                   "details": {
                     "type": "object",
@@ -10361,7 +10519,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
                   },
                   "correlationId": {
                     "type": "string",
-                    "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                   }
                 },
                 "required": [
@@ -10399,7 +10557,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
           "properties": {
             "id": {
               "type": "string",
-              "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "planHash": {
               "type": "string",
@@ -10431,7 +10589,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
             },
             "planArtifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "decision": {
               "anyOf": [
@@ -10477,11 +10635,11 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepRunId": {
             "type": "string",
-            "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "stepKey": {
             "type": "string",
@@ -10777,11 +10935,11 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
             },
             "attemptId": {
               "type": "string",
-              "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "details": {
               "type": "object",
@@ -10792,7 +10950,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
             },
             "correlationId": {
               "type": "string",
-              "pattern": "^cor_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^cor_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -10811,7 +10969,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -10887,7 +11045,7 @@ Channel `relay/v1/runs.events` · query · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "afterSeq": {
       "type": "integer",
@@ -10922,11 +11080,11 @@ Channel `relay/v1/runs.events` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "runId": {
             "type": "string",
-            "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "seq": {
             "type": "integer",
@@ -11016,7 +11174,7 @@ Channel `relay/v1/approvals.decide` · command · route `runner`
     },
     "approvalId": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "planHash": {
       "type": "string",
@@ -11061,7 +11219,7 @@ Channel `relay/v1/approvals.decide` · command · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "planHash": {
           "type": "string",
@@ -11093,7 +11251,7 @@ Channel `relay/v1/approvals.decide` · command · route `runner`
         },
         "planArtifactId": {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "decision": {
           "anyOf": [
@@ -11163,7 +11321,7 @@ Channel `relay/v1/memory.list` · query · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "status": {
       "type": "array",
@@ -11212,11 +11370,11 @@ Channel `relay/v1/memory.list` · query · route `runner`
     "properties": {
       "id": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "projectId": {
         "type": "string",
-        "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "type": {
         "type": "string",
@@ -11303,11 +11461,11 @@ Channel `relay/v1/memory.list` · query · route `runner`
               },
               "runId": {
                 "type": "string",
-                "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               "artifactId": {
                 "type": "string",
-                "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               }
             },
             "required": [
@@ -11373,7 +11531,7 @@ Channel `relay/v1/memory.list` · query · route `runner`
         "anyOf": [
           {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           {
             "type": "null"
@@ -11387,7 +11545,7 @@ Channel `relay/v1/memory.list` · query · route `runner`
         "type": "array",
         "items": {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       }
     },
@@ -11427,7 +11585,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
   "properties": {
     "recordId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -11445,11 +11603,11 @@ Channel `relay/v1/memory.get` · query · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -11536,11 +11694,11 @@ Channel `relay/v1/memory.get` · query · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "artifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -11606,7 +11764,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -11620,7 +11778,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "content": {
@@ -11644,7 +11802,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
           },
           "author": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -11687,13 +11845,13 @@ Channel `relay/v1/memory.get` · query · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "artifactId": {
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         {
                           "type": "null"
@@ -11736,7 +11894,8 @@ Channel `relay/v1/memory.get` · query · route `runner`
               "rejected",
               "deleted",
               "conflict_resolved",
-              "unarchived"
+              "unarchived",
+              "history_purged"
             ]
           },
           "revision": {
@@ -11746,7 +11905,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
           },
           "actor": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -11806,7 +11965,7 @@ Channel `relay/v1/memory.get` · query · route `runner`
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           }
         }
       },
@@ -11861,7 +12020,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -11957,11 +12116,11 @@ Channel `relay/v1/memory.create` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -12048,11 +12207,11 @@ Channel `relay/v1/memory.create` · command · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "artifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -12118,7 +12277,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -12132,7 +12291,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "content": {
@@ -12156,7 +12315,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
           },
           "author": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -12199,13 +12358,13 @@ Channel `relay/v1/memory.create` · command · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "artifactId": {
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         {
                           "type": "null"
@@ -12248,7 +12407,8 @@ Channel `relay/v1/memory.create` · command · route `runner`
               "rejected",
               "deleted",
               "conflict_resolved",
-              "unarchived"
+              "unarchived",
+              "history_purged"
             ]
           },
           "revision": {
@@ -12258,7 +12418,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
           },
           "actor": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -12318,7 +12478,7 @@ Channel `relay/v1/memory.create` · command · route `runner`
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           }
         }
       },
@@ -12368,7 +12528,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
   "properties": {
     "recordId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "expectedRevision": {
       "type": "integer",
@@ -12462,11 +12622,11 @@ Channel `relay/v1/memory.update` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -12553,11 +12713,11 @@ Channel `relay/v1/memory.update` · command · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "artifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -12623,7 +12783,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -12637,7 +12797,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "content": {
@@ -12661,7 +12821,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
           },
           "author": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -12704,13 +12864,13 @@ Channel `relay/v1/memory.update` · command · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "artifactId": {
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         {
                           "type": "null"
@@ -12753,7 +12913,8 @@ Channel `relay/v1/memory.update` · command · route `runner`
               "rejected",
               "deleted",
               "conflict_resolved",
-              "unarchived"
+              "unarchived",
+              "history_purged"
             ]
           },
           "revision": {
@@ -12763,7 +12924,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
           },
           "actor": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -12823,7 +12984,7 @@ Channel `relay/v1/memory.update` · command · route `runner`
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           }
         }
       },
@@ -12873,7 +13034,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
   "properties": {
     "suggestionId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "expectedRevision": {
       "type": "integer",
@@ -12939,11 +13100,11 @@ Channel `relay/v1/memory.approve` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -13030,11 +13191,11 @@ Channel `relay/v1/memory.approve` · command · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "artifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -13100,7 +13261,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -13114,7 +13275,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "content": {
@@ -13138,7 +13299,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
           },
           "author": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -13181,13 +13342,13 @@ Channel `relay/v1/memory.approve` · command · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "artifactId": {
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         {
                           "type": "null"
@@ -13230,7 +13391,8 @@ Channel `relay/v1/memory.approve` · command · route `runner`
               "rejected",
               "deleted",
               "conflict_resolved",
-              "unarchived"
+              "unarchived",
+              "history_purged"
             ]
           },
           "revision": {
@@ -13240,7 +13402,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
           },
           "actor": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -13300,7 +13462,7 @@ Channel `relay/v1/memory.approve` · command · route `runner`
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           }
         }
       },
@@ -13350,7 +13512,7 @@ Channel `relay/v1/memory.reject` · command · route `runner`
   "properties": {
     "suggestionId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "reason": {
       "type": "string",
@@ -13394,7 +13556,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
   "properties": {
     "recordId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -13412,11 +13574,11 @@ Channel `relay/v1/memory.archive` · command · route `runner`
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "type": {
       "type": "string",
@@ -13503,11 +13665,11 @@ Channel `relay/v1/memory.archive` · command · route `runner`
             },
             "runId": {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "artifactId": {
               "type": "string",
-              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -13573,7 +13735,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "null"
@@ -13587,7 +13749,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
     "content": {
@@ -13611,7 +13773,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
           },
           "author": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -13654,13 +13816,13 @@ Channel `relay/v1/memory.archive` · command · route `runner`
                     },
                     "runId": {
                       "type": "string",
-                      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "artifactId": {
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                         },
                         {
                           "type": "null"
@@ -13703,7 +13865,8 @@ Channel `relay/v1/memory.archive` · command · route `runner`
               "rejected",
               "deleted",
               "conflict_resolved",
-              "unarchived"
+              "unarchived",
+              "history_purged"
             ]
           },
           "revision": {
@@ -13713,7 +13876,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
           },
           "actor": {
             "type": "string",
-            "pattern": "^(user|run:run_[0-9A-HJKMNP-TV-Z]{26})$"
+            "pattern": "^(user|run:run_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "createdAt": {
             "type": "integer",
@@ -13773,7 +13936,7 @@ Channel `relay/v1/memory.archive` · command · route `runner`
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           }
         }
       },
@@ -13823,7 +13986,7 @@ Channel `relay/v1/memory.delete` · command · route `runner`
   "properties": {
     "recordId": {
       "type": "string",
-      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "confirm": {
       "type": "boolean",
@@ -13882,11 +14045,11 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
       "prefixItems": [
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       ],
       "items": false,
@@ -13900,7 +14063,7 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
           "properties": {
             "keep": {
               "type": "string",
-              "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             }
           },
           "required": [
@@ -13978,7 +14141,7 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
                   "properties": {
                     "recordId": {
                       "type": "string",
-                      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "scope": {
                       "type": "object",
@@ -14020,7 +14183,7 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
                   "properties": {
                     "recordId": {
                       "type": "string",
-                      "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+                      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
                     },
                     "scope": {
                       "type": "object",
@@ -14089,11 +14252,11 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
     "properties": {
       "id": {
         "type": "string",
-        "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "projectId": {
         "type": "string",
-        "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+        "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       },
       "type": {
         "type": "string",
@@ -14180,11 +14343,11 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
               },
               "runId": {
                 "type": "string",
-                "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               "artifactId": {
                 "type": "string",
-                "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               }
             },
             "required": [
@@ -14250,7 +14413,7 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
         "anyOf": [
           {
             "type": "string",
-            "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           {
             "type": "null"
@@ -14264,7 +14427,7 @@ Channel `relay/v1/memory.resolveConflict` · command · route `runner`
         "type": "array",
         "items": {
           "type": "string",
-          "pattern": "^mem_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       }
     },
@@ -14304,7 +14467,7 @@ Channel `relay/v1/memory.purgeProjectHistory` · command · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "confirmPhrase": {
       "type": "string",
@@ -14329,6 +14492,16 @@ Channel `relay/v1/memory.purgeProjectHistory` · command · route `runner`
       "type": "integer",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "purgedArtifacts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
     }
   },
   "required": [
@@ -14350,7 +14523,7 @@ Channel `relay/v1/artifacts.get` · query · route `runner`
   "properties": {
     "artifactId": {
       "type": "string",
-      "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "maxBytes": {
       "type": "integer",
@@ -14376,7 +14549,7 @@ Channel `relay/v1/artifacts.get` · query · route `runner`
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "kind": {
           "type": "string",
@@ -14403,7 +14576,7 @@ Channel `relay/v1/artifacts.get` · query · route `runner`
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             {
               "type": "null"
@@ -14414,7 +14587,7 @@ Channel `relay/v1/artifacts.get` · query · route `runner`
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^stp_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             {
               "type": "null"
@@ -14425,7 +14598,7 @@ Channel `relay/v1/artifacts.get` · query · route `runner`
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+              "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             {
               "type": "null"
@@ -14526,7 +14699,7 @@ Channel `relay/v1/artifacts.importDiff` · command · route `main+runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -14546,7 +14719,7 @@ Channel `relay/v1/artifacts.importDiff` · command · route `main+runner`
       "properties": {
         "artifactId": {
           "type": "string",
-          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^art_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "files": {
           "type": "array",
@@ -14587,7 +14760,7 @@ Channel `relay/v1/artifacts.export` · command · route `main+runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "what": {
       "type": "string",
@@ -14642,7 +14815,7 @@ Channel `relay/v1/ledger.runSummary` · query · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "required": [
@@ -14793,7 +14966,7 @@ Channel `relay/v1/ledger.projectSummary` · query · route `runner`
   "properties": {
     "projectId": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "month": {
       "type": "string",
@@ -14868,7 +15041,7 @@ Channel `relay/v1/ledger.entries` · query · route `runner`
   "properties": {
     "runId": {
       "type": "string",
-      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "limit": {
       "default": 25,
@@ -14902,7 +15075,7 @@ Channel `relay/v1/ledger.entries` · query · route `runner`
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^led_[0-9A-HJKMNP-TV-Z]{26}$"
+            "pattern": "^led_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
           },
           "createdAt": {
             "type": "integer",
@@ -14920,7 +15093,7 @@ Channel `relay/v1/ledger.entries` · query · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -14942,7 +15115,7 @@ Channel `relay/v1/ledger.entries` · query · route `runner`
             "anyOf": [
               {
                 "type": "string",
-                "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+                "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
               },
               {
                 "type": "null"
@@ -15049,7 +15222,7 @@ Channel `relay/v1/ledger.export` · command · route `main+runner`
       "properties": {
         "runId": {
           "type": "string",
-          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         }
       },
       "required": [
@@ -15061,7 +15234,7 @@ Channel `relay/v1/ledger.export` · command · route `main+runner`
       "properties": {
         "projectId": {
           "type": "string",
-          "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+          "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
         },
         "month": {
           "type": "string",

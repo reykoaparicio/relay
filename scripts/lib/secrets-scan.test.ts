@@ -4,7 +4,17 @@ import { DatabaseSync } from 'node:sqlite';
 import * as asar from '@electron/asar';
 import { afterEach, describe, expect, it } from 'vitest';
 import { makeTempDir, removeDir } from './package-temp-dir.js';
-import { ALLOWLISTED_MARKER, findSecretsInText, formatFinding, KNOWN_TEST_KEYS, scanPath, type SecretFinding } from './secrets-scan.js';
+import {
+  ALLOWLISTED_MARKER,
+  findSecretsInText,
+  formatFinding,
+  KNOWN_TEST_KEYS,
+  lineCol,
+  newlineOffsets,
+  scanBytes,
+  scanPath,
+  type SecretFinding,
+} from './secrets-scan.js';
 
 // Fake, credential-shaped values built at runtime so this source file holds no complete key literal.
 const FAKE_ANTHROPIC = ['sk-ant-api03', 'Zq9Xw8Vu7Ts6Rp5On4Ml3Kj2'].join('-');
@@ -57,6 +67,44 @@ describe('findSecretsInText', () => {
 
   it('flags every known e2e test key', () => {
     for (const key of KNOWN_TEST_KEYS) expect(findSecretsInText(`x ${key} y`)).toHaveLength(1);
+  });
+});
+
+describe('line locations', () => {
+  it('maps offsets to 1-based line:col, including offsets on a newline and past the last one', () => {
+    const text = 'ab\ncd\n\nef';
+    const nl = newlineOffsets(text);
+
+    expect(nl).toEqual([2, 5, 6]);
+    expect([0, 1, 2, 3, 6, 7, 8].map((o) => lineCol(nl, o))).toEqual([
+      'line 1:1',
+      'line 1:2',
+      'line 1:3',
+      'line 2:1',
+      'line 3:1',
+      'line 4:1',
+      'line 4:2',
+    ]);
+    expect(lineCol([], 5)).toBe('line 1:6');
+  });
+
+  it('locates many hits in a large file in linear time (one newline pass, not one per hit)', () => {
+    const lines = Array.from({ length: 20_000 }, (_, i) => `const k${String(i)} = "${FAKE_OPENAI}${String(i).padStart(6, '0')}";`);
+    const bytes = Buffer.from(lines.join('\n'), 'latin1');
+
+    const start = performance.now();
+    const findings = scanBytes(bytes, 'big.js');
+    const ms = performance.now() - start;
+
+    expect(findings).toHaveLength(20_000);
+    expect(findings[0]?.location).toBe('line 1:13');
+    expect(findings[19_999]?.location).toBe('line 20000:17');
+    expect(ms).toBeLessThan(2_000);
+  });
+
+  it('confirms a candidate with its next char: an authorization value followed by ( is a call, not a key', () => {
+    expect(findSecretsInText('authorization: getHeaderValue123456(req)')).toEqual([]);
+    expect(findSecretsInText('authorization: abcdefgh12345678wxyz')).toHaveLength(1);
   });
 });
 

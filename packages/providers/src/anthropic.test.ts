@@ -6,8 +6,9 @@ import testCatalog from '../catalog/test-fixture.json' with { type: 'json' };
 import { createMockFetch, jsonResponse, sseResponse, tickingClock } from './__fixtures__/mock-fetch.js';
 import type { MockFetchCall } from './__fixtures__/mock-fetch.js';
 import { createAnthropicAdapter } from './anthropic.js';
+import * as catalogModule from './catalog.js';
 import { findCatalogEntry, maxProviderPrices } from './catalog.js';
-import { LOCAL_REQUEST_OVERHEAD_TOKENS } from './estimate.js';
+import { LOCAL_REQUEST_OVERHEAD_TOKENS, conservativeInputTokens, localInputTokens } from './estimate.js';
 import { INPUT_SPLIT_ROUNDING_SLACK_MICROUSD, computeCost, upperBound } from './pricing.js';
 import type { GenerateHooks, ModelRequest, ModelResult } from './types.js';
 
@@ -46,6 +47,7 @@ const bodyOf = (call: MockFetchCall | undefined): Record<string, unknown> => cal
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('anthropic adapter: request', () => {
@@ -360,9 +362,19 @@ describe('anthropic adapter: estimate, capabilities, testConnection', () => {
 
     const est = await adapter.estimate(request(), PRICES, { apiKey: API_KEY });
 
-    expect(est.basis).toBe('local_estimate');
+    expect(est).toMatchObject({ basis: 'local_estimate', inputTokens: localInputTokens(request()) });
     expect(warn).toHaveBeenCalledWith('provider.count_tokens_failed', expect.objectContaining({ providerId: 'anthropic' }));
     expect(JSON.stringify(warn.mock.calls)).not.toContain(API_KEY);
+  });
+
+  it('a failed count on a model with a price tier uses the conservative bound, like every adapter', async () => {
+    const entry = catalogModule.findCatalogEntry('anthropic', request().modelId)!;
+    vi.spyOn(catalogModule, 'findCatalogEntry').mockReturnValue({ ...entry, capabilities: { ...entry.capabilities, priceCliffInputTokens: 200_000 } });
+    const { fetch } = createMockFetch(() => jsonResponse(429, { type: 'error', error: { type: 'rate_limit_error', message: 'x' } }));
+
+    const est = await createAnthropicAdapter({ clock: tickingClock(), fetch }).estimate(request(), PRICES, { apiKey: API_KEY });
+
+    expect(est).toMatchObject({ basis: 'local_estimate', inputTokens: conservativeInputTokens(request()) });
   });
 
   it('uses the local heuristic for a model missing from the catalog', async () => {

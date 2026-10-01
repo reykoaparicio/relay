@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { localTokenEstimate, promptChars } from './estimate.js';
-import { ZERO_USAGE, normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage } from './usage.js';
+import { normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage } from './usage.js';
+
+const ZERO = { uncachedInputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
 
 describe('normalizeAnthropicUsage', () => {
   it('keeps input_tokens as uncached because Anthropic already excludes cache reads and writes', () => {
@@ -29,7 +31,7 @@ describe('normalizeAnthropicUsage', () => {
       cacheWriteInputTokens: 0,
       outputTokens: 0,
     });
-    expect(normalizeAnthropicUsage(undefined)).toEqual(ZERO_USAGE);
+    expect(normalizeAnthropicUsage(undefined)).toEqual(ZERO);
   });
 });
 
@@ -59,7 +61,7 @@ describe('normalizeOpenAIUsage', () => {
 
   it('never produces negative uncached input', () => {
     expect(normalizeOpenAIUsage({ input_tokens: 10, input_tokens_details: { cached_tokens: 50 } }).uncachedInputTokens).toBe(0);
-    expect(normalizeOpenAIUsage(null)).toEqual(ZERO_USAGE);
+    expect(normalizeOpenAIUsage(null)).toEqual(ZERO);
   });
 });
 
@@ -133,7 +135,7 @@ describe('normalizeGeminiUsage (third variant: cached inside prompt, thoughts OU
       outputTokens: 1,
     });
     expect(normalizeGeminiUsage({ promptTokenCount: 10, cachedContentTokenCount: 50 }).uncachedInputTokens).toBe(0);
-    expect(normalizeGeminiUsage(undefined)).toEqual(ZERO_USAGE);
+    expect(normalizeGeminiUsage(undefined)).toEqual(ZERO);
   });
 });
 

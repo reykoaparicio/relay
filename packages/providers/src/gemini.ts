@@ -14,155 +14,45 @@
 //   (`raiseUndiciTimeouts`). Cancellation comes from the engine's AbortSignal (`config.abortSignal`).
 // - Errors: a single `ApiError { status, message }` class; the message is the JSON-stringified error body. Fetch
 //   rejections are rethrown as-is (no connection-error class), so this file wraps them (`GeminiConnectionError`).
-import { ApiError, GoogleGenAI, ServiceTier, ThinkingLevel } from '@google/genai';
-import { RelayError, errors } from '@relay/contracts';
-import type { Clock, Effort, ModelCapabilities, ModelPrices } from '@relay/contracts';
-import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
-import { connectionTestRequest } from './connection-test.js';
+import { GoogleGenAI, ServiceTier } from '@google/genai';
+import type { ThinkingLevel } from '@google/genai';
+import type { ModelPrices } from '@relay/contracts';
+import { emitProgress, emitResponseId, guardListener, optionalIds, progressTokens, startTrackedCall, successResult } from './adapter-kit.js';
+import { findCatalogEntry } from './catalog.js';
+import { catalogCapabilities, estimateWith, testConnectionAtLowestEffort } from './catalog-facet.js';
 import { mapProviderError } from './errors.js';
-import type { SdkErrorClasses } from './errors.js';
-import { LOCAL_REQUEST_OVERHEAD_TOKENS, buildEstimate, conservativeInputTokens, localEstimate } from './estimate.js';
-import { NOOP_LOGGER, safeHook } from './safe-hook.js';
+import { LOCAL_REQUEST_OVERHEAD_TOKENS } from './estimate.js';
+import { GEMINI_ERRORS, GeminiConnectionError, toTypedGeminiError } from './gemini-errors.js';
+import { streamErrorOf, watchSseErrors } from './gemini-sse.js';
+import type { SseErrorPayload } from './gemini-sse.js';
+import { isGeminiPriceTierMismatch, mapGeminiEffort } from './gemini-tier.js';
+import { tryParseJson } from './json.js';
+import { NOOP_LOGGER } from './safe-hook.js';
 import { abortError, createTrackedFetch, isSignalAborted } from './tracked-fetch.js';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type {
   EstimateContext,
   GenerateContext,
-  Logger,
   ModelRequest,
   ModelResult,
   NormalizedUsage,
   ProviderAdapter,
+  ProviderAdapterOptions,
   UsageEstimate,
 } from './types.js';
 import { normalizeGeminiUsage } from './usage.js';
 import type { GeminiUsageLike } from './usage.js';
 
-/** Factory options. `fetch` is the injected base fetch; when omitted, `globalThis.fetch` is read at call time. */
-export interface GeminiAdapterOptions {
-  readonly clock: Clock;
-  readonly logger?: Logger;
-  readonly fetch?: typeof fetch;
-}
+export { toTypedGeminiError } from './gemini-errors.js';
+export { isGeminiPriceTierMismatch, mapGeminiEffort } from './gemini-tier.js';
+
+/** Factory options (the shared {@link ProviderAdapterOptions}). */
+export type GeminiAdapterOptions = ProviderAdapterOptions;
 
 /** Explicit base URL + version so GOOGLE_GEMINI_BASE_URL / setDefaultBaseUrls can never redirect requests (or keys). */
 const API_BASE_URL = 'https://generativelanguage.googleapis.com/';
 const API_VERSION = 'v1beta';
 const API_KEY_HEADER = 'x-goog-api-key';
-/** Rough chars-per-token used only for progress display (never for money). */
-const PROGRESS_CHARS_PER_TOKEN = 4;
-const MS_PER_SECOND = 1000;
-
-// ---- Error classes: the SDK has one `ApiError`; the D3 chain needs the status families as classes. ----
-
-/** A Gemini HTTP error status, normalized for the D3 chain (`status`, `error` = parsed body, `headers`, `type`). */
-class GeminiApiError extends Error {
-  readonly status: number;
-  readonly error: unknown;
-  readonly headers: Headers | undefined;
-  readonly type: string | undefined;
-  constructor(status: number, message: string, body: unknown, type: string | undefined, headers: Headers | undefined) {
-    super(message);
-    this.name = 'GeminiApiError';
-    this.status = status;
-    this.error = body;
-    this.type = type;
-    this.headers = headers;
-  }
-}
-class GeminiBadRequestError extends GeminiApiError {}
-class GeminiAuthenticationError extends GeminiApiError {}
-class GeminiPermissionDeniedError extends GeminiApiError {}
-class GeminiNotFoundError extends GeminiApiError {}
-class GeminiUnprocessableEntityError extends GeminiApiError {}
-class GeminiRateLimitError extends GeminiApiError {}
-class GeminiInternalServerError extends GeminiApiError {}
-/** The base fetch rejected (DNS, refused, TLS, reset, …); phase comes from the tracker (D3 rows 4–5). */
-class GeminiConnectionError extends Error {
-  constructor(cause: unknown) {
-    super('connection error', { cause });
-    this.name = 'GeminiConnectionError';
-  }
-}
-/** Never thrown: aborts are detected through our own `AbortSignal` (row 1 via `aborted`). */
-class GeminiUserAbortError extends Error {}
-
-const GEMINI_ERRORS: SdkErrorClasses = {
-  APIError: GeminiApiError,
-  APIUserAbortError: GeminiUserAbortError,
-  APIConnectionError: GeminiConnectionError,
-  RateLimitError: GeminiRateLimitError,
-  AuthenticationError: GeminiAuthenticationError,
-  PermissionDeniedError: GeminiPermissionDeniedError,
-  NotFoundError: GeminiNotFoundError,
-  BadRequestError: GeminiBadRequestError,
-  UnprocessableEntityError: GeminiUnprocessableEntityError,
-  InternalServerError: GeminiInternalServerError,
-};
-
-/** `google.rpc.Status` as the Gemini API returns it (`{ error: { code, message, status, details } }`). */
-interface RpcErrorBody {
-  readonly error?: {
-    readonly message?: unknown;
-    readonly status?: unknown;
-    readonly details?: unknown;
-  };
-}
-interface RpcDetail {
-  readonly '@type'?: unknown;
-  readonly reason?: unknown;
-  readonly retryDelay?: unknown;
-}
-
-/** Google API-key rejections arrive as HTTP 400 INVALID_ARGUMENT with this structured `ErrorInfo.reason`. */
-const API_KEY_REASONS: ReadonlySet<string> = new Set(['API_KEY_INVALID', 'API_KEY_EXPIRED']);
-
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function rpcDetails(body: unknown): RpcDetail[] {
-  const details = (body as RpcErrorBody | undefined)?.error?.details;
-  return Array.isArray(details) ? details.filter((d): d is RpcDetail => typeof d === 'object' && d !== null) : [];
-}
-
-/** `RetryInfo.retryDelay` ("12s", "1.5s") as a `retry-after` header, so the D3 chain can honor it. */
-function retryAfterHeaders(details: readonly RpcDetail[]): Headers | undefined {
-  for (const d of details) {
-    if (typeof d['@type'] !== 'string' || !d['@type'].endsWith('RetryInfo') || typeof d.retryDelay !== 'string') continue;
-    const m = /^(\d+(?:\.\d+)?)s$/.exec(d.retryDelay.trim());
-    if (m?.[1] !== undefined) return new Headers({ 'retry-after': String(Math.ceil(Number(m[1]) * MS_PER_SECOND) / MS_PER_SECOND) });
-  }
-  return undefined;
-}
-
-function classFor(status: number, details: readonly RpcDetail[]): typeof GeminiApiError {
-  if (details.some((d) => typeof d.reason === 'string' && API_KEY_REASONS.has(d.reason))) return GeminiAuthenticationError;
-  if (status === 400) return GeminiBadRequestError;
-  if (status === 401) return GeminiAuthenticationError;
-  if (status === 403) return GeminiPermissionDeniedError;
-  if (status === 404) return GeminiNotFoundError;
-  if (status === 422) return GeminiUnprocessableEntityError;
-  if (status === 429) return GeminiRateLimitError;
-  if (status >= 500) return GeminiInternalServerError;
-  return GeminiApiError;
-}
-
-/** Converts the SDK's `ApiError` into the typed family above; anything else passes through unchanged. */
-export function toTypedGeminiError(err: unknown): unknown {
-  if (!(err instanceof ApiError)) return err;
-  const body = parseJson(err.message) ?? { error: { message: err.message } };
-  const rpc = (body as RpcErrorBody).error;
-  const message = typeof rpc?.message === 'string' ? rpc.message : err.message;
-  const type = typeof rpc?.status === 'string' ? rpc.status : undefined;
-  const details = rpcDetails(body);
-  const Cls = classFor(err.status, details);
-  return new Cls(err.status, message, body, type, retryAfterHeaders(details));
-}
 
 // ---- Structural views of the stream chunks (SDK types stay inside this module). ----
 
@@ -202,67 +92,6 @@ interface CallState {
   sseError?: SseErrorPayload;
 }
 
-/** The `google.rpc.Status` fields kept from a mid-stream SSE error event (redacted before storage). */
-interface SseErrorPayload {
-  readonly code?: number;
-  readonly status?: string;
-  readonly message?: string;
-}
-
-const SSE_EVENT_DELIMITER = /\r\n\r\n|\n\n|\r\r/;
-const SSE_ERROR_DATA = /^\{\s*"error"\s*:/;
-
-/** Parses one SSE event; returns its error payload when the `data:` is a `{"error":{…}}` object. */
-function sseErrorOf(eventText: string): SseErrorPayload | undefined {
-  const data = eventText
-    .split(/\r\n|\n|\r/)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trim())
-    .join('\n');
-  if (!SSE_ERROR_DATA.test(data)) return undefined;
-  const parsed = parseJson(data) as { error?: unknown } | undefined;
-  const e = parsed?.error;
-  if (typeof e !== 'object' || e === null) return undefined;
-  const { code, status, message } = e as { code?: unknown; status?: unknown; message?: unknown };
-  return {
-    ...(typeof code === 'number' ? { code } : {}),
-    ...(typeof status === 'string' ? { status } : {}),
-    ...(typeof message === 'string' ? { message } : {}),
-  };
-}
-
-/**
- * Passes a 2xx stream body through unchanged while watching for SSE `data: {"error":…}` events: the SDK parses such an
- * event into an empty chunk (the converter keeps only known response fields), so the error is otherwise lost.
- */
-function watchSseErrors(response: Response, onError: (e: SseErrorPayload) => void): Response {
-  if (response.body === null || response.status < 200 || response.status >= 300) return response;
-  const decoder = new TextDecoder();
-  let buffer = '';
-  const scan = (final: boolean): void => {
-    const parts = buffer.split(SSE_EVENT_DELIMITER);
-    buffer = final ? '' : (parts.pop() ?? '');
-    for (const part of parts) {
-      const e = sseErrorOf(part);
-      if (e !== undefined) onError(e);
-    }
-  };
-  const body = response.body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-        buffer += decoder.decode(chunk, { stream: true });
-        scan(false);
-      },
-      flush() {
-        buffer += decoder.decode();
-        scan(true);
-      },
-    }),
-  );
-  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
-}
-
 /** Finish reasons that mean the model (or a policy) declined: `refused` (04 §D10). */
 const REFUSAL_FINISH_REASONS: ReadonlySet<string> = new Set([
   'SAFETY',
@@ -274,46 +103,6 @@ const REFUSAL_FINISH_REASONS: ReadonlySet<string> = new Set([
   'IMAGE_PROHIBITED_CONTENT',
   'IMAGE_RECITATION',
 ]);
-
-/** Vertex traffic types billed at the standard (catalog) prices; any other reported type is a price-tier mismatch. */
-const STANDARD_TRAFFIC: ReadonlySet<string> = new Set(['ON_DEMAND', 'TRAFFIC_TYPE_UNSPECIFIED']);
-/**
- * Gemini Developer API service tiers billed at the standard (catalog) prices (SDK `ServiceTier`: `unspecified` is
- * "default service tier, which is standard"). Compared case-insensitively, tolerating a `SERVICE_TIER_` enum prefix.
- */
-const STANDARD_SERVICE_TIERS: ReadonlySet<string> = new Set(['standard', 'unspecified']);
-
-function isStandardServiceTier(tier: string): boolean {
-  return STANDARD_SERVICE_TIERS.has(tier.toLowerCase().replace(/^service_tier_/, ''));
-}
-
-/**
- * Whether the reported usage says the call was billed other than at the standard tier: a Developer API
- * `usageMetadata.serviceTier` other than standard/unspecified (flex, priority, …), or a Vertex `trafficType` other than
- * on-demand/unspecified.
- */
-export function isGeminiPriceTierMismatch(usage: { readonly trafficType?: string; readonly serviceTier?: string } | undefined): boolean {
-  if (usage === undefined) return false;
-  if (typeof usage.serviceTier === 'string' && !isStandardServiceTier(usage.serviceTier)) return true;
-  return typeof usage.trafficType === 'string' && !STANDARD_TRAFFIC.has(usage.trafficType);
-}
-
-const THINKING_LEVELS: Readonly<Partial<Record<Effort, ThinkingLevel>>> = {
-  low: ThinkingLevel.LOW,
-  medium: ThinkingLevel.MEDIUM,
-  high: ThinkingLevel.HIGH,
-};
-
-/**
- * Maps a Relay effort to a Gemini `thinkingLevel`. Only levels the catalog lists for the model (and Gemini has) are
- * sent; anything else is blocked in capability validation (§8.4), so reaching here with one is a programmer error.
- * @throws Error when `effort` is not supported.
- */
-export function mapGeminiEffort(effort: Effort, capabilities: Pick<ModelCapabilities, 'effortLevels'>): ThinkingLevel {
-  const level = THINKING_LEVELS[effort];
-  if (level === undefined || !capabilities.effortLevels.includes(effort)) throw new Error(`effort ${effort} is not supported by this model`);
-  return level;
-}
 
 function userContents(req: ModelRequest) {
   return req.messages.map((m) => ({ role: m.role, parts: [{ text: m.content }] }));
@@ -340,14 +129,6 @@ function requestParams(req: ModelRequest, thinkingLevel: ThinkingLevel | undefin
   };
 }
 
-function tryParseJson(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Usage is known only when a usage block arrived on or after the terminal chunk (earlier blocks are running counts,
  * not the bill) and it carries `promptTokenCount` and, if any text was produced, `candidatesTokenCount`; otherwise the
@@ -357,11 +138,6 @@ function usageIsKnown(state: CallState): boolean {
   const u = state.usage;
   if (!state.usageFinal || u === undefined || typeof u.promptTokenCount !== 'number') return false;
   return state.text === '' || typeof u.candidatesTokenCount === 'number';
-}
-
-/** The mapper's `streamError`: the redacted `{code,status,message}` body plus the RPC status as `errorType`. */
-function streamErrorOf(e: SseErrorPayload): { readonly providerError: unknown; readonly errorType?: string } {
-  return { providerError: { error: e }, ...(e.status === undefined ? {} : { errorType: e.status }) };
 }
 
 /**
@@ -416,10 +192,8 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
 
   const onChunk = (chunk: ChunkLike, state: CallState, ctx: GenerateContext, tracker: DispatchTracker, startedAt: number): void => {
     if (chunk.responseId !== undefined && state.providerResponseId === undefined) {
-      const providerResponseId = chunk.responseId;
-      state.providerResponseId = providerResponseId;
-      const providerRequestId = tracker.requestId;
-      safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId, ...(providerRequestId === undefined ? {} : { providerRequestId }) }), logger);
+      state.providerResponseId = chunk.responseId;
+      emitResponseId(ctx, logger, chunk.responseId, tracker.requestId); // the SDK exposes no request id of its own
     }
     if (chunk.promptFeedback?.blockReason !== undefined) state.blockReason = chunk.promptFeedback.blockReason;
     const candidate = chunk.candidates?.[0];
@@ -436,8 +210,7 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       .join('');
     if (text === '') return;
     state.text += text;
-    const outputTokensSoFar = Math.ceil(state.text.length / PROGRESS_CHARS_PER_TOKEN);
-    safeHook('onProgress', () => ctx.hooks?.onProgress?.({ outputTokensSoFar, elapsedMs: clock.now() - startedAt }), logger);
+    emitProgress(ctx, logger, clock, startedAt, progressTokens(state.text.length));
   };
 
   const partialUsageOf = (state: CallState): NormalizedUsage | undefined =>
@@ -461,8 +234,7 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
     const usage = normalizeGeminiUsage(state.usage);
     const extra = {
       rawUsage: state.usage ?? null,
-      ...(state.providerResponseId === undefined ? {} : { providerResponseId: state.providerResponseId }),
-      ...(tracker.requestId === undefined ? {} : { providerRequestId: tracker.requestId }),
+      ...optionalIds({ providerResponseId: state.providerResponseId, providerRequestId: tracker.requestId }),
       ...(usageIsKnown(state) ? {} : { usageKnown: false }),
       ...(isGeminiPriceTierMismatch(state.usage) ? { priceTierMismatch: true } : {}),
     };
@@ -470,20 +242,7 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       return { kind: 'refused', category: `prompt_blocked:${state.blockReason}`, usage, ...extra };
     }
     const reason = state.finishReason;
-    if (reason === 'STOP') {
-      const now = clock.now();
-      const start = tracker.dispatchedAt ?? now;
-      return {
-        kind: 'success',
-        json: tryParseJson(state.text),
-        rawText: state.text,
-        usage,
-        stopReason: 'end_turn',
-        latencyMs: now - start,
-        ...(tracker.firstByteAt === undefined ? {} : { firstByteMs: tracker.firstByteAt - start }),
-        ...extra,
-      };
-    }
+    if (reason === 'STOP') return successResult(tracker, clock.now(), { json: tryParseJson(state.text), rawText: state.text, usage }, extra);
     if (reason === 'MAX_TOKENS') return { kind: 'truncated', rawText: state.text, usage, ...extra };
     if (reason !== undefined && REFUSAL_FINISH_REASONS.has(reason)) return { kind: 'refused', category: reason, usage, ...extra };
     if (reason !== undefined) return { kind: 'truncated', rawText: state.text, usage, rawStopReason: reason, ...extra };
@@ -495,25 +254,17 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
 
   const generate = async (req: ModelRequest, ctx: GenerateContext): Promise<ModelResult> => {
     const thinkingLevel = assertRequest(req);
-    const startedAt = clock.now();
-    const { fetch: trackedFetch, tracker } = createTrackedFetch(baseFetch(), {
-      clock,
-      logger,
-      onDispatched: () => ctx.hooks?.onDispatched?.(),
-    });
+    const { trackedFetch, tracker, startedAt } = startTrackedCall(baseFetch(), clock, logger, ctx);
     const state: CallState = { text: '', terminalSeen: false, usageFinal: false };
     const onSseError = (e: SseErrorPayload): void => {
       state.sseError ??= e;
     };
     try {
       const stream = await makeClient(ctx.apiKey, trackedFetch, onSseError).models.generateContentStream(requestParams(req, thinkingLevel, ctx.signal));
-      for await (const chunk of stream) {
-        try {
-          onChunk(chunk, state, ctx, tracker, startedAt);
-        } catch (err) {
-          logger.warn('provider.stream_listener_failed', { errorName: err instanceof Error ? err.name : typeof err });
-        }
-      }
+      const onEachChunk = guardListener(logger, (chunk: ChunkLike) => {
+        onChunk(chunk, state, ctx, tracker, startedAt);
+      });
+      for await (const chunk of stream) onEachChunk(chunk);
       return toResult(state, tracker, ctx.signal.aborted);
     } catch (err) {
       return errorResult(err, state, tracker, ctx.signal.aborted);
@@ -541,49 +292,19 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
     return res.totalTokens + LOCAL_REQUEST_OVERHEAD_TOKENS;
   };
 
-  const estimate = async (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> => {
-    const entry = findCatalogEntry('gemini', req.modelId);
-    const version = priceCatalogVersionFor('gemini', req.modelId, prices, ctx?.priceCatalogVersion);
-    if (ctx?.apiKey !== undefined && entry?.capabilities.supportsTokenCounting === true) {
-      try {
-        const inputTokens = await countTokens(req, ctx.apiKey, ctx.signal);
-        return buildEstimate(inputTokens, req, prices, 'provider_count', version);
-      } catch (err) {
-        logger.warn('provider.count_tokens_failed', { providerId: 'gemini', errorName: err instanceof Error ? err.name : typeof err });
-        // Price cliff (Gemini Pro-class models bill prompts above 200K tokens at a higher tier; the catalog then caps
-        // `maxInputTokens` below the threshold): the chars/3.2 heuristic can undercount dense scripts and slip a
-        // long-context prompt past capability validation. Without a count, bound it at one token per UTF-16 code unit.
-        if (entry.capabilities.maxInputTokens !== undefined) {
-          return buildEstimate(conservativeInputTokens(req), req, prices, 'local_estimate', version);
-        }
-      }
-    }
-    return localEstimate(req, prices, version);
-  };
-
-  const capabilities = (modelId: string): Promise<ModelCapabilities> => {
-    const entry = findCatalogEntry('gemini', modelId);
-    if (entry === undefined) {
-      return Promise.reject(new RelayError(errors.modelUnsupported({ providerId: 'gemini', modelId, reason: 'not_in_catalog' })));
-    }
-    return Promise.resolve(entry.capabilities);
-  };
-
-  const lowestEffort = (modelId: string): Effort | undefined => findCatalogEntry('gemini', modelId)?.capabilities.effortLevels[0];
+  // gemini-3.5-flash has no prompt-length price tier (no `priceCliffInputTokens`): a count failure falls back to the
+  // normal local heuristic. A tiered model would get the conservative bound (04 ADR note "Count-failure fallback").
+  const estimate = (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> =>
+    estimateWith({ providerId: 'gemini', logger, countTokens }, req, prices, ctx);
 
   return {
     providerId: 'gemini',
-    capabilities,
+    capabilities: (modelId) => catalogCapabilities('gemini', modelId),
     estimate,
     generate,
     // No reconcile: the Gemini API has no endpoint that retrieves a past generateContent by responseId
     // (supportsRequestLookup: false), so unknown outcomes go to the user decision flow (§7.5), like Anthropic.
-    testConnection: (ctx) => {
-      // Thinking is always on: the lowest listed level plus a 256-token allowance (GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS)
-      // lets the model answer; a `truncated` answer still proves the key and model work.
-      const effort = lowestEffort(ctx.modelId);
-      const req = connectionTestRequest('gemini', ctx.modelId);
-      return generate(effort === undefined ? req : { ...req, effort }, { apiKey: ctx.apiKey, signal: ctx.signal });
-    },
+    // Thinking is always on: the lowest listed level + GEMINI_CONNECTION_TEST_MAX_OUTPUT_TOKENS (connectionTestRequest).
+    testConnection: (ctx) => testConnectionAtLowestEffort('gemini', generate, ctx),
   };
 }

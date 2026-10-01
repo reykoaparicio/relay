@@ -111,7 +111,7 @@ export const memoryOps = {
     route: 'runner',
     input: memoryCreateInputSchema,
     output: memoryRecordDetailSchema,
-    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED', 'NOT_FOUND'],
+    errors: ['VALIDATION_FAILED', 'PERMISSION_DENIED', 'NOT_FOUND', 'CONFLICT'],
     idempotent: true,
   }),
   'memory.update': op({
@@ -173,7 +173,7 @@ export const memoryOps = {
     route: 'runner',
     input: z.object({ recordId: idSchema('memory'), confirm: z.literal(true) }),
     output: z.object({ deleted: z.literal(true), retainedInRunSnapshots: z.number().int().nonnegative() }),
-    errors: ['NOT_FOUND'],
+    errors: ['NOT_FOUND', 'CONFLICT'],
     idempotent: false,
   }),
   'memory.resolveConflict': op({

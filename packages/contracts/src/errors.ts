@@ -218,11 +218,33 @@ export const PERMISSION_DENIED_REASONS = [
   'inside_project',
   'contains_project',
   'unsafe_root',
+  'untrusted_sender',
 ] as const;
 /** Schema for {@link PermissionDeniedReason}. */
 export const permissionDeniedReasonSchema = z.enum(PERMISSION_DENIED_REASONS);
 /** `PERMISSION_DENIED` reason. */
 export type PermissionDeniedReason = z.infer<typeof permissionDeniedReasonSchema>;
+
+/**
+ * `INTERNAL` `details.reason` values: a closed set, so an internal error says WHICH invariant broke without carrying a
+ * message, stack, or path (02 §B0, B13). `aborted` is the provider call our own AbortSignal cancelled (04 §D3 row 1).
+ */
+export const INTERNAL_REASONS = [
+  'aborted',
+  'not_implemented',
+  'snapshot_hash_mismatch',
+  'snapshot_input_hash_mismatch',
+  'snapshot_not_utf8',
+  'integrity_check_failed',
+  'idempotency_result_invalid',
+  'artifact_not_json',
+  'artifact_invalid',
+  'provider_call_failed_before_dispatch',
+] as const;
+/** Schema for {@link InternalReason}. */
+export const internalReasonSchema = z.enum(INTERNAL_REASONS);
+/** `INTERNAL` reason. */
+export type InternalReason = z.infer<typeof internalReasonSchema>;
 
 /** `LIMIT_REACHED` `details.limit` values (§9.1). */
 export const LIMIT_KINDS = ['attempts', 'revisions', 'deadline', 'tool_calls'] as const;
@@ -287,22 +309,50 @@ export const errors = {
       providerId === undefined ? ctx : { ...ctx, details: { ...ctx?.details, providerId } },
     ),
   /**
-   * `INTERNAL` carries only the correlation id (02 §B0). It takes no context: a message, details, or ids could leak
-   * internals (SQL errors, stacks, paths), and callers passing one at runtime have it ignored.
+   * `INTERNAL` carries only the correlation id (02 §B0) and, optionally, a closed {@link InternalReason}. It takes no
+   * free-form context: a message, details, or ids could leak internals (SQL errors, stacks, paths), so anything else
+   * passed at runtime is ignored. `correlationId` is `undefined` only where none exists (providers, tools); the
+   * boundary that surfaces the error assigns one. `aborted` also sets `details.aborted: true` (read by callers of 04 §D3).
    */
-  internal: (correlationId: CorrelationId): AppError => appError('INTERNAL', { correlationId }),
+  internal: (correlationId: CorrelationId | undefined, reason?: InternalReason): AppError => {
+    const known = typeof reason === 'string' && (INTERNAL_REASONS as readonly string[]).includes(reason) ? reason : undefined;
+    const details = known === undefined ? undefined : { reason: known, ...(known === 'aborted' ? { aborted: true } : {}) };
+    return appError('INTERNAL', {
+      ...(correlationId === undefined ? {} : { correlationId }),
+      ...(details === undefined ? {} : { details }),
+    });
+  },
 } as const;
 
-/** Internal exception carrying an {@link AppError}; serialized at boundaries (IPC router, runner protocol server). */
+/**
+ * Internal exception carrying an {@link AppError}. Boundaries (IPC router, runner protocol server) serialize only
+ * `.appError` (via {@link toAppError}); the optional `cause` is for in-process debugging and is never serialized,
+ * because a provider SDK error can hold request headers or raw bodies.
+ */
 export class RelayError extends Error {
   /** The boundary-safe error. */
   readonly appError: AppError;
 
-  constructor(appErrorValue: AppError) {
-    super(appErrorValue.userMessage);
+  constructor(appErrorValue: AppError, options?: { readonly cause?: unknown }) {
+    super(appErrorValue.userMessage, options === undefined ? undefined : { cause: options.cause });
     this.name = 'RelayError';
     this.appError = appErrorValue;
   }
+}
+
+/**
+ * The errno code (`'ENOENT'`, `'EACCES'`, …) of a thrown Node fs/system error, else undefined. Only the code: the
+ * message and `path` of such errors hold absolute paths and must never reach an {@link AppError} (00b §2.6).
+ */
+export function errnoOf(e: unknown): string | undefined {
+  if (typeof e !== 'object' || e === null || !('code' in e)) return undefined;
+  return typeof e.code === 'string' && /^E[A-Z0-9]+$/.test(e.code) ? e.code : undefined;
+}
+
+/** `{ errno }` for {@link ErrorContext.details} when `e` carries an errno code, else `{}`. */
+export function errnoDetails(e: unknown): { readonly errno?: string } {
+  const errno = errnoOf(e);
+  return errno === undefined ? {} : { errno };
 }
 
 /** Type guard for {@link RelayError}. */

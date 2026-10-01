@@ -75,10 +75,3 @@ export function normalizeGeminiUsage(u: GeminiUsageLike | null | undefined): Nor
   return typeof u?.thoughtsTokenCount === 'number' ? { ...base, reasoningTokens: thoughts } : base;
 }
 
-/** All-zero usage. */
-export const ZERO_USAGE: NormalizedUsage = Object.freeze({
-  uncachedInputTokens: 0,
-  cacheReadInputTokens: 0,
-  cacheWriteInputTokens: 0,
-  outputTokens: 0,
-});

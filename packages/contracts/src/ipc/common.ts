@@ -52,12 +52,13 @@ export function op<
 
 /**
  * Error codes any op may return without listing them: bad input (router validation), rate limiting, runner loss,
- * and internal errors.
+ * a refused sender (`PERMISSION_DENIED untrusted_sender`, router), and internal errors.
  */
 export const UNIVERSAL_ERROR_CODES = [
   'VALIDATION_FAILED',
   'RATE_LIMITED',
   'RUNNER_UNAVAILABLE',
+  'PERMISSION_DENIED',
   'INTERNAL',
 ] as const satisfies readonly ErrorCode[];
 

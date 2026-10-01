@@ -559,7 +559,7 @@ describe('openai adapter: estimate, capabilities, testConnection, helpers', () =
     const schemaChars = JSON.stringify(STRICT_SCHEMA).length;
     const local = Math.ceil(((21 + 26 + schemaChars) * 23) / 64) + LOCAL_REQUEST_OVERHEAD_TOKENS;
     expect(noKey).toMatchObject({ basis: 'local_estimate', inputTokens: local });
-    // gpt-6.1-sol has a price cliff (maxInputTokens): a failed count falls back to 1 token per UTF-16 code unit.
+    // gpt-6.1-sol has a price cliff (priceCliffInputTokens): a failed count falls back to 1 token per UTF-16 code unit.
     expect(failed).toMatchObject({ basis: 'local_estimate', inputTokens: 21 + 26 + schemaChars + LOCAL_REQUEST_OVERHEAD_TOKENS });
     expect(warn).toHaveBeenCalledWith('provider.count_tokens_failed', expect.objectContaining({ providerId: 'openai' }));
     expect(JSON.stringify(warn.mock.calls)).not.toContain(API_KEY);
@@ -591,7 +591,7 @@ describe('openai adapter: estimate, capabilities, testConnection, helpers', () =
   it('a failed count on a model without a price cliff keeps the chars/3.2 heuristic', async () => {
     const entry = findCatalogEntry('openai', MODEL)!;
     const caps = { ...entry.capabilities };
-    delete caps.maxInputTokens;
+    delete caps.priceCliffInputTokens; // maxInputTokens alone (a context limit) no longer selects the conservative bound
     vi.spyOn(catalogModule, 'findCatalogEntry').mockReturnValue({ ...entry, capabilities: caps });
     const { fetch } = createMockFetch(() => jsonResponse(500, { error: { type: 'server_error', message: 'x', code: null, param: null } }));
     const adapter = createOpenAIAdapter({ clock: tickingClock(), fetch });

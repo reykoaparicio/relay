@@ -39,7 +39,7 @@ export const projectOps = {
     route: 'main',
     input: emptyInputSchema,
     output: z.object({ selection: directorySelectionSchema.nullable() }),
-    errors: ['PERMISSION_DENIED'],
+    errors: ['PERMISSION_DENIED', 'NOT_FOUND'],
     idempotent: false,
   }),
   'projects.previewFiles': op({

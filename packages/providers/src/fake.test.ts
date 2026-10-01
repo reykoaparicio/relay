@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -10,7 +10,7 @@ import type { FakeCallLog } from './call-log.js';
 import { FAKE_CRASH_EXIT_CODE, createFakeProvider } from './fake.js';
 import type { FakeProviderOptions } from './fake.js';
 import { FAKE_FIXTURES } from './fake-fixtures/index.js';
-import { FAKE_SCENARIOS } from './fake-scenarios.js';
+import { DEFAULT_FAKE_SCENARIO, FAKE_SCENARIOS } from './fake-scenarios.js';
 import type { FakeScenario, FakeStepResult } from './fake-scenarios.js';
 import type { GenerateHooks, ModelRequest, ModelResult, ProviderAdapter, Timers } from './types.js';
 
@@ -270,6 +270,11 @@ describe('fake provider: FAKE_SCENARIOS', () => {
     expect([...table.map(([n]) => n), 'hang', 'slow-review'].sort()).toEqual(Object.keys(FAKE_SCENARIOS).sort());
   });
 
+  it('keys every scenario by its own name; the default is happy-path', () => {
+    for (const [key, sc] of Object.entries(FAKE_SCENARIOS)) expect(sc.name).toBe(key);
+    expect(DEFAULT_FAKE_SCENARIO).toBe(FAKE_SCENARIOS['happy-path']);
+  });
+
   it.each(table)('%s answers its script in order', async (name, calls) => {
     const { provider } = make(name);
     const outcomes: string[] = [];
@@ -349,6 +354,20 @@ describe('fake provider: call log and crash step', () => {
     tempDirs.push(dir);
 
     expect(createJsonlCallLog(join(dir, 'none.jsonl')).entries()).toEqual([]);
+  });
+
+  it('skips a torn last line (crash mid-append) and lines that are not log entries', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-fake-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'log.jsonl');
+    const log = createJsonlCallLog(file);
+    log.append({ kind: 'reconcile', at: 1, attemptId: 'att_1', providerId: 'fake' });
+    appendFileSync(file, '{"kind":"generate","at":2,"runId":"run_1","attem'); // torn: the process died mid-write
+    appendFileSync(file, '\n[1,2]\n{"kind":"bogus","at":3}\n{"kind":"reconcile","at":4}\n');
+    log.append({ kind: 'reconcile', at: 5, attemptId: 'att_2', providerId: 'fake' });
+
+    expect(log.reconcileEntries().map((e) => e.attemptId)).toEqual(['att_1', 'att_2']);
+    expect(log.entries()).toEqual([]);
   });
 });
 

@@ -1,11 +1,11 @@
+import { isUtf8 } from 'node:buffer';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Ignore } from 'ignore';
-import type { ExclusionReason, RelPath, Result, Sha256 } from '@relay/contracts';
-import { INPUT_CAPS, assertNever, err, errors, ok } from '@relay/contracts';
+import type { AppError, ExclusionReason, RelPath, Result, Sha256 } from '@relay/contracts';
+import { INPUT_CAPS, assertNever, err, errnoDetails, errnoOf, errors, ok } from '@relay/contracts';
 import type { ClassifyContext, Sniff } from './exclusions.js';
 import { SNIFF_BYTES, classifyByContent, classifyByName, compileUserPatterns, sniffBytes } from './exclusions.js';
-import { loadGitignore, makeGitignoreMatcher } from './gitignore.js';
+import { createIncrementalGitignore, loadGitignore } from './gitignore.js';
 import type { ProjectRoot } from './paths.js';
 import { isSecretRootPath, normalizeRelPath, realRelPath, resolveInside } from './paths.js';
 
@@ -61,7 +61,7 @@ export interface ScanOptions {
 type Inspected =
   | { readonly kind: 'excluded'; readonly relPath: string; readonly reason: ExclusionReason; readonly isDirectory: boolean }
   | { readonly kind: 'dir'; readonly dir: QueuedDir }
-  | { readonly kind: 'file'; readonly relPath: RelPath; readonly size: number; readonly sniff: Sniff; readonly utf8: boolean }
+  | { readonly kind: 'file'; readonly relPath: RelPath; readonly abs: string; readonly probe: FileProbe }
   | { readonly kind: 'unreadable'; readonly relPath: string }
   | { readonly kind: 'skip' };
 
@@ -72,7 +72,9 @@ interface QueuedDir {
 }
 
 const SKIP: Inspected = { kind: 'skip' };
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+/** At most this many entries of one directory are inspected (opened) concurrently: bounds open file handles. */
+const DIR_FAN_OUT = 64;
+const GITIGNORE = '.gitignore';
 
 /**
  * The NFC relPath as a RelPath, or null when the RelPath rules cannot express it exactly (e.g. a name containing `\`,
@@ -81,10 +83,6 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 function asExactRelPath(relPath: string): RelPath | null {
   const rel = normalizeRelPath(relPath);
   return rel.ok && rel.value === relPath ? rel.value : null;
-}
-
-function errnoOf(e: unknown): string | undefined {
-  return e instanceof Error && 'code' in e && typeof e.code === 'string' ? e.code : undefined;
 }
 
 /** Vanished or swapped mid-scan: nothing to show. Anything else (EACCES, EPERM, EIO, …) is reported as unreadable. */
@@ -96,52 +94,66 @@ function isGone(e: unknown): boolean {
 interface FileProbe {
   readonly size: number;
   readonly sniff: Sniff;
-  /** Whole-file UTF-8 validity for files within the cap; `true` for over-cap files (they are `too_large` anyway). */
-  readonly utf8: boolean;
+  /**
+   * Whole-file UTF-8 validity when the sniff window already holds the whole file; `undefined` when only a prefix was
+   * read (decided later, only for files the caps admit: {@link isUtf8File}).
+   */
+  readonly utf8?: boolean;
 }
 
-function isValidUtf8(bytes: Uint8Array): boolean {
+const OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
+
+/** Reads up to `want` bytes from the start of an open file. */
+async function readPrefix(fh: fs.promises.FileHandle, want: number): Promise<Buffer> {
+  const buf = Buffer.alloc(want);
+  let got = 0;
+  while (got < want) {
+    const { bytesRead } = await fh.read(buf, got, want - got, got);
+    if (bytesRead === 0) break;
+    got += bytesRead;
+  }
+  return buf.subarray(0, got);
+}
+
+/**
+ * Opens a regular file without following a final symlink and probes it from ONE handle: `fstat` size and the binary
+ * sniff of the first {@link SNIFF_BYTES}. Returns null for a non-regular file.
+ */
+async function probeFile(abs: string): Promise<FileProbe | null> {
+  const fh = await fs.promises.open(abs, OPEN_FLAGS);
   try {
-    utf8Decoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    const bytes = await readPrefix(fh, Math.min(st.size, SNIFF_BYTES));
+    const whole = bytes.byteLength === st.size;
+    return { size: st.size, sniff: sniffBytes(bytes), ...(whole ? { utf8: isUtf8(bytes) } : {}) };
+  } finally {
+    await fh.close();
   }
 }
 
 /**
- * Opens a regular file without following a final symlink and probes it from ONE handle: `fstat` size, the binary
- * sniff, and — for files within `maxFileBytes` — a fatal UTF-8 decode of the whole file, so the preview agrees with
- * `readSelected` (invalid UTF-8 → `binary`, B8). Returns null for a non-regular file.
+ * UTF-8 validity of the first `size` bytes (the probed size) of a file the caps admit, so the preview agrees with
+ * `readSelected` (invalid UTF-8 → `binary`, B8).
  */
-async function probeFile(abs: string, maxFileBytes: number): Promise<FileProbe | null> {
-  const fh = await fs.promises.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+async function isUtf8File(abs: string, size: number): Promise<boolean> {
+  const fh = await fs.promises.open(abs, OPEN_FLAGS);
   try {
-    const st = await fh.stat();
-    if (!st.isFile()) return null;
-    const want = st.size <= maxFileBytes ? st.size : Math.min(st.size, SNIFF_BYTES);
-    const buf = Buffer.alloc(want);
-    let got = 0;
-    while (got < want) {
-      const { bytesRead } = await fh.read(buf, got, want - got, got);
-      if (bytesRead === 0) break;
-      got += bytesRead;
-    }
-    const bytes = buf.subarray(0, got);
-    return { size: st.size, sniff: sniffBytes(bytes), utf8: st.size > maxFileBytes || isValidUtf8(bytes) };
+    return isUtf8(await readPrefix(fh, size));
   } finally {
     await fh.close();
   }
 }
 
 async function inspectFile(relPath: string, abs: string, ctx: ClassifyContext, realRel?: string): Promise<Inspected> {
-  const byName = classifyByName(relPath, false, ctx) ?? (realRel === undefined ? null : classifyByName(realRel, false, ctx));
+  // The real name of a symlinked file was never vetted by the walk: classify it with every prefix.
+  const byName = classifyByName(relPath, false, ctx) ?? (realRel === undefined ? null : classifyByName(realRel, false, { ...ctx, ancestorsVetted: false }));
   if (byName !== null) return { kind: 'excluded', relPath, reason: byName, isDirectory: false };
   const rel = asExactRelPath(relPath);
   if (rel === null) return SKIP;
-  const probe = await probeFile(abs, ctx.maxFileBytes);
+  const probe = await probeFile(abs);
   if (probe === null) return SKIP;
-  return { kind: 'file', relPath: rel, ...probe };
+  return { kind: 'file', relPath: rel, abs, probe };
 }
 
 /** Symlinked files are resolved and checked by E1; directory symlinks are never followed. */
@@ -179,6 +191,22 @@ async function inspectEntry(root: ProjectRoot, dirent: fs.Dirent, parent: Queued
   }
 }
 
+/** `.gitignore`, as the volume spells it (a case-insensitive volume also opens `.GITIGNORE` by that path). */
+function isGitignoreName(name: string, caseInsensitive: boolean): boolean {
+  return caseInsensitive ? name.toLowerCase() === GITIGNORE : name === GITIGNORE;
+}
+
+/** `fn` over `items` with at most `limit` in flight; results in input order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 async function listDir(abs: string): Promise<fs.Dirent[]> {
   const dir = await fs.promises.opendir(abs);
   const out: fs.Dirent[] = [];
@@ -194,7 +222,9 @@ interface ScanState {
   readonly included: FileEntry[];
   readonly excluded: ExcludedEntry[];
   readonly unreadable: RelPath[];
+  /** Breadth-first queue; `head` is the next index (no O(n) `shift`). */
   readonly queue: QueuedDir[];
+  head: number;
   includedBytes: number;
 }
 
@@ -203,7 +233,17 @@ function addUnreadable(state: ScanState, relPath: string): void {
   if (rel !== null) state.unreadable.push(rel);
 }
 
-function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext, caps: InputCaps): void {
+/** The content verdict of a probed file: binary sniff → too_large → caps; then UTF-8 validity, read only if admitted. */
+async function fileReason(item: Extract<Inspected, { kind: 'file' }>, state: ScanState, ctx: ClassifyContext, caps: InputCaps): Promise<ExclusionReason | null> {
+  const totals = { ...caps, includedBytes: state.includedBytes, includedFiles: state.included.length };
+  const reason = classifyByContent({ isDirectory: false, size: item.probe.size }, item.probe.sniff, { ...ctx, caps: totals });
+  if (reason !== null) return reason;
+  // Invalid UTF-8 is binary, exactly as readSelected decides (05 E4, B8). Only admitted files pay for the full read.
+  const utf8 = item.probe.utf8 ?? (await isUtf8File(item.abs, item.probe.size));
+  return utf8 ? null : 'binary';
+}
+
+async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext, caps: InputCaps): Promise<void> {
   switch (item.kind) {
     case 'skip':
       return;
@@ -217,21 +257,31 @@ function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext,
       state.excluded.push({ relPath: item.relPath, reason: item.reason, isDirectory: item.isDirectory });
       return;
     case 'file': {
-      const totals = { ...caps, includedBytes: state.includedBytes, includedFiles: state.included.length };
-      const reason =
-        classifyByContent({ isDirectory: false, size: item.size }, item.sniff, { ...ctx, caps: totals }) ??
-        (item.utf8 ? null : 'binary'); // invalid UTF-8 is binary, exactly as readSelected decides (05 E4, B8)
+      let reason: ExclusionReason | null;
+      try {
+        reason = await fileReason(item, state, ctx, caps);
+      } catch (e) {
+        // The file vanished or became unreadable between the probe and the UTF-8 read (B7: never throw).
+        if (!isGone(e)) addUnreadable(state, item.relPath);
+        return;
+      }
       if (reason !== null) {
         state.excluded.push({ relPath: item.relPath, reason, isDirectory: false });
         return;
       }
-      state.included.push({ relPath: item.relPath, size: item.size });
-      state.includedBytes += item.size;
+      state.included.push({ relPath: item.relPath, size: item.probe.size });
+      state.includedBytes += item.probe.size;
       return;
     }
     default:
       assertNever(item);
   }
+}
+
+function unreadableRoot(e: unknown): AppError {
+  return errnoOf(e) === 'ENOENT'
+    ? errors.notFound('project_root', {}, { details: errnoDetails(e) })
+    : errors.permissionDenied('unsafe_root', { userMessage: 'The project folder cannot be read. Check its permissions.', details: errnoDetails(e) });
 }
 
 /**
@@ -242,35 +292,35 @@ function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext,
  */
 export async function scanProject(root: ProjectRoot, opts: ScanOptions = {}): Promise<Result<ScanResult>> {
   const caps = opts.caps ?? INPUT_CAPS;
-  const isUserExcluded = compileUserPatterns(opts.exclusions ?? []);
-  const gitRules = new Map<string, Ignore>();
-  let ctx: ClassifyContext = { maxFileBytes: caps.maxFileBytes, isUserExcluded, rootIsSecret: isSecretRootPath(root.realpath) };
-  const state: ScanState = { included: [], excluded: [], unreadable: [], queue: [{ disk: '', rel: '' }], includedBytes: 0 };
-  while (state.queue.length > 0) {
+  const gitignore = opts.respectGitignore === false ? null : createIncrementalGitignore();
+  // ancestorsVetted: a directory is only queued after classifyByName passed it, so its entries skip the prefix walk.
+  const ctx: ClassifyContext = {
+    maxFileBytes: caps.maxFileBytes,
+    isUserExcluded: compileUserPatterns(opts.exclusions ?? []),
+    rootIsSecret: isSecretRootPath(root.realpath),
+    ancestorsVetted: true,
+    ...(gitignore === null ? {} : { isGitignored: gitignore.isGitignored }),
+  };
+  const state: ScanState = { included: [], excluded: [], unreadable: [], queue: [{ disk: '', rel: '' }], head: 0, includedBytes: 0 };
+  for (let dir = state.queue[0]; dir !== undefined; dir = state.queue[state.head]) {
+    state.head += 1;
     opts.signal?.throwIfAborted();
-    const dir = state.queue.shift() ?? { disk: '', rel: '' };
     let dirents: fs.Dirent[];
     try {
       dirents = await listDir(path.join(root.realpath, dir.disk));
     } catch (e) {
-      if (dir.disk === '') {
-        return errnoOf(e) === 'ENOENT'
-          ? err(errors.notFound('project_root'))
-          : err(errors.permissionDenied('unsafe_root', { userMessage: 'The project folder cannot be read. Check its permissions.' }));
-      }
+      if (dir.disk === '') return err(unreadableRoot(e));
       if (!isGone(e)) addUnreadable(state, dir.rel);
       continue;
     }
-    if (opts.respectGitignore !== false) {
+    // Rules of this directory apply to its entries; loaded (through the confined reader) only when the file exists.
+    if (gitignore !== null && dirents.some((d) => isGitignoreName(d.name, root.caseInsensitive))) {
       const ig = await loadGitignore(root, dir.disk);
-      if (ig !== null) {
-        gitRules.set(dir.rel, ig);
-        ctx = { ...ctx, isGitignored: makeGitignoreMatcher(gitRules) };
-      }
+      if (ig !== null) gitignore.add(dir.rel, ig);
     }
-    const itemCtx = ctx;
-    const items = await Promise.all(dirents.map((d) => inspectEntry(root, d, dir, itemCtx)));
-    for (const item of items) applyInspected(item, state, ctx, caps);
+    const parent = dir;
+    const items = await mapLimit(dirents, DIR_FAN_OUT, (d) => inspectEntry(root, d, parent, ctx));
+    for (const item of items) await applyInspected(item, state, ctx, caps);
   }
   const included = [...state.included].sort(byRelPath);
   const excluded = [...state.excluded].sort(byRelPath);

@@ -50,6 +50,14 @@ export function maskAllowlisted(text: string): string {
   return text.replaceAll(ALLOWLISTED_MARKER, ' '.repeat(ALLOWLISTED_MARKER.length));
 }
 
+/**
+ * A SECRET_PATTERNS match is only a candidate: some rules check the char after the value (`(` marks a call, not a
+ * key), so the confirmation sees the match plus one char of right context.
+ */
+function isConfirmed(text: string, index: number, match: string): boolean {
+  return looksLikeSecret(text.slice(index, index + match.length + 1));
+}
+
 /** The redacted form of a match; falls back to a bare marker if redaction ever left something secret-shaped. */
 function safeLabel(match: string): string {
   const label = redactString(match);
@@ -71,7 +79,7 @@ function anchoredHit(masked: string, at: number): Hit | null {
   const window = masked.slice(at, at + ANCHOR_WINDOW);
   for (const re of ANCHORED_PATTERNS) {
     const m = re.exec(window);
-    if (m !== null && looksLikeSecret(m[0])) return { offset: at, label: safeLabel(m[0]) };
+    if (m !== null && isConfirmed(window, 0, m[0])) return { offset: at, label: safeLabel(m[0]) };
   }
   return null;
 }
@@ -83,7 +91,7 @@ export function findSecretsInText(text: string, binary = false): Hit[] {
   for (const re of SECRET_PATTERNS) {
     // matchAll clones the regex, so the shared global pattern's lastIndex is never touched.
     for (const m of masked.matchAll(re)) {
-      if (hits.has(m.index) || !looksLikeSecret(m[0])) continue;
+      if (hits.has(m.index) || !isConfirmed(masked, m.index, m[0])) continue;
       hits.set(m.index, { offset: m.index, label: safeLabel(m[0]) });
     }
   }
@@ -121,21 +129,36 @@ function isBinary(bytes: Buffer): boolean {
   return bytes.subarray(0, 8192).includes(0);
 }
 
-function lineCol(text: string, offset: number): string {
-  let line = 1;
-  let start = 0;
-  for (let i = text.indexOf('\n'); i !== -1 && i < offset; i = text.indexOf('\n', i + 1)) {
-    line += 1;
-    start = i + 1;
+/** Offsets of every `\n` in `text`, ascending: computed once per file so each hit's line lookup is a binary search. */
+export function newlineOffsets(text: string): number[] {
+  const out: number[] = [];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) out.push(i);
+  return out;
+}
+
+/** `line L:C` (1-based) of `offset`, given {@link newlineOffsets} of the same text. */
+export function lineCol(newlines: readonly number[], offset: number): string {
+  let lo = 0;
+  let hi = newlines.length; // count of newlines strictly before `offset` lies in [lo, hi]
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if ((newlines[mid] ?? Infinity) < offset) lo = mid + 1;
+    else hi = mid;
   }
-  return `line ${String(line)}:${String(offset - start + 1)}`;
+  const start = lo === 0 ? 0 : (newlines[lo - 1] ?? -1) + 1;
+  return `line ${String(lo + 1)}:${String(offset - start + 1)}`;
 }
 
 /** Scans raw bytes (latin1 keeps one char per byte, so binary files and WAL frames scan safely). */
 export function scanBytes(bytes: Buffer, file: string): SecretFinding[] {
   const text = bytes.toString('latin1');
   const binary = isBinary(bytes);
-  const where = (o: number): string => (binary ? `byte ${String(o)}` : lineCol(text, o));
+  let newlines: number[] | undefined; // computed on the first text hit only
+  const where = (o: number): string => {
+    if (binary) return `byte ${String(o)}`;
+    newlines ??= newlineOffsets(text);
+    return lineCol(newlines, o);
+  };
   return [...findSecretsInText(text, binary), ...findEncodedTestKeys(bytes)].map((h) => ({ file, location: where(h.offset), label: h.label }));
 }
 
@@ -212,12 +235,12 @@ function asarMembers(node: AsarNode, prefix: string, out: string[]): string[] {
   return out;
 }
 
-/** Scans every packed member of an asar archive. Returns the number of members scanned. */
 /** Packed file members of an asar archive (`/out/main/index.js`, …): no dirs, links or unpacked members. */
 export function listAsarFiles(file: string): string[] {
   return asarMembers(asar.getRawHeader(file).header, '', []);
 }
 
+/** Scans every packed member of an asar archive. Returns the number of members scanned. */
 export function scanAsar(file: string): { findings: SecretFinding[]; members: number } {
   const members = listAsarFiles(file);
   const findings = members.flatMap((m) => scanBytes(asar.extractFile(file, m.slice(1)), `${file}:${m}`));

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { ExclusionReason, RelPath, Result } from '@relay/contracts';
-import { err, errors, ok, relPathSchema, toValidationIssues } from '@relay/contracts';
+import { err, errnoDetails, errnoOf, errors, ok, relPathSchema, toValidationIssues } from '@relay/contracts';
 
 /**
  * The contracts {@link RelPath} schema (02 primitives). It already brands its output, so this is an alias rather than
@@ -72,7 +72,30 @@ export function relationOf(parent: string, child: string, caseInsensitive: boole
 }
 
 function isErrno(e: unknown, ...codes: string[]): boolean {
-  return e instanceof Error && 'code' in e && typeof e.code === 'string' && codes.includes(e.code);
+  const code = errnoOf(e);
+  return code !== undefined && codes.includes(code);
+}
+
+/**
+ * The root cannot be opened: missing → `NOT_FOUND`; not readable (EACCES/EPERM) → `PERMISSION_DENIED unsafe_root`,
+ * the same answer {@link scanProject} gives for an unreadable root. `details.errno` keeps the cause (code only).
+ */
+function rootOpenFailed(e: unknown) {
+  if (isErrno(e, 'EACCES', 'EPERM')) {
+    return err(
+      errors.permissionDenied('unsafe_root', {
+        userMessage: 'The project folder cannot be read. Check its permissions.',
+        details: errnoDetails(e),
+      }),
+    );
+  }
+  return err(errors.notFound('project_root', {}, { details: errnoDetails(e) }));
+}
+
+/** A project file cannot be opened: `ELOOP` is a symlink escape attempt; anything else is `NOT_FOUND` + errno. */
+function fileOpenFailed(e: unknown, rel: RelPath) {
+  if (isErrno(e, 'ELOOP')) return err(errors.permissionDenied('outside_root', { details: { relPath: rel } }));
+  return err(errors.notFound('file', {}, { details: { relPath: rel, ...errnoDetails(e) } }));
 }
 
 /** realpath that falls back to `path.resolve` when the path does not exist (e.g. a userData dir not created yet). */
@@ -151,13 +174,13 @@ export async function openProjectRoot(absPath: string, opts: OpenRootOptions): P
     );
   }
   let real: string;
+  let st: fs.Stats;
   try {
     real = await fs.promises.realpath(absPath);
-  } catch {
-    return err(errors.notFound('project_root'));
+    st = await fs.promises.stat(real);
+  } catch (e) {
+    return rootOpenFailed(e);
   }
-  const st = await fs.promises.stat(real).catch(() => null);
-  if (st === null) return err(errors.notFound('project_root'));
   if (!st.isDirectory()) {
     return err(errors.validationFailed([{ path: 'rootPath', message: 'The project path is not a folder.', code: 'not_directory' }]));
   }
@@ -223,8 +246,7 @@ export async function resolveInside(root: ProjectRoot, rel: RelPath): Promise<Re
   try {
     real = await fs.promises.realpath(abs);
   } catch (e) {
-    if (isErrno(e, 'ELOOP')) return err(errors.permissionDenied('outside_root', { details: { relPath: rel } }));
-    return err(errors.notFound('file', {}, { details: { relPath: rel } }));
+    return fileOpenFailed(e, rel);
   }
   if (relationOf(root.realpath, real, root.caseInsensitive) !== 'inside') {
     return err(
@@ -355,8 +377,7 @@ export async function readConfined(
   try {
     fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   } catch (e) {
-    if (isErrno(e, 'ELOOP')) return err(errors.permissionDenied('outside_root', { details: { relPath: rel } }));
-    return err(errors.notFound('file', {}, { details: { relPath: rel } }));
+    return fileOpenFailed(e, rel);
   }
   try {
     const st = await fh.stat();
@@ -366,8 +387,8 @@ export async function readConfined(
     if (st.size > maxBytes) return excluded(rel, 'too_large');
     const bytes = await readHandle(fh, st.size);
     return ok({ bytes, size: bytes.byteLength, real });
-  } catch {
-    return err(errors.notFound('file', {}, { details: { relPath: rel } }));
+  } catch (e) {
+    return err(errors.notFound('file', {}, { details: { relPath: rel, ...errnoDetails(e) } }));
   } finally {
     await fh.close();
   }

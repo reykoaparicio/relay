@@ -61,8 +61,8 @@ const SCHEMA_INVALID_TEXT = '{"summary": "", "findings": "none"}';
 const scenario = (name: string, steps: readonly FakeScriptStep[], capabilityOverrides?: Partial<ModelCapabilities>): FakeScenario =>
   Object.freeze(capabilityOverrides === undefined ? { name, steps } : { name, steps, capabilityOverrides });
 
-/** Every scripted scenario, keyed by name (04 §D7 table). */
-export const FAKE_SCENARIOS: Readonly<Record<string, FakeScenario>> = Object.freeze({
+/** The scenario table; `satisfies` checks every entry while keeping the literal keys for {@link FakeScenarioName}. */
+const SCENARIOS = {
   'happy-path': scenario('happy-path', []),
   'slow-review': scenario('slow-review', [
     { match: REVIEW_INITIAL, delayMs: SLOW_REVIEW_DELAY_MS, result: { kind: 'success' } },
@@ -128,4 +128,13 @@ export const FAKE_SCENARIOS: Readonly<Record<string, FakeScenario>> = Object.fre
   overrun: scenario('overrun', [
     { match: { stepKey: 'review' }, result: { kind: 'overrun', outputTokens: OVERRUN_OUTPUT_TOKENS } },
   ]),
-});
+} satisfies Readonly<Record<string, FakeScenario>>;
+
+/** Name of a bundled scenario (each key equals its scenario's `name`; fake.test.ts checks it). */
+export type FakeScenarioName = keyof typeof SCENARIOS;
+
+/** The scenario served when none is named. */
+export const DEFAULT_FAKE_SCENARIO: FakeScenario = SCENARIOS['happy-path'];
+
+/** Every scripted scenario, keyed by name (04 §D7 table). Indexed by arbitrary strings (env/CLI input), hence Record. */
+export const FAKE_SCENARIOS: Readonly<Record<string, FakeScenario>> = Object.freeze(SCENARIOS);

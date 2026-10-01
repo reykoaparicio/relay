@@ -1,7 +1,7 @@
 // 04 §D3 mapping chain: specific-first, evaluated top to bottom, first match wins. Classification uses instanceof and
 // the tracker's mechanically recorded phase — never error-message matching (except row 10a, "prompt too long").
-import { appError, redactDeep } from '@relay/contracts';
-import type { Clock, ErrorCode, ProviderId } from '@relay/contracts';
+import { appError, errors, redactDeep } from '@relay/contracts';
+import type { AppError, Clock, ErrorCode, InternalReason, ProviderId } from '@relay/contracts';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type { DispatchPhase, ModelError, NormalizedUsage } from './types.js';
 
@@ -20,6 +20,25 @@ export interface SdkErrorClasses {
   readonly BadRequestError: ErrorClass;
   readonly UnprocessableEntityError: ErrorClass;
   readonly InternalServerError: ErrorClass;
+}
+
+/**
+ * Picks the chain's classes from an SDK that exports them under these names (the Anthropic and OpenAI client
+ * classes carry them as statics), so each adapter does not restate the ten-entry map.
+ */
+export function sdkErrorClasses(sdk: SdkErrorClasses): SdkErrorClasses {
+  return {
+    APIError: sdk.APIError,
+    APIUserAbortError: sdk.APIUserAbortError,
+    APIConnectionError: sdk.APIConnectionError,
+    RateLimitError: sdk.RateLimitError,
+    AuthenticationError: sdk.AuthenticationError,
+    PermissionDeniedError: sdk.PermissionDeniedError,
+    NotFoundError: sdk.NotFoundError,
+    BadRequestError: sdk.BadRequestError,
+    UnprocessableEntityError: sdk.UnprocessableEntityError,
+    InternalServerError: sdk.InternalServerError,
+  };
 }
 
 /** Everything the chain needs besides the error itself. */
@@ -102,6 +121,8 @@ interface Mapped {
   readonly phase: DispatchPhase;
   readonly details?: Record<string, unknown>;
   readonly retryAfterMs?: number;
+  /** For `INTERNAL` rows: the closed reason ({@link errors.internal}). */
+  readonly internalReason?: InternalReason;
 }
 
 function isInstance(err: unknown, cls: ErrorClass): boolean {
@@ -148,7 +169,7 @@ function classify(err: unknown, ctx: MapErrorContext): Mapped {
   const { tracker, classes: c } = ctx;
   // Row 1: our AbortSignal. The engine treats details.aborted as cancellation, not as an error.
   if (ctx.aborted === true || isInstance(err, c.APIUserAbortError)) {
-    return { code: 'INTERNAL', phase: tracker.phase, details: { aborted: true } };
+    return { code: 'INTERNAL', phase: tracker.phase, internalReason: 'aborted' };
   }
   // Row 2: any failure after the first body byte of a 2xx stream (SSE error event, drop, parse failure).
   if (tracker.firstByteAt !== undefined) return { code: 'REQUEST_OUTCOME_UNKNOWN', phase: 'responded_partial' };
@@ -169,8 +190,20 @@ function classify(err: unknown, ctx: MapErrorContext): Mapped {
   }
   // Anything else (a non-SDK error). Before dispatch nothing left the machine; after dispatch the outcome is unknown.
   const errorName = err instanceof Error ? err.name : typeof err;
-  if (tracker.phase === 'not_sent') return { code: 'INTERNAL', phase: 'not_sent', details: { errorName } };
+  if (tracker.phase === 'not_sent') {
+    return { code: 'INTERNAL', phase: 'not_sent', internalReason: 'provider_call_failed_before_dispatch', details: { errorName } };
+  }
   return { code: 'REQUEST_OUTCOME_UNKNOWN', phase: tracker.phase, details: { errorName } };
+}
+
+/**
+ * The AppError of a mapped row. INTERNAL rows go through {@link errors.internal} (closed reason; `aborted` keeps
+ * `details.aborted: true` for the engine), then keep the provider diagnostics (providerId, partial usage, ids).
+ */
+function errorFor(mapped: Mapped, details: Record<string, unknown>): AppError {
+  if (mapped.code !== 'INTERNAL') return appError(mapped.code, { details });
+  const internal = errors.internal(undefined, mapped.internalReason);
+  return { ...internal, details: { ...details, ...internal.details } };
 }
 
 /**
@@ -197,7 +230,7 @@ export function mapProviderError(err: unknown, ctx: MapErrorContext): ModelError
   const providerRequestId = ctx.tracker.requestId ?? apiView?.requestId;
   return {
     kind: 'error',
-    error: appError(mapped.code, { details }),
+    error: errorFor(mapped, details),
     phase: mapped.phase,
     ...(mapped.retryAfterMs === undefined ? {} : { retryAfterMs: mapped.retryAfterMs }),
     ...(providerRequestId === undefined ? {} : { providerRequestId }),

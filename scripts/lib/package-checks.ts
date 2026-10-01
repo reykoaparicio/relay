@@ -1,6 +1,7 @@
 // Pure checks for `verify-package` (13 §M1). Readers (asar listing, file contents, fuse wire, codesign output, DB facts)
 // are injected so the checks are unit-testable without a packaged build.
 import { createHash } from 'node:crypto';
+import { workflowSpecSchema } from '@relay/contracts';
 
 export interface CheckResult {
   readonly name: string;
@@ -99,22 +100,28 @@ export interface SeedFacts {
   readonly template: { readonly specJson: string; readonly promptsJson: string } | null;
 }
 
-interface ModelStep {
-  readonly id?: unknown;
-  readonly kind?: unknown;
-  readonly instructionVersion?: unknown;
+function parseJsonOrUndefined(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
-/** sha256 of every model step's prompt text; '' when a step's prompt is missing or empty. */
+/**
+ * sha256 of every model step's prompt text, keyed by step id; '' when a step's prompt is missing or empty. A spec
+ * that is not a valid workflow spec (contracts `workflowSpecSchema`) yields no steps, which the caller reports.
+ */
 export function promptShasByStep(specJson: string, promptsJson: string): Map<string, string> {
-  const spec = JSON.parse(specJson) as { steps?: ModelStep[] };
-  const prompts = JSON.parse(promptsJson) as Record<string, unknown>;
+  const spec = workflowSpecSchema.safeParse(parseJsonOrUndefined(specJson));
+  const raw = parseJsonOrUndefined(promptsJson);
+  const prompts: Readonly<Record<string, unknown>> = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const out = new Map<string, string>();
-  for (const step of spec.steps ?? []) {
+  if (!spec.success) return out;
+  for (const step of spec.data.steps) {
     if (step.kind !== 'model') continue;
-    const text = typeof step.instructionVersion === 'string' ? prompts[step.instructionVersion] : undefined;
-    const key = typeof step.id === 'string' ? step.id : String(step.instructionVersion);
-    out.set(key, typeof text === 'string' && text.trim() !== '' ? createHash('sha256').update(text).digest('hex') : '');
+    const text = prompts[step.instructionVersion];
+    out.set(step.id, typeof text === 'string' && text.trim() !== '' ? createHash('sha256').update(text).digest('hex') : '');
   }
   return out;
 }

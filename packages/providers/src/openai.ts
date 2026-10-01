@@ -1,74 +1,38 @@
 // 04 §D5: OpenAI Responses API adapter (`openai` SDK 7.25). SDK objects never leave this file (§8.3).
 import OpenAI from 'openai';
-import { RelayError, errors } from '@relay/contracts';
-import type { Clock, Effort, ModelCapabilities, ModelPrices, ProviderId } from '@relay/contracts';
-import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
-import { connectionTestRequest } from './connection-test.js';
+import { PROVIDER_REQUEST_TIMEOUT_MS, RelayError } from '@relay/contracts';
+import type { Effort, ModelCapabilities, ModelPrices, ProviderId } from '@relay/contracts';
+import { emitProgress, emitResponseId, guardListener, progressTokens, startTrackedCall } from './adapter-kit.js';
+import { findCatalogEntry } from './catalog.js';
+import { catalogCapabilities, estimateWith, testConnectionAtLowestEffort } from './catalog-facet.js';
 import { mapProviderError } from './errors.js';
-import type { SdkErrorClasses } from './errors.js';
-import { buildEstimate, conservativeInputTokens, localEstimate } from './estimate.js';
-import { NOOP_LOGGER, safeHook } from './safe-hook.js';
+import { OPENAI_ERRORS, OPENAI_SERVICE_TIER, reconcileResult, toResult } from './openai-results.js';
+import type { ResponseLike } from './openai-results.js';
+import { NOOP_LOGGER } from './safe-hook.js';
 import { assertStrictCompatible } from './strict-schema.js';
 import { createTrackedFetch } from './tracked-fetch.js';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type {
   EstimateContext,
   GenerateContext,
-  Logger,
   ModelRequest,
   ModelResult,
   ProviderAdapter,
+  ProviderAdapterOptions,
   ReconciliationResult,
   UsageEstimate,
 } from './types.js';
 import { normalizeOpenAIUsage } from './usage.js';
-import type { OpenAIUsageLike } from './usage.js';
 
-/** Factory options. `fetch` is the injected base fetch; when omitted, `globalThis.fetch` is read at call time. */
-export interface OpenAIAdapterOptions {
-  readonly clock: Clock;
-  readonly logger?: Logger;
-  readonly fetch?: typeof fetch;
-}
+export { OPENAI_SERVICE_TIER, isPriceTierMismatch } from './openai-results.js';
 
-const REQUEST_TIMEOUT_MS = 600_000;
+/** Factory options (the shared {@link ProviderAdapterOptions}). */
+export type OpenAIAdapterOptions = ProviderAdapterOptions;
+
 /** Explicit base URL so `OPENAI_BASE_URL` in the environment can never redirect requests (or keys). */
 const API_BASE_URL = 'https://api.openai.com/v1';
-/** Rough chars-per-token used only for progress display (never for money). */
-const PROGRESS_CHARS_PER_TOKEN = 4;
 
-const OPENAI_ERRORS: SdkErrorClasses = {
-  APIError: OpenAI.APIError,
-  APIUserAbortError: OpenAI.APIUserAbortError,
-  APIConnectionError: OpenAI.APIConnectionError,
-  RateLimitError: OpenAI.RateLimitError,
-  AuthenticationError: OpenAI.AuthenticationError,
-  PermissionDeniedError: OpenAI.PermissionDeniedError,
-  NotFoundError: OpenAI.NotFoundError,
-  BadRequestError: OpenAI.BadRequestError,
-  UnprocessableEntityError: OpenAI.UnprocessableEntityError,
-  InternalServerError: OpenAI.InternalServerError,
-};
-
-// Structural views of the SDK response/events, so SDK types stay inside this module.
-interface ContentLike {
-  readonly type: string;
-  readonly text?: string;
-  readonly refusal?: string;
-}
-interface OutputItemLike {
-  readonly type: string;
-  readonly content?: readonly ContentLike[] | null;
-}
-interface ResponseLike {
-  readonly id: string;
-  readonly status?: string | null;
-  readonly output?: readonly OutputItemLike[] | null;
-  readonly usage?: OpenAIUsageLike | null;
-  readonly incomplete_details?: { readonly reason?: string | null } | null;
-  readonly error?: unknown;
-  readonly service_tier?: string | null;
-}
+// Structural view of the SDK stream events, so SDK types stay inside the openai modules.
 interface StreamEventLike {
   readonly type: string;
   readonly response?: ResponseLike;
@@ -120,11 +84,6 @@ export function mapEffort(effort: Effort, capabilities: Pick<ModelCapabilities, 
   return effort; // Relay's levels are a subset of OpenAI's ReasoningEffort ('none'|'minimal'|'low'|…|'max')
 }
 
-/**
- * The only service tier Relay requests: the catalog prices are the standard (`default`) tier. `auto` would let a project
- * setting route calls to flex/priority/scale tiers at different prices; the response echoes the tier actually used.
- */
-export const OPENAI_SERVICE_TIER = 'default' as const;
 
 /**
  * Headers that pin authentication per request. `RequestOptions.headers` are applied LAST by the SDK, after
@@ -145,12 +104,6 @@ const STRIPPED_ENV_HEADERS: Readonly<Record<string, null>> = Object.freeze({
   'OpenAI-Organization': null,
   'OpenAI-Project': null,
 });
-
-/** Whether a response's reported `service_tier` means it was billed at other than the standard (catalog) prices. */
-export function isPriceTierMismatch(serviceTier: string | null | undefined): boolean {
-  // Absent: the tier was not reported (the request asked for `default`); only an explicit other tier is a mismatch.
-  return serviceTier != null && serviceTier !== OPENAI_SERVICE_TIER;
-}
 
 /** Request body per 04 §D5. Only attemptId + runId are sent as metadata; stepKey/purpose never leave the machine. */
 function requestParams(req: ModelRequest, effort: Effort | undefined) {
@@ -180,29 +133,6 @@ export function openAISchemaName(name: string): string {
   return cleaned === '' ? 'output' : cleaned;
 }
 
-function messageContents(resp: ResponseLike): ContentLike[] {
-  return (resp.output ?? []).filter((o) => o.type === 'message').flatMap((o) => [...(o.content ?? [])]);
-}
-
-function outputText(resp: ResponseLike): string {
-  return messageContents(resp)
-    .filter((c) => c.type === 'output_text')
-    .map((c) => c.text ?? '')
-    .join('');
-}
-
-function hasRefusal(resp: ResponseLike): boolean {
-  return messageContents(resp).some((c) => c.type === 'refusal');
-}
-
-function tryParseJson(text: string): unknown {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
 function deltaLength(delta: unknown): number {
   return typeof delta === 'string' ? delta.length : 0;
 }
@@ -228,7 +158,7 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
       baseURL: API_BASE_URL,
       defaultHeaders: { ...STRIPPED_ENV_HEADERS },
       maxRetries: 0,
-      timeout: REQUEST_TIMEOUT_MS,
+      timeout: PROVIDER_REQUEST_TIMEOUT_MS, // ADR-013: the engine owns every retry; one HTTP call = one Attempt
       fetch: trackedFetch,
       logLevel: 'off',
     });
@@ -242,100 +172,37 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     return entry === undefined ? req.effort : mapEffort(req.effort, entry.capabilities);
   };
 
-  const requestIdOf = (tracker: DispatchTracker, sdkRequestId: string | null | undefined): string | undefined =>
-    tracker.requestId ?? sdkRequestId ?? undefined;
-
   const onEvent = (event: StreamEventLike, state: CallState, ctx: GenerateContext, tracker: DispatchTracker, startedAt: number): void => {
     if (LIFECYCLE_EVENTS.has(event.type) && event.response !== undefined) {
       state.latest = event.response;
       if (TERMINAL_EVENTS.has(event.type)) state.terminal = event.response;
     }
     if (event.type === 'response.created' && event.response !== undefined) {
-      const providerResponseId = event.response.id;
-      state.providerResponseId = providerResponseId;
-      const providerRequestId = requestIdOf(tracker, undefined);
-      safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId, ...(providerRequestId === undefined ? {} : { providerRequestId }) }), logger);
+      state.providerResponseId = event.response.id;
+      // Only the tracked fetch's `x-request-id` exists this early (the SDK's `_request_id` arrives with the final response).
+      emitResponseId(ctx, logger, event.response.id, tracker.requestId);
       return;
     }
     if (event.type !== 'response.output_text.delta' && event.type !== 'response.refusal.delta') return;
     state.outputChars += deltaLength(event.delta);
-    const outputTokensSoFar = Math.ceil(state.outputChars / PROGRESS_CHARS_PER_TOKEN);
-    safeHook('onProgress', () => ctx.hooks?.onProgress?.({ outputTokensSoFar, elapsedMs: clock.now() - startedAt }), logger);
-  };
-
-  /** D3 row 2: a terminal `response.failed`, or a stream that ended without a terminal status, after the first byte. */
-  const unknownOutcome = (resp: ResponseLike, tracker: DispatchTracker, aborted: boolean): ModelResult => {
-    const status = resp.status ?? 'none';
-    const body = resp.error ?? { status };
-    const partialUsage = resp.usage == null ? undefined : normalizeOpenAIUsage(resp.usage);
-    return mapProviderError(new OpenAI.APIError(undefined, body, `response ${status}`, undefined), {
-      providerId: 'openai',
-      tracker,
-      classes: OPENAI_ERRORS,
-      clock,
-      aborted,
-      providerResponseId: resp.id,
-      ...(partialUsage === undefined ? {} : { partialUsage }),
-    });
-  };
-
-  const toResult = (resp: ResponseLike, tracker: DispatchTracker, sdkRequestId: string | null | undefined, aborted: boolean): ModelResult => {
-    const usage = normalizeOpenAIUsage(resp.usage);
-    const requestId = requestIdOf(tracker, sdkRequestId);
-    const extra = {
-      rawUsage: resp.usage ?? null,
-      providerResponseId: resp.id,
-      ...(requestId === undefined ? {} : { providerRequestId: requestId }),
-      // A terminal response without `usage` must not read as a known $0 (the zeros above are placeholders).
-      ...(resp.usage == null ? { usageKnown: false } : {}),
-      ...(isPriceTierMismatch(resp.service_tier) ? { priceTierMismatch: true } : {}),
-    };
-    const rawText = outputText(resp);
-    if (resp.status === 'completed') {
-      if (hasRefusal(resp)) return { kind: 'refused', category: 'refusal', usage, ...extra };
-      const now = clock.now();
-      const start = tracker.dispatchedAt ?? now;
-      return {
-        kind: 'success',
-        json: tryParseJson(rawText),
-        rawText,
-        usage,
-        stopReason: 'end_turn',
-        latencyMs: now - start,
-        ...(tracker.firstByteAt === undefined ? {} : { firstByteMs: tracker.firstByteAt - start }),
-        ...extra,
-      };
-    }
-    if (resp.status === 'incomplete') {
-      const reason = resp.incomplete_details?.reason ?? 'unknown';
-      if (reason === 'content_filter') return { kind: 'refused', category: 'content_filter', usage, ...extra };
-      if (reason === 'max_output_tokens') return { kind: 'truncated', rawText, usage, ...extra };
-      return { kind: 'truncated', rawText, usage, rawStopReason: `incomplete:${reason}`, ...extra };
-    }
-    return unknownOutcome(resp, tracker, aborted); // failed / cancelled / in_progress / queued / missing
+    emitProgress(ctx, logger, clock, startedAt, progressTokens(state.outputChars));
   };
 
   const generate = async (req: ModelRequest, ctx: GenerateContext): Promise<ModelResult> => {
     const effort = assertRequest(req);
-    const startedAt = clock.now();
-    const { fetch: trackedFetch, tracker } = createTrackedFetch(baseFetch(), {
-      clock,
-      logger,
-      onDispatched: () => ctx.hooks?.onDispatched?.(),
-    });
+    const { trackedFetch, tracker, startedAt } = startTrackedCall(baseFetch(), clock, logger, ctx);
     const state: CallState = { outputChars: 0 };
     try {
       const stream = makeClient(ctx.apiKey, trackedFetch).responses.stream(requestParams(req, effort), {
         signal: ctx.signal,
         headers: pinnedAuthHeaders(ctx.apiKey),
       });
-      stream.on('event', (event) => {
-        try {
+      stream.on(
+        'event',
+        guardListener(logger, (event: StreamEventLike) => {
           onEvent(event, state, ctx, tracker, startedAt);
-        } catch (err) {
-          logger.warn('provider.stream_listener_failed', { errorName: err instanceof Error ? err.name : typeof err });
-        }
-      });
+        }),
+      );
       let final: (ResponseLike & { readonly _request_id?: string | null }) | undefined;
       try {
         final = await stream.finalResponse();
@@ -346,7 +213,7 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
       }
       const resp = state.terminal ?? final;
       if (resp === undefined) throw new Error('stream ended without a response');
-      return toResult(resp, tracker, final?._request_id, ctx.signal.aborted);
+      return toResult(resp, { tracker, clock, aborted: ctx.signal.aborted, sdkRequestId: final?._request_id });
     } catch (err) {
       return mapProviderError(err, {
         providerId: 'openai',
@@ -370,25 +237,10 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     return res.input_tokens;
   };
 
-  const estimate = async (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> => {
-    const entry = findCatalogEntry('openai', req.modelId);
-    const version = priceCatalogVersionFor('openai', req.modelId, prices, ctx?.priceCatalogVersion);
-    if (ctx?.apiKey !== undefined && entry?.capabilities.supportsTokenCounting === true) {
-      try {
-        const inputTokens = await countTokens(req, ctx.apiKey, ctx.signal);
-        return buildEstimate(inputTokens, req, prices, 'provider_count', version);
-      } catch (err) {
-        logger.warn('provider.count_tokens_failed', { providerId: 'openai', errorName: err instanceof Error ? err.name : typeof err });
-        // Price cliff (catalog `maxInputTokens`, e.g. 272K for gpt-6.1-sol): the chars/3.2 heuristic can undercount
-        // dense scripts (CJK ≈ 1+ token per character) and slip a long-context prompt past capability validation into
-        // the 2x tier. Without a provider count, bound it at one token per UTF-16 code unit instead.
-        if (entry.capabilities.maxInputTokens !== undefined) {
-          return buildEstimate(conservativeInputTokens(req), req, prices, 'local_estimate', version);
-        }
-      }
-    }
-    return localEstimate(req, prices, version);
-  };
+  // The price cliff (gpt-6.1-sol bills prompts above 272K at 2x input) is `priceCliffInputTokens` in the catalog;
+  // `estimateWith` uses the conservative bound on a count failure for such models (04 ADR note "Count-failure fallback").
+  const estimate = (req: ModelRequest, prices: ModelPrices, ctx?: EstimateContext): Promise<UsageEstimate> =>
+    estimateWith({ providerId: 'openai', logger, countTokens }, req, prices, ctx);
 
   const reconcile = async (
     ids: { readonly providerResponseId: string },
@@ -405,59 +257,19 @@ export function createOpenAIAdapter(opts: OpenAIAdapterOptions): ProviderAdapter
     } catch (err) {
       if (err instanceof OpenAI.NotFoundError) return { kind: 'not_found' };
       const mapped = mapProviderError(err, { providerId: 'openai', tracker, classes: OPENAI_ERRORS, clock, aborted: ctx.signal.aborted });
-      throw new RelayError(mapped.error);
+      throw new RelayError(mapped.error, { cause: err });
     }
-    const usage = resp.usage == null ? undefined : normalizeOpenAIUsage(resp.usage);
-    // `usageKnown: false` keeps the liability: a missing usage block is NOT a known $0 (04 §D5).
-    const usageKnown = usage !== undefined;
-    switch (resp.status) {
-      case 'completed':
-        return {
-          kind: 'completed',
-          json: tryParseJson(outputText(resp)),
-          usage: usage ?? normalizeOpenAIUsage(null),
-          rawUsage: resp.usage ?? null,
-          usageKnown,
-        };
-      case 'queued':
-      case 'in_progress':
-        return { kind: 'in_progress' };
-      case 'failed':
-      case 'cancelled':
-      case 'incomplete':
-      case null:
-      case undefined:
-      default:
-        // failed / cancelled / incomplete: no usable output; the usage (if any) settles the liability, otherwise the
-        // engine keeps it (usageKnown: false), since the provider may still have billed the call.
-        return usage === undefined ? { kind: 'failed', usageKnown } : { kind: 'failed', usage, usageKnown };
-    }
+    return reconcileResult(resp);
   };
-
-  const capabilities = (modelId: string): Promise<ModelCapabilities> => {
-    const entry = findCatalogEntry('openai', modelId);
-    if (entry === undefined) {
-      return Promise.reject(new RelayError(errors.modelUnsupported({ providerId: 'openai', modelId, reason: 'not_in_catalog' })));
-    }
-    return Promise.resolve(entry.capabilities);
-  };
-
-  const lowestEffort = (modelId: string): Effort | undefined => findCatalogEntry('openai', modelId)?.capabilities.effortLevels[0];
 
   return {
     providerId: 'openai',
-    capabilities,
+    capabilities: (modelId) => catalogCapabilities('openai', modelId),
     estimate,
     generate,
     reconcile,
-    testConnection: (ctx) => {
-      // Reasoning is always on for current models: the lowest listed effort plus a 256-token allowance
-      // (OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS, set by connectionTestRequest) lets the model finish its answer; a
-      // `truncated` answer still proves the key and model work.
-      const effort = lowestEffort(ctx.modelId);
-      const req = connectionTestRequest('openai', ctx.modelId);
-      return generate(effort === undefined ? req : { ...req, effort }, { apiKey: ctx.apiKey, signal: ctx.signal });
-    },
+    // Reasoning is always on: the lowest listed effort + OPENAI_CONNECTION_TEST_MAX_OUTPUT_TOKENS (connectionTestRequest).
+    testConnection: (ctx) => testConnectionAtLowestEffort('openai', generate, ctx),
   };
 }
 

@@ -8,8 +8,6 @@ import { workflowLimitsSchema } from './run.js';
 
 /** A workflow version selector: a validated version number or the editable draft. */
 export const workflowVersionSelectorSchema = z.union([z.number().int().positive(), z.literal('draft')]);
-/** Workflow version selector. */
-export type WorkflowVersionSelector = z.infer<typeof workflowVersionSelectorSchema>;
 
 /** `workflows.list` row. */
 export const workflowSummarySchema = z.object({

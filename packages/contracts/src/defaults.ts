@@ -106,3 +106,12 @@ export const RUNNER_SHUTDOWN_MAX_GRACE_MS = 10_000;
 
 /** 02 §B5: `attempt.stream_progress` events are throttled to at most one per 500 ms (§5.7). */
 export const STREAM_PROGRESS_THROTTLE_MS = 500;
+
+/**
+ * 04 §D4/§D5: client-side timeout of one provider HTTP call (10 min, covers long reasoning streams). ADR-013: the SDK
+ * never retries, so this bounds one Attempt. Not applied to Gemini (its SDK would mutate the global undici timeouts).
+ */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 600_000;
+
+/** §5.7: rough chars-per-token used only for `onProgress` output-token display while streaming (never for money). */
+export const PROGRESS_CHARS_PER_TOKEN = 4;

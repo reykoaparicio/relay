@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { createTemplateRegistry } from '@relay/templates';
 import {
   checkAdhocSignature,
   checkForbiddenMembers,
@@ -90,14 +91,11 @@ describe('checkAdhocSignature', () => {
 });
 
 describe('seed facts', () => {
-  const spec = JSON.stringify({
-    steps: [
-      { id: 'review', kind: 'model', instructionVersion: 'reviewer.v1' },
-      { id: 'approve', kind: 'approval' },
-      { id: 'plan', kind: 'model', instructionVersion: 'planner.v1' },
-    ],
-  });
-  const prompts = JSON.stringify({ 'reviewer.v1': 'You review.', 'planner.v1': 'You plan.' });
+  // The real bundled workflow (a valid contracts workflowSpec), with test prompt texts.
+  const bundled = createTemplateRegistry().get('review-propose-fix');
+  const spec = JSON.stringify(bundled);
+  const modelSteps = bundled.steps.flatMap((s) => (s.kind === 'model' ? [s] : []));
+  const prompts = JSON.stringify(Object.fromEntries(modelSteps.map((s) => [s.instructionVersion, `You are ${s.id}.`])));
   const facts: SeedFacts = {
     schemaVersion: 1,
     runnerLeaseHeartbeatAt: 1,
@@ -109,8 +107,14 @@ describe('seed facts', () => {
   it('hashes the prompt of every model step', () => {
     const shas = promptShasByStep(spec, prompts);
 
-    expect([...shas.keys()]).toEqual(['review', 'plan']);
-    expect(shas.get('plan')).toBe(createHash('sha256').update('You plan.').digest('hex'));
+    expect([...shas.keys()]).toEqual(modelSteps.map((s) => s.id));
+    expect(shas.get('plan')).toBe(createHash('sha256').update('You are plan.').digest('hex'));
+  });
+
+  it('treats a spec that is not a valid workflow spec, or non-JSON prompts, as having no hashed prompts', () => {
+    expect(promptShasByStep(JSON.stringify({ steps: [{ id: 'x', kind: 'model', instructionVersion: 'reviewer.v1' }] }), prompts).size).toBe(0);
+    expect(promptShasByStep('{not json', prompts).size).toBe(0);
+    expect([...promptShasByStep(spec, '[1,2]').values()].every((sha) => sha === '')).toBe(true);
   });
 
   it('passes a fully seeded database', () => {
@@ -129,7 +133,7 @@ describe('seed facts', () => {
     const failed = checkSeedFacts(bad, 1).filter((c) => !c.ok);
 
     expect(failed.map((c) => c.name)).toEqual(['runner ready', 'schema version', 'model catalog', 'review-propose-fix v1 prompts']);
-    expect(failed.at(-1)?.detail).toBe('empty prompt for review, plan');
+    expect(failed.at(-1)?.detail).toBe(`empty prompt for ${modelSteps.map((s) => s.id).join(', ')}`);
     expect(checkSeedFacts({ ...facts, template: null }, 1).at(-1)?.ok).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { idSchema } from '../ids.js';
+import { idBodyPattern, idSchema } from '../ids.js';
 import { epochMsSchema } from '../primitives.js';
 import { credentialStorageModeSchema, errorCodeSchema, providerIdSchema } from '../status.js';
 
@@ -9,7 +9,7 @@ export const REDACTED_LABEL_MAX = 40;
 /** Vault file of an OS-protected key, relative to userData (never the key itself; §12.2). */
 export const vaultFileSchema = z
   .string()
-  .regex(/^secrets\/crd_[0-9A-HJKMNP-TV-Z]{26}\.bin$/, 'must be secrets/crd_<ULID>.bin');
+  .regex(new RegExp(`^secrets/${idBodyPattern('credentialRef')}\\.bin$`), 'must be secrets/crd_<ULID>.bin');
 
 /** §12.2 ProviderCredentialRef: metadata only; the raw credential is never here. */
 export const credentialRefSchema = z.object({

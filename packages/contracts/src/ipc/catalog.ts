@@ -78,10 +78,18 @@ export const RUNNER_CHANNELS: readonly RunnerChannel[] = [
   ...INTERNAL_OPERATION_LIST.map((d) => d.channel as RunnerChannel),
 ];
 
+/**
+ * `items` as a non-empty tuple (what `z.enum` requires).
+ * @throws Error when `items` is empty: an invariant of a static table, checked once at module load.
+ */
+function nonEmpty<T>(items: readonly T[], what: string): readonly [T, ...T[]] {
+  const [first, ...rest] = items;
+  if (first === undefined) throw new Error(`${what} must not be empty`);
+  return [first, ...rest];
+}
+
 /** Schema accepting exactly the {@link RunnerChannel}s (runner protocol, B7). */
-export const runnerChannelSchema: z.ZodType<RunnerChannel> = z.enum(
-  RUNNER_CHANNELS as unknown as readonly [RunnerChannel, ...RunnerChannel[]],
-);
+export const runnerChannelSchema: z.ZodType<RunnerChannel> = z.enum(nonEmpty(RUNNER_CHANNELS, 'RUNNER_CHANNELS'));
 
 const CHANNEL_INDEX: ReadonlyMap<string, AnyOperationDef> = new Map(
   OPERATION_LIST.map((d) => [d.channel, d]),
