@@ -186,7 +186,7 @@ export function LedgerPanel(p: LedgerPanelProps) {
           Ledger exported to <span className="mono">{p.exportedTo}</span>.
         </p>
       )}
-      <ActionErrorNotice error={p.exportError} fallback="The ledger is unchanged; retry the export." />
+      <ActionErrorNotice error={p.exportError} />
       {p.error !== null && p.error !== undefined ? (
         <ActionErrorNotice error={p.error} />
       ) : p.entries === undefined ? (

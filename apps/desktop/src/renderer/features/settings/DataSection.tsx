@@ -132,7 +132,7 @@ function BackupCard() {
           </p>
         </InlineAlert>
       )}
-      <MutationError error={backup.error} unavailableHint="Copy the data folder while Relay is closed to back it up by hand." />
+      <MutationError error={backup.error} />
     </section>
   );
 }
@@ -190,7 +190,7 @@ function ExportsCard({ project, explicit }: { readonly project: Project | undefi
             Export project…
           </Button>
         </div>
-        <MutationError error={projectExport.error} unavailableHint="Project export is not available in this build." />
+        <MutationError error={projectExport.error} />
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
           <Field label="Ledger month (CSV)" id={monthId} hint="Every ledger entry of the project in that month, tracked by Relay.">
             {(control) => (
@@ -214,7 +214,7 @@ function ExportsCard({ project, explicit }: { readonly project: Project | undefi
             Export ledger (CSV)…
           </Button>
         </div>
-        <MutationError error={ledgerExport.error} unavailableHint="Each run's ledger can still be read in the run inspector." />
+        <MutationError error={ledgerExport.error} />
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div className="stack" style={{ gap: 2 }}>
             <strong>Diagnostics (redacted)</strong>
@@ -264,7 +264,7 @@ function ExportsCard({ project, explicit }: { readonly project: Project | undefi
             </ul>
           </div>
         </div>
-        <MutationError error={diagnosticsExport.error} unavailableHint="The Diagnostics section shows the same information on screen." />
+        <MutationError error={diagnosticsExport.error} />
       </Dialog>
     </section>
   );
@@ -341,7 +341,7 @@ function RetentionCard({ retentionDays, setupAllowance }: { readonly retentionDa
             }}
           />
         </div>
-        <MutationError error={save.error} unavailableHint="The previous settings stay in effect." />
+        <MutationError error={save.error} />
         <div className="actions">
           <Button type="submit" variant="primary" pending={save.isPending} disabled={!changed}>
             Save data settings
@@ -431,7 +431,7 @@ function PurgeCard({ project, explicit }: { readonly project: Project; readonly 
         <Field label={`Type “${PURGE_PHRASE}” to confirm purging the history of “${project.name}”`} id={phraseId}>
           {(control) => <TextInput {...control} value={phrase} onValueChange={setPhrase} autoComplete="off" />}
         </Field>
-        <MutationError error={purge.error} unavailableHint="Nothing was purged." />
+        <MutationError error={purge.error} />
       </Dialog>
     </section>
   );

@@ -179,7 +179,6 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
           {error === null || error === undefined ? null : (
             <MutationError
               error={error}
-              unavailableHint="The suggestion is unchanged and still excluded from runs."
               names={{ recordTitle: titleOf }}
               handlers={{ reload }}
               conflictActions={(conflictCopy(error)?.conflictsWith ?? []).map((id) => (

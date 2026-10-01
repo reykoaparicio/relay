@@ -213,7 +213,6 @@ export function MemoryDetail(props: MemoryDetailProps) {
       <p className="subtle small">No secrets or provider credentials belong in memory.</p>
       <MutationError
         error={error}
-        unavailableHint="The record is unchanged."
         {...(props.onReload === undefined ? {} : { handlers: { reload: props.onReload } })}
         {...(props.titleOf === undefined ? {} : { names: { recordTitle: props.titleOf } })}
       />

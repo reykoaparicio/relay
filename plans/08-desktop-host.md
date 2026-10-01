@@ -24,11 +24,13 @@ Boot order (this order is binding and is unit-tested in `index.test.ts`):
    5. `supervisor.start()` (H6). A rejected `start()` is caught and logged; the supervisor state becomes `unavailable`, the window still shows, and the renderer displays the diagnostics banner (runner-routed ops return `RUNNER_UNAVAILABLE`).
 5. **Quit:** `app.on('before-quit', e => …)` guarded by a module-level `quitting` flag. On the first call: `e.preventDefault()` → `quitting = true` → `await supervisor.shutdown({ graceMs: 5000 })` (lets an in-flight checkpoint commit; errors are logged, never block) → flush logs → `app.quit()`. The second `before-quit` sees `quitting === true` and returns without preventing, so quit is never re-entered or blocked.
 
-`app-paths.ts` exports `appPaths()` → `{ userData, artifacts, backups, logs, exports, secrets, samples, dbFile: 'relay.sqlite' }`. It never hardcodes a home path (§12.3).
+`app-paths.ts` exports `appPaths(userData, samples)` → `{ userData, artifacts, backups, logs, exports, secrets, samples, dbFile: join(userData, 'relay.sqlite') }`, where `samples = samplesRoot(userData, app.getPath('documents'), userDataOverridden)` (H10: outside userData). It never hardcodes a home path (§12.3).
 
 Window: `new BrowserWindow({ width: 1440, height: 940, minWidth: 1024, minHeight: 700, show: false, backgroundColor: '#0B1119', webPreferences: { preload, contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false, spellcheck: false } })`. It shows on `ready-to-show` (avoids a white flash), independent of the runner state. DevTools are available only when `!app.isPackaged` and are **never auto-opened when `RELAY_E2E=1`** (an extra DevTools window breaks Playwright's `firstWindow()`).
 
-## H2: Preload bridge (`src/preload/index.ts`) — "small typed, validated IPC surface" (§6.3)
+## H2: Preload bridge (`src/preload/bridge.ts`, `src/preload/index.ts`) — "small typed, validated IPC surface" (§6.3)
+
+The API is built by `createRelayApi(ipcRenderer, process.platform)` in Electron-free `bridge.ts` (unit-tested with a fake `ipcRenderer`); `index.ts` only calls `contextBridge.exposeInMainWorld('relay', createRelayApi(ipcRenderer, process.platform))`. The logic is:
 
 ```ts
 import { contextBridge, ipcRenderer } from 'electron';
@@ -37,7 +39,7 @@ import { OPERATIONS, pushEventSchema, type Channel, type InputOf, type IpcResult
 const ALLOWED = new Set<string>(Object.values(OPERATIONS).map((o) => `${o.channel}`));  // INTERNAL_RUNNER_OPS are never in OPERATIONS
 const api = {
   invoke<C extends Channel>(channel: C, input: InputOf<C>): Promise<IpcResult<C>> {
-    if (!ALLOWED.has(channel)) return Promise.resolve({ ok: false, error: notAllowed(channel) });
+    if (!ALLOWED.has(channel)) return Promise.resolve({ ok: false, error: appError('PERMISSION_DENIED', { details: { reason: 'channel_not_allowed' } }) });
     return ipcRenderer.invoke(channel, input);          // main validates; preload does not trust itself
   },
   subscribe(listener: (e: PushEvent) => void): () => void {
@@ -80,29 +82,40 @@ The preload never exposes `ipcRenderer`, `require`, `process.env`, or any filesy
 A pipeline per operation, in this order (backend-patterns "middleware"). Only `OPERATIONS` are registered; `INTERNAL_RUNNER_OPS` (02 `src/ipc/internal.ts`) are **never** registered with `ipcMain` and are reachable only from main's composite handlers via `supervisor.request`.
 
 ```ts
-for (const op of Object.values(OPERATIONS)) {
-  ipcMain.handle(op.channel, async (event, raw) => {
-    const correlationId = ids.next('correlation'); const t0 = performance.now();
-    let result: IpcResult<typeof op.channel>;
+// router.ts (createIpcRouter): `register()` calls ipcMain.handle(op.channel, …) for every OPERATION; `invoke` is the pipeline.
+async function invoke(channel, event, raw): Promise<IpcEnvelope<unknown>> {
+  const correlationId = ids.next('correlation'); const t0 = now();
+  const op = byChannel.get(channel);
+  let result;
+  if (op === undefined) result = { ok: false, error: errors.notFound('channel') };          // unknown channel → NOT_FOUND
+  else {
     try {
-      assertTrustedSender(event);                                   // 1. see below → PERMISSION_DENIED
-      rateLimiter.take(op.channel, op.rateLimit);                   // 2. token bucket → RATE_LIMITED { retryAfterMs }
-      const input = op.input.safeParse(raw);                        // 3. VALIDATION_FAILED with zod issues → details.issues
-      if (!input.success) result = errResult(validationFailed(input.error));
-      else {
-        result = op.route === 'main'   ? await mainHandlers[op.channel](input.data)          // 4. route
-               : op.route === 'runner' ? await supervisor.request(op.channel, input.data)
-               :                         await composite[op.channel](input.data);         //   main+runner
-        if (!app.isPackaged && result.ok) op.output.parse(result.data);                     // 5. dev-only output contract check
-      }
+      result = await pipeline(op, event, raw);
     } catch (e) {
-      logger.error({ event: 'ipc.error', channel: op.channel, correlationId, outcome: 'error', err: redactDeep(serializeError(e)) });
-      result = errResult(internal(correlationId));                  // 6. never leak internals
+      logger.error({ event: 'ipc.error', channel, correlationId, outcome: 'error', err: redactDeep(serializeError(e)) });
+      const mapped = toAppError(e, correlationId);                  // a thrown AppError (known code) passes through as is;
+      result = { ok: false, error: mapped.code === 'INTERNAL' ? errors.internal(correlationId) : mapped }; // anything else → INTERNAL, no internals leaked
     }
-    logger.info({ event: 'ipc.op', channel: op.channel, correlationId, durationMs: performance.now() - t0,
-                  outcome: result.ok ? 'ok' : 'error', code: result.ok ? undefined : result.error.code });
-    return result;
-  });
+  }
+  logger.info({ event: 'ipc.op', channel, correlationId, durationMs: Math.round(now() - t0),
+                outcome: result.ok ? 'ok' : 'error', ...(result.ok ? {} : { code: result.error.code }) });
+  return result;
+}
+
+async function pipeline(op, event, raw) {
+  if (!isTrustedSender(event, origin)) return { ok: false, error: PERMISSION_DENIED /* untrusted_sender */ }; // 1. sender check
+  const taken = limiter.take(op.channel, op.rateLimit ?? RATE_LIMITS.default);                             // 2. token bucket
+  if (!taken.ok) return { ok: false, error: errors.rateLimited(taken.retryAfterMs) };                       //    → RATE_LIMITED
+  const input = op.input.safeParse(raw);                                                                     // 3. validation
+  if (!input.success) return { ok: false, error: errors.validationFailed(toValidationIssues(input.error.issues)) };
+  const result = op.route === 'main' ? await mainHandlers[op.channel](input.data)                          // 4. route
+               : op.route === 'runner' ? await supervisor.request(op.channel, input.data)
+               : await composite[op.channel](input.data);                                                    //    main+runner
+  if (!isPackaged) {                                                                                         // 5. dev-only checks
+    if (result.ok) op.output.parse(result.data);           // contract violation throws → INTERNAL (visible in dev)
+    else if (!documented(op, result.error.code)) logger.warn({ event: 'ipc.undocumented_error', channel: op.channel, code: result.error.code });
+  }
+  return result;
 }
 ```
 
@@ -142,12 +155,12 @@ export interface CredentialVault {
   remove(providerId): Promise<void>;
 }
 ```
-- **API verification (first task of H5):** confirm the Electron 44 `safeStorage` async API names and result shapes (`encryptStringAsync`, `decryptStringAsync` → `{ result, shouldReEncrypt }`, `isAsyncEncryptionAvailable`, `isTemporarilyUnavailable`) against the Electron 44 docs/typings and record the finding in the H5 commit. `credentials.ts` feature-detects at runtime: if the async variants are absent, it falls back to the sync `encryptString`/`decryptString` (with `shouldReEncrypt` treated as `false` and no temporary-unavailability signal). Both paths are unit-tested.
+- **API verification (done in H5, recorded in `credentials.ts`):** the Electron 44.5.1 typings have `encryptStringAsync(string) → Promise<Buffer>`, `decryptStringAsync(Buffer) → Promise<{ result, shouldReEncrypt }>` and `isAsyncEncryptionAvailable() → Promise<boolean>`. `isTemporarilyUnavailable` is **not** an Electron 44 API. `credentials.ts` feature-detects at runtime: if the async variants are absent, it falls back to the sync `encryptString`/`decryptString` (with `shouldReEncrypt` treated as `false` and no temporary-unavailability signal). Both paths are unit-tested.
 - `os_protected`:
   - Requires `safeStorage.isEncryptionAvailable()` (or the async availability check, when present) after `ready`.
   - On Linux, `getSelectedStorageBackend() !== 'basic_text'`. The basic_text backend uses a hard-coded password, so it is treated as **unavailable**. The desktop target is macOS for P0, but the check is cheap and prevents a silent downgrade.
   - Encrypt → write `secrets/<refId>.bin` with `fs.writeFile(…, { mode: 0o600, flag: 'w' })`. Decrypt on `get`. If `shouldReEncrypt` → re-encrypt and rewrite.
-  - `isTemporarilyUnavailable` (async API only) → `SECURE_STORAGE_UNAVAILABLE` (retryable).
+  - `isTemporarilyUnavailable` is not part of Electron 44's `safeStorage`. `SafeStorageLike` declares it as an optional method and `saveProtected` feature-detects it (`s.isTemporarilyUnavailable?.() === true` → `SECURE_STORAGE_UNAVAILABLE`, retryable), so with Electron 44 there is no temporary-unavailability signal and the check is a no-op. A keychain denial or failed write still fails closed (`SECURE_STORAGE_UNAVAILABLE` with `use_session_key`).
 - `session`: the key is held in a main-process `Map` only and dropped on quit. The UI labels it "Session only: re-enter after restart".
 - **Fail closed:** if the OS is unavailable and the user asked for `os_protected` → `SECURE_STORAGE_UNAVAILABLE` with nextAction `use_session_key`. **Never write plaintext** (§18.2).
 - The ref row (`provider_credential_refs`: redacted label, mode, vault file) is written by the **runner** through the internal op `providers.recordCredentialRef` (`INTERNAL_RUNNER_OPS`, never renderer-exposed), preserving the single DB writer (§6.4).
@@ -224,6 +237,7 @@ export interface RunnerSupervisor {
   - **Dev** (dev server only): the production policy plus `script-src 'sha256-<hash of the React-Refresh preamble>' http://localhost:*` (the plugin hashes the inline preamble that `@vitejs/plugin-react` injects, which is why it runs `post`) and `connect-src ws://localhost:* http://localhost:*` (HMR).
   - `frame-ancestors` is **ignored in a meta CSP**, so it is not emitted there. Framing is prevented by the navigation/window-open/webview denials below.
   - `session.defaultSession.webRequest.onHeadersReceived` sets the dev CSP header (including `frame-ancestors 'none'`) **only** for responses from the dev server when `!app.isPackaged`. Production loads via `file://` and relies on the meta tag.
+  - The dev **header** keeps `script-src 'self' 'unsafe-inline' http://localhost:*` (dev only). The React-Refresh preamble is an inline module script, every CSP in force must allow it, and the static header cannot know its hash. The meta CSP allows only the preamble's `sha256-` hash, and the browser enforces both policies, so the effective dev policy admits exactly that one inline script. Removing `'unsafe-inline'` from the header blocks the preamble and breaks dev HMR.
 - `app.on('web-contents-created')`:
   - `will-navigate` → `preventDefault()` unless the URL is the app entry.
   - `setWindowOpenHandler(() => ({ action: 'deny' }))`.
@@ -255,8 +269,10 @@ export interface RunnerSupervisor {
   mac: { target: [{ target: dir, arch: arm64 }, { target: dmg, arch: arm64 }], category: public.app-category.developer-tools,
          hardenedRuntime: false, identity: "-" }    # ad-hoc signature: arm64 macOS refuses to run unsigned code (§18.1) — VERIFY
   electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
-                   enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true }
+                   enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true,
+                   grantFileProtocolExtraPrivileges: true }   # stays enabled: see below
   ```
+  - **`GrantFileProtocolExtraPrivileges` stays enabled (decision, 2026-10-01).** The renderer loads from `file://…/out/renderer/index.html` (inside the asar when packaged), and Vite emits `<script type="module" crossorigin>` and `<link rel="stylesheet" crossorigin>`. With the fuse disabled, Chromium treats `file://` as origin `null` and blocks those loads by CORS, so the window stays blank. This was verified by flipping only this fuse on a copy of the Electron 44.5.1 binary and launching the built app: with the fuse on, the renderer mounts; with it off, `index.js` and `index.css` are blocked (`Cross origin requests are only supported for protocol schemes: … http, https`) and `#root` stays empty. Disabling the fuse needs the renderer served from a privileged custom protocol (`protocol.handle`) instead of `file://`, which is a post-P0 change. The setting is explicit in `electron-builder.yml` with this rationale.
   - **Verify task (H9, before M1 packaging):** confirm that electron-builder 26 performs an ad-hoc signature with `identity: "-"` (or find its documented equivalent), and that `codesign -dv dist/mac-arm64/Relay.app` reports `Signature=adhoc`. Record the result in the H9 commit. This is a prototype build: document the Gatekeeper warnings, and never tell users to disable protections. 13 §M1 `verify-package` asserts the ad-hoc signature.
   - **E2E runs against the unpackaged build** (`out/main/index.js`; `apps/desktop/package.json` `main` points there), because Playwright hangs when the `nodeCliInspect` fuse is disabled. The packaged app is smoke-tested separately by `scripts/verify-package.ts` (13 §M1).
 - `package.json` scripts (owned by A; requested here): `dev: electron-vite dev`, `dev:renderer: vite --config vite.renderer.config.ts`, `build: electron-vite build`, `package: electron-builder --mac --dir`.
@@ -272,13 +288,17 @@ export interface RunnerSupervisor {
 | File | Must cover |
 |---|---|
 | `main/index.test.ts` | Boot order: userData override → `requestSingleInstanceLock` → `whenReady` → `ipc.register` called **before** `createMainWindow`. `supervisor.start()` rejecting still creates and shows the window. `before-quit`: first call `preventDefault` + awaits `shutdown` then `app.quit()`; second call does not prevent (no re-entry). DevTools not opened when `RELAY_E2E=1` |
-| `ipc/router.test.ts` | Null `senderFrame` rejected. Packaged: exact renderer file URL accepted, another `file://` URL rejected, dev URL rejected. Invalid input → `VALIDATION_FAILED` with issues. Thrown error → `INTERNAL` with correlationId and no stack in the result. The rate limit returns `retryAfterMs`. Each call logs `ipc.op` with `outcome`. No `INTERNAL_RUNNER_OPS` channel is registered with `ipcMain` |
-| `ipc/handlers/composite.test.ts` | `projects.create` → `projects.createFromRoot` with the realpath and consumes the token (second use → `NOT_FOUND`). `projects.previewFiles` does not consume. `projects.export`/`ledger.export`/`artifacts.export` → the matching internal `*.exportTo` with a realpath destination; cancel → `exported: false`. `artifacts.importDiff` → `artifacts.importDiffText`. `providers.connect` → `recordCredentialRef`, and a runner failure removes the vault entry. `providers.disconnect` → `deleteCredentialRef` |
+| `ipc/router.test.ts` | Null `senderFrame` rejected. Packaged: exact renderer file URL accepted, another `file://` URL rejected, dev URL rejected. Invalid input → `VALIDATION_FAILED` with issues. Thrown error → `INTERNAL` with correlationId and no stack in the result. The rate limit returns `retryAfterMs`. Each call logs `ipc.op` with `outcome`. No `INTERNAL_RUNNER_OPS` channel is registered with `ipcMain`. Unknown channel → `NOT_FOUND`. Dev only: an output violating the catalog schema → `INTERNAL` (packaged passes it through) and an undocumented error code logs `ipc.undocumented_error` |
+| `ipc/handlers/composite.test.ts` | `projects.create` → `projects.createFromRoot` with the realpath and consumes the token (second use → `NOT_FOUND`). `projects.previewFiles` does not consume. `projects.export`/`ledger.export`/`artifacts.export` → the matching internal `*.exportTo` with a realpath destination; cancel → `exported: false`. `artifacts.importDiff` → `artifacts.importDiffText`. `providers.connect` → `recordCredentialRef`, and a runner failure removes the vault entry. `providers.disconnect` → `deleteCredentialRef`. `app.exportDiagnostics` writes a redacted file (a key seeded in a log line, an error message and an `apiKey` field never reach it). `projects.createSample` → `createFromRoot` with `isDemo: true`. `projects.previewFiles {projectId}` → `previewRoot {projectId}` without touching selections |
+| `ipc/handlers/main-handlers.test.ts` | Through the real router: `app.openExternal` https-only (non-https refused before any confirmation; the handler itself also refuses), cancel → `opened: false` and `shell.openExternal` never called, confirm → opens exactly that URL. `app.getInfo` output matches the catalog schema. `projects.pickDirectory` through the `__relayDialogs` seam returns a token + display path (never the realpath); cancel → `selection: null`; an unsafe root → `PERMISSION_DENIED` with no token |
 | `ipc/rate-limit.test.ts` | Token bucket refill math with fake timers |
 | `credentials.test.ts` | Encryption unavailable → `SECURE_STORAGE_UNAVAILABLE`. `basic_text` → unavailable. The session key is not persisted (no file written). The saved file has mode 0600. The file content ≠ plaintext key. `remove` deletes the file. Async API absent → sync `encryptString` fallback works. `shouldReEncrypt` → rewrite |
 | `runner-supervisor.test.ts` | Fake utility process + fake `MessagePortMain` that buffers until `start()`: a supervisor that omits `port1.start()` never sees `ready` (test fails without it). stdout/stderr lines are drained into the log. Waits for `ready`; no `ready` within 60 s → kill + restart. No heartbeat staleness before `ready`. Heartbeat loss after `ready` → kill → waits for exit → re-fork. 3 restarts/60 s → unavailable. `minimalEnv` sets `RELAY_USER_DATA_DIR`, `HOME`, `TMPDIR` and contains no other inherited vars; `RELAY_CRASH_AT` only with `RELAY_E2E=1`. Credential request answered; missing credential → `AUTH_REQUIRED`. Request timeout → `RUNNER_UNAVAILABLE` |
-| `dialogs.test.ts` | Selection token expiry. `validateProjectRoot` rejects `/`, the home dir, `/System/…`, `/usr/…`, `/etc` (via `/private/etc`), a root inside userData, and a root **containing** userData; accepts an `os.tmpdir()` subdir. Export dir inside a project → refused by the runner (tested in 05). `__relayDialogs` exists only with `RELAY_E2E=1`; `setStub` merges, `clear` restores native; stubbed paths still validated |
+| `dialogs.test.ts` | Selection token expiry. `validateProjectRoot` rejects `/`, the home dir, `/System/…`, `/usr/…`, `/etc` (via `/private/etc`), a root inside userData, and a root **containing** userData; accepts an `os.tmpdir()` subdir. Export dir inside a project → refused by the runner (tested in 05). `__relayDialogs` exists only with `RELAY_E2E=1`; `setStub` merges, `clear` restores native; stubbed paths still validated. `pickDiffFile` refuses a file over 1 MiB (`VALIDATION_FAILED` `too_large`) and accepts exactly 1 MiB |
 | `app-paths.test.ts` | `RELAY_USER_DATA_DIR` ignored when packaged without `RELAY_E2E` |
+| `security.test.ts` | Fake session/webContents: every permission request and check denied; `will-navigate` blocked except the app entry (exact file URL; dev origin only when unpackaged); `setWindowOpenHandler` denies; `will-attach-webview` prevented; the dev header CSP only for dev-server responses when unpackaged, none when packaged |
+| `preload-bridge.test.ts` (in `main/`: the `unit` project collects only `main`/`runner` tests) | `invoke` of a non-allowlisted channel (incl. internal runner ops) → `PERMISSION_DENIED` `channel_not_allowed` and `ipcRenderer.invoke` never called; `subscribe` drops payloads failing `pushEventSchema`; unsubscribe removes the listener |
+| `logger.test.ts`, `runner/logger.test.ts` | `formatLogLine` / the runner logger redact secret-looking values and drop sensitive keys; daily rotation at UTC midnight with an injected clock; `pruneLogs` keeps 14 days and only touches `YYYY-MM-DD.jsonl`. Temp dirs only via the ownership-guarded `main/testing/temp-dirs.ts` |
 | `samples.test.ts` | Copy skips `.env`; other files (incl. `node_modules/`, `dist/`) copied; calls `projects.createFromRoot` with `isDemo: true` |
 | `runner/compose.test.ts` | Calls `createRuntime` (mocked `@relay/engine`) with `fakeScenario` and a JSONL `callLog` at `userData/fake-call-log.jsonl` in fake mode, neither in live mode. `RELAY_CRASH_AT` parsed via F's parser only when `RELAY_E2E=1`; ignored otherwise. `ready` posted only after `engine.start()` resolves. `createRuntime` receives an `emit` function that forwards to `protocol.sendEvent` (assert: calling the captured `emit` with a push event calls `sendEvent` with it) |
 | `runner/protocol-server.test.ts` | Runner end calls `port.start()`. Invalid message ignored and logged. `op` (public and internal channels) routed to the engine. `shutdown` → `engine.stop` → `dispose` |

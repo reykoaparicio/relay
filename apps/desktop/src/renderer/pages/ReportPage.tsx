@@ -18,8 +18,7 @@ import {
   useToast,
 } from '../components/ui';
 import type { Panel } from '../components/ui';
-import { isNotImplemented, toViewError } from '../api/errors';
-import { NotAvailableNotice } from '../features/common/NotAvailableNotice';
+import { toViewError } from '../api/errors';
 import { diffStats } from '../features/outputs/OutputViews';
 import {
   ArtifactsSection,
@@ -27,7 +26,6 @@ import {
   ExportDialog,
   FindingsSection,
   LimitationsSection,
-  RunFallbackSummary,
   SummarySection,
   TerminalLead,
 } from '../features/report/ReportSections';
@@ -64,9 +62,8 @@ export function ReportPage() {
   const [exportOpen, setExportOpen] = useState<ExportWhat | null>(null);
   const bannerId = useId();
   const tab = search.get('tab') === 'patch' && patchId !== null ? 'patch' : 'report';
-  const reportUnavailable = reportQ.error !== null && isNotImplemented(reportQ.error);
 
-  useNavPerf('report', report !== undefined || reportUnavailable || (run !== undefined && run.reportArtifactId === null));
+  useNavPerf('report', report !== undefined || (run !== undefined && run.reportArtifactId === null));
 
   const setTab = useCallback(
     (id: string) => {
@@ -131,7 +128,7 @@ export function ReportPage() {
     />
   );
 
-  const loadError = runQ.error ?? (reportQ.error !== null && !reportUnavailable ? reportQ.error : null);
+  const loadError = runQ.error ?? reportQ.error;
   if (loadError !== null) {
     return (
       <>
@@ -179,16 +176,6 @@ export function ReportPage() {
     </InlineAlert>
   );
 
-  if (reportUnavailable) {
-    return (
-      <>
-        {header}
-        {notModified}
-        <NotAvailableNotice error={reportQ.error}>The report is stored with the run; the summary below comes from the run itself.</NotAvailableNotice>
-        <RunFallbackSummary run={run} />
-      </>
-    );
-  }
   if (report === undefined) {
     return (
       <>
@@ -236,16 +223,12 @@ export function ReportPage() {
           </div>
         </div>
         {patchQ.error !== null ? (
-          isNotImplemented(patchQ.error) ? (
-            <NotAvailableNotice error={patchQ.error}>The patch is stored with the run and can still be exported.</NotAvailableNotice>
-          ) : (
-            <ErrorView
-              error={toViewError(patchQ.error)}
-              onAction={() => {
-                void patchQ.refetch();
-              }}
-            />
-          )
+          <ErrorView
+            error={toViewError(patchQ.error)}
+            onAction={() => {
+              void patchQ.refetch();
+            }}
+          />
         ) : patch === undefined ? (
           <Skeleton lines={8} />
         ) : (

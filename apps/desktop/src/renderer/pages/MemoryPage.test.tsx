@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { appError } from '@relay/contracts';
-import { FAKE_PROJECT_ID } from '../api/fake-bridge';
+import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import { sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 
@@ -448,13 +448,16 @@ describe('MemoryPage (J9)', () => {
     expect(within(panel).queryByRole('button', { name: 'Confirm still accurate' })).not.toBeInTheDocument();
   });
 
-  it('memory not implemented in this build: "Not available yet in this build", no add button', async () => {
-    renderApp(P, { scenario: 'backend-stubs' });
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Add project rule' })).not.toBeInTheDocument();
+  it('a failing memory.list (e.g. a future stubbed channel) renders the generic ErrorView', async () => {
+    const bridge = createFakeBridge('awaiting-approval');
+    bridge.world.notImplemented.add('memory.list');
+    renderApp(P, { bridge });
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
 
-  it('a stubbed memory command shows the notice and keeps the record unchanged', async () => {
+  it('a stubbed memory command shows the generic error and keeps the record unchanged', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp(`${P}?record=${M(2)}`, { scenario: 'awaiting-approval' });
     const panel = await detail('Validate request bodies with zod');
@@ -463,7 +466,8 @@ describe('MemoryPage (J9)', () => {
       appError('INTERNAL', { details: { reason: 'not_implemented', channel: 'relay/v1/memory.archive' } }),
     );
     await user.click(within(panel).getByRole('button', { name: 'Archive' }));
-    expect(await within(panel).findByText('Not available yet in this build')).toBeInTheDocument();
-    expect(within(panel).getByText('The record is unchanged.')).toBeInTheDocument();
+    expect(await within(panel).findByText('Something went wrong inside Relay.')).toBeInTheDocument();
+    expect(within(panel).getByText('INTERNAL')).toBeInTheDocument();
+    expect(within(panel).queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
 });

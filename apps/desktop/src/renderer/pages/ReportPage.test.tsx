@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError, microusd } from '@relay/contracts';
+import { appError } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
 import { axe, describeViolations } from '../components/ui/test-utils';
@@ -114,14 +114,16 @@ describe('ReportPage', () => {
     });
   });
 
-  it('artifacts.export not implemented in this build: says so in the dialog', async () => {
+  it('artifacts.export failing as a stubbed channel: the dialog shows the generic failure', async () => {
     const { bridge } = open('completed');
     await ready();
     bridge.world.notImplemented.add('artifacts.export');
     await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
     const dialog = await screen.findByRole('dialog', { name: 'Export failed' });
-    expect(within(dialog).getByText('Not available yet in this build')).toBeInTheDocument();
+    expect(within(dialog).getByText('This feature is not available in this build yet.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Run is intact; retry export only.')).toBeInTheDocument();
+    expect(within(dialog).getByText('INTERNAL')).toBeInTheDocument();
   });
 
   it('a patch-less run cannot export a patch', async () => {
@@ -133,14 +135,15 @@ describe('ReportPage', () => {
     expect(within(dialog).getByRole('radio', { name: /Both/ })).toBeDisabled();
   });
 
-  it('artifacts.get not implemented: shows the notice and a summary from the run', async () => {
+  it('artifacts.get failing (e.g. a future stubbed channel): the generic ErrorView with a retry, no fallback summary', async () => {
     const bridge = createFakeBridge('completed');
     bridge.world.notImplemented.add('artifacts.get');
     const run = bridge.world.runs[0];
     renderApp(`${P}/runs/${run?.id ?? ''}/report`, { bridge });
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument();
-    expect(screen.getByText('Original project files were not modified.')).toBeInTheDocument();
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Summary' })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -161,26 +164,6 @@ describe('ReportPage', () => {
     expect(alert).toBeDefined();
     expect(screen.getByText(note)).toBeInTheDocument();
     if (details?.incompleteCause !== 'revision_limit') expect(screen.queryByText(/revision limit reached/i)).not.toBeInTheDocument();
-  });
-
-  it('B6: the run fallback summary shows the certainty breakdown, unknown liability, and limitations', async () => {
-    const bridge = createFakeBridge('cancelled');
-    bridge.world.notImplemented.add('artifacts.get');
-    const run = bridge.world.runs[0];
-    if (run === undefined) throw new Error('no run');
-    bridge.world.runs[0] = { ...run, cost: { ...run.cost, settledReported: microusd(480_000), settledCalculated: microusd(20_000), settledEstimated: microusd(70_000) } };
-    renderApp(`${P}/runs/${run.id}/report`, { bridge });
-    const summary = (await screen.findByRole('heading', { name: 'Summary' })).closest('section') as HTMLElement;
-    for (const term of ['Reported', 'Calculated', 'Estimated', 'Unknown liability']) {
-      expect(within(summary).getByText(term)).toBeInTheDocument();
-    }
-    expect(within(summary).getByText('$0.62')).toBeInTheDocument(); // run.cost.unknown
-    expect(within(summary).getByRole('heading', { name: 'Unresolved charges' })).toBeInTheDocument();
-    expect(within(summary).getByText(/Produce patch · attempt 1: up to/)).toBeInTheDocument();
-    const limitations = screen.getByRole('heading', { name: 'Limitations' }).closest('section') as HTMLElement;
-    expect(within(limitations).getByText(/Part of the tracked cost is estimated/)).toBeInTheDocument();
-    expect(within(limitations).getByText(/unknown outcome/)).toBeInTheDocument();
-    expect(within(limitations).getByText(/Tracked by Relay; your provider invoice may differ/)).toBeInTheDocument();
   });
 
   it('a run without a report yet links back to the inspector', async () => {

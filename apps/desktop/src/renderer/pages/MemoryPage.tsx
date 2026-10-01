@@ -16,8 +16,7 @@ import {
   Tabs,
   useToast,
 } from '../components/ui';
-import { isNotImplemented, toViewError } from '../api/errors';
-import { NotAvailableNotice } from '../features/common/NotAvailableNotice';
+import { toViewError } from '../api/errors';
 import { MutationError } from '../features/common/MutationError';
 import { useRetryAction } from '../features/common/useNextAction';
 import { AddRuleDialog } from '../features/memory/AddRuleDialog';
@@ -89,7 +88,6 @@ export function MemoryPage() {
     void current.refetch();
   });
 
-  const unavailable = MEMORY_TABS.some((t) => isNotImplemented(lists[t].error));
   useNavPerf('memory', current.data !== undefined || current.error !== null);
 
   const items = current.data ?? [];
@@ -144,36 +142,19 @@ export function MemoryPage() {
     <PageHeader
       title="Project memory"
       breadcrumbs={[{ label: projectName }, { label: 'Approved knowledge persists across runs' }]}
-      {...(unavailable
-        ? {}
-        : {
-            actions: (
-              <Button
-                variant="primary"
-                icon={Plus}
-                onClick={() => {
-                  setAddOpen(true);
-                }}
-              >
-                Add project rule
-              </Button>
-            ),
-          })}
+      actions={
+        <Button
+          variant="primary"
+          icon={Plus}
+          onClick={() => {
+            setAddOpen(true);
+          }}
+        >
+          Add project rule
+        </Button>
+      }
     />
   );
-
-  if (unavailable) {
-    const err = MEMORY_TABS.map((t) => lists[t].error).find((e) => isNotImplemented(e));
-    return (
-      <>
-        {header}
-        <NotAvailableNotice error={err}>
-          Project memory cannot be read in this build yet. Runs still work; approved rules are added to runs once the
-          memory service is available. Rules you entered during onboarding are not lost.
-        </NotAvailableNotice>
-      </>
-    );
-  }
 
   const suggestionCount = suggestedQ.data?.length ?? 0;
   const tabLabel = (t: MemoryTab): ReactNode => {
@@ -515,7 +496,7 @@ export function MemoryPage() {
                   </Button>
                 </div>
               ) : null}
-              <MutationError error={mutations.remove.error ?? (command === 'archive' ? mutations.archive.error : null)} unavailableHint="The record was not changed." />
+              <MutationError error={mutations.remove.error ?? (command === 'archive' ? mutations.archive.error : null)} />
             </div>
           }
           confirmLabel="Delete record from future runs"

@@ -12,7 +12,7 @@ import {
   Textarea,
 } from '../../components/ui';
 import { call } from '../../api/client';
-import { isNotImplemented, toViewError } from '../../api/errors';
+import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { canonicalJson, useIdempotentMutation } from '../../hooks/useIdempotentMutation';
@@ -20,7 +20,6 @@ import { usePreflight } from '../../hooks/usePreflight';
 import { usePreview } from '../../hooks/usePreview';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useWorkflow } from '../../hooks/useWorkflow';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { useNextAction } from '../common/useNextAction';
 import { budgetFromError } from '../new-run/new-run-model';
 import { paths } from '../shell/paths';
@@ -165,12 +164,8 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const budgetError = budgetFromError(preflight.error);
   const budget = budgetError ?? (pf !== undefined && !pf.budget.allowed ? pf.budget : null);
   const blocked = budget !== null;
-  // A stubbed preflight (not implemented in this build) cannot gate: runs.start runs its own admission check.
-  const preflightUnavailable = settledCheck && isNotImplemented(preflight.error);
-  const preflightFailed =
-    preflight.error !== null && !isNotImplemented(preflight.error) && budgetError === null;
-  const checked =
-    preflightUnavailable || (fresh !== undefined && fresh.issues.length === 0 && fresh.budget.allowed);
+  const preflightFailed = preflight.error !== null && budgetError === null;
+  const checked = fresh !== undefined && fresh.issues.length === 0 && fresh.budget.allowed;
   const canStart = goalError !== null || (checked && !blocked);
   const onStart = () => {
     setShowErrors(true);
@@ -223,9 +218,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       {preview.error === null ? null : (
         <ErrorView error={toViewError(preview.error)} onAction={onPreviewErrorAction} />
       )}
-      {preflight.error === null ? null : isNotImplemented(preflight.error) ? (
-        <NotAvailableNotice error={preflight.error} />
-      ) : budgetError !== null ? (
+      {preflight.error === null ? null : budgetError !== null ? (
         <InlineAlert
           tone="warning"
           title="The run allowance would be exceeded"

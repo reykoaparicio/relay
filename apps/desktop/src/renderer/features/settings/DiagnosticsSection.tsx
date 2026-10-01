@@ -1,13 +1,14 @@
 import { useId } from 'react';
 import { Link } from 'react-router';
-import { CircleCheck, Loader, TriangleAlert, CircleX } from 'lucide-react';
+import { CircleCheck, ExternalLink, Loader, TriangleAlert, CircleX } from 'lucide-react';
 import type { RunnerState } from '@relay/contracts';
-import { ErrorView, KeyValueList, RelativeTime, Skeleton } from '../../components/ui';
+import { Button, ErrorView, KeyValueList, RelativeTime, Skeleton } from '../../components/ui';
 import type { KeyValueItem } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { useAppInfo } from '../../hooks/useAppInfo';
 import { useDiagnostics } from '../../hooks/useDiagnostics';
 import { NOW_IDLE_INTERVAL_MS, useNow } from '../../hooks/useNow';
+import { useOpenExternal } from '../common/useOpenExternal';
 import { formatBytes } from '../run-setup/PreviewPanel';
 import { paths } from '../shell/paths';
 
@@ -140,10 +141,14 @@ export function DiagnosticsSection() {
   );
 }
 
-/** Settings → About (§18.5): version and build id. */
+/** Electron's license (MIT). Relay itself has no published license page yet. */
+export const ELECTRON_LICENSE_URL = 'https://github.com/electron/electron/blob/main/LICENSE';
+
+/** Settings → About (§18.5): version and build id, and what is known about third-party licenses. */
 export function AboutSection() {
   const titleId = useId();
   const info = useAppInfo();
+  const openExternal = useOpenExternal();
   return (
     <section className="card stack" aria-labelledby={titleId}>
       <h2 id={titleId}>About</h2>
@@ -161,7 +166,28 @@ export function AboutSection() {
           you connect.
         </p>
       )}
-      <p className="small muted">Open-source license notices arrive in a later milestone.</p>
+      <h3 className="section-label">Third-party licenses</h3>
+      <p className="small">
+        Relay is built on open-source software, including Electron (with Chromium and Node.js) and React. This
+        prototype build does not include the full list of third-party license notices; it is recorded before Relay is
+        distributed.
+      </p>
+      <div>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={ExternalLink}
+          pending={openExternal.isPending}
+          onClick={() => {
+            openExternal.mutate(ELECTRON_LICENSE_URL);
+          }}
+        >
+          Electron license (opens in your browser)
+        </Button>
+      </div>
+      {openExternal.error === null ? null : (
+        <ErrorView error={toViewError(openExternal.error)} onAction={() => { openExternal.reset(); }} />
+      )}
     </section>
   );
 }

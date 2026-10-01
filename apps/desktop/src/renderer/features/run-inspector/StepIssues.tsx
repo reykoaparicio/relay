@@ -2,9 +2,7 @@ import { useId, useState } from 'react';
 import { FileSearch } from 'lucide-react';
 import type { ValidationIssue } from '@relay/contracts';
 import { Button, Skeleton } from '../../components/ui';
-import { isNotImplemented } from '../../api/errors';
 import { useArtifact } from '../../hooks/useArtifact';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 
 /** The validation issues of an invalid output, with their JSON paths as text (§5.4 schema-invalid). */
 export function ValidationIssueList({ issues }: { readonly issues: readonly ValidationIssue[] }) {
@@ -40,11 +38,7 @@ export function RawResponseToggle({ artifactId }: { readonly artifactId: string 
   let body = null;
   if (open) {
     if (artifact.error !== null) {
-      body = isNotImplemented(artifact.error) ? (
-        <NotAvailableNotice error={artifact.error}>The raw response stays stored with the run.</NotAvailableNotice>
-      ) : (
-        <p className="subtle">The raw response could not be loaded ({artifact.error.message}).</p>
-      );
+      body = <p className="subtle">The raw response could not be loaded ({artifact.error.message}).</p>;
     } else if (artifact.data === undefined) {
       body = <Skeleton lines={4} />;
     } else {

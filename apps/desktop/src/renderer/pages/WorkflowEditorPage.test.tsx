@@ -319,7 +319,7 @@ describe('WorkflowEditorPage (J10)', () => {
     expect(screen.getByRole('spinbutton', { name: /Revision cycles/ })).toHaveAttribute('readonly');
   });
 
-  it('saveDraft not implemented: "Not available yet in this build"', async () => {
+  it('saveDraft failing (e.g. a future stubbed channel): the generic ErrorView', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
     await ready();
@@ -328,7 +328,9 @@ describe('WorkflowEditorPage (J10)', () => {
     await user.clear(tokens);
     await user.type(tokens, '7000');
     await user.click(screen.getByRole('button', { name: 'Save draft' }));
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
-    expect(screen.getByText(/Your edits are still in the form/)).toBeInTheDocument();
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
+    expect(tokens).toHaveValue(7000);
   });
 });

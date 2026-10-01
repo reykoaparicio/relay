@@ -21,13 +21,12 @@ import {
   useToast,
 } from '../components/ui';
 import { call } from '../api/client';
-import { isNotImplemented, toViewError, validationIssuesOf } from '../api/errors';
+import { toViewError, validationIssuesOf } from '../api/errors';
 import { qk } from '../api/keys';
 import { ErrorSummary, focusField } from '../features/common/ErrorSummary';
 import type { FormProblem } from '../features/common/ErrorSummary';
 import { isStaleConflict } from '../features/common/conflict';
 import { MutationError } from '../features/common/MutationError';
-import { NotAvailableNotice } from '../features/common/NotAvailableNotice';
 import { useRetryAction } from '../features/common/useNextAction';
 import { paths } from '../features/shell/paths';
 import { LimitsCard, StepDetail, StepList } from '../features/workflow-editor/WorkflowEditorPanels';
@@ -70,11 +69,7 @@ export function WorkflowEditorPage() {
       <>
         <PageHeader title="Workflow editor" breadcrumbs={[{ label: 'Workflows' }]} />
         {loadError !== null ? (
-          isNotImplemented(loadError) ? (
-            <NotAvailableNotice error={loadError}>Runs keep using the workflow version they were started with.</NotAvailableNotice>
-          ) : (
-            <ErrorView error={toViewError(loadError)} onAction={retry} />
-          )
+          <ErrorView error={toViewError(loadError)} onAction={retry} />
         ) : missing ? (
           <InlineAlert tone="warning" title="This workflow does not exist">
             <p>
@@ -441,11 +436,10 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
       ) : null}
       <MutationError
         error={saveIssues.length > 0 || (serverAhead && isStaleConflict(save.error)) ? null : save.error}
-        unavailableHint="Your edits are still in the form; nothing was saved."
         handlers={{ reload }}
       />
-      <MutationError error={validate.error} unavailableHint="The draft is saved; validation is not available in this build." />
-      <MutationError error={publish.error} unavailableHint="The draft is saved; new runs keep using the current validated version." />
+      <MutationError error={validate.error} />
+      <MutationError error={publish.error} />
       <div className="grid grid-cols-[minmax(280px,1fr)_minmax(0,1.6fr)] items-start gap-5 max-[1100px]:grid-cols-1">
         <div className="stack">
           <StepList

@@ -113,11 +113,15 @@ describe('fake bridge', () => {
     expect(res.ok ? null : res.error.code).toBe('APPROVAL_STALE');
   });
 
-  it('answers stubbed channels like the M1 runner: INTERNAL with details.reason not_implemented', async () => {
-    const bridge = createFakeBridge('backend-stubs');
+  it('no scenario stubs a channel: every operation is implemented by the real runner', () => {
+    for (const s of FAKE_SCENARIOS) expect([s, [...createFakeBridge(s).world.notImplemented]]).toEqual([s, []]);
+  });
+
+  it('the notImplemented test hook answers like a stubbed runner channel: INTERNAL with details.reason not_implemented', async () => {
+    const bridge = createFakeBridge('first-launch');
+    bridge.world.notImplemented.add('providers.test');
     const res = await bridge.invoke('relay/v1/providers.test', { providerId: 'anthropic' });
     expect(res.ok ? null : res.error).toMatchObject({ code: 'INTERNAL', details: { reason: 'not_implemented' } });
-    expect(bridge.world.projects).toEqual([]);
   });
 
   it('runs.start fails with the preflight issues (validation-errors) and with BUDGET_BLOCKED until the allowance admits N', async () => {

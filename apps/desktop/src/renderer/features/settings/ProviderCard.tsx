@@ -5,7 +5,6 @@ import type { CredentialStorageMode, ProviderStatus } from '@relay/contracts';
 import { Button, ConfirmDialog, ErrorView, KeyValueList, RelativeTime } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { paths } from '../shell/paths';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { useNextAction } from '../common/useNextAction';
 import { ApiKeyField, apiKeyError } from '../providers/ApiKeyField';
 import { TestOutcomeView } from '../providers/TestOutcomeView';
@@ -60,10 +59,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [keyError, setKeyError] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<{
-    readonly source: 'test' | 'connect';
-    readonly test: TestOutcome;
-  } | null>(null);
+  const [outcome, setOutcome] = useState<{ readonly test: TestOutcome } | null>(null);
   /** Session-only mode chosen from a SECURE_STORAGE_UNAVAILABLE recovery (the Keychain save is not offered). */
   const [sessionOnly, setSessionOnly] = useState(false);
   /** The key was cleared on submit and the last connect failed: ask for it again (it is never kept). */
@@ -93,7 +89,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
       { providerId: p.providerId, apiKey: key, storage },
       {
         onSuccess: (res) => {
-          setOutcome({ source: 'connect', test: res.test });
+          setOutcome({ test: res.test });
           setReplacing(false);
           setSessionOnly(false);
         },
@@ -175,7 +171,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
             onClick={() => {
               test.mutate(p.providerId, {
                 onSuccess: (res) => {
-                  setOutcome({ source: 'test', test: res });
+                  setOutcome({ test: res });
                 },
               });
             }}
@@ -286,11 +282,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
       {disconnect.error === null ? null : (
         <ErrorView error={toViewError(disconnect.error)} onAction={onErrorAction} />
       )}
-      {outcome === null ? null : outcome.source === 'test' && outcome.test.kind === 'not_tested' ? (
-        <NotAvailableNotice error={outcome.test.error}>
-          The key is saved. Relay uses it when a run starts.
-        </NotAvailableNotice>
-      ) : (
+      {outcome === null ? null : (
         <TestOutcomeView
           providerName={p.displayName}
           redactedLabel={p.redactedLabel}

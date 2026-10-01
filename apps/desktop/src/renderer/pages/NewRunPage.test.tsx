@@ -206,12 +206,13 @@ describe('NewRunPage (J7)', () => {
     expect((bridge.callsTo('relay/v1/runs.start')[0]?.input as Record<string, unknown>)['memoryRecordIds']).toEqual([]);
   });
 
-  it('memory.list not implemented in this build: says so and keeps the form usable', async () => {
+  it('memory.list failing (e.g. a future stubbed channel): the generic ErrorView, and the form stays usable', async () => {
     const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
     bridge.world.notImplemented.add('memory.list');
     await ready();
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
-    expect(screen.getByText(/Pinned project rules are still included/)).toBeInTheDocument();
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
   });
 

@@ -77,24 +77,6 @@ export function errorTitle(error: AppError): string {
   return ERROR_TITLES[error.code] ?? error.userMessage;
 }
 
-/** True for the runner's "feature not in this build" answer: `INTERNAL` with `details.reason = 'not_implemented'`. */
-export function isNotImplemented(e: unknown): boolean {
-  if (!isAppErrorException(e)) return false;
-  const { code, details } = e.appError;
-  return code === 'INTERNAL' && details?.['reason'] === 'not_implemented';
-}
-
-/** Title shown for a {@link isNotImplemented} error. */
-export const NOT_AVAILABLE_TITLE = 'Not available yet in this build';
-
-/**
- * The AppError to render for a not-implemented channel: the same code and correlation id, but no next-action buttons
- * (there is nothing the user can do about it except continue without the feature).
- */
-export function notAvailableError(e: unknown): AppError {
-  return { ...toViewError(e), nextAction: 'none', alternatives: [] };
-}
-
 /** Validation issues carried by a `VALIDATION_FAILED` error (`details.issues`), else []. */
 export function validationIssuesOf(e: unknown): ReadonlyArray<{ readonly path: string; readonly message: string; readonly code: string }> {
   if (!isAppErrorException(e) || e.appError.code !== 'VALIDATION_FAILED') return [];

@@ -12,11 +12,10 @@ import {
   Skeleton,
   Textarea,
 } from '../../components/ui';
-import { isNotImplemented, toViewError } from '../../api/errors';
+import { toViewError } from '../../api/errors';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { useWorkflow, useWorkflows } from '../../hooks/useWorkflow';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { useNextAction, useRetryAction } from '../common/useNextAction';
 import { ROLE_LABELS } from '../run-setup/model-steps';
 import { ruleTitle } from './onboarding-state';
@@ -89,7 +88,6 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
       : text.length > MEMORY_LIMITS.contentMax
         ? `Use at most ${String(MEMORY_LIMITS.contentMax)} characters.`
         : null;
-  const notAvailable = isNotImplemented(save.error);
   const skip = () => {
     go('choose-template');
   };
@@ -137,11 +135,7 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
           Skip for now
         </Button>
       }
-      primary={
-        notAvailable
-          ? { label: 'Continue without a rule', onSubmit: skip }
-          : { label: 'Save rule and continue', onSubmit: onSave, pending: save.isPending }
-      }
+      primary={{ label: 'Save rule and continue', onSubmit: onSave, pending: save.isPending }}
     >
       <div className="grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
         <Field label="Type">
@@ -194,11 +188,7 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
           />
         )}
       </Field>
-      {save.error === null || save.error === undefined ? null : notAvailable ? (
-        <NotAvailableNotice error={save.error}>
-          Project rules cannot be saved in this build yet. Skip this step; you can add rules later in Memory.
-        </NotAvailableNotice>
-      ) : (
+      {save.error === null || save.error === undefined ? null : (
         <ErrorView error={toViewError(save.error)} onAction={onSaveErrorAction} />
       )}
     </StepFrame>

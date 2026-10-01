@@ -143,14 +143,16 @@ describe('Settings → Model profiles (J10)', () => {
     expect(bridge.callsTo('relay/v1/profiles.upsert')[1]?.input).toMatchObject({ expectedRevision: 2, profile: { params: { maxOutputTokens: 12000 } } });
   });
 
-  it('profiles.upsert not implemented: "Not available yet in this build"', async () => {
+  it('profiles.upsert failing as a stubbed channel: the generic ErrorView', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp('/settings/profiles', { scenario: 'awaiting-approval' });
     await section('Model profiles');
     bridge.world.notImplemented.add('profiles.upsert');
     await user.click(await screen.findByRole('button', { name: 'Edit Economy' }));
     await user.click(screen.getByRole('button', { name: 'Save revision 2' }));
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
 });
 
@@ -362,14 +364,14 @@ describe('Settings → Storage & data (J10)', () => {
     });
   });
 
-  it('create backup shows where it was saved; not implemented shows the notice', async () => {
+  it('create backup shows where it was saved; a not_implemented answer shows the generic error, then a retry works', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp('/settings/data', { scenario: 'awaiting-approval' });
     await section('Data folder and backup');
     expect(screen.getByText(/does not claim the full database is encrypted/)).toBeInTheDocument();
     bridge.failNext('relay/v1/app.createBackup', NOT_IMPLEMENTED('relay/v1/app.createBackup'));
     await user.click(screen.getByRole('button', { name: 'Create backup' }));
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
+    expect(await screen.findByText('This feature is not available in this build yet.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Create backup' }));
     expect(await screen.findByText('Backup created')).toBeInTheDocument();
     const calls = bridge.callsTo('relay/v1/app.createBackup');

@@ -397,7 +397,6 @@ export function ProfilesSection() {
           ) : (
             <MutationError
               error={upsert.error}
-              unavailableHint="Profiles cannot be edited in this build; runs use the existing profiles."
               handlers={{ reload: reloadDraft }}
               names={conflictNames}
               projectId={settingsProject?.id}
@@ -445,7 +444,7 @@ export function ProfilesSection() {
                   <UsageList usage={usage} projectId={settingsProject?.id} />
                 </InlineAlert>
               ) : null}
-              <MutationError error={remove.error} unavailableHint="The profile was not deleted." names={conflictNames} projectId={settingsProject?.id} />
+              <MutationError error={remove.error} names={conflictNames} projectId={settingsProject?.id} />
             </div>
           }
           confirmLabel="Delete profile"

@@ -5,16 +5,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CredentialStorageMode, ProviderId, ProviderStatus, ProviderTestResult } from '@relay/contracts';
 import { call } from '../../api/client';
-import { isNotImplemented } from '../../api/errors';
 import { qk } from '../../api/keys';
 
 /** Result of the small connection test that follows a connect (FR-02). */
 export type TestOutcome =
   | { readonly kind: 'passed'; readonly result: ProviderTestResult }
   /** The test ran and failed (`result.error`), or the call itself failed (`error`: AUTH_REQUIRED, RATE_LIMITED, …). */
-  | { readonly kind: 'failed'; readonly result: ProviderTestResult | null; readonly error: unknown }
-  /** `providers.test` is still stubbed in this build: the key is saved but was not tested. */
-  | { readonly kind: 'not_tested'; readonly error: unknown };
+  | { readonly kind: 'failed'; readonly result: ProviderTestResult | null; readonly error: unknown };
 
 export interface ConnectInput {
   readonly providerId: ProviderId;
@@ -27,15 +24,13 @@ export interface ConnectOutcome {
   readonly test: TestOutcome;
 }
 
-/** Runs `providers.test` and folds every answer (including not-implemented) into a {@link TestOutcome}. */
+/** Runs `providers.test` and folds every answer (including a failed call) into a {@link TestOutcome}. */
 export async function runProviderTest(providerId: ProviderId): Promise<TestOutcome> {
   try {
     const result = await call('relay/v1/providers.test', { providerId });
     return result.ok ? { kind: 'passed', result } : { kind: 'failed', result, error: null };
   } catch (e) {
-    return isNotImplemented(e)
-      ? { kind: 'not_tested', error: e }
-      : { kind: 'failed', result: null, error: e };
+    return { kind: 'failed', result: null, error: e };
   }
 }
 

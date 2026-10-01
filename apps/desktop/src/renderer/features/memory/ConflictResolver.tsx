@@ -251,7 +251,6 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
       ) : server.length === 0 ? (
         <MutationError
           error={resolve.error}
-          unavailableHint="Both records are unchanged."
           handlers={{
             reload: () => {
               void aDetail.refetch();

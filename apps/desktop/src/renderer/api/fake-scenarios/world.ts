@@ -104,7 +104,7 @@ export interface FakeWorld {
   preflightBlocked: boolean;
   /** `runs.preflight` issues (new-run `validation-errors`); `runs.start` fails with them while non-empty. */
   preflightIssues: ValidationIssue[];
-  /** Operation keys (e.g. `providers.test`) answered like the real runner's stubs: INTERNAL `not_implemented`. */
+  /** Test hook: operation keys answered INTERNAL `not_implemented`, like a stubbed runner channel (none by default). */
   notImplemented: Set<string>;
   /** `artifacts.export` fails with ARTIFACT_WRITE_FAILED (report `export-failed`). */
   exportFails: boolean;
@@ -934,7 +934,6 @@ export interface WorldOptions {
   /** A fresh install: no project, no connected provider, onboarding not completed. */
   readonly fresh?: boolean;
   readonly preflightIssues?: readonly ValidationIssue[];
-  readonly notImplemented?: readonly string[];
   readonly scenario: string;
 }
 
@@ -1033,7 +1032,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     preview: buildPreview(),
     preflightBlocked: o.preflightBlocked ?? false,
     preflightIssues: [...(o.preflightIssues ?? [])],
-    notImplemented: new Set(o.notImplemented ?? []),
+    notImplemented: new Set<string>(),
     exportFails: false,
     dialogCancels: new Set(),
     importDiffWarnings: [],

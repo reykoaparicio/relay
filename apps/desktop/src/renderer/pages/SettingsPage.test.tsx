@@ -70,16 +70,16 @@ describe('SettingsPage (J10 M1 sections)', () => {
     expect(document.body.innerHTML).not.toContain('AIzaSyEXAMPLEEXAMPLEEXAMPLE1234');
   });
 
-  it('providers.test not implemented in this build: "Not available yet in this build" via ErrorView', async () => {
+  it('providers.test failing as a stubbed channel: the generic ErrorView in the test outcome', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp('/settings/providers', { scenario: 'awaiting-approval' });
     const anthropic = await providersReady();
     bridge.failNext('relay/v1/providers.test', NOT_IMPLEMENTED);
     await user.click(within(anthropic).getByRole('button', { name: 'Test connection' }));
-    const alert = await within(anthropic).findByRole('alert');
-    expect(alert).toHaveTextContent('Not available yet in this build');
+    const alert = (await within(anthropic).findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
-    expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(anthropic).getByText(/the connection test failed/)).toBeInTheDocument();
+    expect(within(anthropic).queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
 
   it('auth-failed: the rejected key is flagged; Remove key asks for confirmation then disconnects', async () => {

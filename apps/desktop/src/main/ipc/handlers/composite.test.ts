@@ -62,7 +62,7 @@ function setup(runnerReplies: Record<string, unknown> = {}) {
     writeTextFile: vi.fn(() => Promise.resolve()),
     notifyProvidersChanged: vi.fn(),
   };
-  return { h: createCompositeHandlers(deps), request, dialogs, vault, setSelected: (v: boolean) => (selected = v) };
+  return { h: createCompositeHandlers(deps), deps, request, dialogs, vault, setSelected: (v: boolean) => (selected = v) };
 }
 
 describe('composite handlers (H4)', () => {
@@ -190,6 +190,93 @@ describe('composite handlers (H4)', () => {
 
     expect(r.ok && r.data.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0 });
     expect(r.ok && r.data.secureStorage).toEqual({ available: true, backend: 'keychain' });
+  });
+});
+
+describe('composite handlers: diagnostics export, sample project, preview by project (H4)', () => {
+  const FAKE_KEY = 'sk-ant-api03-SEEDEDFAKEKEY0123456789abcdef';
+
+  it('app.exportDiagnostics writes a redacted file: a key seeded in a log line, an error message, and an apiKey field never reach it', async () => {
+    const { h, deps } = setup({
+      'relay/v1/app.getDiagnostics': {
+        ok: true,
+        data: {
+          db: { schemaVersion: 7, migrationsPending: 0, sizeBytes: 1 }, unresolvedAttempts: 0, catalog: { version: 'c1', models: 3 }, prompts: { loaded: 4 },
+          lastLogLine: `{"event":"provider.call","outcome":"error","err":"401 invalid x-api-key ${FAKE_KEY}"}`,
+        },
+      },
+      'relay/v1/runs.get': { ok: true, data: { id: RUN, statusDetail: { userMessage: `Auth failed for Bearer ${FAKE_KEY}` }, apiKey: FAKE_KEY } },
+    });
+    const r = await h['relay/v1/app.exportDiagnostics']({ includeRunIds: [RUN] } as never);
+    const written = vi.mocked(deps.writeTextFile).mock.calls.map((c) => c[1]);
+
+    expect(r).toEqual({ ok: true, data: { exported: true, displayPath: '~/exports/relay-diagnostics-2023-11-14.json' } });
+    expect(written).toHaveLength(1);
+    const text = written[0] ?? '';
+    expect(text).not.toContain(FAKE_KEY);
+    expect(text).not.toContain('SEEDEDFAKEKEY');
+    expect(text).toContain('[REDACTED:sk-…cdef]');
+    const parsed = JSON.parse(text) as { runs: Record<string, unknown>[]; diagnostics: { runner: unknown } };
+    expect(parsed.runs[0]).not.toHaveProperty('apiKey');
+    expect(parsed.diagnostics.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0 });
+  });
+
+  it('app.exportDiagnostics: a cancelled save dialog writes nothing', async () => {
+    const { h, dialogs } = setup({ 'relay/v1/app.getDiagnostics': { ok: false, error: errors.runnerUnavailable() } });
+    vi.mocked(dialogs.pickSaveFile).mockResolvedValueOnce(ok(null));
+
+    const r = await h['relay/v1/app.exportDiagnostics']({});
+
+    expect(r).toEqual({ ok: true, data: { exported: false } });
+  });
+
+  it('projects.createSample copies the sample, then creates it with isDemo: true', async () => {
+    const createInput = {
+      rootRealpath: `${HOME}/Documents/Relay Samples/sample-api-1`, rootDisplayPath: '~/Documents/Relay Samples/sample-api-1', name: 'Sample API',
+      exclusions: [], allowedProviderIds: ['anthropic' as const], monthlyAllowanceMicrousd: 20_000_000,
+    };
+    const request = vi.fn((_c: string, input: unknown) => Promise.resolve({ ok: true, data: { id: PRJ, ...(input as object) } }));
+    const copySample = vi.fn(() => Promise.resolve(ok({ realpath: createInput.rootRealpath, createInput })));
+    const h = createCompositeHandlers({
+      runner: { request } as unknown as CompositeDeps['runner'],
+      dialogs: {} as DialogService, vault: {} as CredentialVault, samples: { copySample },
+      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+    });
+
+    const r = await h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000001' });
+
+    expect(copySample).toHaveBeenCalledExactlyOnceWith('key-0000000001');
+    expect(request).toHaveBeenCalledExactlyOnceWith('relay/v1/projects.createFromRoot', { idempotencyKey: 'key-0000000001', ...createInput, isDemo: true });
+    expect(r.ok && (r.data as { isDemo?: boolean }).isDemo).toBe(true);
+  });
+
+  it('projects.createSample: a failed copy never reaches the runner', async () => {
+    const request = vi.fn();
+    const h = createCompositeHandlers({
+      runner: { request },
+      dialogs: {} as DialogService, vault: {} as CredentialVault,
+      samples: { copySample: () => Promise.resolve(err(errors.artifactWriteFailed())) },
+      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+    });
+
+    const r = await h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000001' });
+
+    expect(!r.ok && r.error.code).toBe('ARTIFACT_WRITE_FAILED');
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('projects.previewFiles {projectId} previews the registered project without touching selections', async () => {
+    const { h, request, dialogs } = setup({ 'relay/v1/projects.previewRoot': { ok: true, data: { included: [] } } });
+
+    const r = await h['relay/v1/projects.previewFiles']({ projectId: PRJ, extraExclusions: ['dist/**'] } as never);
+
+    expect(request).toHaveBeenCalledExactlyOnceWith('relay/v1/projects.previewRoot', { projectId: PRJ, extraExclusions: ['dist/**'] });
+    expect(dialogs.resolveSelection).not.toHaveBeenCalled();
+    expect(r).toEqual({ ok: true, data: { included: [] } });
   });
 });
 

@@ -2,10 +2,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createIdGen, epochMs } from '@relay/contracts';
+import { INPUT_CAPS, createIdGen, epochMs } from '@relay/contracts';
 import type { SelectionId } from '@relay/contracts';
 import { createDialogService, validateProjectRoot } from './dialogs.js';
 import type { NativeDialogs, RelayDialogsSeam } from './dialogs.js';
+import { makeTempDir, removeTempDir } from './testing/temp-dirs.js';
 
 const HOME = '/Users/alice';
 const policy = { homeDir: HOME, userDataDir: `${HOME}/Library/Application Support/Relay` };
@@ -130,5 +131,54 @@ describe('dialog service', () => {
     const r = await svc.pickDirectory();
 
     expect(!r.ok && r.error.code).toBe('PERMISSION_DENIED');
+  });
+});
+
+describe('pickDiffFile size cap (H3)', () => {
+  let tmp = '';
+  const clock = { now: () => epochMs(1) };
+  const ids = createIdGen(clock, (n) => new Uint8Array(n));
+  const service = (stub: string) => {
+    const target: Record<string, unknown> = {};
+    const svc = createDialogService({
+      dialogs: { showOpenDialog: () => Promise.reject(new Error('native dialog must not open')), showSaveDialog: () => Promise.resolve({ canceled: true }) },
+      clock, ids, homeDir: HOME, userDataDir: join(tmp, 'ud'), e2e: true, seamTarget: target,
+    });
+    (target['__relayDialogs'] as RelayDialogsSeam).setStub({ diffFile: stub });
+    return svc;
+  };
+
+  beforeEach(async () => {
+    tmp = await makeTempDir('dlgcap');
+  });
+  afterEach(async () => {
+    await removeTempDir(tmp);
+  });
+
+  it('rejects a diff larger than 1 MiB with VALIDATION_FAILED too_large and never returns its text', async () => {
+    const big = join(tmp, 'big.diff');
+    await writeFile(big, 'x'.repeat(INPUT_CAPS.maxDiffBytes + 1));
+
+    const r = await service(big).pickDiffFile();
+
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error.code).toBe('VALIDATION_FAILED');
+    expect(!r.ok && r.error.details?.['issues']).toEqual([{ path: 'file', message: 'Choose a diff file of at most 1 MiB.', code: 'too_large' }]);
+  });
+
+  it('accepts a diff of exactly 1 MiB', async () => {
+    const edge = join(tmp, 'edge.diff');
+    await writeFile(edge, 'y'.repeat(INPUT_CAPS.maxDiffBytes));
+
+    const r = await service(edge).pickDiffFile();
+
+    expect(r.ok && r.value?.text.length).toBe(INPUT_CAPS.maxDiffBytes);
+    expect(r.ok && r.value?.fileName).toBe('edge.diff');
+  });
+
+  it('rejects a directory as the diff file', async () => {
+    const r = await service(tmp).pickDiffFile();
+
+    expect(!r.ok && r.error.code).toBe('VALIDATION_FAILED');
   });
 });

@@ -103,9 +103,10 @@ describe('OnboardingPage (J6)', () => {
     expect(document.body.innerHTML).not.toContain(KEY);
   });
 
-  it('works against the M1 runner stubs: own folder, "saved (not tested)" key, and a skippable rule step', async () => {
+  it('own folder, session key, and a rule step that stays skippable when memory.create fails (generic ErrorView)', async () => {
     const user = userEvent.setup();
-    const { bridge } = renderApp('/onboarding/start-point', { scenario: 'backend-stubs' });
+    const { bridge } = renderApp('/onboarding/start-point', { scenario: 'first-launch' });
+    bridge.world.notImplemented.add('memory.create'); // a future stubbed runner channel
     await heading('Choose a starting point');
     await user.click(screen.getByRole('radio', { name: 'My own project folder' }));
     await clickContinue(user);
@@ -114,7 +115,7 @@ describe('OnboardingPage (J6)', () => {
     await user.click(screen.getByRole('radio', { name: 'Session only' }));
     await user.type(screen.getByLabelText(/Anthropic API key/), KEY);
     await user.click(screen.getByRole('button', { name: 'Connect and test' }));
-    expect(await screen.findByText(/Anthropic key saved \(not tested\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Connected to Anthropic/)).toBeInTheDocument();
     expect(document.body.innerHTML).not.toContain(KEY);
     expect(bridge.callsTo('relay/v1/providers.connect')[0]?.input).toMatchObject({ storage: 'session' });
     await clickContinue(user);
@@ -135,8 +136,10 @@ describe('OnboardingPage (J6)', () => {
     });
     await user.type(screen.getByRole('textbox', { name: /Rule/ }), 'Keep handlers thin.');
     await user.click(screen.getByRole('button', { name: 'Save rule and continue' }));
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Continue without a rule' }));
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('INTERNAL');
+    expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Skip for now' }));
     await heading('Choose a workflow template');
   });
 

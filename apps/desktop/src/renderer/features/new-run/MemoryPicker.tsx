@@ -2,9 +2,8 @@ import type { ReactNode } from 'react';
 import { Pin } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
 import { ErrorView, Skeleton } from '../../components/ui';
-import { isNotImplemented, toViewError } from '../../api/errors';
+import { toViewError } from '../../api/errors';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { useRetryAction } from '../common/useNextAction';
 import { ROLE_LABELS } from '../run-setup/model-steps';
 import { FIELD } from './new-run-model';
@@ -60,15 +59,7 @@ export function MemoryPicker({
     </div>
   );
   if (error !== null && error !== undefined) {
-    return wrap(
-      isNotImplemented(error) ? (
-        <NotAvailableNotice error={error}>
-          Pinned project rules are still included by Relay when the run starts.
-        </NotAvailableNotice>
-      ) : (
-        <ErrorView error={toViewError(error)} onAction={onAction} />
-      ),
-    );
+    return wrap(<ErrorView error={toViewError(error)} onAction={onAction} />);
   }
   if (records === undefined) {
     return wrap(

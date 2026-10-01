@@ -21,12 +21,11 @@ import {
   Textarea,
 } from '../components/ui';
 import { call } from '../api/client';
-import { isNotImplemented, toViewError, validationIssuesOf } from '../api/errors';
+import { toViewError, validationIssuesOf } from '../api/errors';
 import { qk } from '../api/keys';
 import { formatHash } from '../lib/format';
 import { ErrorSummary } from '../features/common/ErrorSummary';
 import type { FormProblem } from '../features/common/ErrorSummary';
-import { NotAvailableNotice } from '../features/common/NotAvailableNotice';
 import { BudgetBlockedPanel } from '../features/new-run/BudgetBlockedPanel';
 import { FilePicker } from '../features/new-run/FilePicker';
 import { MemoryPicker } from '../features/new-run/MemoryPicker';
@@ -142,8 +141,7 @@ export function NewRunPage() {
   useNavPerf('new-run', project.data !== undefined && workflow.data !== undefined);
 
   // ----- problems (validation-errors) and budget (budget-blocked) -----
-  const preflightError =
-    preflight.error !== null && !isNotImplemented(preflight.error) ? preflight.error : null;
+  const preflightError = preflight.error;
   const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal });
   const submitFingerprint = submittable === null ? null : canonicalJson(submittable);
   /** A settled preflight for exactly the input Start would send (B3: never start unpreflighted inputs). */
@@ -207,12 +205,9 @@ export function NewRunPage() {
       ? startError
       : null;
 
-  const preflightUnavailable =
-    preflightMatches && preflight.error !== null && isNotImplemented(preflight.error);
-  /** Start needs a fresh, clean preflight of the submitted input (or a preflight stubbed in this build). */
+  /** Start needs a fresh, clean preflight of the submitted input. */
   const checked =
-    preflightUnavailable ||
-    (freshPreflight !== undefined && freshPreflight.issues.length === 0 && freshPreflight.budget.allowed);
+    freshPreflight !== undefined && freshPreflight.issues.length === 0 && freshPreflight.budget.allowed;
   // The (debounced) check has not caught up with the form yet.
   const draftFingerprint = draft === null ? '' : canonicalJson(draft);
   const checking =
@@ -229,7 +224,7 @@ export function NewRunPage() {
     pf.issues.length === 0 &&
     pf.budget.allowed;
   // With no goal yet the check uses a placeholder goal; Start then only reveals what is missing.
-  const allPassed = submittable === null ? goal === '' && draftClean : checked && freshPreflight !== undefined;
+  const allPassed = submittable === null ? goal === '' && draftClean : checked;
   const onSubmit = (e: SyntheticEvent) => {
     e.preventDefault();
     if (!form.submitted) dispatch({ type: 'patch', patch: { submitted: true } });
@@ -466,11 +461,7 @@ export function NewRunPage() {
                       </ul>
                     </InlineAlert>
                   )}
-                  {importDiff.error === null ? null : isNotImplemented(importDiff.error) ? (
-                    <NotAvailableNotice error={importDiff.error}>
-                      Use Selected files for now.
-                    </NotAvailableNotice>
-                  ) : (
+                  {importDiff.error === null ? null : (
                     <ErrorView error={toViewError(importDiff.error)} onAction={onImportErrorAction} />
                   )}
                 </div>
@@ -604,9 +595,6 @@ export function NewRunPage() {
           <div className="stack">
             <Card labelledBy={ids.summary}>
               <CardHeader title="Input summary" titleId={ids.summary} />
-              {preflight.error !== null && isNotImplemented(preflight.error) ? (
-                <NotAvailableNotice error={preflight.error} />
-              ) : null}
               {preflightSystemError === null ? null : (
                 <div className="stack">
                   <ErrorView error={toViewError(preflightSystemError)} onAction={onErrorAction} />

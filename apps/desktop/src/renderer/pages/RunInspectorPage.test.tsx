@@ -303,13 +303,14 @@ describe('RunInspectorPage', () => {
     expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
   });
 
-  it('a runner channel that is not implemented yet shows the not-available notice', async () => {
+  it('a runner channel answering not_implemented shows the generic action error', async () => {
     const bridge = createFakeBridge('paused-user');
     bridge.world.notImplemented.add('runs.resume');
     const run = focusRun(bridge);
     renderApp(`${P}/runs/${run.id}`, { bridge });
     await userEvent.click(await screen.findByRole('button', { name: 'Resume' }));
-    expect(await screen.findByText('Not available yet in this build')).toBeInTheDocument();
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    expect(alert).toHaveTextContent('Error code INTERNAL. The run is unchanged.');
   });
 
   it('?tab=ledger shows the run ledger and exports it as CSV via ledger.export({ runId })', async () => {

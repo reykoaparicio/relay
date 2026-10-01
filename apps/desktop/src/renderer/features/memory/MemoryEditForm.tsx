@@ -344,7 +344,6 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
       ) : error !== null && error !== undefined && Object.keys(server).length === 0 ? (
         <MutationError
           error={error}
-          unavailableHint="Your text is still in the form; nothing was saved."
           {...(onReload === undefined ? {} : { handlers: { reload: onReload } })}
         />
       ) : null}

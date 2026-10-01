@@ -6,8 +6,7 @@ import { addMicrousd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
 import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
 import { PROVIDER_LABELS, statusPresentation } from '../../lib/format';
-import { errorTitle, isNotImplemented, toViewError } from '../../api/errors';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
+import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
 import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
 import type { IncompleteCause } from '../run-inspector/inspector-model';
@@ -170,11 +169,7 @@ export function FindingsSection({ findings, error, hasFindings }: { readonly fin
   let body: ReactNode;
   if (!hasFindings) body = <p className="subtle">The review step did not produce findings in this run.</p>;
   else if (error !== null && error !== undefined) {
-    body = isNotImplemented(error) ? (
-      <NotAvailableNotice error={error}>The findings are stored with the run.</NotAvailableNotice>
-    ) : (
-      <p className="subtle">The findings could not be loaded ({errorTitle(toViewError(error))}).</p>
-    );
+    body = <p className="subtle">The findings could not be loaded ({errorTitle(toViewError(error))}).</p>;
   } else if (findings === undefined) body = <Skeleton lines={4} />;
   else body = <FindingsView value={findings} headingLevel={3} />;
   return (
@@ -298,16 +293,12 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
       }
     >
       {failed && e !== null ? (
-        isNotImplemented(error) ? (
-          <NotAvailableNotice error={error}>Run is intact; retry export only after updating Relay.</NotAvailableNotice>
-        ) : (
-          <InlineAlert tone="danger" title={errorTitle(e)}>
-            <p>Run is intact; retry export only.</p>
-            <p className="subtle">
-              Error code <code>{e.code}</code>. No run data, ledger entries, or artifacts were changed.
-            </p>
-          </InlineAlert>
-        )
+        <InlineAlert tone="danger" title={errorTitle(e)}>
+          <p>Run is intact; retry export only.</p>
+          <p className="subtle">
+            Error code <code>{e.code}</code>. No run data, ledger entries, or artifacts were changed.
+          </p>
+        </InlineAlert>
       ) : null}
       <RadioGroup<ExportWhat>
         legend="What to export"
@@ -321,72 +312,5 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
       />
       <p className="subtle small">Export excludes credentials, raw provider payloads, and diagnostics.</p>
     </Dialog>
-  );
-}
-
-/** Limitations of the fallback summary: what it cannot show, and which amounts are not settled facts. */
-export function fallbackLimitations(run: RunDetail): string[] {
-  const out = [
-    'The full report is not available in this build, so this summary comes from the run record: findings, per-step costs, and patch details are not shown here.',
-  ];
-  if (run.cost.settledEstimated > 0) {
-    out.push('Part of the tracked cost is estimated because the provider did not report usage for every request.');
-  }
-  if (run.cost.unknown > 0 || run.unresolvedAttempts.length > 0) {
-    out.push('Some requests have an unknown outcome; their possible charge is kept as unknown liability until you decide.');
-  }
-  if (run.status !== 'completed') {
-    out.push('The run did not complete, so the workflow reviewer did not accept a patch.');
-  }
-  out.push('Relay never modifies your project files; any patch is a proposal only.');
-  out.push('Tracked by Relay; your provider invoice may differ.');
-  return out;
-}
-
-/** The run cost summary when `report.v1` cannot be loaded (not-implemented fallback): straight from `runs.get`. */
-export function RunFallbackSummary({ run }: { readonly run: RunDetail }) {
-  const c = run.cost;
-  const settled = addMicrousd(c.settledReported, c.settledCalculated, c.settledEstimated);
-  return (
-    <>
-      <Section title="Summary">
-        <KeyValueList
-          items={[
-            { id: 'goal', term: 'Goal', value: run.goal },
-            { id: 'status', term: 'Status', value: <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail /> },
-            {
-              id: 'cost',
-              term: 'Tracked cost',
-              value: <Money value={settled} certainty={c.settledEstimated > 0 ? 'estimated' : null} />,
-            },
-            { id: 'rep', term: 'Reported', value: <Money value={c.settledReported} /> },
-            { id: 'calc', term: 'Calculated', value: <Money value={c.settledCalculated} /> },
-            { id: 'est', term: 'Estimated', value: <Money value={c.settledEstimated} certainty="estimated" /> },
-            { id: 'unk', term: 'Unknown liability', value: <Money value={c.unknown} /> },
-            { id: 'allow', term: 'Run allowance', value: <Money value={c.allowance} /> },
-          ]}
-        />
-        {run.unresolvedAttempts.length > 0 ? (
-          <div className="stack">
-            <h3 className="section-label">Unresolved charges</h3>
-            <ul className="small">
-              {run.unresolvedAttempts.map((a) => (
-                <li key={a.id}>
-                  {stepTitle(a)} · attempt {a.seq}: up to{' '}
-                  {a.cost === null ? 'an amount not known' : <Money value={a.cost.microusd} certainty={a.cost.certainty} />}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </Section>
-      <Section title="Limitations">
-        <ul>
-          {fallbackLimitations(run).map((l) => (
-            <li key={l}>{l}</li>
-          ))}
-        </ul>
-      </Section>
-    </>
   );
 }

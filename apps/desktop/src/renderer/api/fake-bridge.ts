@@ -987,7 +987,8 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
     }
     const key = channel.slice(CHANNEL_PREFIX.length) as OperationKey;
     if (world.notImplemented.has(key)) {
-      // Mirrors the real runner's stubbed channels (engine services.ts `notImplemented`).
+      // Test hook: answers like a runner channel that is stubbed (engine services.ts `notImplemented`), so the
+      // generic error path for INTERNAL `not_implemented` stays covered.
       return {
         ok: false,
         error: appError('INTERNAL', {

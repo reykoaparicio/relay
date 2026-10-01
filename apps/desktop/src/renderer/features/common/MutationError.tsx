@@ -1,20 +1,17 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Button, ErrorView, InlineAlert } from '../../components/ui';
-import { errorTitle, isNotImplemented, toViewError } from '../../api/errors';
+import { errorTitle, toViewError } from '../../api/errors';
 import { runLabel } from '../runs/run-display';
 import { paths } from '../shell/paths';
 import { conflictCopy, conflictErrorOf } from './conflict';
 import type { ConflictCopy, ConflictNames } from './conflict';
-import { NotAvailableNotice } from './NotAvailableNotice';
 import { useNextAction } from './useNextAction';
 import type { NextActionHandlers } from './useNextAction';
 
 export interface MutationErrorProps {
   /** The failed mutation's error; nothing renders when null/undefined. */
   readonly error: unknown;
-  /** What still works when the channel is not implemented in this build (NotAvailableNotice body). */
-  readonly unavailableHint?: ReactNode;
   /**
    * Page handlers for next actions (e.g. `reload` → refetch the queries the form depends on). Unhandled actions route
    * as usual; an unhandled `reload` is never rendered (a Reload button that refetches nothing would be dead).
@@ -29,13 +26,12 @@ export interface MutationErrorProps {
 }
 
 /**
- * The error of a command: "Not available yet in this build" for a stubbed runner channel (no retry buttons), the
- * specific copy of a CONFLICT (`ConflictNotice`), otherwise an ErrorView with the error's next actions.
+ * The error of a command: the specific copy of a CONFLICT (`ConflictNotice`), otherwise an ErrorView with the error's
+ * next actions (any other code, including an INTERNAL `not_implemented` from a future stubbed runner channel).
  */
-export function MutationError({ error, unavailableHint, handlers = {}, names, projectId, conflictActions }: MutationErrorProps) {
+export function MutationError({ error, handlers = {}, names, projectId, conflictActions }: MutationErrorProps) {
   const onAction = useNextAction(handlers);
   if (error === null || error === undefined) return null;
-  if (isNotImplemented(error)) return <NotAvailableNotice error={error}>{unavailableHint}</NotAvailableNotice>;
   const copy = conflictCopy(error, names);
   if (copy !== null) {
     return (

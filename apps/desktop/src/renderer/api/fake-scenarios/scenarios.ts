@@ -40,7 +40,6 @@ export const FAKE_SCENARIOS = [
   'workflow-draft',
   'no-secure-storage',
   'first-launch',
-  'backend-stubs',
   'validation-errors',
 ] as const;
 export type FakeScenarioName = (typeof FAKE_SCENARIOS)[number];
@@ -71,19 +70,6 @@ const HISTORY: readonly RunSpec[] = [
     steps: { intake: 'succeeded', review: 'succeeded', plan: 'succeeded', approve: 'skipped' },
     cost: { reported: 120_000, estimated: 70_000 },
   },
-];
-
-/** Runner channels still stubbed in the M1 build (engine services.ts `todo(...)`), used by `backend-stubs`. */
-export const BACKEND_STUBS: readonly string[] = [
-  'providers.test',
-  'profiles.upsert',
-  'profiles.delete',
-  'projects.update',
-  'artifacts.importDiff',
-  'memory.list',
-  'memory.get',
-  'memory.create',
-  'memory.update',
 ];
 
 /** Preflight problems of the new-run `validation-errors` state (paths point at form fields). */
@@ -324,9 +310,6 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { secureStorage: false });
     case 'first-launch':
       return { runs: [], memory: 'setup-only', fresh: true };
-    case 'backend-stubs':
-      // A fresh install against the M1 runner: these channels still answer INTERNAL `not_implemented`.
-      return { runs: [], memory: 'setup-only', fresh: true, notImplemented: BACKEND_STUBS };
     case 'validation-errors':
       // New run: preflight issues. Workflow editor: a saved draft whose validation fails.
       return {

@@ -79,6 +79,50 @@ describe('IPC router (H4)', () => {
     expect((await router.invoke('relay/v1/app.getInfo', frame('http://localhost:9999/'), {})).ok).toBe(false);
   });
 
+  it('dev only: an output that violates the catalog schema becomes INTERNAL (and is logged); packaged passes it through', async () => {
+    const bad = () => Promise.resolve({ ok: true, data: { version: 42 } });
+    const dev = setup({ isPackaged: false, getInfo: bad });
+    const packaged = setup({ isPackaged: true, getInfo: bad });
+
+    const d = await dev.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+    const p = await packaged.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+
+    expect(!d.ok && d.error.code).toBe('INTERNAL');
+    expect(JSON.stringify(d)).not.toContain('42');
+    expect(dev.lines.some((l) => l.event === 'ipc.error')).toBe(true);
+    expect(p).toEqual({ ok: true, data: { version: 42 } });
+    expect(packaged.lines.some((l) => l.event === 'ipc.error')).toBe(false);
+  });
+
+  it('dev only: warns about an error code the operation does not document, without changing the answer', async () => {
+    const undocumented = () => Promise.resolve({ ok: false, error: { code: 'BUDGET_BLOCKED', userMessage: 'x', retryable: false, nextAction: 'none', alternatives: [] } });
+    const dev = setup({ isPackaged: false, getInfo: undocumented });
+    const packaged = setup({ isPackaged: true, getInfo: undocumented });
+
+    const d = await dev.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+    await packaged.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+
+    expect(!d.ok && d.error.code).toBe('BUDGET_BLOCKED');
+    expect(dev.lines).toContainEqual({ event: 'ipc.undocumented_error', channel: 'relay/v1/app.getInfo', code: 'BUDGET_BLOCKED' });
+    expect(packaged.lines.some((l) => l.event === 'ipc.undocumented_error')).toBe(false);
+  });
+
+  it('dev: a documented or universal error code is not reported', async () => {
+    const dev = setup({ isPackaged: false, getInfo: () => Promise.resolve({ ok: false, error: { code: 'RUNNER_UNAVAILABLE', userMessage: 'x', retryable: true, nextAction: 'none', alternatives: [] } }) });
+
+    await dev.router.invoke('relay/v1/app.getInfo', frame(FILE_URL), {});
+
+    expect(dev.lines.some((l) => l.event === 'ipc.undocumented_error')).toBe(false);
+  });
+
+  it('an unknown channel answers NOT_FOUND', async () => {
+    const { router } = setup();
+
+    const r = await router.invoke('relay/v1/nope', frame(FILE_URL), {});
+
+    expect(!r.ok && r.error.code).toBe('NOT_FOUND');
+  });
+
   it('returns VALIDATION_FAILED with zod issues for invalid input', async () => {
     const { router } = setup();
 

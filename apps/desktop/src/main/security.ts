@@ -4,7 +4,17 @@
 import { isAppEntryUrl } from './ipc/router.js';
 import type { TrustedOrigin } from './ipc/router.js';
 
-/** Header CSP for the dev server (the meta CSP narrows script-src further to the preamble hash). */
+/**
+ * Header CSP for the dev server only (never packaged; see `applySessionPolicy`). Its main job is `frame-ancestors`,
+ * which a meta CSP cannot carry.
+ *
+ * `'unsafe-inline'` in script-src is required in dev and is not a widening in practice: @vitejs/plugin-react injects
+ * an inline React-Refresh preamble `<script type="module">` into index.html, and every CSP in force must allow it. This
+ * static header cannot know that script's hash, so it allows inline scripts; the generated meta CSP
+ * (build/vite-plugin-csp.ts) allows only that preamble's sha256 hash, and the browser enforces both policies, so the
+ * effective dev policy admits exactly the hashed preamble. Production has no header CSP and its meta CSP is
+ * `script-src 'self'` with no inline allowance.
+ */
 export const DEV_HEADER_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' http://localhost:*",

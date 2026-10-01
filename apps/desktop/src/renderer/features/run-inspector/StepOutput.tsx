@@ -14,10 +14,8 @@ import {
 } from '../../components/ui';
 import type { ApprovalDecisionInput } from '../../components/ui';
 import { formatDuration, formatTokens, PROVIDER_LABELS } from '../../lib/format';
-import { isNotImplemented } from '../../api/errors';
 import { useArtifact } from '../../hooks/useArtifact';
 import { useStep } from '../../hooks/useStep';
-import { NotAvailableNotice } from '../common/NotAvailableNotice';
 import { PlanView, StepOutputView } from '../outputs/OutputViews';
 import { paths } from '../shell/paths';
 import { ActionErrorNotice } from './ActionErrorNotice';
@@ -193,11 +191,7 @@ export function ApprovalOutput({ run, onDecide, pendingDecision, error, staleNot
   if (approval === null) return stale;
   if (plan === undefined) {
     if (loadError !== null && loadError !== undefined) {
-      return isNotImplemented(loadError) ? (
-        <NotAvailableNotice error={loadError}>The plan is stored with the run and can be reviewed after updating Relay.</NotAvailableNotice>
-      ) : (
-        <ActionErrorNotice error={loadError} />
-      );
+      return <ActionErrorNotice error={loadError} />;
     }
     return <Skeleton lines={6} />;
   }
@@ -216,7 +210,7 @@ export function ApprovalOutput({ run, onDecide, pendingDecision, error, staleNot
       ) : (
         <PlanView value={plan} />
       )}
-      <ActionErrorNotice error={error} fallback="The plan is unchanged and still waiting for your decision." />
+      <ActionErrorNotice error={error} />
     </div>
   );
 }

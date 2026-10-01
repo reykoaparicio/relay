@@ -34,7 +34,9 @@ J depends on contracts (types) and I (components). J does **not** wait for H: it
 
 P0 navigation shows Overview, Workflows, Runs, Memory, and Settings. **Schedules and Usage are hidden** (§5.1 "hide unfinished navigation entries").
 
-**Wave 1 route coverage.** In Wave 1 (M1) every route in the table above is registered. A page not yet built renders `PlaceholderPage` (`pages/PlaceholderPage.tsx`: the page title as the `h1`, the app shell and navigation, and the text "This page arrives in a later milestone"), and it still emits the J2 `relay:nav:<route>` measure when its content renders. This lets 12's `@m1` `responsiveness.spec.ts` and `smoke.spec.ts` navigate to Runs, Memory, and Settings before J4–J10 land. Each placeholder is replaced by its real page in the milestone listed in the header.
+**Route coverage.** Every route in the table above is registered and renders its real page, and each page emits the J2 `relay:nav:<route>` measure when its content renders (12's `@m1` `responsiveness.spec.ts` and `smoke.spec.ts` time these). There is no placeholder page.
+
+**Runner stubs.** Every operation is implemented by the real runner. A channel that answers `INTERNAL` with `details.reason = 'not_implemented'` (a future stub) gets no special UI: it renders through the normal `ErrorView` / `MutationError` / `ActionErrorNotice` path like any other error. The fake bridge keeps `world.notImplemented` as a test hook so that generic path stays covered; no fake scenario stubs a channel.
 
 ## J2: Data layer (`api/*.ts`, `hooks/*.ts`)
 
@@ -228,7 +230,7 @@ The first-run flow must not require any knowledge of graph theory, tokenizers, c
   - Projects: rename, exclusions editor (with a live preview), allowed providers, monthly allowance, an **OpenAI "Store responses at OpenAI"** toggle (`projects.update({ patch: { providerOptions: { openai: { storeResponses } } } })`, default on, with the 04 §D5 explanation; disabling it limits unknown-outcome reconciliation), archive.
   - Data: backup; **Export project (JSON)** (`projects.export({ projectId })`; main shows the save dialog; the bundle has no credentials and no absolute root path); **Export ledger for a month (CSV)** (month select → `ledger.export({ projectId, month })`); **raw-response retention** (`NumberInput` 1–365 days → `app.updateSettings({ rawResponseRetentionDays })`); **setup allowance** (`MoneyInput`, default `SETUP_ALLOWANCE_MICROUSD` = $0.05/month for connection tests → `app.updateSettings({ setupAllowanceMicrousd })`); export diagnostics (redacted; the user reviews the list of included items before saving, §18.3); purge project history; retention note (§12.3 "do not claim the full database is encrypted").
   - Diagnostics: runner heartbeat, schema version, unresolved calls, provider mode.
-  - About: version and build id (§18.5), licenses link.
+  - About: version and build id (§18.5) and a "Third-party licenses" note. Relay has no license page of its own yet, and the third-party notice list is not bundled in the prototype build, so the copy says that. The Electron license link opens through `app.openExternal` (main confirms; https only). Bundling `docs/release/licenses.txt` into About needs a build change (a `?raw` import or an `extraResources` file plus an IPC read), which is tracked separately.
 
 ## J11: Page tests (owned by J; `*.test.tsx`; jsdom + fake bridge + I's `renderWithProviders`)
 

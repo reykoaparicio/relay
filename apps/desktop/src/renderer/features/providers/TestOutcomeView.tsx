@@ -38,21 +38,6 @@ export function TestOutcomeView({
       </InlineAlert>
     );
   }
-  if (outcome.kind === 'not_tested') {
-    return (
-      <InlineAlert
-        tone="info"
-        title={
-          <>
-            {providerName} key saved (not tested)
-            {label === null ? null : <> · {label}</>}
-          </>
-        }
-      >
-        <p>Connection tests are not available yet in this build. Relay uses the key when a run starts.</p>
-      </InlineAlert>
-    );
-  }
   const error = outcome.error === null || outcome.error === undefined ? null : toViewError(outcome.error);
   const appErr = error ?? outcome.result?.error ?? null;
   const rejected = appErr?.code === 'AUTH_REQUIRED';

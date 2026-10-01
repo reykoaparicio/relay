@@ -181,7 +181,6 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
         {unmappedError === null ? null : (
           <MutationError
             error={unmappedError}
-            unavailableHint="Nothing was saved. You can add rules once memory is available."
             {...(titleOf === undefined ? {} : { names: { recordTitle: titleOf } })}
           />
         )}

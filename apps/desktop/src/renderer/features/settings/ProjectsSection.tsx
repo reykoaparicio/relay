@@ -343,7 +343,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
           <section className="stack" aria-label="Exclusion preview" aria-live="polite" aria-busy={preview.isFetching || undefined}>
             <span className="section-label">Preview</span>
             {preview.error !== null ? (
-              <MutationError error={preview.error} unavailableHint="Exclusions still apply after you save." />
+              <MutationError error={preview.error} />
             ) : preview.data === undefined ? (
               <Skeleton lines={3} />
             ) : (
@@ -434,7 +434,6 @@ function ProjectForm({ project }: { readonly project: Project }) {
         ) : (
           <MutationError
             error={serverAhead && isStaleConflict(update.error) ? null : update.error}
-            unavailableHint="Project settings cannot be changed in this build; runs keep the current settings."
             handlers={{ reload: refresh }}
             projectId={project.id}
           />
@@ -475,7 +474,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
                 usage ledger stay on this computer. Project files are never touched.
               </p>
               <p className="subtle">A project with an active run cannot be archived until that run ends.</p>
-              <MutationError error={archive.error} unavailableHint="The project was not archived." projectId={project.id} />
+              <MutationError error={archive.error} projectId={project.id} />
             </div>
           }
           confirmLabel="Archive project"

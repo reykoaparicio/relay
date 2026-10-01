@@ -30,3 +30,11 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
+  # Stays ENABLED (Electron's default), set explicitly so it is a decision, not an omission (08 H9). The renderer is
+  # loaded from file://…/out/renderer/index.html, and Vite emits `<script type="module" crossorigin>` and
+  # `<link rel="stylesheet" crossorigin>`. Without this fuse Chromium treats file:// as origin `null` and blocks those
+  # module/CORS loads ("Cross origin requests are only supported for protocol schemes: … http, https"): the window
+  # stays blank. Verified 2026-10-01 by flipping only this fuse on a copy of the Electron 44.5.1 binary and launching
+  # the built app (fuse on: renderer mounts; fuse off: index.js and index.css blocked by CORS, #root empty).
+  # Disabling it requires serving the renderer from a privileged custom protocol (protocol.handle) instead of file://.
+  grantFileProtocolExtraPrivileges: true
