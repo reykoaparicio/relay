@@ -284,22 +284,22 @@ ADRs 001–010 are copied from spec §24.1. New ADRs:
 
 ## 9. Status tracker (the orchestrator updates this table)
 
-**M1 reached 2026-09-30.** **M2–M4 functionally complete 2026-10-01** (fake providers): e2e 35/35 (M1–M4 + a11y incl. Memory, workflow editor, Settings), 2,489 unit, 77 integration (crash matrix 7/7). **M2 sign-off pending:** live three-provider workflow test (D9b, ~$1.50 cap) — needs founder approval + API keys.
+**M1 reached 2026-09-30.** **M2–M5 functionally complete 2026-10-01** (fake providers). Final sweep 2026-10-01: typecheck, lint (eslint + depcruise), 2,675 unit (coverage thresholds met), 81 integration (crash matrix included), build, e2e 36/36 (M1–M4 + a11y), `pnpm package` + verify-package 19/19, check:secrets 0 findings, check:project-untouched OK, demo reset+verify ×2, evaluate --dry-run ($0). **Sign-off pending:** live three-provider run (D9b, ~$1.50 cap) — needs founder approval + API keys.
 
 | Plan | Status | Audit | Open items |
 |---|---|---|---|
 | 01 Foundation | done | fixed F1–F7 | |
 | 02 Contracts / API | done | fixed B1–B16 | |
-| 03 Storage | done | fixed B1–B5 + replaceInputFiles, txResult, deferred_pause | |
-| 04 Providers | done (Anthropic, OpenAI, Gemini, fake, live tests) | fixed (Anthropic F1–F6, OpenAI B1–B9, Gemini G1–G4) | Anthropic price verification vs official page; live run not executed |
+| 03 Storage | done | fixed B1–B5, txResult, deferred_pause; verification gaps closed | |
+| 04 Providers | done (Anthropic, OpenAI, Gemini, fake, live tests) | fixed (Anthropic F1–F6, OpenAI B1–B9, Gemini G1–G4) | Anthropic prices pending official-page verification; live run never executed |
 | 05 Tools | done | fixed B1–B12, S1 (credential-file exclusions) | content-based secret scan of intake files (founder decision) |
-| 06 Engine | done | fixed B1–B9, BH-1..8, money audit 1–4 (durable deferred overrun, dead-end pauses, lease-in-tx) | setup unknown liability has no resolve path (founder decision) |
-| 07 Context/Memory/Templates | done (G1–G6) | fixed BH-1..8 | |
-| 08 Desktop host | H1–H8, H10 | fixed F1–F6; security audit clean except hardenedRuntime (accepted risk until a Developer ID exists) | H9 package verify (plan 13 M1) |
+| 06 Engine | done | fixed B1–B9, BH-1..8, money audit 1–4, verification 1–8 (readiness checks, report regeneration, daily sweep) | setup unknown liability has no resolve path (founder decision) |
+| 07 Context/Memory/Templates | done | fixed BH-1..8 | |
+| 08 Desktop host | done (H1–H10) | security audit clean; hardening/preload/handler/logger tests added | hardenedRuntime off until a Developer ID exists (accepted risk); GrantFileProtocolExtraPrivileges stays on (file:// renderer) |
 | 09 Design system | done | fixed B1–B13 | ConflictCompare slots, ConfirmDialog secondary action, date input |
-| 10 Renderer | done (J1–J10) | fixed J9/J10 B1–B14 | `editable.limits` is always true (locked-limits UI only reachable in tests) |
-| 11 Integration | K1–K7 | – | it.todo: export IPC, importDiffText .env |
-| 12 E2E | done (35) | – | |
-| 13 Release/Demo/Eval | in progress | – | |
+| 10 Renderer | done (J1–J10) | fixed J9/J10 B1–B14; dead stub UI removed | `editable.limits` always true; full third-party license list not bundled |
+| 11 Integration | done (27 suites) | – | |
+| 12 E2E | done (36) | – | |
+| 13 Release/Demo/Eval | done (M1–M5) | packaging fix (no node_modules in asar); demo scratch-dir guard fix | founder: spending cap, baseline choice, demo launch mode, live-labelled prepared runs |
 
 Incident log: 2026-09-30 18:27 a test helper recursively deleted the contents of the user's `$TMPDIR` (path computed one level too high). Fixed with ownership-guarded delete helpers in tests/helpers and tests/e2e; recorded as a standing rule.
