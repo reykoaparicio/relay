@@ -14,7 +14,7 @@
 //   (`raiseUndiciTimeouts`). Cancellation comes from the engine's AbortSignal (`config.abortSignal`).
 // - Errors: a single `ApiError { status, message }` class; the message is the JSON-stringified error body. Fetch
 //   rejections are rethrown as-is (no connection-error class), so this file wraps them (`GeminiConnectionError`).
-import { ApiError, GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { ApiError, GoogleGenAI, ServiceTier, ThinkingLevel } from '@google/genai';
 import { RelayError, errors } from '@relay/contracts';
 import type { Clock, Effort, ModelCapabilities, ModelPrices } from '@relay/contracts';
 import { findCatalogEntry, priceCatalogVersionFor } from './catalog.js';
@@ -23,7 +23,7 @@ import { mapProviderError } from './errors.js';
 import type { SdkErrorClasses } from './errors.js';
 import { LOCAL_REQUEST_OVERHEAD_TOKENS, buildEstimate, conservativeInputTokens, localEstimate } from './estimate.js';
 import { NOOP_LOGGER, safeHook } from './safe-hook.js';
-import { createTrackedFetch } from './tracked-fetch.js';
+import { abortError, createTrackedFetch, isSignalAborted } from './tracked-fetch.js';
 import type { DispatchTracker } from './tracked-fetch.js';
 import type {
   EstimateContext,
@@ -175,7 +175,10 @@ interface CandidateLike {
   readonly finishReason?: string;
 }
 interface UsageMetadataLike extends GeminiUsageLike {
+  /** Vertex AI only (`TrafficType`). */
   readonly trafficType?: string;
+  /** Gemini Developer API only (`ServiceTier`: unspecified / standard / flex / priority). */
+  readonly serviceTier?: string;
 }
 interface ChunkLike {
   readonly responseId?: string;
@@ -191,6 +194,73 @@ interface CallState {
   blockReason?: string;
   /** Latest usage block (the last chunk carries the complete counts). */
   usage?: UsageMetadataLike;
+  /** Whether a terminal chunk (finishReason / prompt blockReason) has been seen. */
+  terminalSeen: boolean;
+  /** A usage block arrived on or after the terminal chunk: only then are the counts final. */
+  usageFinal: boolean;
+  /** A raw SSE `{"error":…}` payload the SDK silently drops (captured from the body stream). */
+  sseError?: SseErrorPayload;
+}
+
+/** The `google.rpc.Status` fields kept from a mid-stream SSE error event (redacted before storage). */
+interface SseErrorPayload {
+  readonly code?: number;
+  readonly status?: string;
+  readonly message?: string;
+}
+
+const SSE_EVENT_DELIMITER = /\r\n\r\n|\n\n|\r\r/;
+const SSE_ERROR_DATA = /^\{\s*"error"\s*:/;
+
+/** Parses one SSE event; returns its error payload when the `data:` is a `{"error":{…}}` object. */
+function sseErrorOf(eventText: string): SseErrorPayload | undefined {
+  const data = eventText
+    .split(/\r\n|\n|\r/)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice('data:'.length).trim())
+    .join('\n');
+  if (!SSE_ERROR_DATA.test(data)) return undefined;
+  const parsed = parseJson(data) as { error?: unknown } | undefined;
+  const e = parsed?.error;
+  if (typeof e !== 'object' || e === null) return undefined;
+  const { code, status, message } = e as { code?: unknown; status?: unknown; message?: unknown };
+  return {
+    ...(typeof code === 'number' ? { code } : {}),
+    ...(typeof status === 'string' ? { status } : {}),
+    ...(typeof message === 'string' ? { message } : {}),
+  };
+}
+
+/**
+ * Passes a 2xx stream body through unchanged while watching for SSE `data: {"error":…}` events: the SDK parses such an
+ * event into an empty chunk (the converter keeps only known response fields), so the error is otherwise lost.
+ */
+function watchSseErrors(response: Response, onError: (e: SseErrorPayload) => void): Response {
+  if (response.body === null || response.status < 200 || response.status >= 300) return response;
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const scan = (final: boolean): void => {
+    const parts = buffer.split(SSE_EVENT_DELIMITER);
+    buffer = final ? '' : (parts.pop() ?? '');
+    for (const part of parts) {
+      const e = sseErrorOf(part);
+      if (e !== undefined) onError(e);
+    }
+  };
+  const body = response.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+        buffer += decoder.decode(chunk, { stream: true });
+        scan(false);
+      },
+      flush() {
+        buffer += decoder.decode();
+        scan(true);
+      },
+    }),
+  );
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 /** Finish reasons that mean the model (or a policy) declined: `refused` (04 §D10). */
@@ -205,12 +275,27 @@ const REFUSAL_FINISH_REASONS: ReadonlySet<string> = new Set([
   'IMAGE_RECITATION',
 ]);
 
-/** Traffic types billed at the standard (catalog) prices; any other reported type is a price-tier mismatch. */
+/** Vertex traffic types billed at the standard (catalog) prices; any other reported type is a price-tier mismatch. */
 const STANDARD_TRAFFIC: ReadonlySet<string> = new Set(['ON_DEMAND', 'TRAFFIC_TYPE_UNSPECIFIED']);
+/**
+ * Gemini Developer API service tiers billed at the standard (catalog) prices (SDK `ServiceTier`: `unspecified` is
+ * "default service tier, which is standard"). Compared case-insensitively, tolerating a `SERVICE_TIER_` enum prefix.
+ */
+const STANDARD_SERVICE_TIERS: ReadonlySet<string> = new Set(['standard', 'unspecified']);
 
-/** Whether a reported `usageMetadata.trafficType` means the call was billed other than at the standard tier. */
-export function isGeminiPriceTierMismatch(trafficType: string | undefined): boolean {
-  return trafficType !== undefined && !STANDARD_TRAFFIC.has(trafficType);
+function isStandardServiceTier(tier: string): boolean {
+  return STANDARD_SERVICE_TIERS.has(tier.toLowerCase().replace(/^service_tier_/, ''));
+}
+
+/**
+ * Whether the reported usage says the call was billed other than at the standard tier: a Developer API
+ * `usageMetadata.serviceTier` other than standard/unspecified (flex, priority, …), or a Vertex `trafficType` other than
+ * on-demand/unspecified.
+ */
+export function isGeminiPriceTierMismatch(usage: { readonly trafficType?: string; readonly serviceTier?: string } | undefined): boolean {
+  if (usage === undefined) return false;
+  if (typeof usage.serviceTier === 'string' && !isStandardServiceTier(usage.serviceTier)) return true;
+  return typeof usage.trafficType === 'string' && !STANDARD_TRAFFIC.has(usage.trafficType);
 }
 
 const THINKING_LEVELS: Readonly<Partial<Record<Effort, ThinkingLevel>>> = {
@@ -234,12 +319,17 @@ function userContents(req: ModelRequest) {
   return req.messages.map((m) => ({ role: m.role, parts: [{ text: m.content }] }));
 }
 
-/** Request per 04 §D10. No metadata is sent: Gemini API `labels` are Vertex-only (the SDK throws for the Developer API). */
+/**
+ * Request per 04 §D10. No metadata is sent: Gemini API `labels` are Vertex-only (the SDK throws for the Developer API).
+ * `serviceTier: standard` pins the catalog-priced tier (the SDK sends it as the top-level request `serviceTier`), so a
+ * future default change or a project-level flex/priority setting cannot silently change the price.
+ */
 function requestParams(req: ModelRequest, thinkingLevel: ThinkingLevel | undefined, signal: AbortSignal) {
   return {
     model: req.modelId,
     contents: userContents(req),
     config: {
+      serviceTier: ServiceTier.STANDARD,
       systemInstruction: req.system,
       maxOutputTokens: req.maxOutputTokens,
       responseMimeType: 'application/json',
@@ -259,13 +349,19 @@ function tryParseJson(text: string): unknown {
 }
 
 /**
- * Usage is known only when the final usage block carries `promptTokenCount` and, if any text was produced,
- * `candidatesTokenCount`; otherwise the zeros are placeholders and must not read as a known $0.
+ * Usage is known only when a usage block arrived on or after the terminal chunk (earlier blocks are running counts,
+ * not the bill) and it carries `promptTokenCount` and, if any text was produced, `candidatesTokenCount`; otherwise the
+ * numbers are placeholders or stale and must not read as a known (under)cost.
  */
 function usageIsKnown(state: CallState): boolean {
   const u = state.usage;
-  if (u === undefined || typeof u.promptTokenCount !== 'number') return false;
+  if (!state.usageFinal || u === undefined || typeof u.promptTokenCount !== 'number') return false;
   return state.text === '' || typeof u.candidatesTokenCount === 'number';
+}
+
+/** The mapper's `streamError`: the redacted `{code,status,message}` body plus the RPC status as `errorType`. */
+function streamErrorOf(e: SseErrorPayload): { readonly providerError: unknown; readonly errorType?: string } {
+  return { providerError: { error: e }, ...(e.status === undefined ? {} : { errorType: e.status }) };
 }
 
 /**
@@ -282,14 +378,18 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
    * fallback, and the `x-goog-api-key` header is pinned in `httpOptions.headers` (the SDK never overwrites a present
    * key header). `vertexai`/`enterprise: false` ignore GOOGLE_GENAI_USE_*; `baseUrl` ignores GOOGLE_GEMINI_BASE_URL.
    */
-  const makeClient = (apiKey: string, trackedFetch: typeof fetch): GoogleGenAI => {
+  const makeClient = (apiKey: string, trackedFetch: typeof fetch, onSseError?: (e: SseErrorPayload) => void): GoogleGenAI => {
     const connectionFetch: typeof fetch = async (input, init) => {
+      // The SDK calls fetch even when its abortSignal is already aborted: never dispatch (phase stays `not_sent`).
+      if (isSignalAborted(input, init)) throw abortError();
+      let response: Response;
       try {
-        return await trackedFetch(input, init);
+        response = await trackedFetch(input, init);
       } catch (err) {
         if (init?.signal?.aborted === true) throw err;
         throw new GeminiConnectionError(err);
       }
+      return onSseError === undefined ? response : watchSseErrors(response, onSseError);
     };
     return new GoogleGenAI({
       apiKey,
@@ -321,11 +421,15 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       const providerRequestId = tracker.requestId;
       safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId, ...(providerRequestId === undefined ? {} : { providerRequestId }) }), logger);
     }
-    if (chunk.usageMetadata !== undefined) state.usage = chunk.usageMetadata;
     if (chunk.promptFeedback?.blockReason !== undefined) state.blockReason = chunk.promptFeedback.blockReason;
     const candidate = chunk.candidates?.[0];
+    if (candidate?.finishReason !== undefined) state.finishReason = candidate.finishReason;
+    if (state.finishReason !== undefined || state.blockReason !== undefined) state.terminalSeen = true;
+    if (chunk.usageMetadata !== undefined) {
+      state.usage = chunk.usageMetadata;
+      state.usageFinal = state.terminalSeen; // a block before the terminal chunk is a running count, not the bill
+    }
     if (candidate === undefined) return;
-    if (candidate.finishReason !== undefined) state.finishReason = candidate.finishReason;
     const text = (candidate.content?.parts ?? [])
       .filter((p) => p.thought !== true)
       .map((p) => p.text ?? '')
@@ -349,6 +453,7 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       aborted,
       ...(state.providerResponseId === undefined ? {} : { providerResponseId: state.providerResponseId }),
       ...(partialUsage === undefined ? {} : { partialUsage }),
+      ...(state.sseError === undefined ? {} : { streamError: streamErrorOf(state.sseError) }),
     });
   };
 
@@ -359,7 +464,7 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       ...(state.providerResponseId === undefined ? {} : { providerResponseId: state.providerResponseId }),
       ...(tracker.requestId === undefined ? {} : { providerRequestId: tracker.requestId }),
       ...(usageIsKnown(state) ? {} : { usageKnown: false }),
-      ...(isGeminiPriceTierMismatch(state.usage?.trafficType) ? { priceTierMismatch: true } : {}),
+      ...(isGeminiPriceTierMismatch(state.usage) ? { priceTierMismatch: true } : {}),
     };
     if (state.blockReason !== undefined && state.finishReason === undefined) {
       return { kind: 'refused', category: `prompt_blocked:${state.blockReason}`, usage, ...extra };
@@ -383,7 +488,8 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
     if (reason !== undefined && REFUSAL_FINISH_REASONS.has(reason)) return { kind: 'refused', category: reason, usage, ...extra };
     if (reason !== undefined) return { kind: 'truncated', rawText: state.text, usage, rawStopReason: reason, ...extra };
     // The stream ended without a finish reason (e.g. an SSE error payload the SDK drops, or a cut stream): the provider
-    // accepted the request and may have executed it, so this is never "not executed" (D3 rows 2/3).
+    // accepted the request and may have executed it, so this is never "not executed" (D3 rows 2/3). A captured SSE
+    // error payload is attached (redacted) for diagnosis only; the classification does not change.
     return errorResult(new Error('stream ended without a finish reason'), state, tracker, aborted);
   };
 
@@ -395,9 +501,12 @@ export function createGeminiAdapter(opts: GeminiAdapterOptions): ProviderAdapter
       logger,
       onDispatched: () => ctx.hooks?.onDispatched?.(),
     });
-    const state: CallState = { text: '' };
+    const state: CallState = { text: '', terminalSeen: false, usageFinal: false };
+    const onSseError = (e: SseErrorPayload): void => {
+      state.sseError ??= e;
+    };
     try {
-      const stream = await makeClient(ctx.apiKey, trackedFetch).models.generateContentStream(requestParams(req, thinkingLevel, ctx.signal));
+      const stream = await makeClient(ctx.apiKey, trackedFetch, onSseError).models.generateContentStream(requestParams(req, thinkingLevel, ctx.signal));
       for await (const chunk of stream) {
         try {
           onChunk(chunk, state, ctx, tracker, startedAt);

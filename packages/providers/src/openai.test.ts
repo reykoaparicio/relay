@@ -439,11 +439,13 @@ describe('openai adapter: hooks and cancellation', () => {
     const controller = new AbortController();
     controller.abort();
     const { fetch, calls } = serve('success');
+    const onDispatched = vi.fn();
 
-    const result = await run(fetch, {}, undefined, controller.signal);
+    const result = await run(fetch, {}, { onDispatched }, controller.signal);
 
     expect(result).toMatchObject({ kind: 'error', phase: 'not_sent', error: { details: { aborted: true } } });
     expect(calls).toHaveLength(0);
+    expect(onDispatched).not.toHaveBeenCalled();
   });
 });
 

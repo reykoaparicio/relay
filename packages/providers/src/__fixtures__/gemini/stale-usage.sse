@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"{\"summary\":\"ok\","}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":1200,"candidatesTokenCount":5,"thoughtsTokenCount":120,"totalTokenCount":1325},"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_stale_01"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"\"findings\":[]}"}],"role":"model"},"index":0,"finishReason":"STOP"}],"modelVersion":"gemini-3.5-flash","responseId":"gem_resp_stale_01"}
+

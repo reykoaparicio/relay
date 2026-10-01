@@ -91,6 +91,7 @@ describe('gemini adapter: request', () => {
     expect(calls[0]!.headers.get('x-goog-api-key')).toBe(API_KEY);
     expect(calls[0]!.headers.get('authorization')).toBeNull();
     const body = bodyOf(calls[0]);
+    expect(body['serviceTier']).toBe('standard'); // catalog prices are the Standard tier (G3)
     expect(body['contents']).toEqual([{ role: 'user', parts: [{ text: 'Review the selected files.' }] }]);
     expect(body['systemInstruction']).toMatchObject({ parts: [{ text: 'You are the reviewer.' }] });
     expect(body['generationConfig']).toEqual({
@@ -253,6 +254,48 @@ describe('gemini adapter: stream results', () => {
     expect(await run(serveChunks([chunk]).fetch)).toMatchObject({ kind: 'success', usageKnown: false });
   });
 
+  it('usage only on an earlier chunk (none on/after the finishReason chunk) → usageKnown: false (stale running count)', async () => {
+    const r = await run(serve('stale-usage').fetch);
+
+    expect(r).toMatchObject({ kind: 'success', usageKnown: false, json: { summary: 'ok', findings: [] }, providerResponseId: 'gem_resp_stale_01' });
+    if (r.kind !== 'success') return;
+    expect(r.rawUsage).toMatchObject({ promptTokenCount: 1200, candidatesTokenCount: 5 });
+  });
+
+  it('a usage-only chunk after the finishReason chunk is final → usage known', async () => {
+    const chunks = [
+      event({ candidates: [{ content: { parts: [{ text: '{}' }] } }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 }, responseId: 'r1' }),
+      event({ candidates: [{ content: { parts: [] }, finishReason: 'STOP' }], responseId: 'r1' }),
+      event({ usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 9 }, responseId: 'r1' }),
+    ];
+    const r = await run(serveChunks(chunks).fetch);
+
+    expect(r).toMatchObject({ kind: 'success', usage: { outputTokens: 9 } });
+    expect(r).not.toHaveProperty('usageKnown');
+  });
+
+  it.each(['flex', 'priority', 'FLEX', 'SERVICE_TIER_PRIORITY'])('a reported serviceTier %s sets priceTierMismatch', async (serviceTier) => {
+    const chunk = event({
+      candidates: [{ content: { parts: [{ text: '{}' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1, serviceTier },
+      responseId: 'r1',
+    });
+
+    expect(await run(serveChunks([chunk]).fetch)).toMatchObject({ kind: 'success', priceTierMismatch: true });
+  });
+
+  it.each(['standard', 'unspecified', 'SERVICE_TIER_STANDARD'])('a reported serviceTier %s is the catalog tier (no mismatch)', async (serviceTier) => {
+    const chunk = event({
+      candidates: [{ content: { parts: [{ text: '{}' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1, serviceTier },
+      responseId: 'r1',
+    });
+    const r = await run(serveChunks([chunk]).fetch);
+
+    expect(r.kind).toBe('success');
+    expect(r).not.toHaveProperty('priceTierMismatch');
+  });
+
   it('a non-standard traffic type sets priceTierMismatch', async () => {
     const chunk = event({
       candidates: [{ content: { parts: [{ text: '{}' }] }, finishReason: 'STOP' }],
@@ -289,6 +332,33 @@ describe('gemini adapter: mid-stream failures are never "not executed"', () => {
     expect(e.error.code).toBe('REQUEST_OUTCOME_UNKNOWN');
     expect(e.providerResponseId).toBe('gem_resp_midstream_01');
     expect(e.error.details?.['partialUsage']).toMatchObject({ uncachedInputTokens: 1000, cacheReadInputTokens: 200, outputTokens: 120 });
+    // The SDK drops the `data: {"error":…}` event; the adapter recovers it from the raw stream for diagnosis (G4).
+    expect(e.error.details?.['providerError']).toEqual({
+      error: { code: 500, status: 'INTERNAL', message: expect.stringContaining('An internal error has occurred') as unknown },
+    });
+    expect(e.error.details?.['errorType']).toBe('INTERNAL');
+  });
+
+  it('an SSE error event is redacted, split across byte chunks, and never changes the classification', async () => {
+    const first = geminiChunks(raw('success'))[0]!;
+    const errEvent = event(errorBody(503, 'UNAVAILABLE', `overloaded for key ${API_KEY}`, [{ '@type': 'x.DebugInfo', detail: 'stack' }]));
+    const mid = Math.floor(errEvent.length / 2);
+    const e = asError(await run(serveChunks([first, errEvent.slice(0, mid), errEvent.slice(mid)]).fetch));
+
+    expect(e).toMatchObject({ phase: 'responded_partial', providerResponseId: 'gem_resp_success_01' });
+    expect(e.error.code).toBe('REQUEST_OUTCOME_UNKNOWN');
+    expect(e.error.details?.['errorType']).toBe('UNAVAILABLE');
+    expect(e.error.details?.['providerError']).toMatchObject({ error: { code: 503, status: 'UNAVAILABLE' } });
+    expect(JSON.stringify(e.error.details?.['providerError'])).not.toContain('DebugInfo');
+    expect(JSON.stringify(e)).not.toContain(API_KEY);
+  });
+
+  it('a malformed or non-object SSE error event attaches nothing', async () => {
+    const first = geminiChunks(raw('success'))[0]!;
+    const e = asError(await run(serveChunks([first, 'data: {"error": "boom"}\r\n\r\n', 'data: {"error": {not json\r\n\r\n']).fetch));
+
+    expect(e.error.code).toBe('REQUEST_OUTCOME_UNKNOWN');
+    expect(e.error.details).not.toHaveProperty('providerError');
   });
 
   it('a raw JSON error chunk (SDK ApiError mid-stream, even a 5xx) → unknown, never PROVIDER_UNAVAILABLE', async () => {
@@ -328,17 +398,22 @@ describe('gemini adapter: mid-stream failures are never "not executed"', () => {
     expect(e.phase).toBe('responded_partial');
   });
 
-  it('an already-aborted signal → cancellation', async () => {
+  it('an already-aborted signal → cancellation, not_sent, never dispatched (the SDK still calls fetch)', async () => {
     const ac = new AbortController();
     ac.abort();
     // Like undici: an already-aborted signal rejects the fetch before anything is sent.
-    const { fetch } = createMockFetch((_url, init) => {
+    const { fetch, calls } = createMockFetch((_url, init) => {
       if (init?.signal?.aborted === true) throw new DOMException('This operation was aborted', 'AbortError');
       return geminiSse(geminiChunks(raw('success')));
     });
-    const e = asError(await run(fetch, {}, undefined, ac.signal));
+    const onDispatched = vi.fn();
+    const e = asError(await run(fetch, {}, { onDispatched }, ac.signal));
 
+    expect(e.error.code).toBe('INTERNAL');
     expect(e.error.details?.['aborted']).toBe(true);
+    expect(e.phase).toBe('not_sent');
+    expect(onDispatched).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -450,11 +525,17 @@ describe('toTypedGeminiError / helpers', () => {
     expect(typed).toMatchObject({ status: 418, message: 'not json', error: { error: { message: 'not json' } } });
   });
 
-  it('isGeminiPriceTierMismatch: only an explicit non-standard traffic type', () => {
+  it('isGeminiPriceTierMismatch: only an explicit non-standard service tier or traffic type', () => {
     expect(isGeminiPriceTierMismatch(undefined)).toBe(false);
-    expect(isGeminiPriceTierMismatch('ON_DEMAND')).toBe(false);
-    expect(isGeminiPriceTierMismatch('TRAFFIC_TYPE_UNSPECIFIED')).toBe(false);
-    expect(isGeminiPriceTierMismatch('ON_DEMAND_FLEX')).toBe(true);
+    expect(isGeminiPriceTierMismatch({})).toBe(false);
+    expect(isGeminiPriceTierMismatch({ trafficType: 'ON_DEMAND' })).toBe(false);
+    expect(isGeminiPriceTierMismatch({ trafficType: 'TRAFFIC_TYPE_UNSPECIFIED' })).toBe(false);
+    expect(isGeminiPriceTierMismatch({ trafficType: 'ON_DEMAND_FLEX' })).toBe(true);
+    expect(isGeminiPriceTierMismatch({ serviceTier: 'standard' })).toBe(false);
+    expect(isGeminiPriceTierMismatch({ serviceTier: 'unspecified' })).toBe(false);
+    expect(isGeminiPriceTierMismatch({ serviceTier: 'flex' })).toBe(true);
+    expect(isGeminiPriceTierMismatch({ serviceTier: 'priority' })).toBe(true);
+    expect(isGeminiPriceTierMismatch({ serviceTier: 'standard', trafficType: 'ON_DEMAND_PRIORITY' })).toBe(true);
   });
 
   it('mapGeminiEffort maps listed levels and throws otherwise', () => {

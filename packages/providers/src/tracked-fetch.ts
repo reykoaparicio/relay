@@ -75,6 +75,17 @@ function trackBody(response: Response, onFirstChunk: () => void): Response {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+/** True when the request's signal (from `init`, else from a `Request` input) is already aborted. */
+export function isSignalAborted(input: string | URL | Request, init?: RequestInit): boolean {
+  const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  return signal?.aborted === true;
+}
+
+/** The `AbortError` fetch rejects with for an aborted signal. */
+export function abortError(): DOMException {
+  return new DOMException('This operation was aborted', 'AbortError');
+}
+
 /**
  * Wraps an injected base fetch so every request records its {@link DispatchPhase}. One tracker per
  * `generate` / `testConnection` / `reconcile` / count call; `onDispatched` fires once, at the first invocation.
@@ -86,6 +97,9 @@ export function createTrackedFetch(
   const tracker: MutableTracker = { phase: 'not_sent' };
   const logger = opts.logger ?? NOOP_LOGGER;
   const tracked = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // A request whose signal is already aborted is never sent (fetch rejects before opening a connection), so it must
+    // not be marked dispatched: the phase stays `not_sent` and `onDispatched` does not fire.
+    if (isSignalAborted(input, init)) throw abortError();
     if (tracker.dispatchedAt === undefined) {
       tracker.dispatchedAt = opts.clock.now();
       safeHook('onDispatched', opts.onDispatched, logger);

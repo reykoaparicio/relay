@@ -51,6 +51,24 @@ describe('createTrackedFetch', () => {
     expect(tracker.causeCode).toBeUndefined();
   });
 
+  it.each([
+    ['init.signal', (f: typeof fetch, signal: AbortSignal) => f('https://example.invalid/v1', { signal })],
+    ['a Request input signal', (f: typeof fetch, signal: AbortSignal) => f(new Request('https://example.invalid/v1', { signal }))],
+  ])('an already-aborted %s rejects with AbortError without dispatching (phase stays not_sent)', async (_label, call) => {
+    const ac = new AbortController();
+    ac.abort();
+    const base = vi.fn<typeof fetch>();
+    const onDispatched = vi.fn();
+    const { fetch: tracked, tracker } = createTrackedFetch(base, { clock: tickingClock(), onDispatched });
+
+    await expect(call(tracked, ac.signal)).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(base).not.toHaveBeenCalled();
+    expect(onDispatched).not.toHaveBeenCalled();
+    expect(tracker.phase).toBe('not_sent');
+    expect(tracker.dispatchedAt).toBeUndefined();
+  });
+
   it('fires onDispatched exactly once, at invocation', async () => {
     const onDispatched = vi.fn();
     let seenAtCall = -1;

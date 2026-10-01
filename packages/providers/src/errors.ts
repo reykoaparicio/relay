@@ -32,6 +32,11 @@ export interface MapErrorContext {
   readonly aborted?: boolean;
   readonly providerResponseId?: string;
   readonly partialUsage?: NormalizedUsage;
+  /**
+   * A provider error payload seen in the stream but not surfaced by the SDK as an error (e.g. a Gemini SSE
+   * `{"error":…}` event). Attached (redacted) to `REQUEST_OUTCOME_UNKNOWN` details only; it never changes the row.
+   */
+  readonly streamError?: { readonly providerError: unknown; readonly errorType?: string };
 }
 
 /** §7.6 cap on honoring `retry-after`. */
@@ -182,6 +187,10 @@ export function mapProviderError(err: unknown, ctx: MapErrorContext): ModelError
   if (apiView?.type !== undefined) details['errorType'] = apiView.type;
   if (mapped.code === 'REQUEST_OUTCOME_UNKNOWN' && apiView?.body !== undefined && !('providerError' in details)) {
     details['providerError'] = redactDeep(apiView.body); // e.g. the SSE `error` event body
+  }
+  if (mapped.code === 'REQUEST_OUTCOME_UNKNOWN' && ctx.streamError !== undefined && !('providerError' in details)) {
+    details['providerError'] = redactDeep(ctx.streamError.providerError);
+    if (ctx.streamError.errorType !== undefined && !('errorType' in details)) details['errorType'] = ctx.streamError.errorType;
   }
   if (ctx.partialUsage !== undefined && mapped.phase === 'responded_partial') details['partialUsage'] = ctx.partialUsage;
   if (ctx.providerResponseId !== undefined) details['providerResponseId'] = ctx.providerResponseId;
