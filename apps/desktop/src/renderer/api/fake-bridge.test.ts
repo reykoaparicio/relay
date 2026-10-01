@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OPERATIONS, PAUSE_REASONS, runDetailSchema } from '@relay/contracts';
 import type { OperationKey } from '@relay/contracts';
-import { createFakeBridge, FAKE_HANDLED_OPERATIONS, FAKE_SCENARIOS, FAKE_WORKFLOW_ID, fakeScenarioFromUrl } from './fake-bridge';
+import { createFakeBridge, FAKE_HANDLED_OPERATIONS, FAKE_PROJECT_ID, FAKE_SCENARIOS, FAKE_WORKFLOW_ID, fakeScenarioFromUrl } from './fake-bridge';
 import { allowedRunActions } from './fake-scenarios/allowed-actions';
 
 const PROJECT = 'prj_00000000000000000000000001';
@@ -202,5 +202,27 @@ describe('fake bridge', () => {
     expect(fakeScenarioFromUrl({ search: '?fake=interrupted', hash: '' })).toBe('interrupted');
     expect(fakeScenarioFromUrl({ search: '', hash: '#/p/x?fake=empty' })).toBe('empty');
     expect(fakeScenarioFromUrl({ search: '?fake=nope', hash: '' })).toBe('awaiting-approval');
+  });
+
+  it('runs.preflight memory: absent = every approved record, [] = pinned only, a list = pinned + those', async () => {
+    const bridge = createFakeBridge('awaiting-approval');
+    const approved = bridge.world.memory.filter((m) => m.status === 'approved');
+    const pinned = approved.filter((m) => m.pinned).map((m) => m.id);
+    const other = approved.find((m) => !m.pinned)!;
+    const base = {
+      projectId: FAKE_PROJECT_ID,
+      workflowId: FAKE_WORKFLOW_ID,
+      workflowVersion: 3,
+      goal: 'g',
+      input: { kind: 'files' as const, relPaths: ['src/a.ts'] },
+    };
+    const ids = async (memoryRecordIds?: string[]) => {
+      const r = await bridge.invoke('relay/v1/runs.preflight', { ...base, ...(memoryRecordIds === undefined ? {} : { memoryRecordIds }) });
+      if (!r.ok) throw new Error(r.error.code);
+      return (r.data as { inputSummary: { memoryRecords: { id: string }[] } }).inputSummary.memoryRecords.map((m) => m.id).sort();
+    };
+    expect(await ids()).toEqual(approved.map((m) => m.id).sort());
+    expect(await ids([])).toEqual([...pinned].sort());
+    expect(await ids([other.id])).toEqual([...pinned, other.id].sort());
   });
 });

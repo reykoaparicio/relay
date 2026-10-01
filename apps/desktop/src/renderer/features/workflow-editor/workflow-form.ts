@@ -3,6 +3,7 @@
 // (`steps[3].maxOutputTokens`, `limits.maxAttempts`, `prompts.reviewer.v1`) to editor field ids.
 import { DEFAULT_LIMITS, MAX_OUTPUT_TOKENS_CEILING, MAX_RETRY_POLICY, MEMORY_TYPES } from '@relay/contracts';
 import type { MemoryType, Microusd, StepKey, StepSpec, WorkflowDraftPatch, WorkflowVersionView } from '@relay/contracts';
+import { stepKeyLabel } from '../../lib/format';
 import { checkAllowance, checkWhole, dollarsText, LIMIT_BOUNDS } from '../run-setup/limits';
 
 export type ModelStep = Extract<StepSpec, { kind: 'model' }>;
@@ -98,7 +99,11 @@ function sameTypes(a: readonly MemoryType[], b: readonly MemoryType[]): boolean 
   return a.length === b.length && MEMORY_TYPES.every((t) => a.includes(t) === b.includes(t));
 }
 
-/** Diffs the form against the loaded version: only changed P0-editable fields are sent (02 `saveDraft`). */
+/**
+ * Diffs the form against the version the user started editing (the *base*, not whatever loaded since): only the
+ * P0-editable fields the user changed are sent (02 `saveDraft`), so a field changed in another session is never
+ * reverted by an untouched field of this form.
+ */
 export function buildPatch(view: WorkflowVersionView, form: WorkflowForm): PatchResult {
   const errors: Record<string, string> = {};
   const base = initialForm(view);
@@ -173,6 +178,99 @@ export function buildPatch(view: WorkflowVersionView, form: WorkflowForm): Patch
     ...(Object.keys(prompts).length > 0 ? { prompts } : {}),
   };
   return { patch: Object.keys(patch).length > 0 ? patch : null, errors };
+}
+
+const STEP_FIELD_LABELS: Readonly<Record<keyof StepForm, string>> = {
+  profile: 'profile',
+  maxOutputTokens: 'output token maximum',
+  transport: 'transport retries',
+  schemaRepair: 'schema repair attempts',
+  rateLimitWaits: 'rate-limit waits',
+  memoryRoles: 'memory scope',
+  memoryTypes: 'memory record types',
+};
+
+const LIMIT_FIELD_LABELS = {
+  allowance: 'Run allowance',
+  revisions: 'Revision cycles',
+  attempts: 'Maximum attempts',
+  timeoutMinutes: 'Timeout (minutes)',
+} as const;
+
+/** One editable field of the form, as text (for field-by-field comparison of two forms). */
+export interface FormField {
+  readonly key: string;
+  readonly label: string;
+  readonly value: string;
+}
+
+/** Every P0-editable field of a form, in display order. */
+export function formFields(view: WorkflowVersionView, form: WorkflowForm): FormField[] {
+  const out: FormField[] = [];
+  for (const k of Object.keys(LIMIT_FIELD_LABELS) as Array<keyof typeof LIMIT_FIELD_LABELS>) {
+    out.push({ key: `limits.${k}`, label: LIMIT_FIELD_LABELS[k], value: form[k] });
+  }
+  for (const s of modelSteps(view)) {
+    const f = form.steps[s.id];
+    if (f === undefined) continue;
+    for (const k of Object.keys(STEP_FIELD_LABELS) as Array<keyof StepForm>) {
+      const v = f[k];
+      out.push({
+        key: `steps.${s.id}.${k}`,
+        label: `${stepKeyLabel(s.id)} step: ${STEP_FIELD_LABELS[k]}`,
+        value: typeof v === 'string' ? v : MEMORY_TYPES.filter((t) => v.includes(t)).join(', '),
+      });
+    }
+    const prompt = form.prompts[s.instructionVersion];
+    if (prompt !== undefined) out.push({ key: `prompts.${s.instructionVersion}`, label: `${stepKeyLabel(s.id)} step: prompt`, value: prompt });
+  }
+  return out;
+}
+
+/** Fields whose values differ between two forms of the same workflow. */
+export function changedFields(view: WorkflowVersionView, a: WorkflowForm, b: WorkflowForm): FormField[] {
+  const bv = new Map(formFields(view, b).map((f) => [f.key, f.value]));
+  return formFields(view, a).filter((f) => bv.get(f.key) !== f.value);
+}
+
+/**
+ * Re-bases the user's edits onto a newer saved version: a field the user changed (mine ≠ base) keeps the user's
+ * value; every other field takes the newer saved value (theirs). Nothing the other session changed is reverted.
+ */
+export function rebaseForm(base: WorkflowForm, mine: WorkflowForm, theirs: WorkflowForm): WorkflowForm {
+  const pick = <T>(b: T, m: T, t: T, same: (x: T, y: T) => boolean = (x, y) => x === y): T => (same(m, b) ? t : m);
+  const steps: Record<string, StepForm> = {};
+  for (const [id, t] of Object.entries(theirs.steps)) {
+    const b = base.steps[id];
+    const m = mine.steps[id];
+    if (b === undefined || m === undefined) {
+      steps[id] = t;
+      continue;
+    }
+    steps[id] = {
+      profile: pick(b.profile, m.profile, t.profile),
+      maxOutputTokens: pick(b.maxOutputTokens, m.maxOutputTokens, t.maxOutputTokens),
+      transport: pick(b.transport, m.transport, t.transport),
+      schemaRepair: pick(b.schemaRepair, m.schemaRepair, t.schemaRepair),
+      rateLimitWaits: pick(b.rateLimitWaits, m.rateLimitWaits, t.rateLimitWaits),
+      memoryRoles: pick(b.memoryRoles, m.memoryRoles, t.memoryRoles),
+      memoryTypes: pick(b.memoryTypes, m.memoryTypes, t.memoryTypes, sameTypes),
+    };
+  }
+  const prompts: Record<string, string> = {};
+  for (const [iv, t] of Object.entries(theirs.prompts)) {
+    const b = base.prompts[iv];
+    const m = mine.prompts[iv];
+    prompts[iv] = b === undefined || m === undefined ? t : pick(b, m, t);
+  }
+  return {
+    allowance: pick(base.allowance, mine.allowance, theirs.allowance),
+    revisions: pick(base.revisions, mine.revisions, theirs.revisions),
+    attempts: pick(base.attempts, mine.attempts, theirs.attempts),
+    timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
+    steps,
+    prompts,
+  };
 }
 
 /** Where a validation issue points: an editor field and the step it belongs to (both may be null). */

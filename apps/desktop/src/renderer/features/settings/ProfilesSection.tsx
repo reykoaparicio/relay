@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { EFFORT_LEVELS, MAX_OUTPUT_TOKENS_CEILING } from '@relay/contracts';
@@ -20,8 +21,13 @@ import { qk } from '../../api/keys';
 import { PROVIDER_LABELS } from '../../lib/format';
 import { useCatalog } from '../../hooks/useCatalog';
 import { useProfiles } from '../../hooks/useProfiles';
+import { useProfileUsage, useWorkflows } from '../../hooks/useWorkflow';
+import type { ProfileUse } from '../../hooks/useWorkflow';
 import { MutationError } from '../common/MutationError';
+import { conflictReason } from '../common/conflict';
 import { useRetryAction } from '../common/useNextAction';
+import { paths } from '../shell/paths';
+import { useSettingsProject } from './useSettingsProject';
 
 interface Draft {
   readonly id: ModelProfile['id'] | null;
@@ -68,6 +74,21 @@ function paramsWithoutEffort(base: ModelProfile | null): Omit<ModelProfile['para
   return { refusalFallback, ...(maxInputTokens === undefined ? {} : { maxInputTokens }) };
 }
 
+function UsageList({ usage, projectId }: { readonly usage: readonly ProfileUse[]; readonly projectId: string | undefined }) {
+  return (
+    <ul className="small" style={{ margin: 0, paddingLeft: 16 }} aria-label="Workflows using this profile">
+      {usage.map((u) => {
+        const label = `${u.name} (${u.version === 'draft' ? 'draft' : `v${String(u.version)}`})`;
+        return (
+          <li key={`${u.workflowId}:${String(u.version)}`}>
+            {projectId === undefined ? label : <Link to={paths.workflow(projectId, u.workflowId)}>{label}</Link>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function WarningList({ warnings }: { readonly warnings: readonly CapabilityWarning[] }) {
   if (warnings.length === 0) return <span className="badge success">OK</span>;
   return (
@@ -105,9 +126,27 @@ export function ProfilesSection() {
   const [saved, setSaved] = useState<ProfileWithWarnings | null>(null);
   const [deleting, setDeleting] = useState<ModelProfile | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const workflows = useWorkflows();
+  const { project: settingsProject } = useSettingsProject();
+  const conflictNames = { workflowName: (id: string) => workflows.data?.find((w) => w.id === id)?.name };
+  const renaming = draft !== null && draft.base !== null && draft.name.trim() !== draft.base.name;
+  // Pre-warnings (the engine decides): workflows that name the profile being renamed or deleted.
+  const usage = useProfileUsage(renaming ? draft.base.name : (deleting?.name ?? null));
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: qk.profiles() });
+  };
+  /**
+   * Reload of a stale CONFLICT: refetch the profiles and re-base the open edit on the saved revision. The user's edits
+   * stay in the form; only the expected revision (and the params the form does not edit) come from the saved profile.
+   */
+  const reloadDraft = () => {
+    void profiles.refetch().then((res) => {
+      const fresh = res.data?.find((row) => row.profile.id === draft?.id)?.profile;
+      if (fresh === undefined) return;
+      setDraft((d) => (d === null || d.id !== fresh.id ? d : { ...d, expectedRevision: fresh.revision, base: fresh }));
+      upsert.reset();
+    });
   };
   const upsert = useMutation({
     mutationFn: (d: Draft) =>
@@ -356,8 +395,20 @@ export function ProfilesSection() {
               </ul>
             </InlineAlert>
           ) : (
-            <MutationError error={upsert.error} unavailableHint="Profiles cannot be edited in this build; runs use the existing profiles." />
+            <MutationError
+              error={upsert.error}
+              unavailableHint="Profiles cannot be edited in this build; runs use the existing profiles."
+              handlers={{ reload: reloadDraft }}
+              names={conflictNames}
+              projectId={settingsProject?.id}
+            />
           )}
+          {renaming && usage !== null && usage.length > 0 && conflictReason(upsert.error) !== 'profile_in_use' ? (
+            <InlineAlert tone="warning" title={`Relay will refuse to rename “${draft.base.name}” while workflows use it`}>
+              <p>These workflows name the profile; choose another profile in their steps first, or keep the name:</p>
+              <UsageList usage={usage} projectId={settingsProject?.id} />
+            </InlineAlert>
+          ) : null}
           <div className="actions">
             <Button type="submit" variant="primary" pending={upsert.isPending}>
               {draft.id === null ? 'Create profile' : `Save revision ${String((draft.expectedRevision ?? 0) + 1)}`}
@@ -385,10 +436,16 @@ export function ProfilesSection() {
           consequences={
             <div className="stack">
               <p>
-                Future runs can no longer use it. A workflow draft that still names it cannot be validated until you
-                choose another profile. Past runs keep the profile snapshot they used.
+                Future runs can no longer choose it. Past runs keep the profile snapshot they used. Relay refuses to
+                delete a profile that a workflow draft or validated version still names: choose another profile in
+                those workflows first.
               </p>
-              <MutationError error={remove.error} unavailableHint="The profile was not deleted." />
+              {usage !== null && usage.length > 0 ? (
+                <InlineAlert tone="warning" title={`Used by ${String(new Set(usage.map((u) => u.workflowId)).size)} workflow${new Set(usage.map((u) => u.workflowId)).size === 1 ? '' : 's'}: deleting will be refused`}>
+                  <UsageList usage={usage} projectId={settingsProject?.id} />
+                </InlineAlert>
+              ) : null}
+              <MutationError error={remove.error} unavailableHint="The profile was not deleted." names={conflictNames} projectId={settingsProject?.id} />
             </div>
           }
           confirmLabel="Delete profile"

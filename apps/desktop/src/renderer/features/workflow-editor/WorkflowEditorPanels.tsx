@@ -123,16 +123,30 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
         <span className="subtle small">Snapshotted into every run</span>
       </div>
       <div className="grid grid-cols-2 gap-4 max-[700px]:grid-cols-1">
-        <MoneyInput
-          id={WF_FIELD.allowance}
-          label="Run allowance (USD)"
-          value={form.allowance}
-          hint="Checked before each billable request."
-          {...(errors[WF_FIELD.allowance] === undefined ? {} : { error: errors[WF_FIELD.allowance] })}
-          onValueChange={(text) => {
-            set({ allowance: text });
-          }}
-        />
+        {editable ? (
+          <MoneyInput
+            id={WF_FIELD.allowance}
+            label="Run allowance (USD)"
+            value={form.allowance}
+            hint="Checked before each billable request."
+            {...(errors[WF_FIELD.allowance] === undefined ? {} : { error: errors[WF_FIELD.allowance] })}
+            onValueChange={(text) => {
+              set({ allowance: text });
+            }}
+          />
+        ) : (
+          // Limits are locked for this version: the allowance is shown, not editable (like the other limit inputs).
+          <Field label="Run allowance (USD)" id={WF_FIELD.allowance} hint="Checked before each billable request. Locked for this version.">
+            {(control) => (
+              <span className="money-input">
+                <span className="prefix" aria-hidden="true">
+                  $
+                </span>
+                <input {...control} className="input mono" type="text" value={form.allowance} readOnly />
+              </span>
+            )}
+          </Field>
+        )}
         <Field
           label="Revision cycles"
           id={WF_FIELD.revisions}

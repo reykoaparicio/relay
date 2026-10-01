@@ -28,8 +28,12 @@ export interface NewRunForm {
   readonly revisionText: string | null;
   readonly attemptsText: string | null;
   readonly timeoutText: string | null;
-  /** Checked approved, non-pinned records (pinned rules are always included by the engine and never sent). */
-  readonly memoryIds: readonly string[];
+  /**
+   * The memory selection. `null` = untouched: every approved record is included (the engine default, §4.5) and
+   * `memoryRecordIds` is not sent. Once the user changes the selection it is the explicit list of ticked non-pinned
+   * records, sent as is (possibly `[]` = pinned rules only; pinned rules are always included and never sent).
+   */
+  readonly memoryIds: readonly string[] | null;
   /** Set by the first submit: goal/input errors show from then on. */
   readonly submitted: boolean;
 }
@@ -44,14 +48,15 @@ export const INITIAL_FORM: NewRunForm = {
   revisionText: null,
   attemptsText: null,
   timeoutText: null,
-  memoryIds: [],
+  memoryIds: null,
   submitted: false,
 };
 
 export type FormAction =
   | { readonly type: 'patch'; readonly patch: Partial<NewRunForm> }
   | { readonly type: 'select-profile'; readonly stepKey: string; readonly profileId: string }
-  | { readonly type: 'toggle-memory'; readonly id: string; readonly checked: boolean };
+  /** `defaults`: the non-pinned approved ids ticked while the selection is untouched (the first toggle starts from them). */
+  | { readonly type: 'toggle-memory'; readonly id: string; readonly checked: boolean; readonly defaults: readonly string[] };
 
 export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
   switch (a.type) {
@@ -59,13 +64,13 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       return { ...s, ...a.patch };
     case 'select-profile':
       return { ...s, profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId } };
-    case 'toggle-memory':
+    case 'toggle-memory': {
+      const current = s.memoryIds ?? a.defaults;
       return {
         ...s,
-        memoryIds: a.checked
-          ? [...s.memoryIds.filter((m) => m !== a.id), a.id]
-          : s.memoryIds.filter((m) => m !== a.id),
+        memoryIds: a.checked ? [...current.filter((m) => m !== a.id), a.id] : current.filter((m) => m !== a.id),
       };
+    }
   }
 }
 
@@ -235,7 +240,8 @@ export function buildStartInput(args: {
     input,
     ...(check.limitOverrides === undefined ? {} : { limitOverrides: check.limitOverrides }),
     ...(profileOverrides === undefined ? {} : { profileOverrides }),
-    ...(form.memoryIds.length === 0 ? {} : { memoryRecordIds: [...form.memoryIds] }),
+    // Absent = every approved record (untouched picker); otherwise the explicit list, `[]` included.
+    ...(form.memoryIds === null ? {} : { memoryRecordIds: [...form.memoryIds] }),
   };
 }
 

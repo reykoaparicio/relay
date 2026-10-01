@@ -141,4 +141,41 @@ describe('useIdempotentMutation', () => {
   it('canonicalJson sorts keys at every depth', () => {
     expect(canonicalJson({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: 3 } })).toBe('{"a":{"c":3,"d":[2,{"y":2,"z":1}]},"b":1}');
   });
+
+  it('an intent tag (state the input does not carry) gives a different intent a new key after an error', async () => {
+    const { bridge, hook } = setup();
+    bridge.failNext('relay/v1/projects.createSample', errors.runnerUnavailable());
+    await act(async () => {
+      await hook.result.current.mutateAsync({}, 'rev1').catch(() => undefined);
+    });
+    await act(async () => {
+      await hook.result.current.mutateAsync({}, 'rev2');
+    });
+    const [first, second] = bridge.callsTo('relay/v1/projects.createSample');
+    expect(keyOf(second?.input)).not.toBe(keyOf(first?.input));
+    expect(second?.input).toEqual({ idempotencyKey: keyOf(second?.input) });
+  });
+
+  it('reset clears the error and starts a new intent', async () => {
+    const { bridge, hook } = setup();
+    bridge.failNext('relay/v1/projects.createSample', errors.runnerUnavailable());
+    await act(async () => {
+      await hook.result.current.mutateAsync({}).catch(() => undefined);
+    });
+    await waitFor(() => {
+      expect(hook.result.current.error).not.toBeNull();
+    });
+    act(() => {
+      hook.result.current.reset();
+    });
+    await waitFor(() => {
+      expect(hook.result.current.error).toBeNull();
+    });
+    expect(hook.result.current.currentKey()).toBeNull();
+    await act(async () => {
+      await hook.result.current.mutateAsync({});
+    });
+    const [first, second] = bridge.callsTo('relay/v1/projects.createSample');
+    expect(keyOf(second?.input)).not.toBe(keyOf(first?.input));
+  });
 });

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Link, Navigate, useParams } from 'react-router';
+import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 import { PageHeader } from '../components/ui';
 import { AboutSection, DiagnosticsSection } from '../features/settings/DiagnosticsSection';
 import { DataSection } from '../features/settings/DataSection';
@@ -38,6 +38,8 @@ const CONTENT: Readonly<Record<SettingsSection, () => ReactNode>> = {
 /** Settings (10 J10, lazy route): Providers (+ Models), Model profiles, Projects, Storage & data, Diagnostics, About. */
 export function SettingsPage() {
   const { section } = useParams();
+  // The chosen project (`?project=`) is kept when switching sections.
+  const [search] = useSearchParams();
   const current: SettingsSection | null =
     section === undefined ? 'providers' : isSection(section) ? section : null;
   useNavPerf('settings', current !== null);
@@ -52,7 +54,7 @@ export function SettingsPage() {
             <li key={s.key}>
               <Link
                 className="tab no-underline"
-                to={paths.settings(s.key)}
+                to={paths.settings(s.key, { project: search.get('project') ?? undefined })}
                 aria-current={s.key === current ? 'page' : undefined}
                 style={s.key === current ? CURRENT_TAB_STYLE : undefined}
               >

@@ -62,7 +62,7 @@ export function BudgetBlockedPanel({
                 The project monthly allowance is a project setting, recorded as a policy change.
               </p>
               <div>
-                <ButtonLink as={Link} to={paths.settings('projects')}>
+                <ButtonLink as={Link} to={paths.settings('projects', { project: projectId })}>
                   Edit project allowance
                 </ButtonLink>
               </div>

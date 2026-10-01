@@ -1,11 +1,14 @@
 import { useId, useState } from 'react';
 import { Link } from 'react-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { Check, Combine, Pencil, X } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
 import { Button, ErrorView, Field, Hash, KeyValueList, Select, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
+import { qk } from '../../api/keys';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
 import { useMemoryRecord } from '../../hooks/useMemoryRecord';
+import { conflictCopy } from '../common/conflict';
 import { MutationError } from '../common/MutationError';
 import { runLabel } from '../runs/run-display';
 import { paths } from '../shell/paths';
@@ -21,7 +24,8 @@ export interface SuggestionCardProps {
   /** Titles of records this suggestion overlaps with (by id), for the overlap note. */
   readonly titleOf: (id: string) => string | undefined;
   readonly mutations: ReturnType<typeof useMemoryMutations>;
-  readonly onCombine: (suggestionId: string) => void;
+  /** Opens Combine with an approved record: the one named (e.g. by a memory_conflict), else the page's best match. */
+  readonly onCombine: (suggestionId: string, withId?: string) => void;
 }
 
 /**
@@ -35,7 +39,13 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
   const [scope, setScope] = useState<ScopeChoice>(() => choiceFromScope(suggestion.scope));
   const [editing, setEditing] = useState(false);
   const [lastAction, setLastAction] = useState<'approve' | 'edit' | 'reject' | null>(null);
+  const queryClient = useQueryClient();
   const { approve, reject } = mutations;
+  /** Reload refetches what Approve depends on: the suggestion list (its revision) and the suggestion's detail. */
+  const reload = () => {
+    void queryClient.invalidateQueries({ queryKey: qk.memory(projectId, 'suggested') });
+    void detail.refetch();
+  };
   const approvePending = approve.isPending && approve.variables.suggestionId === suggestion.id;
   const rejectPending = reject.isPending && reject.variables.suggestionId === suggestion.id;
   const busy = approvePending || rejectPending;
@@ -124,6 +134,11 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
           onCancel={() => {
             setEditing(false);
           }}
+          onReload={reload}
+          titleOf={titleOf}
+          onOpenConflict={(id) => {
+            onCombine(suggestion.id, id);
+          }}
         />
       ) : (
         <>
@@ -162,7 +177,25 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
             </p>
           )}
           {error === null || error === undefined ? null : (
-            <MutationError error={error} unavailableHint="The suggestion is unchanged and still excluded from runs." />
+            <MutationError
+              error={error}
+              unavailableHint="The suggestion is unchanged and still excluded from runs."
+              names={{ recordTitle: titleOf }}
+              handlers={{ reload }}
+              conflictActions={(conflictCopy(error)?.conflictsWith ?? []).map((id) => (
+                <Button
+                  key={id}
+                  size="sm"
+                  variant="primary"
+                  icon={Combine}
+                  onClick={() => {
+                    onCombine(suggestion.id, id);
+                  }}
+                >
+                  {`Combine with “${titleOf(id) ?? 'the approved record'}”`}
+                </Button>
+              ))}
+            />
           )}
           <div className="actions" style={{ flexWrap: 'wrap' }}>
             <Button variant="primary" icon={Check} pending={approvePending && lastAction === 'approve'} disabled={busy} onClick={doApprove}>

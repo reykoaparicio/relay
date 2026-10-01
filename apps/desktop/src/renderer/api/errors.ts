@@ -30,7 +30,7 @@ export function nextActionTarget(action: NextAction, ctx: NextActionContext = {}
     case 'report_bug':
       return { kind: 'navigate', to: paths.settings('diagnostics') };
     case 'edit_policy':
-      return { kind: 'navigate', to: paths.settings('projects') };
+      return { kind: 'navigate', to: paths.settings('projects', { project: ctx.projectId ?? undefined }) };
     case 'decide_unknown':
       return ctx.projectId && ctx.runId
         ? { kind: 'navigate', to: paths.run(ctx.projectId, ctx.runId) }

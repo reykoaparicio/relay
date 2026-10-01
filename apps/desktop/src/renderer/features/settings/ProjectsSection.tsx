@@ -11,6 +11,7 @@ import {
   Field,
   InlineAlert,
   MoneyInput,
+  parseDollarInput,
   Skeleton,
   Textarea,
   TextInput,
@@ -22,6 +23,7 @@ import { qk } from '../../api/keys';
 import { EXCLUSION_REASON_LABELS, PROVIDER_LABELS } from '../../lib/format';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { usePreview } from '../../hooks/usePreview';
+import { isStaleConflict } from '../common/conflict';
 import { MutationError } from '../common/MutationError';
 import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
@@ -76,31 +78,111 @@ export function ProjectsSection() {
   return (
     <section className="stack" aria-label="Projects">
       <SettingsProjectPicker projects={projects.data} value={project.id} onChange={choose} />
-      <ProjectForm key={`${project.id}:${String(project.updatedAt)}`} project={project} />
+      {/* Keyed by id only: a refetch (or a CONFLICT) must never remount the form and drop the user's edits. */}
+      <ProjectForm key={project.id} project={project} />
     </section>
   );
 }
 
+/** The editable values of a project, as form text. */
+interface ProjectValues {
+  readonly name: string;
+  readonly exclusionsText: string;
+  /** Sorted provider ids. */
+  readonly allowed: readonly ProviderId[];
+  readonly allowanceText: string;
+  readonly storeResponses: boolean;
+}
+
+type ProjectField = keyof ProjectValues;
+
+const PROJECT_FIELD_LABELS: Readonly<Record<ProjectField, string>> = {
+  name: 'Project name',
+  exclusionsText: 'Exclusions',
+  allowed: 'Allowed providers',
+  allowanceText: 'Monthly allowance',
+  storeResponses: 'Store responses at OpenAI',
+};
+
+const PROJECT_FIELDS = Object.keys(PROJECT_FIELD_LABELS) as ProjectField[];
+
+function valuesOf(p: Project): ProjectValues {
+  return {
+    name: p.name,
+    exclusionsText: p.exclusions.join('\n'),
+    allowed: [...p.providerPolicy.allowedProviderIds].sort(),
+    allowanceText: p.monthlyAllowanceMicrousd === null ? '' : dollarsText(p.monthlyAllowanceMicrousd),
+    storeResponses: p.providerPolicy.providerOptions.openai.storeResponses,
+  };
+}
+
+function sameValue(f: ProjectField, a: ProjectValues, b: ProjectValues): boolean {
+  if (f === 'allowed') return sameList(a.allowed, b.allowed);
+  if (f === 'exclusionsText') return sameList(parseGlobs(a.exclusionsText), parseGlobs(b.exclusionsText));
+  if (f === 'name') return a.name.trim() === b.name.trim();
+  return a[f] === b[f];
+}
+
+function valueText(f: ProjectField, v: ProjectValues): string {
+  switch (f) {
+    case 'allowed':
+      return v.allowed.length === 0 ? 'None' : v.allowed.map((p) => PROVIDER_LABELS[p]).join(', ');
+    case 'exclusionsText':
+      return parseGlobs(v.exclusionsText).join(', ') || 'None';
+    case 'allowanceText':
+      return v.allowanceText.trim() === '' ? 'No monthly allowance' : `$${v.allowanceText}`;
+    case 'storeResponses':
+      return v.storeResponses ? 'On' : 'Off';
+    case 'name':
+      return v.name;
+  }
+}
+
+/**
+ * Project settings form. The project the user started editing is the *base*: the patch is the form diffed against it
+ * and the save expects its `updatedAt`. A newer project (saved elsewhere, or loaded after a CONFLICT) never replaces
+ * the user's edits: the form shows what changed on the server, and re-basing onto it is an explicit choice that keeps
+ * the user's changes and takes every other field from the server.
+ */
 function ProjectForm({ project }: { readonly project: Project }) {
   const titleId = useId();
   const queryClient = useQueryClient();
   const toast = useToast();
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const [name, setName] = useState(project.name);
-  const [exclusionsText, setExclusionsText] = useState(project.exclusions.join('\n'));
-  const [allowed, setAllowed] = useState<ReadonlySet<ProviderId>>(new Set(project.providerPolicy.allowedProviderIds));
-  const [allowanceText, setAllowanceText] = useState(
-    project.monthlyAllowanceMicrousd === null ? '' : dollarsText(project.monthlyAllowanceMicrousd),
-  );
-  const [allowance, setAllowance] = useState<Microusd | null>(project.monthlyAllowanceMicrousd);
-  const [storeResponses, setStoreResponses] = useState(project.providerPolicy.providerOptions.openai.storeResponses);
+  const [base, setBase] = useState(project);
+  const [values, setValues] = useState<ProjectValues>(() => valuesOf(project));
   const [submitted, setSubmitted] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const { name, exclusionsText, allowanceText, storeResponses } = values;
+  const allowed: ReadonlySet<ProviderId> = new Set(values.allowed);
+  const set = (patch: Partial<ProjectValues>) => {
+    setValues((v) => ({ ...v, ...patch }));
+  };
+  const parsedAllowance = parseDollarInput(allowanceText);
+  const allowance: Microusd | null = parsedAllowance.ok ? parsedAllowance.value : null;
+
+  const baseValues = valuesOf(base);
+  const changedByMe = PROJECT_FIELDS.filter((f) => !sameValue(f, values, baseValues));
+  // A newer project replaces an untouched form silently; with edits it is shown, never applied behind the user's back.
+  // (Only a newer project: the list may still hold the pre-save project for a moment after a save.)
+  if (project.updatedAt > base.updatedAt && changedByMe.length === 0) {
+    setBase(project);
+    setValues(valuesOf(project));
+  }
+  const serverAhead = project.updatedAt > base.updatedAt && changedByMe.length > 0;
+  const serverValues = valuesOf(project);
+  const changedOnServer = serverAhead ? PROJECT_FIELDS.filter((f) => !sameValue(f, serverValues, baseValues)) : [];
+  const rebase = () => {
+    const next: Record<string, unknown> = {};
+    for (const f of PROJECT_FIELDS) next[f] = changedByMe.includes(f) ? values[f] : serverValues[f];
+    setValues(next as unknown as ProjectValues);
+    setBase(project);
+  };
 
   const exclusions = parseGlobs(exclusionsText);
   // The runner previews saved exclusions + `extraExclusions`, so only the new patterns are sent (removals apply on save).
-  const added = exclusions.filter((g) => !project.exclusions.includes(g));
-  const removed = project.exclusions.filter((g) => !exclusions.includes(g));
+  const added = exclusions.filter((g) => !base.exclusions.includes(g));
+  const removed = base.exclusions.filter((g) => !exclusions.includes(g));
   const settledAdded = useDebouncedValue(added.join('\n'), EXCLUSION_PREVIEW_DEBOUNCE_MS);
   const preview = usePreview({ projectId: project.id }, settledAdded === '' ? [] : settledAdded.split('\n'));
   const userExcluded = (preview.data?.excluded ?? []).filter((e) => e.reason === 'user_pattern');
@@ -114,18 +196,17 @@ function ProjectForm({ project }: { readonly project: Project }) {
   if (allowed.size === 0) local[FIELD.providers] = 'Allow at least one provider, or no run can start.';
   if (allowanceInvalid) local[FIELD.allowance] = 'Enter an amount like 20.00, or leave it empty for no monthly allowance.';
 
+  const changed = (f: ProjectField) => changedByMe.includes(f);
   const patch: InputOf<'relay/v1/projects.update'>['patch'] = {
-    ...(name.trim() === project.name ? {} : { name: name.trim() }),
-    ...(sameList(exclusions, project.exclusions) ? {} : { exclusions }),
-    ...(sameList([...allowed].sort(), [...project.providerPolicy.allowedProviderIds].sort())
-      ? {}
-      : { allowedProviderIds: POLICY_PROVIDERS.filter((p) => allowed.has(p)) }),
-    ...((allowanceText.trim() === '' ? null : allowance) === project.monthlyAllowanceMicrousd
-      ? {}
-      : { monthlyAllowanceMicrousd: allowanceText.trim() === '' ? null : allowance }),
-    ...(storeResponses === project.providerPolicy.providerOptions.openai.storeResponses
-      ? {}
-      : { providerOptions: { ...project.providerPolicy.providerOptions, openai: { storeResponses } } }),
+    ...(changed('name') ? { name: name.trim() } : {}),
+    ...(changed('exclusionsText') ? { exclusions } : {}),
+    ...(changed('allowed') ? { allowedProviderIds: POLICY_PROVIDERS.filter((p) => allowed.has(p)) } : {}),
+    ...(changed('allowanceText') && (allowanceText.trim() === '' || allowance !== null)
+      ? { monthlyAllowanceMicrousd: allowanceText.trim() === '' ? null : allowance }
+      : {}),
+    ...(changed('storeResponses')
+      ? { providerOptions: { ...base.providerPolicy.providerOptions, openai: { storeResponses } } }
+      : {}),
   };
   const dirty = Object.keys(patch).length > 0;
 
@@ -135,10 +216,22 @@ function ProjectForm({ project }: { readonly project: Project }) {
     void queryClient.invalidateQueries({ queryKey: ['preview', project.id] });
   };
   const update = useMutation({
-    mutationFn: () => call('relay/v1/projects.update', { projectId: project.id, expectedUpdatedAt: project.updatedAt, patch }),
+    // The expected `updatedAt` is the base the user edited, never a newer project loaded meanwhile.
+    mutationFn: (input: { readonly expectedUpdatedAt: number; readonly patch: InputOf<'relay/v1/projects.update'>['patch'] }) =>
+      call('relay/v1/projects.update', { projectId: project.id, expectedUpdatedAt: input.expectedUpdatedAt, patch: input.patch }),
     onSuccess: (p) => {
+      setBase(p);
+      // Edits typed while the save was in flight stay; every other field shows the saved value.
+      setValues((v) => {
+        const saved = valuesOf(p);
+        return Object.fromEntries(PROJECT_FIELDS.map((f) => [f, sameValue(f, v, saved) ? saved[f] : v[f]])) as unknown as ProjectValues;
+      });
       refresh();
       toast.show({ key: `project:saved:${p.id}`, title: `Saved “${p.name}”`, body: 'New runs use these settings.', tone: 'success' });
+    },
+    onError: (e) => {
+      // Changed elsewhere: load the saved project so the form can show what changed (the edits stay).
+      if (isStaleConflict(e)) refresh();
     },
   });
   const archive = useMutation({
@@ -165,6 +258,47 @@ function ProjectForm({ project }: { readonly project: Project }) {
           <p>It is hidden from the project switcher. Its runs and memory are kept.</p>
         </InlineAlert>
       )}
+      {serverAhead ? (
+        <InlineAlert
+          tone="warning"
+          title="This project changed since you started editing"
+          actions={
+            <Button size="sm" variant="primary" onClick={rebase}>
+              Keep my changes on top of the saved settings
+            </Button>
+          }
+        >
+          <p>Nothing was overwritten. Your edits are kept in the form; compare them with the saved settings:</p>
+          <div className="table-wrap" style={{ overflowX: 'auto' }}>
+            <table className="table">
+              <caption className="sr-only">Saved project settings compared with your edits</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Setting</th>
+                  <th scope="col">Saved now</th>
+                  <th scope="col">Yours</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...new Set([...changedOnServer, ...changedByMe])].map((f) => (
+                  <tr key={f}>
+                    <th scope="row">
+                      {PROJECT_FIELD_LABELS[f]}
+                      {changedOnServer.includes(f) ? <span className="subtle">{' (changed on the server)'}</span> : null}
+                    </th>
+                    <td>{valueText(f, serverValues)}</td>
+                    <td>{changedByMe.includes(f) ? valueText(f, values) : 'Unchanged'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="subtle">
+            Keeping your changes sends only the settings you changed, based on the latest saved version; every other
+            setting keeps the saved value.
+          </p>
+        </InlineAlert>
+      ) : null}
       <form
         className="stack"
         noValidate
@@ -172,12 +306,20 @@ function ProjectForm({ project }: { readonly project: Project }) {
         onSubmit={(e) => {
           e.preventDefault();
           setSubmitted(true);
-          if (Object.keys(local).length > 0 || !dirty) return;
-          update.mutate();
+          if (Object.keys(local).length > 0 || !dirty || serverAhead) return;
+          update.mutate({ expectedUpdatedAt: base.updatedAt, patch });
         }}
       >
         <Field label="Project name" id={FIELD.name} error={errorOf(FIELD.name)} required>
-          {(control) => <TextInput {...control} value={name} onValueChange={setName} />}
+          {(control) => (
+            <TextInput
+              {...control}
+              value={name}
+              onValueChange={(v) => {
+                set({ name: v });
+              }}
+            />
+          )}
         </Field>
         <div className="grid grid-cols-2 gap-5 max-[1024px]:grid-cols-1">
           <Field
@@ -187,7 +329,15 @@ function ProjectForm({ project }: { readonly project: Project }) {
             error={errorOf(FIELD.exclusions)}
           >
             {(control) => (
-              <Textarea {...control} className="mono" rows={6} value={exclusionsText} onValueChange={setExclusionsText} />
+              <Textarea
+                {...control}
+                className="mono"
+                rows={6}
+                value={exclusionsText}
+                onValueChange={(v) => {
+                  set({ exclusionsText: v });
+                }}
+              />
             )}
           </Field>
           <section className="stack" aria-label="Exclusion preview" aria-live="polite" aria-busy={preview.isFetching || undefined}>
@@ -235,7 +385,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
                   const next = new Set(allowed);
                   if (on) next.add(p);
                   else next.delete(p);
-                  setAllowed(next);
+                  set({ allowed: [...next].sort() });
                 }}
               />
             ))}
@@ -255,13 +405,18 @@ function ProjectForm({ project }: { readonly project: Project }) {
           label="Monthly allowance (optional)"
           value={allowanceText}
           hint="Tracked by Relay across every run of this project in a calendar month. Empty means no monthly allowance. Changing it re-checks runs paused by the project allowance."
-          onValueChange={(text, parsed) => {
-            setAllowanceText(text);
-            setAllowance(parsed);
+          onValueChange={(text) => {
+            set({ allowanceText: text });
           }}
         />
         <div className="stack" style={{ gap: 4 }}>
-          <Checkbox label="Store responses at OpenAI" checked={storeResponses} onCheckedChange={setStoreResponses} />
+          <Checkbox
+            label="Store responses at OpenAI"
+            checked={storeResponses}
+            onCheckedChange={(on) => {
+              set({ storeResponses: on });
+            }}
+          />
           <p className="hint small" style={{ margin: 0 }}>
             On by default. OpenAI keeps the response for a limited time, which lets Relay look up a request whose outcome
             is unknown (for example after a crash). When off, OpenAI does not store responses, and Relay cannot check an
@@ -278,9 +433,10 @@ function ProjectForm({ project }: { readonly project: Project }) {
           </InlineAlert>
         ) : (
           <MutationError
-            error={update.error}
+            error={serverAhead && isStaleConflict(update.error) ? null : update.error}
             unavailableHint="Project settings cannot be changed in this build; runs keep the current settings."
             handlers={{ reload: refresh }}
+            projectId={project.id}
           />
         )}
         {submitted && Object.keys(local).length > 0 ? (
@@ -289,7 +445,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
           </p>
         ) : null}
         <div className="actions">
-          <Button type="submit" variant="primary" pending={update.isPending} disabled={!dirty}>
+          <Button type="submit" variant="primary" pending={update.isPending} disabled={!dirty || serverAhead}>
             Save project settings
           </Button>
           {project.archivedAt === null ? (
@@ -319,7 +475,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
                 usage ledger stay on this computer. Project files are never touched.
               </p>
               <p className="subtle">A project with an active run cannot be archived until that run ends.</p>
-              <MutationError error={archive.error} unavailableHint="The project was not archived." />
+              <MutationError error={archive.error} unavailableHint="The project was not archived." projectId={project.id} />
             </div>
           }
           confirmLabel="Archive project"

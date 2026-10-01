@@ -28,7 +28,7 @@ import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
 import { formatBytes } from '../run-setup/PreviewPanel';
 import { paths } from '../shell/paths';
-import { SettingsProjectPicker, useSettingsProject } from './useSettingsProject';
+import { FallbackProjectNote, SettingsProjectPicker, useSettingsProject } from './useSettingsProject';
 
 /** Raw-response retention bounds (02 `app.updateSettings`, §12.3). */
 export const RETENTION_BOUNDS = { min: 1, max: 365 } as const;
@@ -72,7 +72,7 @@ function useExportToast() {
 
 /** Settings → Storage & data (10 J10, §12.3, §18.3–18.4). */
 export function DataSection() {
-  const { project, projects, settings, choose } = useSettingsProject();
+  const { project, explicit, projects, settings, choose } = useSettingsProject();
   const retry = useRetryAction(() => {
     void projects.refetch();
     void settings.refetch();
@@ -84,7 +84,7 @@ export function DataSection() {
         <SettingsProjectPicker projects={projects.data} value={project.id} onChange={choose} />
       )}
       <BackupCard />
-      <ExportsCard project={project} />
+      <ExportsCard project={project} explicit={explicit} />
       {settings.data === undefined ? (
         settings.error === null ? (
           <div className="card" aria-busy="true">
@@ -100,7 +100,7 @@ export function DataSection() {
           setupAllowance={settings.data.setupAllowanceMicrousd}
         />
       )}
-      {project === undefined ? null : <PurgeCard project={project} />}
+      {project === undefined ? null : <PurgeCard project={project} explicit={explicit} />}
     </section>
   );
 }
@@ -137,7 +137,7 @@ function BackupCard() {
   );
 }
 
-function ExportsCard({ project }: { readonly project: Project | undefined }) {
+function ExportsCard({ project, explicit }: { readonly project: Project | undefined; readonly explicit: boolean }) {
   const titleId = useId();
   const monthId = useId();
   const exportToast = useExportToast();
@@ -169,10 +169,11 @@ function ExportsCard({ project }: { readonly project: Project | undefined }) {
     <section className="card stack" aria-labelledby={titleId}>
       <h2 id={titleId}>Exports</h2>
       <p className="small muted">Relay asks where to save each file. Exports never contain API keys.</p>
+      {project === undefined ? null : <FallbackProjectNote project={project} explicit={explicit} />}
       <div className="stack">
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div className="stack" style={{ gap: 2 }}>
-            <strong>Project (JSON)</strong>
+            <strong>Project (JSON){project === undefined ? null : <>: {project.name}</>}</strong>
             <span className="small muted">
               Memory records with all revisions, workflow versions and run reports. No credentials and no absolute folder
               path.
@@ -353,7 +354,7 @@ function RetentionCard({ retentionDays, setupAllowance }: { readonly retentionDa
 
 const PURGE_PHRASE = 'purge';
 
-function PurgeCard({ project }: { readonly project: Project }) {
+function PurgeCard({ project, explicit }: { readonly project: Project; readonly explicit: boolean }) {
   const titleId = useId();
   const phraseId = useId();
   const queryClient = useQueryClient();
@@ -382,6 +383,7 @@ function PurgeCard({ project }: { readonly project: Project }) {
       <h2 id={titleId} ref={headingRef} tabIndex={-1}>
         Purge project history
       </h2>
+      <FallbackProjectNote project={project} explicit={explicit} />
       <p className="small muted">
         Removes memory copies kept inside run snapshots of <strong>{project.name}</strong>, and old memory revisions. Run
         reports that quoted that memory lose the quoted text. To stop using a single record, archive or delete it on the{' '}
@@ -418,12 +420,15 @@ function PurgeCard({ project }: { readonly project: Project }) {
           />
         }
       >
+        <p>
+          Project: <strong>{project.name}</strong> <span className="mono small">({project.rootDisplayPath})</span>
+        </p>
         <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
-          <li>Memory copies inside every run snapshot of this project are removed.</li>
+          <li>Memory copies inside every run snapshot of “{project.name}” are removed.</li>
           <li>Earlier revisions of memory records are removed; each record keeps its current text.</li>
           <li>Runs, ledgers and artifacts other than memory copies are kept. Project files are never touched.</li>
         </ul>
-        <Field label={`Type “${PURGE_PHRASE}” to confirm`} id={phraseId}>
+        <Field label={`Type “${PURGE_PHRASE}” to confirm purging the history of “${project.name}”`} id={phraseId}>
           {(control) => <TextInput {...control} value={phrase} onValueChange={setPhrase} autoComplete="off" />}
         </Field>
         <MutationError error={purge.error} unavailableHint="Nothing was purged." />

@@ -131,14 +131,16 @@ describe('NewRunPage (J7)', () => {
       screen.getByRole('combobox', { name: /Planner profile \(Plan step\)/ }),
       PROFILES.economy.id,
     );
-    // A pinned rule is checked and locked; tick one non-pinned record.
+    // A pinned rule is checked and locked; every approved record starts ticked; untick one non-pinned record.
     expect(
       screen.getByRole('checkbox', { name: 'Preserve the existing public response format' }),
     ).toBeDisabled();
     expect(
       screen.getByRole('checkbox', { name: 'Preserve the existing public response format' }),
     ).toBeChecked();
-    await user.click(await screen.findByRole('checkbox', { name: 'Keep handlers thin' }));
+    const keepBox = await screen.findByRole('checkbox', { name: 'Keep handlers thin' });
+    expect(keepBox).toBeChecked();
+    await user.click(keepBox);
     // Start waits for the preflight of exactly this input.
     expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
     expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
@@ -157,10 +159,51 @@ describe('NewRunPage (J7)', () => {
     const input = calls[0]?.input as Record<string, unknown>;
     expect(input['idempotencyKey']).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(input['profileOverrides']).toEqual({ plan: PROFILES.economy.id });
-    const keep = bridge.world.memory.find((m) => m.title === 'Keep handlers thin');
-    expect(input['memoryRecordIds']).toEqual([keep?.id]);
+    // Touched: the explicit list of the still-ticked non-pinned approved records (pinned rules never sent).
+    const expected = bridge.world.memory
+      .filter((m) => m.status === 'approved' && !m.pinned && m.title !== 'Keep handlers thin')
+      .map((m) => m.id);
+    expect(input['memoryRecordIds']).toEqual(expected);
     expect(input).not.toHaveProperty('limitOverrides');
     expect(input['goal']).toBe('Review input validation');
+  });
+
+  it('memory default: every approved record is ticked and memoryRecordIds is absent; the preflight lists the records', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review input validation');
+    for (const m of bridge.world.memory.filter((x) => x.status === 'approved')) {
+      expect(await screen.findByRole('checkbox', { name: m.title })).toBeChecked();
+    }
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    const included = screen.getByRole('list', { name: 'Memory records this run includes' });
+    expect(within(included).getAllByRole('listitem')).toHaveLength(bridge.world.memory.filter((x) => x.status === 'approved').length);
+    expect(within(included).getByText('Keep handlers thin')).toBeInTheDocument();
+    for (const c of bridge.callsTo('relay/v1/runs.preflight')) expect(c.input).not.toHaveProperty('memoryRecordIds');
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/runs.start')[0]?.input).not.toHaveProperty('memoryRecordIds');
+  });
+
+  it('memory: unticking every non-pinned record sends memoryRecordIds: [] (pinned only)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review input validation');
+    for (const m of bridge.world.memory.filter((x) => x.status === 'approved' && !x.pinned)) {
+      await user.click(await screen.findByRole('checkbox', { name: m.title }));
+    }
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    const included = screen.getByRole('list', { name: 'Memory records this run includes' });
+    expect(within(included).getAllByRole('listitem')).toHaveLength(bridge.world.memory.filter((x) => x.status === 'approved' && x.pinned).length);
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+    });
+    expect((bridge.callsTo('relay/v1/runs.start')[0]?.input as Record<string, unknown>)['memoryRecordIds']).toEqual([]);
   });
 
   it('memory.list not implemented in this build: says so and keeps the form usable', async () => {

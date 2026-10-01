@@ -6,6 +6,7 @@ import {
   appError,
   appSettingsSchema,
   errors,
+  isTerminalRunStatus,
   getOperation,
   memoryRecordDetailSchema,
   memoryRecordViewSchema,
@@ -156,6 +157,40 @@ function projectDetail(w: FakeWorld, projectId: string) {
 }
 
 /** List projection of a detail (zod strips the detail-only keys). */
+/** Normalized title (engine `normalizeTitle`: case and whitespace insensitive). */
+function normTitle(t: string): string {
+  return t.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function scopesOverlap(a: MemoryRecordDetail['scope'], b: MemoryRecordDetail['scope']): boolean {
+  if (a.roles === 'all' || b.roles === 'all') return true;
+  const other = b.roles;
+  return a.roles.some((r) => other.includes(r));
+}
+
+/** Engine `titleConflicts`: approved records of the project with the same title in an overlapping scope. */
+function titleConflicts(w: FakeWorld, projectId: string, title: string, scope: MemoryRecordDetail['scope'], exclude?: string): string[] {
+  return w.memory
+    .filter((m) => m.projectId === projectId && m.status === 'approved' && m.id !== exclude && normTitle(m.title) === normTitle(title) && scopesOverlap(m.scope, scope))
+    .map((m) => m.id);
+}
+
+/** Engine `memoryConflict`: CONFLICT { reason: 'memory_conflict', conflictsWith }. */
+function failMemoryConflict(conflictsWith: readonly string[]): void {
+  if (conflictsWith.length > 0) fail(errors.conflict({ reason: 'memory_conflict', conflictsWith: [...new Set(conflictsWith)] }));
+}
+
+/** Engine `referencingWorkflows`: workflow versions (draft + latest validated) whose steps name the profile. */
+function workflowsUsingProfile(w: FakeWorld, name: string): Array<{ id: string; name: string; version: number | 'draft' }> {
+  const lower = name.toLowerCase();
+  return w.workflows.flatMap((summary) =>
+    w.workflowVersions
+      .filter((v) => v.workflowId === summary.id && (v.version === 'draft' || v.version === summary.latestValidatedVersion))
+      .filter((v) => v.spec.steps.some((st) => st.kind === 'model' && st.profile.toLowerCase() === lower))
+      .map((v) => ({ id: summary.id, name: summary.name, version: v.version })),
+  );
+}
+
 function toView(m: MemoryRecordDetail) {
   return memoryRecordViewSchema.parse(m);
 }
@@ -324,6 +359,9 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   },
   'projects.archive': (w, input, ctx) => {
     const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
+    const active = w.runs.filter((r) => r.projectId === project.id && !isTerminalRunStatus(r.status)).map((r) => r.id);
+    if (active.length > 0) fail(errors.conflict({ reason: 'active_run', runIds: active }));
+    if (project.archivedAt !== null) fail(errors.conflict({ reason: 'already_archived' }));
     const next = projectSchema.parse({ ...project, archivedAt: ctx.now(), updatedAt: ctx.now() });
     w.projects = w.projects.map((p) => (p.id === next.id ? next : p));
     return next;
@@ -415,7 +453,12 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const existing = profile.id === undefined ? undefined : w.profiles.find((p) => p.profile.id === profile.id);
     if (profile.id !== undefined && existing === undefined) fail(errors.notFound('profile'));
     if (existing !== undefined && input.expectedRevision !== undefined && existing.profile.revision !== input.expectedRevision) {
-      fail(errors.conflict({ entity: 'profile' }));
+      fail(errors.conflict({ entity: 'profile', currentRevision: existing.profile.revision }));
+    }
+    if (existing !== undefined && existing.profile.name.toLowerCase() !== profile.name.toLowerCase()) {
+      // Engine: renaming a profile that workflows name would orphan their steps.
+      const users = workflowsUsingProfile(w, existing.profile.name);
+      if (users.length > 0) fail(errors.conflict({ reason: 'profile_in_use', workflows: users }));
     }
     const known = w.catalog.some((c) => c.providerId === profile.providerId && c.modelId === profile.modelId);
     if (!known) fail(errors.modelUnsupported({ providerId: profile.providerId, modelId: profile.modelId }));
@@ -433,7 +476,9 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     return row;
   },
   'profiles.delete': (w, input) => {
-    if (!w.profiles.some((p) => p.profile.id === input.profileId)) fail(errors.notFound('profile'));
+    const row = w.profiles.find((p) => p.profile.id === input.profileId) ?? fail(errors.notFound('profile'));
+    const users = workflowsUsingProfile(w, row.profile.name);
+    if (users.length > 0) fail(errors.conflict({ reason: 'profile_in_use', workflowIds: [...new Set(users.map((u) => u.id))] }));
     w.profiles = w.profiles.filter((p) => p.profile.id !== input.profileId);
     return { deleted: true as const };
   },
@@ -448,7 +493,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'workflows.saveDraft': (w, input) => {
     const summary = w.workflows.find((x) => x.id === input.workflowId) ?? fail(errors.notFound('workflow'));
     const draft = w.workflowVersions.find((v) => v.version === 'draft');
-    if ((draft?.draftRevision ?? 0) !== input.expectedDraftRevision) fail(errors.conflict({ entity: 'workflow draft' }));
+    if ((draft?.draftRevision ?? 0) !== input.expectedDraftRevision) fail(errors.conflict({ reason: 'draft_changed' }));
     const base = draft ?? w.workflowVersions.find((v) => v.version === summary.latestValidatedVersion) ?? fail(errors.notFound('workflow version'));
     const next = applyDraftPatch(base, input.patch, (draft?.draftRevision ?? 0) + 1);
     w.workflowVersions = [...w.workflowVersions.filter((v) => v.version !== 'draft'), next];
@@ -461,7 +506,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     if (!w.workflows.some((x) => x.id === input.workflowId)) fail(errors.notFound('workflow'));
     if (input.version !== 'draft') return { valid: true, issues: [], warnings: [] };
     if (!w.workflowVersions.some((v) => v.version === 'draft')) fail(errors.notFound('workflow draft'));
-    return { valid: w.workflowIssues.length === 0, issues: w.workflowIssues, warnings: [] };
+    return { valid: w.workflowIssues.length === 0, issues: w.workflowIssues, warnings: w.workflowWarnings };
   },
   'workflows.publish': (w, input) => {
     const summary = w.workflows.find((x) => x.id === input.workflowId) ?? fail(errors.notFound('workflow'));
@@ -491,7 +536,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
         bytes: files * 2_400,
         estimatedInputTokens: files * 620,
         memoryRecords: w.memory
-          .filter((m) => m.status === 'approved' && (m.pinned || (input.memoryRecordIds ?? []).includes(m.id)))
+          // Engine semantics: absent = every approved record (§4.5 default context); [] = pinned only; a list = pinned + those.
+          .filter((m) => m.status === 'approved' && (input.memoryRecordIds === undefined || m.pinned || input.memoryRecordIds.includes(m.id)))
           .map((m) => ({ id: m.id, revision: m.currentRevision, type: m.type, title: m.title, pinned: m.pinned })),
         providersReceivingContext: ['anthropic', 'openai'],
       },
@@ -670,6 +716,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'memory.get': (w, input) => findMemory(w, input.recordId),
   'memory.create': (w, input, ctx) => {
     if (!w.projects.some((p) => p.id === input.projectId)) fail(errors.notFound('project'));
+    failMemoryConflict(titleConflicts(w, input.projectId, input.title, input.scope));
     const at = ctx.now();
     const record = memoryRecordDetailSchema.parse({
       id: ctx.newId('memory'),
@@ -701,6 +748,13 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'memory.update': (w, input, ctx) => {
     const current = findMemory(w, input.recordId);
     if (current.currentRevision !== input.expectedRevision) fail(errors.conflict({ entity: 'memory', currentRevision: current.currentRevision }));
+    if (input.unarchive === true && current.supersededById !== null) {
+      fail(errors.conflict({ reason: 'memory_superseded', supersededById: current.supersededById, conflictsWith: [current.supersededById] }));
+    }
+    const titleChanged = input.title !== undefined && normTitle(input.title) !== normTitle(current.title);
+    if (input.unarchive === true || titleChanged || input.scope !== undefined) {
+      failMemoryConflict(titleConflicts(w, current.projectId, input.title ?? current.title, input.scope ?? current.scope, current.id));
+    }
     const patch: Partial<MemoryRecordDetail> = {
       ...(input.title === undefined ? {} : { title: input.title }),
       ...(input.content === undefined ? {} : { content: input.content }),
@@ -715,7 +769,12 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   },
   'memory.approve': (w, input, ctx) => {
     const current = findMemory(w, input.suggestionId);
-    if (current.status !== 'suggested' || current.currentRevision !== input.expectedRevision) fail(errors.conflict({ entity: 'memory' }));
+    if (current.status !== 'suggested' || current.currentRevision !== input.expectedRevision) {
+      fail(errors.conflict({ entity: 'memory', currentRevision: current.currentRevision }));
+    }
+    // Engine: title conflicts + the proposal's live conflicts (still-approved records) → memory_conflict.
+    const live = current.conflictsWith.filter((id) => w.memory.some((m) => m.id === id && m.status === 'approved'));
+    failMemoryConflict([...titleConflicts(w, current.projectId, input.finalTitle ?? current.title, input.scope ?? current.scope, current.id), ...live]);
     return updateMemory(
       w,
       ctx,

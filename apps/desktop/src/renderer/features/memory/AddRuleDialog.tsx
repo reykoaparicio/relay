@@ -22,10 +22,12 @@ export interface AddRuleDialogProps {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (recordId: string) => void;
+  /** Titles of existing records (by id), for a memory_conflict with an approved record. */
+  readonly titleOf?: (id: string) => string | undefined;
 }
 
 /** "Add project rule" (`memory.create`): user-authored records are approved immediately (§10.1). */
-export function AddRuleDialog({ projectId, open, onOpenChange, onCreated }: AddRuleDialogProps) {
+export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleOf }: AddRuleDialogProps) {
   const formId = useId();
   const [type, setType] = useState<CreatableType>('user_rule');
   const [title, setTitle] = useState('');
@@ -35,7 +37,9 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated }: AddR
   const [review, setReview] = useState('');
   const [sourcePath, setSourcePath] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  // After a success the dialog starts over: an empty form, no error, and a new intent (a fresh idempotency key).
   const create = useCreateMemory(projectId, (id) => {
+    reset();
     onOpenChange(false);
     onCreated(id);
   });
@@ -54,7 +58,9 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated }: AddR
   const errorOf = (id: string) => (submitted ? local[id] : undefined) ?? server[id];
   const unmappedError = create.error !== null && Object.keys(server).length === 0 ? create.error : null;
 
-  const reset = () => {
+  /** Empties the form, clears the last error and starts a new intent (on success and on every close). */
+  function reset() {
+    create.reset();
     setType('user_rule');
     setTitle('');
     setContent('');
@@ -63,7 +69,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated }: AddR
     setReview('');
     setSourcePath('');
     setSubmitted(false);
-  };
+  }
 
   return (
     <Dialog
@@ -173,7 +179,11 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated }: AddR
         </Field>
         <Checkbox label="Pin: always include this rule in runs within its scope" checked={pinned} onCheckedChange={setPinned} />
         {unmappedError === null ? null : (
-          <MutationError error={unmappedError} unavailableHint="Nothing was saved. You can add rules once memory is available." />
+          <MutationError
+            error={unmappedError}
+            unavailableHint="Nothing was saved. You can add rules once memory is available."
+            {...(titleOf === undefined ? {} : { names: { recordTitle: titleOf } })}
+          />
         )}
       </form>
     </Dialog>

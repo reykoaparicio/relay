@@ -27,7 +27,9 @@ export const paths = {
   report: (projectId: string, runId: string) => `/p/${projectId}/runs/${runId}/report`,
   memory: (projectId: string, opts: { readonly tab?: MemoryTab; readonly record?: string } = {}) =>
     withQuery(`/p/${projectId}/memory`, { tab: opts.tab, record: opts.record }),
-  settings: (section?: SettingsSection) => (section === undefined ? '/settings' : `/settings/${section}`),
+  /** `project`: the project the Projects / Data sections act on (`?project=`, read by `useSettingsProject`). */
+  settings: (section?: SettingsSection, opts: { readonly project?: string | undefined } = {}) =>
+    withQuery(section === undefined ? '/settings' : `/settings/${section}`, { project: opts.project }),
 };
 
 /** `<a href>` value for an app path under `createHashRouter`. */

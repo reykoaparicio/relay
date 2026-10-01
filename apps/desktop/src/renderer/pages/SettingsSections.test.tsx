@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { appError } from '@relay/contracts';
-import { FAKE_PROJECT_ID } from '../api/fake-bridge';
+import { createFakeBridge, FAKE_PROJECT_ID, FAKE_WORKFLOW_ID } from '../api/fake-bridge';
 import { recentMonths } from '../features/settings/DataSection';
 import { sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
@@ -57,7 +57,7 @@ describe('Settings → Model profiles (J10)', () => {
     await user.type(tokens, '12000');
     bridge.failNext('relay/v1/profiles.upsert', appError('CONFLICT'));
     await user.click(within(form).getByRole('button', { name: 'Save revision 2' }));
-    expect(await within(form).findByText('This item changed')).toBeInTheDocument();
+    expect(await within(form).findByText('This item changed since it was loaded')).toBeInTheDocument();
     await user.click(within(form).getByRole('button', { name: 'Save revision 2' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/profiles.upsert')).toHaveLength(2);
@@ -69,21 +69,78 @@ describe('Settings → Model profiles (J10)', () => {
     expect(await screen.findByText(/Saved “Balanced” \(revision 2\)/)).toBeInTheDocument();
   });
 
-  it('deletes a profile only after the confirmation (profiles.delete)', async () => {
+  it('deletes an unused profile only after the confirmation (profiles.delete)', async () => {
     const user = userEvent.setup();
-    const { bridge } = renderApp('/settings/profiles', { scenario: 'awaiting-approval' });
+    const bridge = createFakeBridge('awaiting-approval');
+    const capable = bridge.world.profiles[2]!;
+    bridge.world.profiles = [...bridge.world.profiles, { ...capable, profile: { ...capable.profile, id: sid('profile', 9) as typeof capable.profile.id, name: 'Spare' } }];
+    renderApp('/settings/profiles', { bridge });
     await section('Model profiles');
-    await user.click(await screen.findByRole('button', { name: 'Delete Capable' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Delete the “Capable” profile?' });
+    await user.click(await screen.findByRole('button', { name: 'Delete Spare' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete the “Spare” profile?' });
     expect(dialog).toHaveTextContent(/Past runs keep the profile snapshot/);
     expect(bridge.callsTo('relay/v1/profiles.delete')).toHaveLength(0);
     await user.click(within(dialog).getByRole('button', { name: 'Delete profile' }));
     await waitFor(() => {
-      expect(bridge.callsTo('relay/v1/profiles.delete')[0]?.input).toEqual({ profileId: sid('profile', 3) });
+      expect(bridge.callsTo('relay/v1/profiles.delete')[0]?.input).toEqual({ profileId: sid('profile', 9) });
     });
     await waitFor(() => {
-      expect(screen.queryByRole('rowheader', { name: 'Capable' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('rowheader', { name: 'Spare' })).not.toBeInTheDocument();
     });
+  });
+
+  it('B9: deleting a profile in use pre-warns with the workflows and shows profile_in_use (no Reload)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(`/settings/profiles?project=${FAKE_PROJECT_ID}`, { scenario: 'awaiting-approval' });
+    await section('Model profiles');
+    await user.click(await screen.findByRole('button', { name: 'Delete Capable' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete the “Capable” profile?' });
+    expect(dialog).toHaveTextContent(/Relay refuses to delete a profile that a workflow draft or validated version still names/);
+    expect(dialog).not.toHaveTextContent(/cannot be validated until you choose another profile/);
+    expect(await within(dialog).findByText(/deleting will be refused/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Review & propose a fix (v3)' })).toHaveAttribute('href', `/p/${FAKE_PROJECT_ID}/workflows/${FAKE_WORKFLOW_ID}`);
+    await user.click(within(dialog).getByRole('button', { name: 'Delete profile' }));
+    expect(await within(dialog).findByText('This profile is used by workflows')).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/Used by “Review & propose a fix”/);
+    expect(within(dialog).queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument();
+    expect(bridge.world.profiles.some((p) => p.profile.name === 'Capable')).toBe(true);
+  });
+
+  it('B8: renaming a profile used by workflows pre-warns and shows the engine profile_in_use CONFLICT', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/profiles', { scenario: 'awaiting-approval' });
+    await section('Model profiles');
+    await user.click(await screen.findByRole('button', { name: 'Edit Economy' }));
+    const form = screen.getByRole('form', { name: 'Edit Economy' });
+    const name = within(form).getByRole('textbox', { name: /Name/ });
+    await user.clear(name);
+    await user.type(name, 'Cheap');
+    expect(await within(form).findByText('Relay will refuse to rename “Economy” while workflows use it')).toBeInTheDocument();
+    await user.click(within(form).getByRole('button', { name: 'Save revision 2' }));
+    expect(await within(form).findByText('This profile is used by workflows')).toBeInTheDocument();
+    expect(within(form).queryByText(/Relay will refuse to rename/)).not.toBeInTheDocument();
+    expect(within(form).getByRole('list', { name: 'Workflows using this profile' })).toHaveTextContent('Review & propose a fix (v3)');
+    expect(within(form).queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument();
+    expect(bridge.world.profiles[0]?.profile.name).toBe('Economy');
+  });
+
+  it('a stale profile CONFLICT: Reload refetches the profiles and re-bases the expected revision', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/profiles', { scenario: 'awaiting-approval' });
+    await section('Model profiles');
+    await user.click(await screen.findByRole('button', { name: 'Edit Balanced' }));
+    const form = screen.getByRole('form', { name: 'Edit Balanced' });
+    const tokens = within(form).getByRole('spinbutton', { name: /Default max output tokens/ });
+    await user.clear(tokens);
+    await user.type(tokens, '12000');
+    bridge.world.profiles = bridge.world.profiles.map((p) => (p.profile.name === 'Balanced' ? { ...p, profile: { ...p.profile, revision: 2 } } : p));
+    await user.click(within(form).getByRole('button', { name: 'Save revision 2' }));
+    await user.click(await within(form).findByRole('button', { name: 'Reload' }));
+    await user.click(await within(form).findByRole('button', { name: 'Save revision 3' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/profiles.upsert')).toHaveLength(2);
+    });
+    expect(bridge.callsTo('relay/v1/profiles.upsert')[1]?.input).toMatchObject({ expectedRevision: 2, profile: { params: { maxOutputTokens: 12000 } } });
   });
 
   it('profiles.upsert not implemented: "Not available yet in this build"', async () => {
@@ -166,7 +223,7 @@ describe('Settings → Projects (J10)', () => {
 
   it('archives only after confirmation (projects.archive)', async () => {
     const user = userEvent.setup();
-    const { bridge } = renderApp('/settings/projects', { scenario: 'awaiting-approval' });
+    const { bridge } = renderApp('/settings/projects', { scenario: 'completed' });
     await section('Example API');
     await user.click(screen.getByRole('button', { name: 'Archive project…' }));
     const dialog = await screen.findByRole('dialog', { name: 'Archive “Example API”?' });
@@ -175,6 +232,67 @@ describe('Settings → Projects (J10)', () => {
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/projects.archive')[0]?.input).toEqual({ projectId: FAKE_PROJECT_ID });
     });
+  });
+
+  it('B9: archiving with an active run shows active_run with a run link and no dead Reload', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/projects', { scenario: 'awaiting-approval' });
+    await section('Example API');
+    await user.click(screen.getByRole('button', { name: 'Archive project…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Archive “Example API”?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Archive project' }));
+    expect(await within(dialog).findByText('This project has an active run')).toBeInTheDocument();
+    const active = bridge.world.runs.find((r) => !['completed', 'incomplete', 'cancelled', 'failed'].includes(r.status))!;
+    const link = within(within(dialog).getByRole('list', { name: 'Active runs' })).getByRole('link');
+    expect(link).toHaveAttribute('href', `/p/${FAKE_PROJECT_ID}/runs/${active.id}`);
+    expect(within(dialog).queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument();
+  });
+
+  it('B3: a refetch keeps my edits, shows what changed on the server, and re-basing sends only my fields', async () => {
+    const user = userEvent.setup();
+    const { bridge, queryClient } = renderApp('/settings/projects', { scenario: 'awaiting-approval' });
+    await section('Example API');
+    const name = screen.getByRole('textbox', { name: /Project name/ });
+    await user.clear(name);
+    await user.type(name, 'Example API v2');
+    const p0 = bridge.world.projects[0]!;
+    bridge.world.projects = [{ ...p0, exclusions: ['fixtures/**'], updatedAt: (p0.updatedAt + 1000) as typeof p0.updatedAt }, ...bridge.world.projects.slice(1)];
+    await queryClient.invalidateQueries({ queryKey: ['projects'] });
+    expect(await screen.findByText('This project changed since you started editing')).toBeInTheDocument();
+    expect(name).toHaveValue('Example API v2');
+    const table = screen.getByRole('table', { name: 'Saved project settings compared with your edits' });
+    expect(within(table).getByRole('row', { name: /Exclusions\s*\(changed on the server\)/ })).toHaveTextContent('fixtures/**');
+    expect(screen.getByRole('button', { name: 'Save project settings' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Keep my changes on top of the saved settings' }));
+    expect(screen.getByRole('textbox', { name: /Exclusions/ })).toHaveValue('fixtures/**');
+    await user.click(screen.getByRole('button', { name: 'Save project settings' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/projects.update')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/projects.update')[0]?.input).toEqual({
+      projectId: FAKE_PROJECT_ID,
+      expectedUpdatedAt: p0.updatedAt + 1000,
+      patch: { name: 'Example API v2' },
+    });
+    expect(bridge.world.projects[0]?.exclusions).toEqual(['fixtures/**']);
+  });
+
+  it('B3: a save CONFLICT keeps my edits (no remount) and loads the server version for comparison', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/projects', { scenario: 'awaiting-approval' });
+    await section('Example API');
+    const name = screen.getByRole('textbox', { name: /Project name/ });
+    await user.clear(name);
+    await user.type(name, 'Mine');
+    const p0 = bridge.world.projects[0]!;
+    bridge.world.projects = [
+      { ...p0, monthlyAllowanceMicrousd: 7_000_000 as NonNullable<typeof p0.monthlyAllowanceMicrousd>, updatedAt: (p0.updatedAt + 1000) as typeof p0.updatedAt },
+      ...bridge.world.projects.slice(1),
+    ];
+    await user.click(screen.getByRole('button', { name: 'Save project settings' }));
+    expect(await screen.findByText('This project changed since you started editing')).toBeInTheDocument();
+    expect(name).toHaveValue('Mine');
+    expect(screen.getByRole('row', { name: /Monthly allowance\s*\(changed on the server\)/ })).toHaveTextContent('$7.00');
   });
 });
 
@@ -280,5 +398,23 @@ describe('Settings → Storage & data (J10)', () => {
       });
     });
     expect(await screen.findByText('Project history purged')).toBeInTheDocument();
+  });
+});
+
+describe('Settings → Storage & data: the project acted on (B13)', () => {
+  it('without ?project= the destructive cards name the fallback project prominently; purge text includes the name', async () => {
+    const user = userEvent.setup();
+    renderApp('/settings/data', { scenario: 'awaiting-approval' });
+    await section('Purge project history');
+    expect(screen.getAllByText('Acts on project “Example API”').length).toBe(2);
+    await user.click(screen.getByRole('button', { name: 'Purge project history…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Purge the history of “Example API”?' });
+    expect(within(dialog).getByRole('textbox', { name: /Type “purge” to confirm purging the history of “Example API”/ })).toBeInTheDocument();
+  });
+
+  it('an explicit ?project= is used and needs no fallback note', async () => {
+    renderApp(`/settings/data?project=${FAKE_PROJECT_ID}`, { scenario: 'awaiting-approval' });
+    await section('Purge project history');
+    expect(screen.queryByText('Acts on project “Example API”')).not.toBeInTheDocument();
   });
 });

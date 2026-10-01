@@ -83,27 +83,159 @@ describe('MemoryPage (J9)', () => {
     expect(within(after).getByText(/rev 2/)).toBeInTheDocument();
   });
 
-  it('edit conflict: shows the saved text and saves over the new revision only on request', async () => {
+  it('B2 edit conflict: compares saved vs mine field by field; save over sends only my changed fields', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp(`${P}?record=${M(3)}`, { scenario: 'awaiting-approval' });
     const panel = await detail('Return 422 for invalid input');
     await user.click(within(panel).getByRole('button', { name: 'Edit' }));
-    // Someone else saved revision 2 meanwhile.
+    // Someone else saved revision 2 meanwhile: a new title, the same content.
     bridge.world.memory = bridge.world.memory.map((m) =>
-      m.id === M(3) ? { ...m, currentRevision: 2, content: 'Changed elsewhere.', revisions: [...m.revisions, { ...m.revisions[0]!, revision: 2, content: 'Changed elsewhere.' }] } : m,
+      m.id === M(3)
+        ? { ...m, currentRevision: 2, title: 'Invalid input → 422', revisions: [...m.revisions, { ...m.revisions[0]!, revision: 2, title: 'Invalid input → 422' }] }
+        : m,
     );
     const content = screen.getByRole('textbox', { name: /Content/ });
     await user.clear(content);
     await user.type(content, 'Mine.');
     await user.click(screen.getByRole('button', { name: 'Save revision 2' }));
     expect(await screen.findByText(/This record changed since you opened it \(now revision 2\)/)).toBeInTheDocument();
-    expect(screen.getByText('Changed elsewhere.')).toBeInTheDocument();
+    const table = screen.getByRole('table', { name: 'Saved revision compared with your edit' });
+    const titleRow = within(table).getByRole('row', { name: /^Title/ });
+    expect(titleRow).toHaveTextContent('Invalid input → 422');
+    expect(titleRow).toHaveTextContent('Another session');
+    const contentRow = within(table).getByRole('row', { name: /^Content/ });
+    expect(contentRow).toHaveTextContent('Mine.');
+    expect(contentRow).toHaveTextContent('You');
+    expect(screen.queryByText('Loading the saved version…')).not.toBeInTheDocument();
     expect(content).toHaveValue('Mine.');
-    await user.click(screen.getByRole('button', { name: 'Keep my edit and save over revision 2' }));
+    await user.click(screen.getByRole('button', { name: 'Keep my changes and save over revision 2' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/memory.update')).toHaveLength(2);
     });
-    expect(bridge.callsTo('relay/v1/memory.update')[1]?.input).toMatchObject({ expectedRevision: 2, content: 'Mine.' });
+    // The other session's title is not reverted: only my content is sent.
+    expect(bridge.callsTo('relay/v1/memory.update')[1]?.input).toEqual({ recordId: M(3), expectedRevision: 2, content: 'Mine.' });
+    expect(bridge.world.memory.find((m) => m.id === M(3))?.title).toBe('Invalid input → 422');
+  });
+
+  it('B1: Approve of a suggestion that conflicts with an approved record routes to Combine (no reload loop)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(`${P}?tab=suggested`, { scenario: 'memory-conflict' });
+    const card = (await screen.findByRole('heading', { level: 3, name: 'Validate with hand-written checks' })).closest('article') as HTMLElement;
+    await user.click(within(card).getByRole('button', { name: 'Approve' }));
+    expect(await within(card).findByText('Conflicts with “Validate request bodies with zod”')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument();
+    expect(within(card).queryByText(/changed since/)).not.toBeInTheDocument();
+    expect(bridge.world.memory.find((m) => m.id === M(10))?.status).toBe('suggested');
+    await user.click(within(card).getByRole('button', { name: 'Combine with “Validate request bodies with zod”' }));
+    const panel = (await screen.findByRole('heading', { level: 2, name: /Combine “Validate with hand-written checks”/ })).closest('section') as HTMLElement;
+    expect(within(panel).getByRole('combobox', { name: 'Approved record to combine with' })).toHaveValue(M(2));
+  });
+
+  it('B1: Edit then approve with a conflict shows the conflicting title, never "Loading the saved version…"', async () => {
+    const user = userEvent.setup();
+    renderApp(`${P}?tab=suggested`, { scenario: 'memory-conflict' });
+    const card = (await screen.findByRole('heading', { level: 3, name: 'Validate with hand-written checks' })).closest('article') as HTMLElement;
+    await waitFor(() => {
+      expect(within(card).getByRole('button', { name: 'Edit then approve' })).toBeEnabled();
+    });
+    await user.click(within(card).getByRole('button', { name: 'Edit then approve' }));
+    await user.click(within(card).getByRole('button', { name: 'Approve edited text' }));
+    expect(await within(card).findByText('Conflicts with “Validate request bodies with zod”')).toBeInTheDocument();
+    expect(within(card).queryByText('Loading the saved version…')).not.toBeInTheDocument();
+    expect(within(card).queryByText(/This record changed since you opened it/)).not.toBeInTheDocument();
+    await user.click(within(card).getByRole('button', { name: 'Combine with “Validate request bodies with zod”' }));
+    expect(await screen.findByRole('heading', { level: 2, name: /Combine “Validate with hand-written checks”/ })).toBeInTheDocument();
+  });
+
+  it('B10: after adding a rule the dialog reopens empty, and closing after an error starts a new intent', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(P, { scenario: 'awaiting-approval' });
+    await screen.findByRole('heading', { level: 1, name: 'Project memory' });
+    const open = async () => {
+      await user.click(screen.getAllByRole('button', { name: 'Add project rule' })[0]!);
+      return screen.findByRole('dialog', { name: 'Add project rule' });
+    };
+    let dialog = await open();
+    await user.type(within(dialog).getByRole('textbox', { name: /Title/ }), 'Use UTC timestamps');
+    await user.type(within(dialog).getByRole('textbox', { name: /Rule/ }), 'Store timestamps in UTC.');
+    bridge.failNext('relay/v1/memory.create', appError('RUNNER_UNAVAILABLE'));
+    await user.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/memory.create')).toHaveLength(1);
+    });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    dialog = await open();
+    expect(within(dialog).getByRole('textbox', { name: /Title/ })).toHaveValue('');
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    await user.type(within(dialog).getByRole('textbox', { name: /Title/ }), 'Use UTC timestamps');
+    await user.type(within(dialog).getByRole('textbox', { name: /Rule/ }), 'Store timestamps in UTC.');
+    await user.click(within(dialog).getByRole('button', { name: 'Add rule' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/memory.create')).toHaveLength(2);
+    });
+    const keys = bridge.callsTo('relay/v1/memory.create').map((c) => (c.input as { idempotencyKey: string }).idempotencyKey);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(await detail('Use UTC timestamps')).toBeInTheDocument();
+    dialog = await open();
+    expect(within(dialog).getByRole('textbox', { name: /Title/ })).toHaveValue('');
+    expect(within(dialog).getByRole('textbox', { name: /Rule/ })).toHaveValue('');
+  });
+
+  async function openCombine(user: ReturnType<typeof userEvent.setup>) {
+    const banner = (await screen.findByText('Two records give incompatible instructions')).closest('.banner') as HTMLElement;
+    await user.click(within(banner).getByRole('button', { name: 'Resolve conflict' }));
+    const panel = (await screen.findByRole('heading', { level: 2, name: 'Resolve conflict' })).closest('section') as HTMLElement;
+    await user.click(within(panel).getByRole('radio', { name: 'Combine into a new record' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
+    return panel;
+  }
+
+  it('B11: every validation issue is shown while combining (unmapped paths in a summary)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(P, { scenario: 'memory-conflict' });
+    const panel = await openCombine(user);
+    bridge.failNext(
+      'relay/v1/memory.resolveConflict',
+      appError('VALIDATION_FAILED', {
+        details: {
+          issues: [
+            { path: 'resolution.rewrite.title', message: 'Title is too long.', code: 'too_big' },
+            { path: 'resolution.rewrite.scope', message: 'Scope must name a role.', code: 'custom' },
+            { path: 'recordIds', message: 'A record was archived meanwhile.', code: 'custom' },
+          ],
+        },
+      }),
+    );
+    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    expect(await within(panel).findByText('Scope must name a role.')).toBeInTheDocument();
+    expect(within(panel).getByText('A record was archived meanwhile.')).toBeInTheDocument();
+    expect(within(panel).getByText('Title is too long.')).toBeInTheDocument();
+  });
+
+  it('B12: Combine keeps the pin by default when either record is pinned and sends rewrite.pinned', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(P, { scenario: 'memory-conflict' });
+    bridge.world.memory = bridge.world.memory.map((m) => (m.id === M(2) ? { ...m, pinned: true } : m));
+    const panel = await openCombine(user);
+    const keep = within(panel).getByRole('checkbox', { name: /Keep pinned/ });
+    expect(keep).toBeChecked();
+    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/memory.resolveConflict')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/memory.resolveConflict')[0]?.input).toMatchObject({ resolution: { rewrite: { pinned: true } } });
+  });
+
+  it('B12: Combine of two unpinned records sends pinned: false unless the user ticks Keep pinned', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(P, { scenario: 'memory-conflict' });
+    const panel = await openCombine(user);
+    expect(within(panel).getByRole('checkbox', { name: /Keep pinned/ })).not.toBeChecked();
+    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/memory.resolveConflict')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/memory.resolveConflict')[0]?.input).toMatchObject({ resolution: { rewrite: { pinned: false } } });
   });
 
   it('delete-confirm: explains the consequences and deletes with confirm: true', async () => {
@@ -114,7 +246,7 @@ describe('MemoryPage (J9)', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Delete “Keep handlers thin”?' });
     expect(dialog).toHaveTextContent(/removed from retrieval immediately/);
     expect(dialog).toHaveTextContent(/snapshots of 3 runs keep their copies/);
-    expect(within(dialog).getByRole('link', { name: 'Purge project history' })).toHaveAttribute('href', '/settings/data');
+    expect(within(dialog).getByRole('link', { name: 'Purge project history' })).toHaveAttribute('href', `/settings/data?project=${FAKE_PROJECT_ID}`);
     expect(within(dialog).getByRole('button', { name: 'Archive instead' })).toBeInTheDocument();
     expect(bridge.callsTo('relay/v1/memory.delete')).toHaveLength(0);
     await user.click(within(dialog).getByRole('button', { name: 'Delete record from future runs' }));

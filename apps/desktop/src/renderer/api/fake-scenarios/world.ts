@@ -28,6 +28,7 @@ import type {
   AppError,
   AppInfo,
   AppSettings,
+  CapabilityWarning,
   ArtifactContent,
   ArtifactMeta,
   AttemptView,
@@ -89,6 +90,8 @@ export interface FakeWorld {
   workflowVersions: WorkflowVersionView[];
   /** `workflows.validate` issues of the draft; a saved draft clears them; `workflows.publish` fails while non-empty. */
   workflowIssues: ValidationIssue[];
+  /** `workflows.validate` capability warnings of the draft (shown with the validation and after publishing). */
+  workflowWarnings: CapabilityWarning[];
   /** Newest first. */
   runs: RunDetail[];
   steps: Map<string, StepDetail>;
@@ -1020,6 +1023,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
       ...(o.workflowDraft === true ? [buildWorkflowVersion('draft', 1)] : []),
     ],
     workflowIssues: [...(o.workflowIssues ?? [])],
+    workflowWarnings: [],
     runs: built.map((b) => b.run).sort((a, b) => b.createdAt - a.createdAt),
     steps: new Map(built.flatMap((b) => b.steps.map((s) => [s.step.id as string, s] as const))),
     events: new Map(built.map((b) => [b.run.id as string, b.events])),

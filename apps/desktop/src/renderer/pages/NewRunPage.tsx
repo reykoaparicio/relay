@@ -578,7 +578,10 @@ export function NewRunPage() {
 
             <Card labelledBy={ids.memory}>
               <CardHeader title="Memory records to include" titleId={ids.memory} />
-              <p className="small muted">Approved records only.</p>
+              <p className="small muted">
+                Approved records only. All approved records are included unless you untick them; pinned rules are always
+                included.
+              </p>
               <MemoryPicker
                 records={approved.data}
                 error={approved.error}
@@ -587,7 +590,12 @@ export function NewRunPage() {
                 fieldError={fieldErrors[FIELD.memory]}
                 suggestions={suggested.data?.length ?? 0}
                 onToggle={(id, checked) => {
-                  dispatch({ type: 'toggle-memory', id, checked });
+                  dispatch({
+                    type: 'toggle-memory',
+                    id,
+                    checked,
+                    defaults: (approved.data ?? []).filter((m) => !m.pinned).map((m) => m.id),
+                  });
                 }}
               />
             </Card>

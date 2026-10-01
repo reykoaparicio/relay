@@ -28,6 +28,10 @@ export interface MemoryDetailProps {
   readonly pending: 'archive' | 'restore' | 'pin' | 'confirm' | null;
   /** The last failed command of this panel (pin / archive / restore / confirm). */
   readonly error: unknown;
+  /** Refetches this record (the "Reload" of a stale CONFLICT). */
+  readonly onReload?: () => void;
+  /** Titles of other records (by id), for a memory conflict. */
+  readonly titleOf?: (id: string) => string | undefined;
 }
 
 /** "Superseded by <title>" linking to the record that replaced this one (`?tab=…&record=<id>`). */
@@ -207,7 +211,12 @@ export function MemoryDetail(props: MemoryDetailProps) {
         </ol>
       </div>
       <p className="subtle small">No secrets or provider credentials belong in memory.</p>
-      <MutationError error={error} unavailableHint="The record is unchanged." />
+      <MutationError
+        error={error}
+        unavailableHint="The record is unchanged."
+        {...(props.onReload === undefined ? {} : { handlers: { reload: props.onReload } })}
+        {...(props.titleOf === undefined ? {} : { names: { recordTitle: props.titleOf } })}
+      />
       <div className="actions" style={{ flexWrap: 'wrap' }}>
         {approved && (record.stale || due) ? (
           <Button variant="primary" pending={pending === 'confirm'} onClick={props.onConfirmAccurate}>

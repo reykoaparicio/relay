@@ -102,6 +102,12 @@ export function MemoryPage() {
   const pairs = conflictPairs(listed);
   const titleOf = (id: string) => [...listed, ...(archivedQ.data ?? [])].find((r) => r.id === id)?.title;
 
+  /** Reload of a stale CONFLICT: the record detail and the list it was opened from (its revision). */
+  const reloadRecord = () => {
+    void current.refetch();
+    void detail.refetch();
+  };
+
   const select = useCallback(
     (next: { readonly tab?: MemoryTab; readonly record?: string | null }) => {
       setSearch(
@@ -238,9 +244,12 @@ export function MemoryPage() {
               suggestion={s}
               titleOf={titleOf}
               mutations={mutations}
-              onCombine={(id) => {
+              onCombine={(id, withId) => {
                 const suggestion = q.data.find((r) => r.id === id);
-                const first = approvedList.find((r) => s.conflictsWith.includes(r.id)) ?? approvedList[0];
+                const first =
+                  (withId === undefined ? undefined : approvedList.find((r) => r.id === withId)) ??
+                  approvedList.find((r) => s.conflictsWith.includes(r.id)) ??
+                  approvedList[0];
                 if (suggestion === undefined) return;
                 if (first === undefined) {
                   toast.show({ key: 'memory:combine-none', title: 'No approved record to combine with', tone: 'info' });
@@ -308,6 +317,12 @@ export function MemoryPage() {
                 mutations.update.reset();
                 setEditingId(null);
               }}
+              onReload={reloadRecord}
+              titleOf={titleOf}
+              onOpenConflict={(otherId) => {
+                const other = listed.find((r) => r.id === otherId);
+                if (other !== undefined) openConflict(selected, other);
+              }}
             />
           </section>
         ) : (
@@ -318,6 +333,8 @@ export function MemoryPage() {
             headingRef={detailHeading}
             pending={commandPending}
             error={commandError}
+            onReload={reloadRecord}
+            titleOf={titleOf}
             onEdit={() => {
               mutations.update.reset();
               setEditingId(record.id);
@@ -438,6 +455,7 @@ export function MemoryPage() {
         projectId={projectId}
         open={addOpen}
         onOpenChange={setAddOpen}
+        titleOf={titleOf}
         onCreated={(id) => {
           select({ tab: 'approved', record: id });
           toast.show({ key: `memory:created:${id}`, title: 'Rule added', body: 'Future runs include it within its scope.', tone: 'success' });
@@ -471,7 +489,7 @@ export function MemoryPage() {
               </ul>
               <p className="subtle">
                 To keep the record but stop using it, archive it instead. To also remove copies inside run snapshots, use{' '}
-                <Link to={paths.settings('data')}>Purge project history</Link> in Settings → Storage &amp; data (affects
+                <Link to={paths.settings('data', { project: projectId })}>Purge project history</Link> in Settings → Storage &amp; data (affects
                 run reports).
               </p>
               {deleteTarget.approved ? (

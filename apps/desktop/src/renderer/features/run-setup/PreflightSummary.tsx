@@ -34,7 +34,21 @@ export function PreflightSummary({ preflight, allowance, leading = [], capBytes 
     {
       id: 'memory',
       term: 'Memory records',
-      value: memoryCount === 0 ? 'None' : `${String(memoryCount)} approved`,
+      value:
+        memoryCount === 0 ? (
+          'None'
+        ) : (
+          <span className="stack" style={{ gap: 2 }}>
+            <span>{`${String(memoryCount)} approved`}</span>
+            <ul className="small" style={{ margin: 0, paddingLeft: 16 }} aria-label="Memory records this run includes">
+              {s.memoryRecords.map((m) => (
+                <li key={m.id}>
+                  {m.title} <span className="subtle">{`rev ${String(m.revision)}${m.pinned ? ' · pinned' : ''}`}</span>
+                </li>
+              ))}
+            </ul>
+          </span>
+        ),
     },
     {
       id: 'first',

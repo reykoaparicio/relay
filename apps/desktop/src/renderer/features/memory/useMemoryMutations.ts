@@ -3,9 +3,10 @@
 // through `useIdempotentMutation` (one key per user intent, 02 §B0).
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { InputOf } from '@relay/contracts';
-import { call, isAppErrorException } from '../../api/client';
+import { call } from '../../api/client';
 import { qk } from '../../api/keys';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
+import { isStaleConflict } from '../common/conflict';
 
 function useRefreshMemory(projectId: string) {
   const queryClient = useQueryClient();
@@ -17,13 +18,15 @@ function useRefreshMemory(projectId: string) {
 }
 
 /**
- * The non-idempotent memory commands, each a TanStack mutation that refreshes memory on success. A CONFLICT
+ * The non-idempotent memory commands, each a TanStack mutation that refreshes memory on success. A *stale* CONFLICT
  * (the record changed elsewhere) also refreshes, so the edit form can show the saved version beside the user's edit.
+ * A memory_conflict (the result would conflict with another approved record) is not stale: reloading would not help,
+ * the page routes it to Combine / Resolve instead.
  */
 export function useMemoryMutations(projectId: string) {
   const refresh = useRefreshMemory(projectId);
   const refreshOnConflict = (e: unknown) => {
-    if (isAppErrorException(e) && e.appError.code === 'CONFLICT') refresh();
+    if (isStaleConflict(e)) refresh();
   };
   const update = useMutation({
     mutationFn: (input: InputOf<'relay/v1/memory.update'>) => call('relay/v1/memory.update', input),

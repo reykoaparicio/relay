@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { appError } from '@relay/contracts';
-import { FAKE_PROJECT_ID, FAKE_WORKFLOW_ID } from '../api/fake-bridge';
+import type { CapabilityWarning } from '@relay/contracts';
+import { createFakeBridge, FAKE_PROJECT_ID, FAKE_WORKFLOW_ID } from '../api/fake-bridge';
+import type { FakeBridge } from '../api/fake-bridge';
 import { renderApp } from '../features/testing/render-app';
 
 const PATH = `/p/${FAKE_PROJECT_ID}/workflows/${FAKE_WORKFLOW_ID}`;
@@ -158,8 +160,163 @@ describe('WorkflowEditorPage (J10)', () => {
     await user.type(tokens, '7000');
     bridge.failNext('relay/v1/workflows.saveDraft', appError('CONFLICT'));
     await user.click(screen.getByRole('button', { name: 'Save draft' }));
-    expect(await screen.findByText('This item changed')).toBeInTheDocument();
+    expect(await screen.findByText('This item changed since it was loaded')).toBeInTheDocument();
     expect(tokens).toHaveValue(7000);
+  });
+
+  /** Another session saves draft revision 2 with a different reviewer prompt. */
+  function otherSessionSavesDraft(bridge: FakeBridge) {
+    bridge.world.workflowVersions = bridge.world.workflowVersions.map((v) =>
+      v.version === 'draft'
+        ? { ...v, draftRevision: 2, prompts: { ...v.prompts, 'reviewer.v1': { ...v.prompts['reviewer.v1']!, text: 'Changed elsewhere.' } } }
+        : v,
+    );
+  }
+
+  it('B4: a save CONFLICT loads the other session\'s draft, shows what it changed, and re-basing sends only my fields', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'workflow-draft' });
+    await ready();
+    const allowance = screen.getByRole('textbox', { name: /Run allowance/ });
+    await user.clear(allowance);
+    await user.type(allowance, '4.50');
+    otherSessionSavesDraft(bridge);
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')[0]?.input).toMatchObject({ expectedDraftRevision: 1 });
+    expect(await screen.findByText('The draft changed in another session (now draft revision 2)')).toBeInTheDocument();
+    expect(within(screen.getByRole('list', { name: 'Changed in the other session' })).getByText('Review step: prompt')).toBeInTheDocument();
+    expect(within(screen.getByRole('list', { name: 'Changed by you' })).getByText('Run allowance')).toBeInTheDocument();
+    expect(allowance).toHaveValue('4.50');
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Apply my edits on top of draft revision 2' }));
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(2);
+    });
+    // Only my field: the other session's prompt is never reverted.
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')[1]?.input).toEqual({
+      workflowId: FAKE_WORKFLOW_ID,
+      expectedDraftRevision: 2,
+      patch: { limits: { budgetMicrousd: 4_500_000 } },
+    });
+    expect(bridge.world.workflowVersions.find((v) => v.version === 'draft')?.prompts['reviewer.v1']?.text).toBe('Changed elsewhere.');
+  });
+
+  it('B4: a refetched newer draft never turns my untouched fields into reverts (save expects my base revision)', async () => {
+    const user = userEvent.setup();
+    const { bridge, queryClient } = renderApp(PATH, { scenario: 'workflow-draft' });
+    await ready();
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    otherSessionSavesDraft(bridge);
+    await queryClient.invalidateQueries({ queryKey: ['workflow'] });
+    expect(await screen.findByText('The draft changed in another session (now draft revision 2)')).toBeInTheDocument();
+    expect(rev).toHaveValue(3);
+    await user.click(screen.getByRole('button', { name: 'Apply my edits on top of draft revision 2' }));
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/workflows.saveDraft')[0]?.input).toEqual({
+      workflowId: FAKE_WORKFLOW_ID,
+      expectedDraftRevision: 2,
+      patch: { limits: { maxRevisionCycles: 3 } },
+    });
+  });
+
+  it('B4: Reload after a save CONFLICT refetches the draft (not only the workflow list)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'workflow-draft' });
+    await ready();
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    bridge.failNext('relay/v1/workflows.saveDraft', appError('CONFLICT'));
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    await screen.findByText('This item changed since it was loaded');
+    const before = bridge.callsTo('relay/v1/workflows.get').filter((c) => (c.input as { version?: unknown }).version === 'draft').length;
+    await user.click(screen.getByRole('button', { name: 'Reload' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.get').filter((c) => (c.input as { version?: unknown }).version === 'draft').length).toBeGreaterThan(before);
+    });
+  });
+
+  it('B5: publishing a different draft revision uses a new idempotency key', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    bridge.failNext('relay/v1/workflows.publish', appError('RUNNER_UNAVAILABLE'));
+    await user.click(await screen.findByRole('button', { name: 'Publish as v4' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.publish')).toHaveLength(1);
+    });
+    await user.clear(rev);
+    await user.type(rev, '4');
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.saveDraft')).toHaveLength(2);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Draft revision 2 is valid')).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: 'Publish as v4' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/workflows.publish')).toHaveLength(2);
+    });
+    const keys = bridge.callsTo('relay/v1/workflows.publish').map((c) => (c.input as { idempotencyKey: string }).idempotencyKey);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('B6: Publish is disabled with a reason while the form has unsaved changes', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    const publish = await screen.findByRole('button', { name: 'Publish as v4' });
+    expect(publish).toBeEnabled();
+    await user.clear(rev);
+    await user.type(rev, '2');
+    expect(publish).toBeDisabled();
+    expect(publish).toHaveAccessibleDescription(/Publishing is unavailable while you have unsaved changes/);
+    await user.click(publish);
+    expect(bridge.callsTo('relay/v1/workflows.publish')).toHaveLength(0);
+  });
+
+  it('B7: the published banner carries the validation warnings', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(PATH, { scenario: 'awaiting-approval' });
+    await ready();
+    bridge.world.workflowWarnings = [
+      { stepKey: 'review' as NonNullable<CapabilityWarning['stepKey']>, profileId: null, code: 'output_budget_low', message: 'Review may run out of output tokens.' },
+    ];
+    const rev = screen.getByRole('spinbutton', { name: /Revision cycles/ });
+    await user.clear(rev);
+    await user.type(rev, '3');
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+    await user.click(await screen.findByRole('button', { name: 'Publish as v4' }));
+    const banner = (await screen.findByText(/v4 validated — new runs will snapshot v4/)).closest('.banner') as HTMLElement;
+    expect(banner).toHaveTextContent('Review may run out of output tokens.');
+    expect(banner).not.toHaveTextContent('No capability warnings');
+  });
+
+  it('B14: the run allowance is read-only when limits are locked', async () => {
+    const bridge = createFakeBridge('awaiting-approval');
+    bridge.world.workflowVersions = bridge.world.workflowVersions.map((v) => ({ ...v, editable: { ...v.editable, limits: false } }));
+    renderApp(PATH, { bridge });
+    await ready();
+    expect(screen.getByRole('textbox', { name: /Run allowance/ })).toHaveAttribute('readonly');
+    expect(screen.getByRole('spinbutton', { name: /Revision cycles/ })).toHaveAttribute('readonly');
   });
 
   it('saveDraft not implemented: "Not available yet in this build"', async () => {

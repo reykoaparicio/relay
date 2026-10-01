@@ -1,8 +1,9 @@
 import { useId, useState } from 'react';
 import type { RefObject } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { ROLES } from '@relay/contracts';
 import type { MemoryRecordView, Role } from '@relay/contracts';
-import { Button, ConflictCompare, Field, InlineAlert, Select, Skeleton, TextInput, Textarea } from '../../components/ui';
+import { Button, Checkbox, ConflictCompare, Field, InlineAlert, Select, Skeleton, TextInput, Textarea } from '../../components/ui';
 import type { ConflictResolution } from '../../components/ui';
 import { validationIssuesOf } from '../../api/errors';
 import { useMemoryRecord } from '../../hooks/useMemoryRecord';
@@ -39,6 +40,7 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
   const pickId = useId();
   const aDetail = useMemoryRecord(a.id);
   const bDetail = useMemoryRecord(b.id);
+  const queryClient = useQueryClient();
   const resolve = useResolveConflict(projectId, onResolved);
   const [choice, setChoice] = useState<ConflictResolution | null>(null);
   const [title, setTitle] = useState<string | null>(null);
@@ -47,6 +49,9 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
   const [scopeA, setScopeA] = useState<Role>('reviewer');
   const [scopeB, setScopeB] = useState<Role>('implementer');
   const [submitted, setSubmitted] = useState(false);
+  /** null = the default: pinned when either record is pinned (a pinned rule must not silently lose its pin). */
+  const [pinnedChoice, setPinnedChoice] = useState<boolean | null>(null);
+  const pinned = pinnedChoice ?? (a.pinned || b.pinned);
   const fromSuggestion = a.status === 'suggested' || b.status === 'suggested';
   const recordIds = [a.id, b.id] as [string, string];
 
@@ -59,6 +64,12 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
   const contentError = submitted && rewriteContent.trim() === '' ? 'Enter the combined text.' : undefined;
   const scopesError = scopeA === scopeB ? 'The two records must not apply to the same role.' : undefined;
   const server = validationIssuesOf(resolve.error);
+  const isTitleIssue = (path: string) => /(^|\.)title$/.test(path);
+  const isContentIssue = (path: string) => /(^|\.)content$/.test(path);
+  /** Issues the combine form shows next to a field; every other issue is listed in the summary (never dropped). */
+  const titleIssue = choice === 'combine' ? server.find((i) => isTitleIssue(i.path)) : undefined;
+  const contentIssue = choice === 'combine' ? server.find((i) => isContentIssue(i.path)) : undefined;
+  const unmapped = server.filter((i) => i !== titleIssue && i !== contentIssue);
 
   const apply = (resolution: ConflictResolution) => {
     switch (resolution) {
@@ -73,7 +84,7 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
         if (rewriteTitle.trim() === '' || rewriteContent.trim() === '') return;
         resolve.mutate({
           recordIds,
-          resolution: { rewrite: { title: rewriteTitle.trim(), content: rewriteContent.trim(), scope: scopeFromChoice(scope) } },
+          resolution: { rewrite: { title: rewriteTitle.trim(), content: rewriteContent.trim(), scope: scopeFromChoice(scope), pinned } },
         });
         return;
       case 'keep_both_scoped':
@@ -143,14 +154,14 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
           <p className="small muted">
             Write the combined record. It becomes a new approved record; {fromSuggestion ? 'the approved record is archived as superseded and the suggestion is rejected' : 'A and B are archived as superseded'}.
           </p>
-          <Field label="Title" id={MEMORY_FIELD.title} error={titleError ?? server.find((i) => i.path.includes('title'))?.message} required>
+          <Field label="Title" id={MEMORY_FIELD.title} error={titleError ?? titleIssue?.message} required>
             {(control) => <TextInput {...control} value={rewriteTitle} onValueChange={setTitle} />}
           </Field>
           <Field
             label="Rewritten text"
             id={MEMORY_FIELD.content}
             hint="No secrets or provider credentials belong in memory."
-            error={contentError ?? server.find((i) => i.path.includes('content'))?.message}
+            error={contentError ?? contentIssue?.message}
             required
           >
             {(control) => <Textarea {...control} value={rewriteContent} onValueChange={setContent} rows={5} />}
@@ -168,6 +179,16 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
               />
             )}
           </Field>
+          <Checkbox
+            label="Keep pinned: always include the combined record in runs within its scope"
+            checked={pinned}
+            onCheckedChange={setPinnedChoice}
+          />
+          {a.pinned || b.pinned ? (
+            <p className="small muted" style={{ margin: 0 }}>
+              {`${a.pinned && b.pinned ? 'Both records are' : `“${(a.pinned ? a : b).title}” is`} pinned, so the combined record is pinned unless you untick this.`}
+            </p>
+          ) : null}
           <div className="actions">
             <Button type="submit" variant="primary" pending={resolve.isPending}>
               Apply resolution
@@ -219,16 +240,26 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
           </div>
         </form>
       ) : null}
-      {server.length > 0 && choice !== 'combine' ? (
+      {unmapped.length > 0 ? (
         <InlineAlert tone="danger" title="Relay could not apply this resolution">
           <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
-            {server.map((i) => (
+            {unmapped.map((i) => (
               <li key={`${i.path}:${i.message}`}>{i.message}</li>
             ))}
           </ul>
         </InlineAlert>
       ) : server.length === 0 ? (
-        <MutationError error={resolve.error} unavailableHint="Both records are unchanged." />
+        <MutationError
+          error={resolve.error}
+          unavailableHint="Both records are unchanged."
+          handlers={{
+            reload: () => {
+              void aDetail.refetch();
+              void bDetail.refetch();
+              void queryClient.invalidateQueries({ queryKey: ['memory', projectId] });
+            },
+          }}
+        />
       ) : null}
       <div className="actions">
         <Button variant="ghost" onClick={onCancel} disabled={resolve.isPending}>

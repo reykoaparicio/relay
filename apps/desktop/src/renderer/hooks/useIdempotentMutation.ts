@@ -59,13 +59,17 @@ export interface IdempotentMutationOptions<C extends IdemChannel> {
 }
 
 export interface IdempotentMutation<C extends IdemChannel> {
-  /** Fire-and-forget submit. A second submit of the same intent while one is in flight is deduped (no double start). */
-  readonly mutate: (input: IntentInput<C>) => void;
   /**
-   * Awaitable submit. The same intent (equal canonical input) while in flight returns the in-flight promise; a
-   * different input while another is in flight rejects with {@link IntentInFlightError} (never A's result).
+   * Fire-and-forget submit. A second submit of the same intent while one is in flight is deduped (no double start).
+   * `intentTag` is part of the intent but is not sent: state the input does not carry (e.g. the draft revision a
+   * `workflows.publish` publishes) so that a submit about different state never reuses an earlier key.
    */
-  readonly mutateAsync: (input: IntentInput<C>) => Promise<OutputOf<C>>;
+  readonly mutate: (input: IntentInput<C>, intentTag?: string) => void;
+  /**
+   * Awaitable submit. The same intent (equal canonical input and tag) while in flight returns the in-flight promise; a
+   * different intent while another is in flight rejects with {@link IntentInFlightError} (never A's result).
+   */
+  readonly mutateAsync: (input: IntentInput<C>, intentTag?: string) => Promise<OutputOf<C>>;
   readonly isPending: boolean;
   readonly error: unknown;
   readonly data: OutputOf<C> | undefined;
@@ -73,6 +77,8 @@ export interface IdempotentMutation<C extends IdemChannel> {
   readonly newIntent: () => void;
   /** The key the current intent uses, or null before the first submit of an intent. */
   readonly currentKey: () => string | null;
+  /** Clears the error/result and starts a new intent (e.g. a dialog closed or its form was reset). */
+  readonly reset: () => void;
 }
 
 /**
@@ -94,11 +100,11 @@ export function useIdempotentMutation<C extends IdemChannel>(
   const mutation = useMutation<OutputOf<C>, unknown, InputOf<C>>({
     mutationFn: (input) => call(channel, input),
   });
-  const { mutateAsync: rawMutateAsync } = mutation;
+  const { mutateAsync: rawMutateAsync, reset: rawReset } = mutation;
 
   const mutateAsync = useCallback(
-    (input: IntentInput<C>): Promise<OutputOf<C>> => {
-      const fingerprint = intentFingerprint(channel, input);
+    (input: IntentInput<C>, intentTag?: string): Promise<OutputOf<C>> => {
+      const fingerprint = `${intentFingerprint(channel, input)}${intentTag === undefined ? '' : `\u0000${intentTag}`}`;
       if (inFlight.current !== null) {
         if (inFlight.current.fingerprint === fingerprint) return inFlight.current.promise;
         return Promise.reject(new IntentInFlightError(channel));
@@ -126,8 +132,8 @@ export function useIdempotentMutation<C extends IdemChannel>(
   );
 
   const mutate = useCallback(
-    (input: IntentInput<C>) => {
-      mutateAsync(input).catch(() => undefined);
+    (input: IntentInput<C>, intentTag?: string) => {
+      mutateAsync(input, intentTag).catch(() => undefined);
     },
     [mutateAsync],
   );
@@ -136,6 +142,10 @@ export function useIdempotentMutation<C extends IdemChannel>(
     if (inFlight.current === null) intentRef.current = null;
   }, []);
   const currentKey = useCallback(() => intentRef.current?.key ?? null, []);
+  const reset = useCallback(() => {
+    newIntent();
+    rawReset();
+  }, [newIntent, rawReset]);
 
   return {
     mutate,
@@ -145,5 +155,6 @@ export function useIdempotentMutation<C extends IdemChannel>(
     data: mutation.data,
     newIntent,
     currentKey,
+    reset,
   };
 }

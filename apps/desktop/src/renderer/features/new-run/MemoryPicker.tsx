@@ -13,7 +13,8 @@ export interface MemoryPickerProps {
   readonly records: readonly MemoryRecordView[] | undefined;
   readonly error: unknown;
   readonly onRetry: () => void;
-  readonly checked: readonly string[];
+  /** Ticked non-pinned ids; `null` = untouched (every approved record is included). */
+  readonly checked: readonly string[] | null;
   readonly onToggle: (id: string, checked: boolean) => void;
   readonly suggestions?: number;
   /** A server problem about the memory selection (error-summary target, shown inline). */
@@ -25,8 +26,9 @@ function scopeText(m: MemoryRecordView): string {
 }
 
 /**
- * Approved memory to include (10 J7). Pinned rules are shown checked and locked on (the engine always includes them,
- * so they are never sent); ticked non-pinned records become `memoryRecordIds`.
+ * Approved memory to include (10 J7). By default every approved record is ticked and nothing is sent (the engine
+ * includes all approved records). Pinned rules are shown checked and locked on (always included, never sent). Once
+ * the user changes the selection, the ticked non-pinned records are sent as `memoryRecordIds`.
  */
 export function MemoryPicker({
   records,
@@ -98,7 +100,7 @@ export function MemoryPicker({
               <input
                 type="checkbox"
                 id={id}
-                checked={m.pinned || checked.includes(m.id)}
+                checked={m.pinned || checked === null || checked.includes(m.id)}
                 disabled={m.pinned}
                 aria-describedby={fieldError === undefined ? descId : `${descId} ${errorId}`}
                 aria-invalid={fieldError === undefined || m.pinned ? undefined : true}
