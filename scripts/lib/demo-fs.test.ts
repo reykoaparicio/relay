@@ -3,7 +3,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanupScratchDirs, makeScratchDir, removeScratchDir } from '../../scripts/lib/demo-fs.js';
+import { cleanupScratchDirs, makeScratchDir, removeScratchDir } from './demo-fs.js';
 
 afterEach(async () => {
   await cleanupScratchDirs();

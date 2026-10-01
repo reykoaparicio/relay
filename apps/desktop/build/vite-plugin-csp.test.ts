@@ -12,7 +12,7 @@ describe('relayCsp (H8)', () => {
   it('production meta equals the H8 policy (no localhost, no unsafe-eval, no frame-ancestors)', () => {
     const out = handlerOf(relayCsp({ mode: 'production' }))(HTML, {});
 
-    expect(PRODUCTION_CSP).toBe("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'");
+    expect(PRODUCTION_CSP).toBe("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'");
     expect(out).toContain(`<meta http-equiv="Content-Security-Policy" content="${PRODUCTION_CSP}" />`);
     expect(out).not.toMatch(/localhost|unsafe-eval|frame-ancestors/);
     expect(out.match(/Content-Security-Policy/g)).toHaveLength(1);

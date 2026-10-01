@@ -12,7 +12,7 @@ export const PRODUCTION_CSP_DIRECTIVES: readonly string[] = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
-  "font-src 'self'",
+  "font-src 'self' data:", // Vite inlines small woff2 files as data: URIs
   "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
