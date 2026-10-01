@@ -102,12 +102,22 @@ export function scopeCovers(scope: MemoryRecordScope, role: Role): boolean {
 
 /**
  * Step `memoryScope` filter (02 B4): `types` keeps listed types; `roles: 'step_role'` keeps records whose role scope
- * covers the step's role. Pinned user_rules pass regardless (07 G1 step 3).
+ * covers the step's role. Pinned user_rules bypass only the STEP's `memoryScope` (07 G1 step 3), never the record's
+ * own role scope: a pinned rule scoped to the planner never reaches the reviewer.
  */
 export function applyMemoryScope<T extends RetrievableRecord>(records: readonly T[], scope: MemoryScope, role: Role): T[] {
   return records.filter((r) => {
-    if (isMandatory(r)) return true;
+    if (isMandatory(r)) return scopeCovers(r.scope, role);
     if (!scope.types.includes(r.type)) return false;
     return scope.roles === 'all' || scopeCovers(r.scope, role);
   });
+}
+
+/** The ranked records one model step would place in context: its `memoryScope` filter, then the G2 ranking. */
+export function stepMemory<T extends RetrievableRecord>(records: readonly T[], step: { readonly memoryScope: MemoryScope; readonly role: Role }, query: Omit<RetrievalQuery, 'role'>): {
+  readonly scoped: T[];
+  readonly ranked: RankedRecord[];
+} {
+  const scoped = applyMemoryScope(records, step.memoryScope, step.role);
+  return { scoped, ranked: rankMemory(scoped, { ...query, role: step.role }) };
 }

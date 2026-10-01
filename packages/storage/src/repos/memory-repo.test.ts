@@ -108,8 +108,8 @@ describe('MemoryRepo', () => {
     const o = add(other.id);
     const run = seedRun(f.db, f.clock, p.id);
     const otherRun = seedRun(f.db, f.clock, other.id);
-    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true }]);
-    f.db.repos.memory.snapshotForRun(otherRun.id, [{ recordId: o.record.id, revision: 1, title: 'T', content: 'C', included: false }]);
+    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
+    f.db.repos.memory.snapshotForRun(otherRun.id, [{ recordId: o.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: false }]);
 
     const snap = f.db.repos.memory.runSnapshot(run.id);
     const purged = f.db.repos.memory.purgeRunSnapshots(p.id);
@@ -118,6 +118,19 @@ describe('MemoryRepo', () => {
     expect(purged).toEqual({ deleted: 1, recordIds: [m.record.id] });
     expect(f.db.repos.memory.runSnapshot(run.id)).toEqual([]);
     expect(f.db.repos.memory.runSnapshot(otherRun.id)).toHaveLength(1);
+  });
+
+  it('the run snapshot keeps type, pinned, and role scope as of the snapshot; live attribute edits do not change it (BH-1)', () => {
+    const p = seedProject(f.db, f.clock);
+    const m = add(p.id);
+    const run = seedRun(f.db, f.clock, p.id);
+    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'project_decision', pinned: true,
+      scope: { roles: ['planner', 'verifier'] }, included: true }]);
+
+    f.db.repos.memory.setAttributes(m.record.id, { pinned: false, scope: { roles: ['reviewer'] } }, epochMs(90));
+    const [snap] = f.db.repos.memory.runSnapshot(run.id);
+
+    expect([snap?.type, snap?.pinned, snap?.scope]).toEqual(['project_decision', true, { roles: ['planner', 'verifier'] }]);
   });
 
   it('insertRecord leaves no orphan record when the revision is invalid (B2)', () => {
@@ -154,7 +167,7 @@ describe('MemoryRepo', () => {
     const p = seedProject(f.db, f.clock);
     const run = seedRun(f.db, f.clock, p.id);
     const m = add(p.id);
-    const row = { recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true };
+    const row = { recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule' as const, pinned: false, scope: { roles: 'all' as const }, included: true };
 
     expect(() => { f.db.repos.memory.snapshotForRun(run.id, [row, row]); }).toThrow(/UNIQUE constraint failed/);
 
@@ -165,7 +178,7 @@ describe('MemoryRepo', () => {
     const p = seedProject(f.db, f.clock);
     const m = add(p.id, { expiresAt: f.clock.now() + 5000 });
     const run = seedRun(f.db, f.clock, p.id);
-    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true }]);
+    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
 
     f.db.repos.memory.setAttributes(m.record.id, { pinned: true, reviewAt: epochMs(77) }, epochMs(50));
     const pinned = f.db.repos.memory.get(m.record.id)?.record;

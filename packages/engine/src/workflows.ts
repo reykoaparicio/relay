@@ -82,7 +82,7 @@ export interface SaveDraftInput {
 
 /** `workflows.saveDraft`: creates the draft from the latest validated version (revision 0 → 1) or updates it (CAS). */
 export function saveDraft(ctx: EngineCtx, input: SaveDraftInput): Result<WorkflowVersionView> {
-  return ctx.db.tx('immediate', (r): Result<WorkflowVersionView> => {
+  return ctx.db.txResult('immediate', (r): Result<WorkflowVersionView> => {
     if (r.workflows.getWorkflow(input.workflowId) === undefined) return err(errors.notFound('workflow'));
     const draft = r.workflows.getVersion(input.workflowId, 'draft');
     if (input.expectedDraftRevision === 0 && draft !== undefined) return err(errors.conflict({ reason: 'draft_exists', draftRevision: draft.draftRevision }));
@@ -188,7 +188,7 @@ export async function publishWorkflow(ctx: EngineCtx, input: { readonly idempote
   if (draft === undefined) return err(errors.notFound('workflow_draft'));
   const result = await validateSpec(ctx, draft.spec, draft.prompts);
   if (!result.valid) return err(errors.validationFailed(result.issues));
-  return ctx.db.tx('immediate', (r): Result<WorkflowVersionView> => {
+  return ctx.db.txResult('immediate', (r): Result<WorkflowVersionView> => {
     const again = replay(r);
     if (again !== null) return again;
     const now: EpochMs = ctx.clock.now();

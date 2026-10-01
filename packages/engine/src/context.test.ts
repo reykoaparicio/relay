@@ -209,10 +209,11 @@ describe('context assembler (07 G1 complete)', () => {
     expect(res.value.user).toMatchSnapshot();
   });
 
-  it('step 3: renders the run memory snapshot filtered by memoryScope; pinned rules always; mid-run edits do not leak in', async () => {
+  it('step 3: renders the run memory snapshot filtered by memoryScope; pinned rules bypass the step filter only; mid-run edits do not leak in', async () => {
     const harness = await createHarness();
     h = harness;
     const pinned = await remember(harness, 'pin', { type: 'user_rule', content: 'Pinned planner rule.', roles: ['planner'], pinned: true });
+    const pinAll = await remember(harness, 'pal', { type: 'user_rule', content: 'Pinned rule for every role.', pinned: true });
     const reviewer = await remember(harness, 'rev', { content: 'Reviewer decision original.', roles: ['reviewer'] });
     const planner = await remember(harness, 'pln', { content: 'Planner-only decision.', roles: ['planner'] });
     const source = await remember(harness, 'src', { type: 'source_reference', content: 'Error codes live in src/errors.ts.', sourceFile: 'src/errors.ts' });
@@ -239,15 +240,48 @@ describe('context assembler (07 G1 complete)', () => {
     expect(res.value.user).not.toContain('EDITED');
     expect(res.value.user).toContain('<project_rules approved_by="user">');
     expect(res.value.user.indexOf('<project_rules')).toBeLessThan(res.value.user.indexOf('<untrusted_file'));
-    expect(new Set(ids(res.value.manifest))).toEqual(new Set([pinned.id, reviewer.id, source.id, ...ids(res.value.manifest).filter((i) => ![pinned.id, reviewer.id, source.id].includes(i))]));
+    expect(ids(res.value.manifest)).toEqual(expect.arrayContaining([pinAll.id, reviewer.id, source.id]));
     expect(ids(res.value.manifest)).not.toContain(planner.id);
+    expect(ids(res.value.manifest)).not.toContain(pinned.id); // BH-4: pinned never overrides the record's own role scope
+    expect(res.value.user).not.toContain('Pinned planner rule.');
     expect(res.value.manifest.memory.filter((m) => m.type === 'run_summary' && m.included)).toHaveLength(2);
-    expect(res.value.manifest.omitted).toEqual([expect.objectContaining({ kind: 'memory', reason: 'excluded_by_policy' })]);
+    const policy = res.value.manifest.omitted.filter((o) => o.reason === 'excluded_by_policy');
+    expect(res.value.manifest.omitted.every((o) => o.kind === 'memory' && o.reason === 'excluded_by_policy')).toBe(true);
+    expect(policy.map((o) => o.ref)).toEqual(expect.arrayContaining([pinned.id, planner.id]));
+    expect(policy).toHaveLength(3); // the planner-scoped pinned rule + decision (BH-5) and the third run summary
     expect(res.value.manifest.memory.find((m) => m.recordId === source.id)).toEqual(expect.objectContaining({ stale: true }));
     expect(res.value.user).toContain('source_changed="true"');
-    expect(res.value.manifest.memory.find((m) => m.recordId === pinned.id)).toEqual(expect.objectContaining({ pinned: true, included: true }));
-    expect(new Set(ids(typed.value.manifest))).toEqual(new Set([pinned.id, source.id]));
+    expect(res.value.manifest.memory.find((m) => m.recordId === pinned.id)).toEqual(expect.objectContaining({ pinned: true, included: false }));
+    expect(res.value.manifest.memory.find((m) => m.recordId === pinAll.id)).toEqual(expect.objectContaining({ pinned: true, included: true }));
+    expect(new Set(ids(typed.value.manifest))).toEqual(new Set([pinAll.id, source.id]));
+    expect(typed.value.manifest.omitted.filter((o) => o.reason === 'excluded_by_policy').map((o) => o.ref)).toEqual(expect.arrayContaining([reviewer.id, planner.id, pinned.id]));
     expect(ids(all.value.manifest)).toContain(planner.id);
+    expect(ids(all.value.manifest)).not.toContain(pinned.id);
+  });
+
+  it('BH-1: type, pinned, and scope come from the run snapshot — mid-run pin/scope edits change neither implement nor verify context', async () => {
+    const harness = await createHarness();
+    h = harness;
+    const pin = await remember(harness, 'bh1p', { type: 'user_rule', content: 'Pinned rule for every role.', pinned: true });
+    const dec = await remember(harness, 'bh1d', { content: 'Decision for every role.' });
+    const runId = await untilApproval(harness);
+    const snapshotIds = harness.db.repos.memory.runSnapshot(runId).map((x) => x.recordId);
+
+    const unpinned = await harness.engine.handle('relay/v1/memory.update', { recordId: pin.id, expectedRevision: 1, pinned: false });
+    const rescoped = await harness.engine.handle('relay/v1/memory.update', { recordId: dec.id, expectedRevision: 1, scope: { roles: ['planner'] } });
+    const results = await Promise.all(['implement', 'verify'].map((key) => assembler(harness).assemble(inputFor(harness, runId, key, { preservedSnapshot: true }))));
+
+    expect(snapshotIds).toEqual(expect.arrayContaining([pin.id, dec.id]));
+    expect([unpinned.ok, rescoped.ok, harness.db.repos.memory.get(dec.id)?.record.currentRevision]).toEqual([true, true, 2]);
+    for (const res of results) {
+      if (!res.ok) throw new Error(res.error.code);
+      const m = res.value.manifest;
+      expect(m.memory.find((x) => x.recordId === pin.id)).toEqual(expect.objectContaining({ revision: 1, type: 'user_rule', pinned: true, included: true }));
+      expect(m.memory.find((x) => x.recordId === dec.id)).toEqual(expect.objectContaining({ revision: 1, type: 'project_decision', pinned: false, included: true }));
+      expect(m.omitted.filter((o) => o.kind === 'memory')).toEqual([]);
+      expect(res.value.user).toContain('Decision for every role.');
+      expect(res.value.user).toContain('Pinned rule for every role.');
+    }
   });
 
   it('step 5: plan gets findings.v1; implement gets plan.v1 + findings.v1 with plan-scope files mandatory and the rest optional', async () => {

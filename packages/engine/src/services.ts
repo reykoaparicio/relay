@@ -142,7 +142,7 @@ async function createFromRoot(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/pro
   if (early !== null) return early;
   const root = await ctx.projectFs.openRoot(input.rootRealpath);
   if (!root.ok) return root;
-  return ctx.db.tx('immediate', (r) => {
+  return ctx.db.txResult('immediate', (r) => {
     const again = replay(r);
     if (again !== null) return again;
     const taken = r.projects.list().some((p) => r.projects.getWithRoot(p.id).rootRealpath === root.value.realpath);
@@ -212,7 +212,7 @@ async function stepDetail(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/runs.ge
 
 async function cancelRun(ctx: EngineCtx, runId: RunId) {
   const fx: PostCommitEffect[] = [];
-  const res = ctx.db.tx('immediate', (r) => {
+  const res = ctx.db.txResult('immediate', (r) => {
     const run = r.runs.get(runId);
     const now = ctx.clock.now();
     switch (run.status) {
@@ -251,7 +251,7 @@ async function cancelRun(ctx: EngineCtx, runId: RunId) {
 }
 
 function pauseRun(ctx: EngineCtx, runId: RunId) {
-  const res = ctx.db.tx('immediate', (r) => {
+  const res = ctx.db.txResult('immediate', (r) => {
     const run = r.runs.get(runId);
     if (run.status !== 'running') return err(errors.conflict({ reason: 'run_not_running', status: run.status }));
     r.runs.setPauseRequested(runId, true);
@@ -290,7 +290,7 @@ function diagnostics(ctx: EngineCtx) {
 /** `projects.update` (optimistic on `updated_at`); an allowance edit re-evaluates `paused(budget_project)` runs. */
 async function updateProject(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/projects.update'>): Promise<Result<Project>> {
   const { patch } = input;
-  const updated = ctx.db.tx('immediate', (r) => {
+  const updated = ctx.db.txResult('immediate', (r) => {
     const cur = r.projects.find(input.projectId);
     if (cur === undefined) return err(errors.notFound('project'));
     const policyChanged = patch.allowedProviderIds !== undefined || patch.providerOptions !== undefined;
@@ -312,7 +312,7 @@ async function updateProject(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/proj
 
 /** `projects.archive`: CONFLICT while the project has an active (non-terminal) run. */
 function archiveProject(ctx: EngineCtx, projectId: ParsedInputOf<'relay/v1/projects.archive'>['projectId']): Result<Project> {
-  return ctx.db.tx('immediate', (r) => {
+  return ctx.db.txResult('immediate', (r) => {
     const project = r.projects.find(projectId);
     if (project === undefined) return err(errors.notFound('project'));
     const active = r.runs.listActive().filter((run) => run.projectId === projectId).map((run) => run.id);
@@ -382,7 +382,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/app.createBackup': (input) => createBackupOp(ctx, input),
     'relay/v1/app.getSettings': () => sync(() => ok(readSettings(r))),
     'relay/v1/app.updateSettings': (patch) =>
-      sync(() => ctx.db.tx('immediate', (tx) => {
+      sync(() => ctx.db.txResult('immediate', (tx) => {
         if (patch.activeProjectId !== undefined && patch.activeProjectId !== null && tx.projects.find(patch.activeProjectId) === undefined) {
           return err(errors.validationFailed([{ path: 'activeProjectId', message: 'Unknown project.', code: 'unknown_project' }]));
         }
@@ -403,7 +403,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/providers.test': (input) => testProviderConnection(ctx, input),
     'relay/v1/providers.catalog': (input) => sync(() => ok([...r.catalog.list(input.providerId)])),
     'relay/v1/providers.recordCredentialRef': (input) =>
-      sync(() => ctx.db.tx('immediate', (tx) => {
+      sync(() => ctx.db.txResult('immediate', (tx) => {
         const row = tx.credentials.upsert({ id: ctx.ids.next('credentialRef'), providerId: input.providerId, storageMode: input.storageMode,
           vaultFile: input.vaultFile, redactedLabel: input.redactedLabel });
         return ok(toCredentialRef(row));

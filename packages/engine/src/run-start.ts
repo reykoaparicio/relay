@@ -20,13 +20,14 @@ import type {
   WorkflowSpec,
 } from '@relay/contracts';
 import type { UsageEstimate } from '@relay/providers';
-import type { ProjectRow, Repos, StepInsert, WorkflowVersionRow } from '@relay/storage';
+import type { MemoryItem, ProjectRow, Repos, StepInsert, WorkflowVersionRow } from '@relay/storage';
 import { admit, allowanceSetEntries } from './budget.js';
 import { buildModelRequest } from './checkpoints.js';
 import type { Outstanding } from './budget.js';
 import { monthWindow } from './clock.js';
-import { diffBlock, renderStepPrompt } from './context.js';
+import { diffBlock, renderStepPrompt, renderStepRules, retrievableOf } from './context.js';
 import { requestHash } from './hash.js';
+import { selectRunMemory } from './memory.js';
 import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './ports.js';
 import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
 import type { PostCommitEffect } from './run-machine.js';
@@ -112,7 +113,8 @@ async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: Workf
     steps,
     workflowContentHash: version.contentHash,
     catalogVersion: ctx.db.repos.catalog.latestVersion() ?? '',
-    memoryIncludeIds: [...(input.memoryRecordIds ?? [])],
+    // Absent ≠ empty (BH-2): null = every approved record (§4.5 default), [] = pinned rules only.
+    memoryIncludeIds: input.memoryRecordIds === undefined ? null : [...input.memoryRecordIds],
   });
 }
 
@@ -164,7 +166,7 @@ export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Re
   if (!prepared.ok) return prepared;
   const p = prepared.value;
   const fx: PostCommitEffect[] = [];
-  const result = ctx.db.tx('immediate', (r): Result<{ runId: RunId; status: RunStatus }> => {
+  const result = ctx.db.txResult('immediate', (r): Result<{ runId: RunId; status: RunStatus }> => {
     const again = replay(); // a concurrent duplicate committed while we resolved
     if (again !== null) return again;
     const now = ctx.clock.now();
@@ -187,9 +189,9 @@ const ZERO: Outstanding = { C: 0 as Outstanding['C'], R: 0 as Outstanding['R'], 
 
 /**
  * B7: N of the first model step built exactly like dispatch (F4): the same prompt rendering (role instructions,
- * output contract, goal, constraints, diff, file blocks in `run_input_files` order), `buildModelRequest` (output
- * schema, maxOutputTokens, refusalFallback), and `adapter.estimate` (request overhead, billed hops, allowance prices).
- * Without a key the adapter's local estimate is used.
+ * output contract, goal, constraints, the step's memory rules from the records intake would snapshot, diff, file
+ * blocks in `run_input_files` order), `buildModelRequest` (output schema, maxOutputTokens, refusalFallback), and
+ * `adapter.estimate` (request overhead, billed hops, allowance prices). Without a key the adapter's local estimate is used.
  */
 async function estimateFirstReservation(
   ctx: EngineCtx,
@@ -198,13 +200,15 @@ async function estimateFirstReservation(
   first: ModelStepSnapshot,
   stepKey: StepKey,
   files: readonly { relPath: string; sha256: string; content: string }[],
+  memory: readonly MemoryItem[],
 ): Promise<Result<UsageEstimate>> {
   const roleText = p.version.prompts[first.instructionVersion];
   if (roleText === undefined) return err(errors.modelUnsupported({ reason: 'instructions_missing' }));
   const diff = await diffBlock(ctx, { run: { input: input.input }, stepSpec: first });
   if (!diff.ok) return diff;
   const ordered = [...files].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0)); // = inputFiles ORDER BY rel_path
-  const prompt = renderStepPrompt({ roleText, schemaId: first.outputSchema, goal: input.goal, diffBlock: diff.value, files: ordered, repairBlock: '' });
+  const rules = renderStepRules(memory.map(retrievableOf), first, input.goal, ordered.map((f) => f.relPath));
+  const prompt = renderStepPrompt({ roleText, schemaId: first.outputSchema, goal: input.goal, rules, diffBlock: diff.value, files: ordered, repairBlock: '' });
   const request = buildModelRequest(ctx.templates, first, prompt, { attemptId: 'preflight', runId: 'preflight', stepKey, purpose: 'initial' },
     p.project.providerPolicy.providerOptions);
   let adapter;
@@ -216,11 +220,17 @@ async function estimateFirstReservation(
   return ok(await adapter.estimate(request, first.profile.prices, { priceCatalogVersion: first.profile.priceCatalogVersion }));
 }
 
-/** `runs.preflight`: the same resolution as start (dryRun), plus the estimate of the first reservation (B7). */
+/**
+ * `runs.preflight`: the same resolution as start (dryRun), the memory records intake would snapshot (the same
+ * {@link selectRunMemory} call, so the preview is the selection), plus the estimate of the first reservation (B7),
+ * which renders those records' rules for the first model step.
+ */
 export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<Result<RunPreflight>> {
   const prepared = await prepareRun(ctx, input);
   if (!prepared.ok) return prepared;
   const p = prepared.value;
+  const memory = selectRunMemory(ctx.db.repos, p.project.id, ctx.clock.now(), p.snapshot.memoryIncludeIds);
+  if (!memory.ok) return memory;
   let files: { relPath: string; sha256: string; content: string; size: number }[] = [];
   // A diff-input run's context carries the current files its diff references (read like intake will read them).
   const relPaths = input.input.kind === 'files' ? ok(input.input.relPaths) : await diffReferencedPaths(ctx, p.project.id, input.input.diffArtifactId);
@@ -239,7 +249,7 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
   let estimatedInputTokens = 0;
   let basis: UsageEstimate['basis'] = 'local_estimate';
   if (first !== undefined) {
-    const estimate = await estimateFirstReservation(ctx, p, input, first.snap, first.key, files);
+    const estimate = await estimateFirstReservation(ctx, p, input, first.snap, first.key, files, memory.value);
     if (!estimate.ok) return estimate;
     N = estimate.value.upperAllowanceMicrousd;
     estimatedInputTokens = estimate.value.inputTokens;
@@ -254,7 +264,11 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
   }).breakdown;
   const providers: ProviderId[] = [...new Set(models.map((m) => m.snap.profile.providerId))];
   return ok({
-    inputSummary: { files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), estimatedInputTokens, memoryRecords: [], providersReceivingContext: providers },
+    inputSummary: {
+      files: files.length, bytes: files.reduce((n, f) => n + f.size, 0), estimatedInputTokens,
+      memoryRecords: memory.value.map((m) => ({ id: m.record.id, revision: m.current.revision, type: m.record.type, title: m.current.title, pinned: m.record.pinned })),
+      providersReceivingContext: providers,
+    },
     firstReservation: { N, basis },
     budget,
     issues: [],

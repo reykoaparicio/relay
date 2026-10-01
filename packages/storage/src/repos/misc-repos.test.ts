@@ -209,6 +209,8 @@ describe('settings, credentials, catalog, workflows, config revisions, approvals
     expect(repo.getWorkflow(wf.id)?.slug).toBe('rpf');
     expect(repo.getWorkflow(newId('workflow'))).toBeUndefined();
     expect(repo.listWorkflows()).toHaveLength(1);
+    expect(repo.listVersions(wf.id).map((v) => [v.version, v.status])).toEqual([[1, 'validated']]);
+    expect(repo.listVersions(newId('workflow'))).toEqual([]);
   });
 
   it('ConfigRevisionRepo appends max+1 and resolves the effective profile', () => {

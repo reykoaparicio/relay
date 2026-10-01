@@ -110,8 +110,8 @@ export function parseRunSnapshot(raw: unknown): RunSnapshot {
   for (const [key, v] of Object.entries(raw['steps'])) steps[key] = parseStep(v, key);
   const hash = sha256Schema.safeParse(raw['workflowContentHash']);
   const ids = raw['memoryIncludeIds'];
-  if (!hash.success || typeof raw['catalogVersion'] !== 'string' || !Array.isArray(ids)) throw new SnapshotError('meta');
-  const memoryIncludeIds = ids.map((id) => {
+  if (!hash.success || typeof raw['catalogVersion'] !== 'string' || !(ids === null || Array.isArray(ids))) throw new SnapshotError('meta');
+  const memoryIncludeIds = ids === null ? null : ids.map((id: unknown) => {
     const r = idSchema('memory').safeParse(id);
     if (!r.success) throw new SnapshotError('memoryIncludeIds');
     return r.data;

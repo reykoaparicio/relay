@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createIdGen, isRelayError, systemClock } from '@relay/contracts';
+import { createIdGen, err, errors, isRelayError, ok, systemClock } from '@relay/contracts';
 import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import { openNodeSqlite } from './driver-node-sqlite.js';
@@ -56,6 +56,36 @@ describe('unit of work', () => {
     expect(attempt).toThrow('original failure');
     expect(driver.inTransaction).toBe(false);
     db.close();
+  });
+
+  it('txResult commits an ok Result and rolls back every write of an err Result (returned as is)', () => {
+    const committed = f.db.txResult('immediate', (r) => {
+      r.settings.set('theme', 'dark');
+      return ok(1);
+    });
+    const failed = f.db.txResult('immediate', (r) => {
+      seedProject(f.db, f.clock);
+      r.settings.set('theme', 'light');
+      r.settings.set('other', 'x');
+      return err(errors.conflict({ reason: 'late_failure' }));
+    });
+
+    expect(committed).toEqual(ok(1));
+    expect(failed.ok ? null : failed.error.details).toEqual({ reason: 'late_failure' });
+    expect(f.db.repos.settings.get('theme')).toBe('dark');
+    expect(f.db.repos.settings.get('other')).toBeUndefined();
+    expect(f.db.repos.projects.list({ includeArchived: true })).toHaveLength(0);
+  });
+
+  it('txResult rolls back and rethrows on a throw', () => {
+    const attempt = () =>
+      f.db.txResult('immediate', (r) => {
+        r.settings.set('theme', 'dark');
+        throw new Error('boom');
+      });
+
+    expect(attempt).toThrow('boom');
+    expect(f.db.repos.settings.get('theme')).toBeUndefined();
   });
 
   it('throws on a nested tx', () => {

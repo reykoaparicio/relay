@@ -329,6 +329,9 @@ CREATE TABLE run_memory_snapshot (          -- which revisions each run used (§
   revision     INTEGER NOT NULL,
   title        TEXT NOT NULL,                 -- copied for reproducibility; purged by purgeProjectHistory
   content      TEXT NOT NULL,
+  type         TEXT NOT NULL CHECK (type IN ('user_rule','project_decision','source_reference','run_summary')),  -- attributes as of
+  pinned       INTEGER NOT NULL CHECK (pinned IN (0,1)),                                                       -- the snapshot: context
+  scope_json   TEXT NOT NULL CHECK (json_valid(scope_json)),                                                   -- never reads the live row
   included     INTEGER NOT NULL CHECK (included IN (0,1)),   -- 0 = omitted by token budget (manifest records why)
   PRIMARY KEY (run_id, record_id)
 ) STRICT;

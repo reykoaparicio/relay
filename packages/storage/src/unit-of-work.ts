@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Clock, IdGen } from '@relay/contracts';
+import type { Clock, IdGen, Result } from '@relay/contracts';
 import { createIdGen, invariant, systemClock } from '@relay/contracts';
 import type { Migration } from '../migrations/index.js';
 import type { SqlDriver } from './driver.js';
@@ -37,16 +37,17 @@ export interface CreateDbDeps {
 /**
  * Runs `fn` inside `BEGIN IMMEDIATE … COMMIT` on `driver`. On a throw, issues ROLLBACK only if SQLite still reports
  * an open transaction (it may already have rolled back, e.g. after SQLITE_FULL), then rethrows the original error.
+ * When `rollbackIf(result)` holds, the transaction is rolled back instead of committed and the result is returned.
  * @throws Error (invariant) when a transaction is already open (no nesting / savepoints in P0).
  */
-export function runImmediate<T>(driver: SqlDriver, fn: () => T): T {
+export function runImmediate<T>(driver: SqlDriver, fn: () => T, rollbackIf?: (out: T) => boolean): T {
   // Read through a function: the getter changes under us, so control-flow narrowing must not apply.
   const isOpen = (): boolean => driver.inTransaction;
   invariant(!isOpen(), 'nested transactions are not supported');
   driver.exec('BEGIN IMMEDIATE');
   try {
     const out = fn();
-    driver.exec('COMMIT');
+    driver.exec(rollbackIf?.(out) === true ? 'ROLLBACK' : 'COMMIT');
     return out;
   } catch (e) {
     if (isOpen()) {
@@ -68,6 +69,9 @@ export function createDb(driver: SqlDriver, deps: CreateDbDeps): Db {
     repos,
     tx<T>(_mode: 'immediate', fn: (r: Repos) => NotPromise<T>): T {
       return runImmediate(driver, () => fn(repos));
+    },
+    txResult<T>(_mode: 'immediate', fn: (r: Repos) => NotPromise<Result<T>>): Result<T> {
+      return runImmediate<Result<T>>(driver, () => fn(repos), (out) => !out.ok);
     },
     backupTo: (dest) => driver.backupTo(dest),
     schemaVersion: () =>

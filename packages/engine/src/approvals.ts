@@ -139,7 +139,7 @@ export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promis
     }
   }
   const fx: PostCommitEffect[] = [];
-  const decided = ctx.db.tx('immediate', (r): Result<DecideOutput> => {
+  const decided = ctx.db.txResult('immediate', (r): Result<DecideOutput> => {
     const now = ctx.clock.now();
     const fresh = r.approvals.get(a.id);
     if (fresh?.decision !== null || fresh.invalidatedAt !== null) return err(errors.conflict({ reason: 'duplicate_in_flight' }));

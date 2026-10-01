@@ -19,15 +19,15 @@ import type {
   StepKey,
   ValidationIssue,
 } from '@relay/contracts';
-import type { Db, Repos, RunRow, StepRow } from '@relay/storage';
+import type { Db, MemoryItem as StoredMemoryItem, Repos, RunRow, StepRow } from '@relay/storage';
 import type { ArtifactStore, ProjectRoot } from '@relay/tools';
 import type { TemplateRegistry } from '@relay/templates';
 import { canonicalJson, fromUtf8 } from './hash.js';
 import { buildManifest, computeContextHash, sha256Text } from './manifest.js';
 import type { ManifestInput } from './manifest.js';
-import { applyMemoryScope, excessRunSummaries, rankMemory, scoreRecord, tokenize } from './memory-retrieval.js';
+import { excessRunSummaries, scoreRecord, stepMemory, tokenize } from './memory-retrieval.js';
 import type { RankedRecord, RetrievableRecord } from './memory-retrieval.js';
-import type { AssembleInput, AssembledContext, ContextAssemblerPort, MemoryServicePort, ProjectFsPort } from './ports.js';
+import type { AssembleInput, AssembledContext, ContextAssemblerPort, MemoryServicePort, ModelStepSnapshot, ProjectFsPort } from './ports.js';
 import {
   renderConstraints,
   renderDiffBlock,
@@ -156,19 +156,36 @@ export function renderUserDocument(p: DocumentParts): string {
   return renderTaskDocument([renderGoal(p.goal), renderConstraints(), p.rules ?? '', ...(p.upstream ?? []), p.diffBlock ?? '', ...p.fileBlocks, p.repairBlock]);
 }
 
-/** The prompt of one model step with every selected file and no memory/upstream (preflight estimate, B7). */
+/**
+ * The prompt of one model step with every selected file and the step's memory rules, no upstream (preflight
+ * estimate, B7). `rules` is the {@link renderStepRules} block of the records the run would snapshot.
+ */
 export function renderStepPrompt(i: {
   readonly roleText: string;
   readonly schemaId: string;
   readonly goal: string;
+  readonly rules?: string;
   readonly diffBlock: string | null;
   readonly files: readonly { readonly relPath: string; readonly sha256: string; readonly content: string }[];
   readonly repairBlock: string;
 }): { system: string; user: string } {
   return {
     system: systemPrompt(i.roleText, i.schemaId),
-    user: renderUserDocument({ goal: i.goal, diffBlock: i.diffBlock, fileBlocks: i.files.map(renderFileBlock), repairBlock: i.repairBlock }),
+    user: renderUserDocument({ goal: i.goal, ...(i.rules === undefined ? {} : { rules: i.rules }), diffBlock: i.diffBlock, fileBlocks: i.files.map(renderFileBlock),
+      repairBlock: i.repairBlock }),
   };
+}
+
+/** A live memory record (its current revision) as retrieval sees it: what intake would snapshot right now (preflight). */
+export function retrievableOf(item: StoredMemoryItem): RetrievableRecord {
+  const sourcePaths = item.current.sourceRefs.flatMap((s) => (s.kind === 'file' ? [s.relPath] : []));
+  return { id: item.record.id, revision: item.current.revision, type: item.record.type, title: item.current.title, content: item.current.content,
+    pinned: item.record.pinned, scope: item.record.scope, sourcePaths, stale: false };
+}
+
+/** The rules block one model step renders from `records` before the token fit: its memoryScope filter + G2 ranking. */
+export function renderStepRules(records: readonly RetrievableRecord[], step: Pick<ModelStepSnapshot, 'memoryScope' | 'role'>, goal: string, inputPaths: readonly string[]): string {
+  return renderRulesBlock(stepMemory(records, step, { goal, inputPaths }).ranked);
 }
 
 /** The imported diff for review/plan steps (07 G3), or null. */
@@ -281,21 +298,26 @@ async function loadUpstream(deps: ContextAssemblerDeps, input: AssembleInput): P
 
 // ---------------------------------------------------------------- step 3: memory
 
-/** Step 3: the run's memory snapshot (taken once at intake), as retrievable records of this project. */
+/**
+ * Step 3: the run's memory snapshot (taken once at intake), as retrievable records of this project. Every attribute
+ * (revision, title, content, type, pinned, role scope) comes from the snapshot row, never the live record, so a
+ * mid-run pin/scope/type edit cannot change this run's context or manifest. The snapshotted revision's (immutable)
+ * file source refs feed the stale flag.
+ */
 async function loadMemory(deps: ContextAssemblerDeps, input: AssembleInput, root: () => Promise<Result<ProjectRoot>>): Promise<RetrievableRecord[]> {
   const r = deps.db.repos;
   const records: RetrievableRecord[] = [];
   const fileRefs: { id: string; relPath: string; sha256: Sha256 }[] = [];
   for (const snap of r.memory.runSnapshot(input.run.id)) {
+    if (!snap.included) continue;
     const detail = r.memory.getWithRevisions(snap.recordId);
     // §10.5: project isolation is re-checked here (defense in depth; the snapshot was taken per project).
-    if (!snap.included || detail === undefined || detail.item.record.projectId !== input.run.projectId) continue;
-    const rec = detail.item.record;
+    if (detail === undefined || detail.item.record.projectId !== input.run.projectId) continue;
     const refs = detail.revisions.find((v) => v.revision === snap.revision)?.sourceRefs ?? [];
     const files = refs.flatMap((s) => (s.kind === 'file' ? [s] : []));
-    for (const f of files) fileRefs.push({ id: rec.id, relPath: f.relPath, sha256: f.sha256 });
-    records.push({ id: rec.id, revision: snap.revision, type: rec.type, title: snap.title, content: snap.content, pinned: rec.pinned,
-      scope: rec.scope, sourcePaths: files.map((f) => f.relPath), stale: false });
+    for (const f of files) fileRefs.push({ id: snap.recordId, relPath: f.relPath, sha256: f.sha256 });
+    records.push({ id: snap.recordId, revision: snap.revision, type: snap.type, title: snap.title, content: snap.content, pinned: snap.pinned,
+      scope: snap.scope, sourcePaths: files.map((f) => f.relPath), stale: false });
   }
   if (fileRefs.length === 0 || input.preservedSnapshot) return records;
   const live = await liveHashes(deps, root, [...new Set(fileRefs.map((f) => f.relPath))]);
@@ -408,11 +430,17 @@ function tooLarge(d: { mandatoryTokens: number; budget: number; largestItems: re
 
 // ---------------------------------------------------------------- assembly
 
-function manifestOf(m: Material, input: AssembleInput, roleText: string, fitted: { user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: 'provider_count' | 'local_estimate' } }, extra: { excess: readonly RetrievableRecord[]; budget: number }): ManifestInput {
+/**
+ * The manifest. Snapshot records the step does not use are listed in `memory` (included: false) and in `omitted` with
+ * reason `excluded_by_policy`: those removed by the step's memoryScope / role scope (`policy`) and the run summaries
+ * beyond the per-step cap (`excess`).
+ */
+function manifestOf(m: Material, input: AssembleInput, roleText: string, fitted: { user: string; included: Set<string>; omitted: FitItem[]; tokens: { tokens: number; basis: 'provider_count' | 'local_estimate' } }, extra: { excess: readonly RetrievableRecord[]; policy: readonly RetrievableRecord[]; budget: number }): ManifestInput {
   const { run, step, stepSpec, snapshot: profile } = input;
   const goal = tokenize(run.goal);
   const inputs = new Set(m.files.map((f) => f.relPath));
   const has = (key: string, mandatory: boolean) => mandatory || fitted.included.has(key);
+  const unused = [...extra.policy, ...extra.excess];
   return {
     runId: run.id, stepKey: step.stepKey, revisionIndex: step.revisionIndex, attemptPurpose: input.purpose,
     profile: { name: profile.name, providerId: profile.providerId, modelId: profile.modelId },
@@ -422,12 +450,12 @@ function manifestOf(m: Material, input: AssembleInput, roleText: string, fitted:
       included: has(`file:${f.relPath}`, f.mandatory), reason: f.reason })),
     memory: [
       ...m.memory.map((x) => ({ recordId: x.id, revision: x.revision, type: x.type, included: has(`memory:${x.id}`, x.mandatory), pinned: x.pinned, stale: x.stale, score: x.score })),
-      ...extra.excess.map((x) => ({ recordId: x.id, revision: x.revision, type: x.type, included: false, pinned: x.pinned, stale: x.stale, score: scoreRecord(x, goal, inputs) })),
+      ...unused.map((x) => ({ recordId: x.id, revision: x.revision, type: x.type, included: false, pinned: x.pinned, stale: x.stale, score: scoreRecord(x, goal, inputs) })),
     ],
     upstream: m.upstream.map((u) => ({ stepKey: u.stepKey, artifactId: u.artifactId, schemaId: u.schemaId, sha256: u.sha256 })),
     omitted: [
       ...fitted.omitted.map((o) => ({ kind: o.kind, ref: o.ref, reason: 'token_budget' as const })),
-      ...extra.excess.map((x) => ({ kind: 'memory' as const, ref: x.id, reason: 'excluded_by_policy' as const })),
+      ...unused.map((x) => ({ kind: 'memory' as const, ref: x.id, reason: 'excluded_by_policy' as const })),
     ],
     tokens: { estimatedInput: fitted.tokens.tokens, budget: extra.budget, basis: fitted.tokens.basis },
     contextHash: computeContextHash(m.system, fitted.user),
@@ -457,8 +485,9 @@ async function assemble(deps: ContextAssemblerDeps, estimator: TokenEstimator, i
   const got = await gather(deps, input, root);
   if (!got.ok) return got;
   const { files, diff, up, memory } = got.value;
-  const scoped = applyMemoryScope(memory, stepSpec.memoryScope, stepSpec.role); // 3 (memoryScope)
-  const ranked = rankMemory(scoped, { goal: run.goal, role: stepSpec.role, inputPaths: files.map((f) => f.relPath) }); // G2
+  const { scoped, ranked } = stepMemory(memory, stepSpec, { goal: run.goal, inputPaths: files.map((f) => f.relPath) }); // 3 (memoryScope) + G2
+  const inScope = new Set(scoped.map((x) => x.id));
+  const policy = memory.filter((x) => !inScope.has(x.id));
   const material: Material = {
     system: systemPrompt(role.value, stepSpec.outputSchema), // 1
     goal: run.goal, // 2
@@ -474,7 +503,7 @@ async function assemble(deps: ContextAssemblerDeps, estimator: TokenEstimator, i
   const budget = inputBudget(input.snapshot, stepSpec.maxOutputTokens);
   const fitted = await fit(material, estimator, input, budget); // 6 + 7
   if (!fitted.ok) return fitted;
-  const manifest = buildManifest(manifestOf(material, input, role.value, fitted.value, { excess: excessRunSummaries(scoped, ranked), budget })); // 8
+  const manifest = buildManifest(manifestOf(material, input, role.value, fitted.value, { excess: excessRunSummaries(scoped, ranked), policy, budget })); // 8
   return ok({ system: material.system, user: fitted.value.user, manifest, estimatedInputTokens: fitted.value.tokens.tokens });
 }
 

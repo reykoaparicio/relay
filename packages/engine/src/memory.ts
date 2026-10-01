@@ -2,7 +2,7 @@
 // lifecycle operations below run inside the caller's transaction (memory-handlers.ts wraps them for the memory.* IPC
 // ops). Suggestions never enter context: only approved records are snapshotted (`retrievable`, §10.1), and resolving a
 // conflict never leaves a suggestion in `suggested`. The service never auto-merges (§5.5).
-import { err, errors, looksLikeSecret, memoryContentSchema, memoryTitleSchema, ok, redactDeep, ROLES } from '@relay/contracts';
+import { err, errors, idSchema, looksLikeSecret, memoryContentSchema, memoryTitleSchema, ok, redactDeep, ROLES } from '@relay/contracts';
 import type {
   AppError,
   ArtifactId,
@@ -24,6 +24,7 @@ import type {
 import type { Db, MemoryItem, Repos, RunRow } from '@relay/storage';
 import type { ArtifactStore } from '@relay/tools';
 import { latestOutputStep, readOutput } from './context.js';
+import { isMandatory } from './memory-retrieval.js';
 import type { Logger, MemoryServicePort } from './ports.js';
 
 /** Dependencies of the memory service. */
@@ -164,11 +165,41 @@ function revise(r: Repos, env: MemoryEnv, item: MemoryItem, next: { title: strin
 }
 
 /** Approved records of the project with the same normalized title in an overlapping scope (07 G5 conflict detection). */
-export function titleConflicts(r: Repos, projectId: ProjectId, title: string, scope: MemoryRecordScope, exclude: MemoryId): MemoryId[] {
+export function titleConflicts(r: Repos, projectId: ProjectId, title: string, scope: MemoryRecordScope, exclude?: MemoryId): MemoryId[] {
   const norm = normalizeTitle(title);
   return r.memory.list({ projectId, statuses: ['approved'] })
     .filter((x) => x.record.id !== exclude && normalizeTitle(x.current.title) === norm && scopesOverlap(x.record.scope, scope))
     .map((x) => x.record.id);
+}
+
+/** CONFLICT for an operation that would leave two approved records in conflict (never silent coexistence, §5.5). */
+function memoryConflict(conflictsWith: readonly MemoryId[]): AppError {
+  return errors.conflict({ reason: 'memory_conflict', conflictsWith: [...conflictsWith] });
+}
+
+const memoryIdSchema = idSchema('memory');
+
+/** The ids a suggestion's `proposal_json.conflictsWith` lists (malformed entries ignored; never trusted blindly). */
+function proposalConflictIds(item: MemoryItem): MemoryId[] {
+  const p = item.record.proposal;
+  if (p === null || typeof p !== 'object') return [];
+  const list = (p as Record<string, unknown>)['conflictsWith'];
+  return Array.isArray(list) ? list.flatMap((c) => { const id = memoryIdSchema.safeParse(c); return id.success ? [id.data] : []; }) : [];
+}
+
+/** The proposal's listed conflicts that are still approved records of the same project (a resolution retires them). */
+function liveProposalConflicts(r: Repos, item: MemoryItem): MemoryId[] {
+  return proposalConflictIds(item).filter((id) => {
+    const other = r.memory.get(id);
+    return id !== item.record.id && other?.record.status === 'approved' && other.record.projectId === item.record.projectId;
+  });
+}
+
+/** `memory.create` (user-authored → approved): CONFLICT with `conflictsWith` when an approved record would conflict. */
+export function createRecord(r: Repos, env: MemoryEnv, rec: NewRecord): Result<MemoryItem> {
+  const conflictsWith = titleConflicts(r, rec.projectId, rec.title, rec.scope);
+  if (conflictsWith.length > 0) return err(memoryConflict(conflictsWith));
+  return ok(insertMemory(r, env, 'create', rec));
 }
 
 /** `memory.approve`: suggested → approved (optional edits → rev 2). CONFLICT on a stale revision or a title conflict. */
@@ -186,8 +217,10 @@ export function approveSuggestion(r: Repos, env: MemoryEnv, i: {
   const guard = guardSecrets({ title: next.title, content: next.content });
   if (!guard.ok) return guard;
   const scope = i.scope ?? item.record.scope;
-  const conflictsWith = titleConflicts(r, item.record.projectId, next.title, scope, item.record.id);
-  if (conflictsWith.length > 0) return err(errors.conflict({ reason: 'memory_conflict', conflictsWith }));
+  // Both the title rule and the proposing model's own `conflictsWith` block a plain approve; memory.resolveConflict
+  // is the only way to approve a conflicting suggestion (it retires the other side).
+  const conflictsWith = [...new Set([...titleConflicts(r, item.record.projectId, next.title, scope, item.record.id), ...liveProposalConflicts(r, item)])];
+  if (conflictsWith.length > 0) return err(memoryConflict(conflictsWith));
   const edited = revise(r, env, item, next, false);
   if (!edited.ok) return edited;
   if (edited.value) r.memory.recordEvent({ recordId: item.record.id, event: 'edited', revision: item.record.currentRevision + 1, actor: env.actor, createdAt: env.now });
@@ -209,7 +242,12 @@ export interface UpdateInput {
   readonly unarchive?: true | undefined;
 }
 
-/** `memory.update`: approved → approved (rev n+1 when title/content/scope change); archived + `unarchive` → approved. */
+/**
+ * `memory.update`: approved → approved (rev n+1 when title/content/scope change); archived + `unarchive` → approved.
+ * A title/scope change or an unarchive that would leave two approved records in conflict → CONFLICT (`conflictsWith`).
+ * A superseded record (retired by memory.resolveConflict) cannot be unarchived → CONFLICT: only an explicit
+ * resolution decides between it and its successor.
+ */
 export function updateRecord(r: Repos, env: MemoryEnv, i: UpdateInput): Result<MemoryItem> {
   const got = getItem(r, i.recordId);
   if (!got.ok) return got;
@@ -220,11 +258,20 @@ export function updateRecord(r: Repos, env: MemoryEnv, i: UpdateInput): Result<M
   if (!rev.ok) return rev;
   const guard = guardSecrets({ title: i.title, content: i.content });
   if (!guard.ok) return guard;
+  const superseded = item.record.supersededById;
+  if (action === 'unarchive' && superseded !== null) {
+    return err(errors.conflict({ reason: 'memory_superseded', supersededById: superseded, conflictsWith: [superseded] }));
+  }
+  const scopeChanged = i.scope !== undefined && !sameScope(i.scope, item.record.scope);
+  const titleChanged = i.title !== undefined && normalizeTitle(i.title) !== normalizeTitle(item.current.title);
+  if (action === 'unarchive' || scopeChanged || titleChanged) {
+    const conflictsWith = titleConflicts(r, item.record.projectId, i.title ?? item.current.title, i.scope ?? item.record.scope, item.record.id);
+    if (conflictsWith.length > 0) return err(memoryConflict(conflictsWith));
+  }
   if (action === 'unarchive') {
     const moved = moveMemory(r, env, item, 'unarchive');
     if (!moved.ok) return moved;
   }
-  const scopeChanged = i.scope !== undefined && !sameScope(i.scope, item.record.scope);
   const revised = revise(r, env, item, { title: i.title ?? item.current.title, content: i.content ?? item.current.content }, scopeChanged);
   if (!revised.ok) return revised;
   const attrs = { scope: i.scope, pinned: i.pinned, expiresAt: i.expiresAt, reviewAt: i.reviewAt };
@@ -348,29 +395,41 @@ function retrievableForProject(r: Repos, projectId: ProjectId, now: EpochMs): Me
 }
 
 /**
- * Intake: copies approved, retrievable records with their current revision into `run_memory_snapshot`. Pinned
- * user_rules are always included; a non-empty `includeIds` limits the others (an id that is not approved + retrievable for this
- * project → VALIDATION_FAILED). Idempotent: a retried intake keeps the first snapshot.
+ * The records a run snapshots at intake (shared with `runs.preflight`, so the preview IS the selection). Every
+ * candidate is approved and retrievable for this project. `includeIds` (= `RunStartInput.memoryRecordIds`):
+ * - absent (`null` / `undefined`) → every approved retrievable record (spec §4.5 default context);
+ * - `[]` → pinned user_rules only;
+ * - a list → pinned user_rules + those records (an id that is not approved + retrievable here → VALIDATION_FAILED).
  */
-export function snapshotMemoryForRun(r: Repos, runId: RunId, projectId: ProjectId, now: EpochMs, includeIds?: readonly MemoryId[]): Result<void> {
-  if (r.memory.runSnapshot(runId).length > 0) return ok(undefined);
+export function selectRunMemory(r: Repos, projectId: ProjectId, now: EpochMs, includeIds: readonly MemoryId[] | null | undefined): Result<MemoryItem[]> {
   const candidates = retrievableForProject(r, projectId, now);
   const known = new Set(candidates.map((c) => c.record.id));
   const unknown = (includeIds ?? []).filter((id) => !known.has(id));
   if (unknown.length > 0) {
     return err(errors.validationFailed(unknown.map((id) => ({ path: 'memoryRecordIds', message: `Memory record ${id} is not approved for this project.`, code: 'memory_not_approved' }))));
   }
-  // The run snapshot stores `memoryRecordIds ?? []`, so an empty list means "not given" (every approved record).
-  const wanted = includeIds === undefined || includeIds.length === 0 ? null : new Set(includeIds);
-  const rows = candidates
-    .filter((c) => wanted === null || wanted.has(c.record.id) || (c.record.pinned && c.record.type === 'user_rule'))
-    .map((c) => ({ recordId: c.record.id, revision: c.current.revision, title: c.current.title, content: c.current.content, included: true }));
+  if (includeIds === null || includeIds === undefined) return ok(candidates);
+  const wanted = new Set(includeIds);
+  return ok(candidates.filter((c) => wanted.has(c.record.id) || isMandatory(c.record)));
+}
+
+/**
+ * Intake: copies the {@link selectRunMemory} records into `run_memory_snapshot` with their current revision AND their
+ * attributes (type, pinned, role scope) as of now, so later edits never reach this run's context or manifest.
+ * Idempotent: a retried intake keeps the first snapshot.
+ */
+export function snapshotMemoryForRun(r: Repos, runId: RunId, projectId: ProjectId, now: EpochMs, includeIds?: readonly MemoryId[] | null): Result<void> {
+  if (r.memory.runSnapshot(runId).length > 0) return ok(undefined);
+  const selected = selectRunMemory(r, projectId, now, includeIds);
+  if (!selected.ok) return selected;
+  const rows = selected.value.map((c) => ({ recordId: c.record.id, revision: c.current.revision, title: c.current.title, content: c.current.content,
+    type: c.record.type, pinned: c.record.pinned, scope: c.record.scope, included: true }));
   if (rows.length > 0) r.memory.snapshotForRun(runId, rows);
   return ok(undefined);
 }
 
 /** One memory candidate from a run's outputs. */
-interface Proposal {
+export interface Proposal {
   readonly type: 'user_rule' | 'project_decision';
   readonly title: string;
   readonly content: string;
@@ -378,6 +437,28 @@ interface Proposal {
   readonly conflictsWith: readonly string[];
   readonly artifactId: ArtifactId;
   readonly sourceRefs: readonly SourceRef[];
+}
+
+/** A kept proposal plus the approved records it conflicts with (same normalized title, different content). */
+interface ChosenProposal extends Proposal {
+  readonly detectedConflicts: readonly MemoryId[];
+}
+
+/** A path-like token (`src/lib/validate.ts`, `./a/b`): only its last segment is kept for duplicate detection. */
+const PATH_TOKEN = /[\w.@~-]*(?:\/[\w.@~-]+)+/g;
+
+function stripPathQualifiers(text: string): string {
+  return text.replace(PATH_TOKEN, (m) => m.slice(m.lastIndexOf('/') + 1));
+}
+
+/** Duplicate key of a title: normalized, path qualifiers dropped ("src/lib/validate.ts" ≡ "validate.ts"). */
+export function proposalTitleKey(title: string): string {
+  return normalizeTitle(stripPathQualifiers(title));
+}
+
+/** Duplicate key of content: case- and whitespace-insensitive, path qualifiers and trailing punctuation dropped. */
+export function proposalContentKey(content: string): string {
+  return stripPathQualifiers(content).toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!;:,\s]+$/, '');
 }
 
 async function collectProposals(deps: MemoryServiceDeps, run: RunRow): Promise<Proposal[]> {
@@ -397,23 +478,45 @@ async function collectProposals(deps: MemoryServiceDeps, run: RunRow): Promise<P
   return out;
 }
 
-/** Keeps valid, secret-free, non-duplicate proposals (≤ 3). */
-function selectProposals(deps: MemoryServiceDeps, run: RunRow, proposals: readonly Proposal[]): Proposal[] {
-  const seen = new Set(deps.db.repos.memory.list({ projectId: run.projectId, statuses: ['suggested', 'approved'] }).map((x) => normalizeTitle(x.current.title)));
-  const out: Proposal[] = [];
+/** Why {@link chooseProposals} skipped a proposal. */
+export type ProposalSkipReason = 'invalid' | 'secret_detected' | 'duplicate';
+
+/**
+ * Keeps valid, secret-free, non-duplicate proposals (≤ 3). Pure. A duplicate has the same title key AND
+ * near-identical content ({@link proposalTitleKey} / {@link proposalContentKey}) as an existing suggestion/approved
+ * record or an earlier proposal of this run. A proposal with the same normalized title as an approved record but
+ * different content is KEPT and carries that record in `detectedConflicts` (surfaced as `proposal.conflictsWith`),
+ * never silently dropped.
+ */
+export function chooseProposals<P extends Proposal>(existing: readonly MemoryItem[], proposals: readonly P[]): {
+  readonly chosen: (P & { readonly detectedConflicts: readonly MemoryId[] })[];
+  readonly skipped: readonly ProposalSkipReason[];
+} {
+  const live = existing.filter((x) => x.record.status === 'suggested' || x.record.status === 'approved');
+  const seen = live.map((x) => ({ titleKey: proposalTitleKey(x.current.title), contentKey: proposalContentKey(x.current.content) }));
+  const chosen: (P & { readonly detectedConflicts: readonly MemoryId[] })[] = [];
+  const skipped: ProposalSkipReason[] = [];
   for (const p of proposals) {
+    if (chosen.length === MAX_SUGGESTIONS_PER_RUN) break;
     const valid = memoryTitleSchema.safeParse(p.title).success && memoryContentSchema.safeParse(p.content).success;
     const secret = looksLikeSecret(p.title) || looksLikeSecret(p.content) || looksLikeSecret(p.rationale);
-    const norm = normalizeTitle(p.title);
-    if (!valid || secret || seen.has(norm)) {
-      deps.logger.warn('memory.proposal_skipped', { runId: run.id, reason: !valid ? 'invalid' : secret ? 'secret_detected' : 'duplicate' });
+    const key = { titleKey: proposalTitleKey(p.title), contentKey: proposalContentKey(p.content) };
+    if (!valid || secret || seen.some((k) => k.titleKey === key.titleKey && k.contentKey === key.contentKey)) {
+      skipped.push(!valid ? 'invalid' : secret ? 'secret_detected' : 'duplicate');
       continue;
     }
-    seen.add(norm);
-    out.push(p);
-    if (out.length === MAX_SUGGESTIONS_PER_RUN) break;
+    const norm = normalizeTitle(p.title);
+    const detectedConflicts = live.filter((x) => x.record.status === 'approved' && normalizeTitle(x.current.title) === norm).map((x) => x.record.id);
+    seen.push(key);
+    chosen.push({ ...p, detectedConflicts });
   }
-  return out;
+  return { chosen, skipped };
+}
+
+function selectProposals(deps: MemoryServiceDeps, run: RunRow, proposals: readonly Proposal[]): ChosenProposal[] {
+  const { chosen, skipped } = chooseProposals(deps.db.repos.memory.list({ projectId: run.projectId, statuses: ['suggested', 'approved'] }), proposals);
+  for (const reason of skipped) deps.logger.warn('memory.proposal_skipped', { runId: run.id, reason });
+  return chosen;
 }
 
 /** Finalize: ≤ 3 suggestions from review.v1 memoryProposals + plan.v1 decisions; never auto-approved. Idempotent. */
@@ -430,7 +533,8 @@ async function proposeFromRun(deps: MemoryServiceDeps, runId: RunId): Promise<Re
     const ids = chosen.map((p) => insertMemory(tx, env, 'propose', {
       projectId: run.projectId, type: p.type, title: p.title, content: p.content, scope: ALL_ROLES, sourceRunId: runId,
       sourceRefs: [{ kind: 'run', runId, artifactId: p.artifactId }],
-      proposal: { rationale: p.rationale, sourceRefs: p.sourceRefs.slice(0, 10), suggestedScope: ALL_ROLES, conflictsWith: p.conflictsWith.filter((c) => approved.has(c)) },
+      proposal: { rationale: p.rationale, sourceRefs: p.sourceRefs.slice(0, 10), suggestedScope: ALL_ROLES,
+        conflictsWith: [...new Set([...p.conflictsWith, ...p.detectedConflicts])].filter((c) => approved.has(c)) },
     }).record.id);
     return tx.events.append(runId, 'memory.suggested', redactDeep({ recordIds: ids, count: ids.length }));
   });
@@ -478,7 +582,7 @@ async function recordRunSummary(deps: MemoryServiceDeps, runId: RunId): Promise<
 export function createMemoryService(deps: MemoryServiceDeps): MemoryServicePort {
   return {
     snapshotForRun: (runId, projectId, o) =>
-      deps.db.tx('immediate', (tx) => snapshotMemoryForRun(tx, runId, projectId, deps.clock.now(), o.includeIds)),
+      deps.db.txResult('immediate', (tx) => snapshotMemoryForRun(tx, runId, projectId, deps.clock.now(), o.includeIds)),
     proposeFromRun: (runId) => proposeFromRun(deps, runId),
     recordRunSummary: (runId) => recordRunSummary(deps, runId),
   };

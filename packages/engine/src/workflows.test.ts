@@ -137,6 +137,24 @@ describe('profiles.upsert / delete (F14)', () => {
     expect(x.db.repos.profiles.get(id ?? ('' as never))?.capabilitiesSnapshot.structuredOutput).toBe(true);
   });
 
+  it('B8: renaming a profile referenced by a workflow version → CONFLICT profile_in_use listing the versions; an unreferenced rename is ok', async () => {
+    const { x } = await harness();
+    const balanced = x.db.repos.profiles.getByName('Balanced');
+    const openai = x.db.repos.profiles.getByName('Balanced · OpenAI');
+    if (balanced === undefined || openai === undefined) throw new Error('seeded profiles');
+    const wf = x.db.repos.workflows.listWorkflows()[0];
+    const as = (p: typeof balanced, name: string) => ({ profile: { id: p.id, name, providerId: p.providerId, modelId: p.modelId, params: p.params }, expectedRevision: p.revision });
+
+    const renamed = await x.engine.handle('relay/v1/profiles.upsert', as(balanced, 'Balanced v2'));
+    const recased = await x.engine.handle('relay/v1/profiles.upsert', as(balanced, 'BALANCED'));
+    const free = await x.engine.handle('relay/v1/profiles.upsert', as(openai, 'OpenAI balanced'));
+
+    expect(renamed.ok ? null : [renamed.error.code, renamed.error.details]).toEqual(['CONFLICT', { reason: 'profile_in_use', workflows: [{ id: wf?.id, name: wf?.name, version: 1 }] }]);
+    expect(recased.ok).toBe(true); // workflow references resolve case-insensitively
+    expect(free.ok && free.data.profile.name).toBe('OpenAI balanced');
+    expect(x.db.repos.profiles.get(balanced.id)?.name).toBe('BALANCED');
+  });
+
   it('delete: CONFLICT while a workflow references the profile, NOT_FOUND when absent, ok otherwise', async () => {
     const { x } = await harness();
     const balanced = x.db.repos.profiles.getByName('Balanced');

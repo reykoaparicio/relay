@@ -260,6 +260,8 @@ export interface WorkflowRepo {
   getVersion(workflowId: WorkflowId, version: number | 'draft'): WorkflowVersionRow | undefined;
   getVersionById(id: WorkflowVersionId): WorkflowVersionRow | undefined;
   latestValidated(workflowId: WorkflowId): WorkflowVersionRow | undefined;
+  /** Every version of the workflow (validated + draft), ascending by version. */
+  listVersions(workflowId: WorkflowId): readonly WorkflowVersionRow[];
   insertVersion(v: WorkflowVersionInsert): WorkflowVersionRow;
   /** CAS on `draft_revision`; CONFLICT on mismatch, NOT_FOUND when there is no draft. Bumps `draft_revision`. */
   updateDraft(workflowId: WorkflowId, patch: WorkflowDraftPatch, expectedDraftRevision: number): Result<WorkflowVersionRow>;
@@ -812,12 +814,19 @@ export interface MemoryAttributesPatch {
   readonly reviewAt?: EpochMs | null | undefined;
 }
 
+/**
+ * One record of a run's memory snapshot: the revision text AND the record attributes (type, pinned, role scope) as
+ * they were at intake. Context assembly and the manifest read every attribute from here, never from the live record.
+ */
 export interface RunMemorySnapshotRow {
   readonly runId: RunId;
   readonly recordId: MemoryId;
   readonly revision: number;
   readonly title: string;
   readonly content: string;
+  readonly type: MemoryType;
+  readonly pinned: boolean;
+  readonly scope: MemoryRecordScope;
   readonly included: boolean;
 }
 
@@ -916,6 +925,11 @@ export interface Db {
   readonly repos: Repos;
   /** BEGIN IMMEDIATE … COMMIT; guarded ROLLBACK on throw. Nested calls throw. */
   tx<T>(mode: 'immediate', fn: (repos: Repos) => NotPromise<T>): T;
+  /**
+   * Like {@link Db.tx} for a callback that returns a `Result`: an `{ ok: false }` result ROLLS BACK every write the
+   * callback made (and is returned as is); only `{ ok: true }` commits. Use it whenever an error path can follow a write.
+   */
+  txResult<T>(mode: 'immediate', fn: (repos: Repos) => NotPromise<Result<T>>): Result<T>;
   backupTo(dest: string): Promise<void>;
   /** Highest applied migration version. */
   schemaVersion(): number;

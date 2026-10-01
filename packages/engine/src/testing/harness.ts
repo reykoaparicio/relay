@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createIdGen, ok } from '@relay/contracts';
-import type { IdGen, ProjectId, PushEvent, RunId, RunStatus } from '@relay/contracts';
+import type { IdGen, MemoryId, ProjectId, PushEvent, RunId, RunStatus } from '@relay/contracts';
 import { connectionTestRequest, createMemoryCallLog, createProviderRegistry, loadCatalogEntries, supportsRequestLookupFor } from '@relay/providers';
 import type { FakeCallLog, FakeScenario, ProviderRegistry } from '@relay/providers';
 import { createMaintenance, openTestDb } from '@relay/storage';
@@ -71,7 +71,7 @@ export interface Harness {
   readonly projectRoot: string;
   readonly projectId: ProjectId;
   /** Starts a run over `relPaths` (default: every sample file) through the runner handler. */
-  startRun(o?: { relPaths?: readonly string[]; key?: string; goal?: string; budgetMicrousd?: number }): Promise<RunId>;
+  startRun(o?: { relPaths?: readonly string[]; key?: string; goal?: string; budgetMicrousd?: number; memoryRecordIds?: readonly MemoryId[] }): Promise<RunId>;
   /** Polls (real time) until `cond()` holds. */
   waitFor(cond: () => boolean, timeoutMs?: number): Promise<void>;
   /** Polls (real time) until the run reaches one of `statuses`. */
@@ -142,6 +142,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
         projectId, workflowId: workflow.id, workflowVersion: 1, goal: s.goal ?? 'Fix the defects in the handlers.',
         input: { kind: 'files', relPaths: [...(s.relPaths ?? Object.keys(o.files ?? SAMPLE_FILES))] },
         ...(s.budgetMicrousd === undefined ? {} : { limitOverrides: { budgetMicrousd: s.budgetMicrousd } }),
+        ...(s.memoryRecordIds === undefined ? {} : { memoryRecordIds: [...s.memoryRecordIds] }),
       });
       if (!res.ok) throw new Error(`harness runs.start: ${res.error.code} ${JSON.stringify(res.error.details)}`);
       return res.data.runId;

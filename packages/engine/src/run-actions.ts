@@ -51,7 +51,7 @@ type Tx<T> = (r: Repos, fx: PostCommitEffect[], now: EpochMs) => Result<T>;
 /** Runs `fn` in one tx; post-commit effects run only when it committed a success. */
 async function inTx<T>(ctx: EngineCtx, fn: Tx<T>): Promise<Result<T>> {
   const fx: PostCommitEffect[] = [];
-  const res = ctx.db.tx('immediate', (r) => fn(r, fx, ctx.clock.now()));
+  const res = ctx.db.txResult('immediate', (r) => fn(r, fx, ctx.clock.now()));
   if (res.ok) await runEffects(ctx, fx);
   return res;
 }

@@ -19,7 +19,7 @@ import type {
 } from '@relay/contracts';
 import type { MemoryItem, Repos } from '@relay/storage';
 import { requestHash } from './hash.js';
-import { applyAction, approveSuggestion, guardSecrets, insertMemory, resolveConflict as resolveMemoryConflict, updateRecord } from './memory.js';
+import { applyAction, approveSuggestion, createRecord, guardSecrets, resolveConflict as resolveMemoryConflict, updateRecord } from './memory.js';
 import type { MemoryEnv } from './memory.js';
 import type { EngineCtx } from './ports.js';
 
@@ -116,9 +116,9 @@ async function detail(ctx: EngineCtx, id: MemoryId): Promise<Result<MemoryRecord
   });
 }
 
-/** Runs a lifecycle write in one transaction, then emits `memory.changed` and returns the record detail. */
+/** Runs a lifecycle write in one transaction (rolled back on an error result), then emits `memory.changed` and returns the record detail. */
 async function write(ctx: EngineCtx, f: (r: Repos, env: MemoryEnv) => Result<MemoryItem>): Promise<Result<MemoryRecordDetail>> {
-  const res = ctx.db.tx('immediate', (r) => f(r, userEnv(ctx)));
+  const res = ctx.db.txResult('immediate', (r) => f(r, userEnv(ctx)));
   if (!res.ok) return res;
   changed(ctx, res.value.record.projectId);
   return detail(ctx, res.value.record.id);
@@ -158,7 +158,10 @@ function replayCreate(r: Repos, key: string, hash: string): Result<MemoryId> | n
   return ok(stored.result.ids['recordId'] as MemoryId);
 }
 
-/** `memory.create`: user-authored → approved immediately (author `user`, §10.1). Secrets rejected (§5.5). Idempotent. */
+/**
+ * `memory.create`: user-authored → approved immediately (author `user`, §10.1). Secrets rejected (§5.5). A record that
+ * would conflict with an approved one (same normalized title, overlapping scope) → CONFLICT `conflictsWith`. Idempotent.
+ */
 export async function create(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/memory.create'>): Out<'relay/v1/memory.create'> {
   const hash = requestHash({ ...input });
   const early = replayCreate(ctx.db.repos, input.idempotencyKey, hash);
@@ -172,13 +175,14 @@ export async function create(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/memo
     if (!ref.ok) return ref;
     refs.push(ref.value);
   }
-  const res = ctx.db.tx('immediate', (r): Result<MemoryId> => {
+  const res = ctx.db.txResult('immediate', (r): Result<MemoryId> => {
     const again = replayCreate(r, input.idempotencyKey, hash);
     if (again !== null) return again;
-    const item = insertMemory(r, userEnv(ctx), 'create', { projectId: input.projectId, type: input.type, title: input.title, content: input.content,
+    const item = createRecord(r, userEnv(ctx), { projectId: input.projectId, type: input.type, title: input.title, content: input.content,
       scope: input.scope, pinned: input.pinned, expiresAt: input.expiresAt, reviewAt: input.reviewAt, sourceRefs: refs });
-    r.idempotency.put(CREATE_OP, input.idempotencyKey, hash, { ids: { recordId: item.record.id } });
-    return ok(item.record.id);
+    if (!item.ok) return item;
+    r.idempotency.put(CREATE_OP, input.idempotencyKey, hash, { ids: { recordId: item.value.record.id } });
+    return ok(item.value.record.id);
   });
   if (!res.ok) return res;
   changed(ctx, input.projectId);
@@ -208,7 +212,7 @@ export function archive(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/memory.ar
 
 /** `memory.delete`: approved/archived → deleted; run snapshots keep their copies (§10.4 consequences). */
 export function remove(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/memory.delete'>): Out<'relay/v1/memory.delete'> {
-  const res = ctx.db.tx('immediate', (r) => applyAction(r, userEnv(ctx), input.recordId, 'delete'));
+  const res = ctx.db.txResult('immediate', (r) => applyAction(r, userEnv(ctx), input.recordId, 'delete'));
   if (!res.ok) return Promise.resolve(res);
   changed(ctx, res.value.record.projectId);
   return Promise.resolve(ok({ deleted: true as const, retainedInRunSnapshots: ctx.db.repos.memory.countRunSnapshots(input.recordId) }));
@@ -226,7 +230,8 @@ function replayResolve(r: Repos, key: string, hash: string): Result<MemoryId[]> 
 /** `memory.resolveConflict` (never auto-merges; 07 G5 rules). Idempotent. */
 export async function resolveConflict(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/memory.resolveConflict'>): Out<'relay/v1/memory.resolveConflict'> {
   const hash = requestHash({ ...input });
-  const res = ctx.db.tx('immediate', (r): Result<MemoryId[]> => {
+  // txResult: a resolution that fails half-way (e.g. rewrite inserted, then a retire failed) leaves no partial writes.
+  const res = ctx.db.txResult('immediate', (r): Result<MemoryId[]> => {
     const again = replayResolve(r, input.idempotencyKey, hash);
     if (again !== null) return again;
     const done = resolveMemoryConflict(r, userEnv(ctx), input.recordIds, input.resolution);

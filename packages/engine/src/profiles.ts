@@ -1,6 +1,6 @@
 // 06 F14: the single profile validator (`checkProfile`) and `profiles.list` warnings (`profilesWithWarnings`).
 import { err, errors, ok } from '@relay/contracts';
-import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, Result } from '@relay/contracts';
+import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, Result, WorkflowId } from '@relay/contracts';
 import type { ProfileRow, Repos } from '@relay/storage';
 import type { EngineCtx } from './ports.js';
 
@@ -80,6 +80,7 @@ export interface UpsertProfileInput {
 /**
  * `profiles.upsert` (FR-03): validated against the catalog and the adapter's live capabilities (resolved before the
  * tx); MODEL_UNSUPPORTED when `checkProfile` fails. The capability snapshot + catalog version are stored with it.
+ * Renaming a profile that any workflow version references → CONFLICT `{ reason: 'profile_in_use', workflows }`.
  */
 export async function upsertProfile(ctx: EngineCtx, input: UpsertProfileInput): Promise<Result<{ profile: ModelProfile; warnings: CapabilityWarning[] }>> {
   const p = input.profile;
@@ -93,7 +94,13 @@ export async function upsertProfile(ctx: EngineCtx, input: UpsertProfileInput): 
   const checked = checkProfile(p, entry, capabilities);
   if (!checked.ok) return checked;
   if (entry === undefined) return err(errors.modelUnsupported({ providerId: p.providerId, modelId: p.modelId })); // narrowed above
-  return ctx.db.tx('immediate', (r) => {
+  return ctx.db.txResult('immediate', (r) => {
+    // B8: workflow steps reference profiles by NAME, so a rename would silently break every referencing version.
+    const current = p.id === undefined ? undefined : r.profiles.get(p.id);
+    if (current !== undefined && current.name.toLowerCase() !== p.name.toLowerCase()) {
+      const workflows = workflowsReferencingProfile(r, current.name);
+      if (workflows.length > 0) return err(errors.conflict({ reason: 'profile_in_use', workflows }));
+    }
     const saved = r.profiles.upsert({ id: p.id ?? ctx.ids.next('profile'), name: p.name, providerId: p.providerId, modelId: p.modelId, params: p.params,
       capabilitiesSnapshot: capabilities ?? entry.capabilities, catalogVersion: entry.catalogVersion }, input.expectedRevision);
     return saved.ok ? ok({ profile: toModelProfile(saved.value), warnings: warningsFor(r, saved.value) }) : saved;
@@ -109,9 +116,20 @@ function referencingWorkflows(r: Repos, name: string): string[] {
   });
 }
 
+/**
+ * Every workflow version (draft or validated, any version number — any validated version can still be run) whose
+ * spec references the profile name (case-insensitive, like {@link findProfileByName}).
+ */
+export function workflowsReferencingProfile(r: Repos, name: string): { id: WorkflowId; name: string; version: number }[] {
+  const lower = name.toLowerCase();
+  return r.workflows.listWorkflows().flatMap((w) => r.workflows.listVersions(w.id)
+    .filter((v) => v.spec.steps.some((s) => s.kind === 'model' && s.profile.toLowerCase() === lower))
+    .map((v) => ({ id: w.id, name: w.name, version: v.version })));
+}
+
 /** `profiles.delete`: CONFLICT while a draft or the latest validated workflow version references the profile. */
 export function deleteProfile(ctx: EngineCtx, profileId: ModelProfile['id']): Result<{ deleted: true }> {
-  return ctx.db.tx('immediate', (r) => {
+  return ctx.db.txResult('immediate', (r) => {
     const row = r.profiles.get(profileId);
     if (row === undefined) return err(errors.notFound('profile'));
     const users = referencingWorkflows(r, row.name);

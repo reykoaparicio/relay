@@ -52,19 +52,24 @@ describe('memory retrieval ranking (07 G2)', () => {
     expect(excessRunSummaries(records, ranked).map((r) => r.id.slice(-2))).toEqual(['B2', 'B3']);
   });
 
-  it('applies the step memoryScope (types + step role) but always keeps pinned user rules', () => {
+  it('applies the step memoryScope (types + step role); pinned user rules bypass only the step filter, never their own role scope (BH-4)', () => {
     const records = [
       rec('C1', { type: 'user_rule', scope: { roles: ['planner'] } }),
       rec('C2', { type: 'user_rule', scope: { roles: ['reviewer'] } }),
       rec('C3', { type: 'run_summary' }),
       rec('C4', { type: 'user_rule', pinned: true, scope: { roles: ['planner'] } }),
+      rec('C5', { type: 'user_rule', pinned: true, scope: { roles: 'all' } }),
     ];
 
     const stepRole = applyMemoryScope(records, { roles: 'step_role', types: ['user_rule'] }, 'reviewer');
     const allRoles = applyMemoryScope(records, { roles: 'all', types: ['user_rule', 'run_summary'] }, 'reviewer');
+    const summariesOnly = applyMemoryScope(records, { roles: 'step_role', types: ['run_summary'] }, 'reviewer');
+    const planner = applyMemoryScope(records, { roles: 'step_role', types: [] }, 'planner');
 
-    expect(stepRole.map((r) => r.id.slice(-2))).toEqual(['C2', 'C4']);
-    expect(allRoles.map((r) => r.id.slice(-2))).toEqual(['C1', 'C2', 'C3', 'C4']);
+    expect(stepRole.map((r) => r.id.slice(-2))).toEqual(['C2', 'C5']);
+    expect(allRoles.map((r) => r.id.slice(-2))).toEqual(['C1', 'C2', 'C3', 'C5']); // a pinned planner rule never reaches the reviewer
+    expect(summariesOnly.map((r) => r.id.slice(-2))).toEqual(['C3', 'C5']); // pinned bypasses the step's types filter
+    expect(planner.map((r) => r.id.slice(-2))).toEqual(['C4', 'C5']);
   });
 });
 

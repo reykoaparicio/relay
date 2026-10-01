@@ -103,7 +103,7 @@ export async function testProviderConnection(ctx: EngineCtx, input: { readonly p
   const estimate = await adapter.estimate(request, entry.prices, { priceCatalogVersion: entry.catalogVersion });
   const N = estimate.upperAllowanceMicrousd;
   const refs = { attemptId: null, runId: null, projectId: null, priceCatalogVersion: entry.catalogVersion, scope: 'setup' as const };
-  const admitted = ctx.db.tx('immediate', (r): Result<EpochMs> => {
+  const admitted = ctx.db.txResult('immediate', (r): Result<EpochMs> => {
     const now = ctx.clock.now();
     const { start, end } = monthWindow(now);
     const L = readSettings(r).setupAllowanceMicrousd; // default SETUP_ALLOWANCE_MICROUSD

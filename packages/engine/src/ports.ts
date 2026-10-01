@@ -124,7 +124,11 @@ export interface RunSnapshot {
   readonly steps: Readonly<Record<string, StepSnapshot>>;
   readonly workflowContentHash: Sha256;
   readonly catalogVersion: string;
-  readonly memoryIncludeIds: readonly MemoryId[];
+  /**
+   * `RunStartInput.memoryRecordIds` as given: `null` = not given (every approved retrievable record, spec §4.5),
+   * `[]` = pinned user_rules only, a list = pinned user_rules + those records.
+   */
+  readonly memoryIncludeIds: readonly MemoryId[] | null;
 }
 
 /** 07 G1 input. */
@@ -156,8 +160,8 @@ export interface ContextAssemblerPort {
  * async because they read the run's validated output artifacts (plan.v1 / review.v1).
  */
 export interface MemoryServicePort {
-  /** Intake: pinned user_rules always included; idempotent across a retried intake. */
-  snapshotForRun(runId: RunId, projectId: ProjectId, o: { readonly includeIds?: readonly MemoryId[] }): Result<void>;
+  /** Intake: pinned user_rules always included; `includeIds` absent/null = every approved record. Idempotent across a retried intake. */
+  snapshotForRun(runId: RunId, projectId: ProjectId, o: { readonly includeIds?: readonly MemoryId[] | null | undefined }): Result<void>;
   /** Finalize: ≤ 3 suggestions, never auto-approved. */
   proposeFromRun(runId: RunId): Promise<Result<void>>;
   /** Finalize: one approved run_summary, idempotent (R3-17). */

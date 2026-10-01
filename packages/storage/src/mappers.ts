@@ -562,6 +562,9 @@ export function mapRunMemorySnapshot(row: unknown): RunMemorySnapshotRow {
     revision: r.int('revision'),
     title: r.text('title'),
     content: r.text('content'),
+    type: r.as('type', memoryTypeSchema),
+    pinned: r.bool('pinned'),
+    scope: r.json('scope_json', memoryRecordScopeSchema),
     included: r.bool('included'),
   });
 }

@@ -171,10 +171,11 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
     snapshotForRun(runId, rows) {
       deps.inTx(() => {
         const stmt = driver.prepare(
-          `INSERT INTO run_memory_snapshot (run_id, record_id, revision, title, content, included) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO run_memory_snapshot (run_id, record_id, revision, title, content, type, pinned, scope_json, included)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         for (const r of rows) {
-          stmt.run(runId, r.recordId, r.revision, r.title, r.content, bit(r.included));
+          stmt.run(runId, r.recordId, r.revision, r.title, r.content, r.type, bit(r.pinned), toJson(r.scope), bit(r.included));
         }
       });
     },

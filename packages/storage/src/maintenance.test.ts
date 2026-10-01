@@ -48,7 +48,7 @@ describe('maintenance (C8)', () => {
       { id: newId('memory'), projectId: p.id, type: 'user_rule', status: 'approved', scope: { roles: 'all' }, createdAt: f.clock.now() },
       { id: newId('memoryRevision'), title: 'T', content: 'C', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
     );
-    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true }]);
+    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
     const raw = art(run.id, p.id, 'raw_response', 1, '1');
     const manifest = art(run.id, p.id, 'context_manifest', 1, '2');
     const plan = art(run.id, p.id, 'plan', 1, '3');

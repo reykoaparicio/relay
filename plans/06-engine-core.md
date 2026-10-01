@@ -38,7 +38,7 @@ export interface ContextAssemblerPort {
   }): Promise<Result<AssembledContext>>; // { system, user, manifest: ContextManifest, estimatedInputTokens }
 }
 export interface MemoryServicePort {
-  snapshotForRun(runId: RunId, projectId: ProjectId, o: { includeIds?: MemoryId[] }): Result<void>;  // intake; pinned user_rules always included
+  snapshotForRun(runId: RunId, projectId: ProjectId, o: { includeIds?: MemoryId[] | null }): Result<void>;  // intake; pinned user_rules always included; absent/null = every approved record
   proposeFromRun(runId: RunId): Result<void>;                  // finalize: ≤ 3 suggestions, never auto-approved
   recordRunSummary(runId: RunId): Result<void>;                // finalize: one approved run_summary, idempotent (R3-17)
   // + the memory.* IPC handlers (create, update, approve, reject, archive, delete, resolveConflict, list, get)
@@ -733,6 +733,10 @@ export function crashHooksFromEnv(env: NodeJS.ProcessEnv, o?: { exit?: (code: nu
 
 ## F14: Workflow validation & profile checks (`workflows.validate`, `workflows.publish`, `src/profiles.ts`)
 
+`profiles.upsert` refuses to **rename** a profile (case-insensitive name change) while any workflow version (draft or validated, any version number) references its current name: `CONFLICT { reason: 'profile_in_use', workflows: [{ id, name, version }] }`. Workflow steps reference profiles by name, so a rename would otherwise break them silently (`unknown_profile` at validate/preflight).
+
+**Transactions returning `Result`.** Every engine operation whose transaction callback returns a `Result` uses `db.txResult` (03 C4), so an error result after a write rolls the whole transaction back (memory lifecycle writes, `runs.start`, `runs.resume` / `increaseAllowance` / `decideUnknown` / `retryStep`, `approvals.decide`, `providers.test` admission, `profiles.*`, `workflows.saveDraft` / `publish`, `projects.*`, `app.updateSettings`). Transactions that commit state on a "blocked" outcome by design (F4 admission, `pauseRun`) keep `db.tx`.
+
 `checkProfile(profile, catalogEntry | undefined, capabilities)` in `profiles.ts` is the single profile validator. It is used by `profiles.upsert`, F14, F15, `switch_profile`, `runs.retryStep`, and `seedDatabase`. It returns `MODEL_UNSUPPORTED` when:
 - the model id is not in the catalog;
 - the effort is not in `effortLevels`;
@@ -759,7 +763,7 @@ Each issue carries a field path (`steps[3].maxOutputTokens`) matching the mock's
    - Resolve the catalog entry (prices) and `adapter.capabilities(modelId)` **here**, outside the tx, then run `checkProfile`.
 3. Build `snapshot_json = { steps: { [stepKey]: StepSnapshot }, workflowContentHash, catalogVersion, memoryIncludeIds }`.
    - `StepSnapshot = { kind, role, profile: ProfileSnapshot (with capabilities and prices, R2-10/R2-11), outputSchema, outputKind, instructionVersion, maxOutputTokens, retryPolicy, memoryScope }`.
-   - `memoryIncludeIds` = `memoryRecordIds` (approved records to include; pinned rules are always included).
+   - `memoryIncludeIds` = `memoryRecordIds` exactly as given, distinguishing absent from empty: absent → `null` (every approved retrievable record, spec §4.5 default context); `[]` → pinned user_rules only; a list → pinned user_rules + those records.
 4. Compute the limits: workflow limits ⊕ `limitOverrides`, bounded by `RUN_LIMIT_MAXIMUMS`.
 
 **In one transaction:**
@@ -774,7 +778,7 @@ Each issue carries a field path (`steps[3].maxOutputTokens`) matching the mock's
 
 The intake step (F13) later snapshots the input files into `run_input_files`; that set changes only through `resnapshot_and_replan` (F10, `RunRepo.replaceInputFiles`), which also recomputes `context_hash`.
 
-Then signal the loop. Preflight uses the same code path with `dryRun: true` and stops before the transaction. **Its first-reservation N (ruling B7)** is computed exactly like dispatch: the same prompt rendering as the context assembler (`renderStepPrompt`: role instructions + output contract, goal, constraints, diff block, file blocks in `run_input_files` order), `buildModelRequest` (output schema, `maxOutputTokens`, `refusalFallback`), and `adapter.estimate` (request overhead, billed hops, allowance prices). Without a key the adapter's local estimate is used, so preflight N equals the first attempt's reservation for the same inputs.
+Then signal the loop. Preflight uses the same code path with `dryRun: true` and stops before the transaction. Its `inputSummary.memoryRecords` are the records intake would snapshot, computed by the same function (07 G5 `selectRunMemory`, same `memoryIncludeIds`; an unknown id → `VALIDATION_FAILED` with path `memoryRecordIds`). **Its first-reservation N (ruling B7)** is computed exactly like dispatch: the same prompt rendering as the context assembler (`renderStepPrompt`: role instructions + output contract, goal, constraints, the first model step's project rules from those records (its `memoryScope` + G2 ranking, before the token fit), diff block, file blocks in `run_input_files` order), `buildModelRequest` (output schema, `maxOutputTokens`, `refusalFallback`), and `adapter.estimate` (request overhead, billed hops, allowance prices). Without a key the adapter's local estimate is used, so preflight N equals the first attempt's reservation for the same inputs.
 
 **Config revisions (R3-13).** The snapshot is revision 0 and is never mutated. Every later profile change (`switch_profile`, `runs.retryStep{profileId}`) appends a `run_config_revisions` row and emits `run.config_revised`. `effectiveStepSnapshot` = the latest revision for that step key, else the snapshot entry. Historical attempts keep their own `profile_snapshot_json`.
 

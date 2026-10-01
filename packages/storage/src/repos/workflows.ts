@@ -53,6 +53,9 @@ export function createWorkflowRepo(driver: SqlDriver, deps: RepoDeps): WorkflowR
         workflowId,
       );
     },
+    listVersions(workflowId) {
+      return driver.prepare('SELECT * FROM workflow_versions WHERE workflow_id = ? ORDER BY version').all(workflowId).map(mapWorkflowVersion);
+    },
     insertVersion(v) {
       driver
         .prepare(
