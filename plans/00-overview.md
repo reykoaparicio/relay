@@ -284,22 +284,22 @@ ADRs 001–010 are copied from spec §24.1. New ADRs:
 
 ## 9. Status tracker (the orchestrator updates this table)
 
-**M1 reached 2026-09-30.** **M2 functionally complete 2026-09-30** (fake providers): approve → implement → verify → completed in the real app; e2e 25/25 (M1–M4 + a11y), 2,155 unit, 70 integration (crash matrix 7/7 ×3). **M2 sign-off pending:** live two-provider workflow test (D9b, ~$1.50 cap) — needs founder approval + API keys.
+**M1 reached 2026-09-30.** **M2–M4 functionally complete 2026-10-01** (fake providers): e2e 35/35 (M1–M4 + a11y incl. Memory, workflow editor, Settings), 2,489 unit, 77 integration (crash matrix 7/7). **M2 sign-off pending:** live three-provider workflow test (D9b, ~$1.50 cap) — needs founder approval + API keys.
 
 | Plan | Status | Audit | Open items |
 |---|---|---|---|
 | 01 Foundation | done | fixed F1–F7 | |
 | 02 Contracts / API | done | fixed B1–B16 | |
-| 03 Storage | done | fixed B1–B5 + replaceInputFiles | |
-| 04 Providers | D1–D9b done (Anthropic, OpenAI, fake, live tests) | fixed (Anthropic F1–F6, OpenAI B1–B9) | D10 Gemini; Anthropic price verification vs official page |
-| 05 Tools | done | fixed B1–B12 (security) | |
-| 06 Engine | Waves 1–2 done | fixed B1–B9, BH-1..7 | interrupted-run overrun must require acknowledgement; memory.*, artifacts.exportTo/importDiffText, projects.exportTo, ledger.exportTo still not_implemented |
-| 07 Context/Memory/Templates | G6 + stub | fixed BH-1..7 | G1–G5 (Wave 3) |
-| 08 Desktop host | H1–H8, H10 | fixed F1–F6 | H9 package verify (Wave 5) |
-| 09 Design system | done for current pages | fixed B1–B13 | |
-| 10 Renderer | J1–J8, J10 partial | fixed (J1–J4 B1–B8, J6/7/10 B1–B12, J8 B1–B6) | J9 Memory page, J10 Profiles/Projects/Data, workflow editor |
-| 11 Integration | K1–K7 | – | memory/export suites auto-enable in Wave 3 |
-| 12 E2E | M1–M4 + a11y (25) | – | memory.spec (Wave 3) |
-| 13 Release/Demo/Eval | not started | – | Wave 5–6 |
+| 03 Storage | done | fixed B1–B5 + replaceInputFiles, txResult, deferred_pause | |
+| 04 Providers | done (Anthropic, OpenAI, Gemini, fake, live tests) | fixed (Anthropic F1–F6, OpenAI B1–B9, Gemini G1–G4) | Anthropic price verification vs official page; live run not executed |
+| 05 Tools | done | fixed B1–B12, S1 (credential-file exclusions) | content-based secret scan of intake files (founder decision) |
+| 06 Engine | done | fixed B1–B9, BH-1..8, money audit 1–4 (durable deferred overrun, dead-end pauses, lease-in-tx) | setup unknown liability has no resolve path (founder decision) |
+| 07 Context/Memory/Templates | done (G1–G6) | fixed BH-1..8 | |
+| 08 Desktop host | H1–H8, H10 | fixed F1–F6; security audit clean except hardenedRuntime (accepted risk until a Developer ID exists) | H9 package verify (plan 13 M1) |
+| 09 Design system | done | fixed B1–B13 | ConflictCompare slots, ConfirmDialog secondary action, date input |
+| 10 Renderer | done (J1–J10) | fixed J9/J10 B1–B14 | `editable.limits` is always true (locked-limits UI only reachable in tests) |
+| 11 Integration | K1–K7 | – | it.todo: export IPC, importDiffText .env |
+| 12 E2E | done (35) | – | |
+| 13 Release/Demo/Eval | in progress | – | |
 
 Incident log: 2026-09-30 18:27 a test helper recursively deleted the contents of the user's `$TMPDIR` (path computed one level too high). Fixed with ownership-guarded delete helpers in tests/helpers and tests/e2e; recorded as a standing rule.
