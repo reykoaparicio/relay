@@ -1,0 +1,37 @@
+{
+  "id": "T2-orders-store-failure",
+  "title": "GET /orders answers a store failure with an empty 200",
+  "category": "error-handling",
+  "seededDefect": "DEFECT 2 (11 §K1): handlers/orders.ts",
+  "goal": "Make GET /orders behave as docs/api.md describes when the order store fails.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/handlers/orders.ts",
+      "src/errors.ts",
+      "docs/api.md"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "A failing store produces a 500 response with the { error: { code: 'INTERNAL', message } } shape, never an empty body",
+    "Successful listing is unchanged (same status, same fields, including the formatted amount)",
+    "The failure is not silently swallowed"
+  ],
+  "answerLeakTerms": [
+    "sendError",
+    "500",
+    "empty",
+    "INTERNAL",
+    "catch"
+  ]
+}

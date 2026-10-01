@@ -1,0 +1,17 @@
+{
+  "kind": "relay-demo-snapshot",
+  "schemaVersion": 1,
+  "dbSchemaVersion": 1,
+  "generator": "fake-provider",
+  "createdAt": "2026-10-01T13:25:29.725Z",
+  "sampleRootPlaceholder": "/relay-demo-sample-root/sample-api",
+  "sampleSource": "tests/fixtures/sample-api",
+  "fixtureTreeHash": "1cc494944a4cced997d52c81f6820ece160a59cdf6a05103d779e6291898b5c6",
+  "states": [
+    "sample project + 1 approved rule",
+    "completed run with report",
+    "budget-blocked run (paused, budget_run)",
+    "interrupted run checkpointed after Plan"
+  ],
+  "note": "Every prepared run was produced by the deterministic FAKE provider. Label them \"Prepared (fake provider)\" in the demo; never present them as live model results (§22.2)."
+}

@@ -1,0 +1,35 @@
+{
+  "id": "T6-malformed-path-param",
+  "title": "A malformed path parameter yields a server error",
+  "category": "error-handling",
+  "seededDefect": "variant: router.ts",
+  "goal": "Make requests with a malformed path parameter produce a client error response instead of a server error.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/router.ts",
+      "src/errors.ts",
+      "docs/api.md"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "A request such as GET /users/%E0%A4%A returns a 4xx with the error shape and a stable documented code",
+    "Well-formed requests are routed exactly as before",
+    "No change to the public response fields"
+  ],
+  "answerLeakTerms": [
+    "decodeURIComponent",
+    "URIError",
+    "%E0"
+  ]
+}

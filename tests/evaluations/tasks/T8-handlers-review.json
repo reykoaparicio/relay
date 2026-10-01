@@ -1,0 +1,42 @@
+{
+  "id": "T8-handlers-review",
+  "title": "Review all handlers against the project conventions",
+  "category": "multi-defect",
+  "seededDefect": "DEFECTS 1-3 together (the demo task)",
+  "goal": "Review the request handlers and their helpers against the conventions in the README and docs/api.md, and fix the problems you find.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/handlers/user.ts",
+      "src/handlers/orders.ts",
+      "src/handlers/health.ts",
+      "src/lib/format.ts",
+      "src/lib/validate.ts",
+      "src/errors.ts",
+      "docs/api.md",
+      "README.md"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "The user-body validation, the swallowed order-store failure, and the duration unit/comment mismatch are each identified and addressed",
+    "Every response keeps the documented { data } | { error } shape",
+    "No unrelated rewrites; each change is explained"
+  ],
+  "answerLeakTerms": [
+    "age",
+    "swallow",
+    "seconds",
+    "empty body",
+    "elapsed"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "id": "T3-format-doc-comment",
+  "title": "A helper's doc comment disagrees with its return value",
+  "category": "misleading-comment",
+  "seededDefect": "DEFECT 3 (11 §K1): lib/format.ts",
+  "goal": "Check that the documentation comments in src/lib/format.ts describe what each function actually returns, and correct any that do not.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/lib/format.ts"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "After the change, the comment and the implementation of every helper in format.ts state the same unit and meaning",
+    "Any behavior change is called out explicitly in the explanation, with its effect on callers",
+    "formatCents and isoTimestamp are unchanged"
+  ],
+  "answerLeakTerms": [
+    "seconds",
+    "milliseconds",
+    "1000",
+    "elapsed"
+  ]
+}

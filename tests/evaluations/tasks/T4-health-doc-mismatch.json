@@ -1,0 +1,36 @@
+{
+  "id": "T4-health-doc-mismatch",
+  "title": "/health disagrees with the API reference",
+  "category": "documentation-mismatch",
+  "seededDefect": "variant of DEFECT 3: handlers/health.ts via lib/format.ts",
+  "goal": "Make the GET /health response agree with docs/api.md.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/handlers/health.ts",
+      "src/lib/format.ts",
+      "docs/api.md"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "Every field of the /health payload has the unit and meaning docs/api.md gives it",
+    "Field names and the { data } envelope are unchanged",
+    "Other callers of any changed helper keep a consistent unit (or are updated with it)"
+  ],
+  "answerLeakTerms": [
+    "seconds",
+    "uptimeMs",
+    "elapsed",
+    "1000"
+  ]
+}

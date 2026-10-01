@@ -1,0 +1,34 @@
+{
+  "id": "T7-orders-limit-refactor",
+  "title": "Narrow refactor of query parsing onto the shared validators",
+  "category": "narrow-refactor",
+  "seededDefect": "variant: handlers/orders.ts parseLimit",
+  "goal": "Refactor the query-parameter parsing in src/handlers/orders.ts to reuse the shared validation helpers, without changing which requests are accepted or the status and error code of rejected ones.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/handlers/orders.ts",
+      "src/lib/validate.ts",
+      "src/errors.ts"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "The same limit values are accepted and rejected as before (missing → 50; integers 1–200 accepted; everything else 400 VALIDATION_FAILED)",
+    "Only the parsing code changes; the store, response shaping, and createOrder are untouched",
+    "The patch is small enough to review in a few minutes"
+  ],
+  "answerLeakTerms": [
+    "requireNonNegativeInteger(",
+    "Number.isInteger"
+  ]
+}

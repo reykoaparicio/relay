@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "eval-single-step",
+  "version": 1,
+  "name": "Evaluation baseline: single implementer pass",
+  "limits": {
+    "budgetMicrousd": 3000000,
+    "maxRevisionCycles": 0,
+    "maxAttempts": 10,
+    "maxConcurrentSteps": 1,
+    "executionTimeoutSeconds": 900
+  },
+  "steps": [
+    {
+      "id": "plan",
+      "kind": "model",
+      "role": "planner",
+      "profile": "balanced",
+      "outputSchema": "plan.v1",
+      "instructionVersion": "planner.v1",
+      "maxOutputTokens": 8000
+    },
+    {
+      "id": "approve",
+      "kind": "approval",
+      "dependsOn": ["plan"],
+      "bindTo": ["planHash", "contextHash"]
+    },
+    {
+      "id": "implement",
+      "kind": "model",
+      "role": "implementer",
+      "profile": "capable",
+      "dependsOn": ["approve"],
+      "outputSchema": "patch.v1",
+      "instructionVersion": "implementer.v1",
+      "maxOutputTokens": 16000
+    },
+    {
+      "id": "verify",
+      "kind": "model",
+      "role": "reviewer",
+      "profile": "balanced",
+      "dependsOn": ["implement"],
+      "outputSchema": "review.v1",
+      "instructionVersion": "verifier.v1",
+      "maxOutputTokens": 8000
+    }
+  ],
+  "revisionPolicy": {
+    "triggerStep": "verify",
+    "triggerOutcome": "revise",
+    "repeatSteps": ["implement", "verify"],
+    "approvalInvalidation": "require_new_approval_if_plan_or_scope_changes",
+    "onLimit": "incomplete"
+  }
+}

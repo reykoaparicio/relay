@@ -1,0 +1,38 @@
+{
+  "id": "T1-validate-user-body",
+  "title": "POST /users accepts body fields the API reference forbids",
+  "category": "input-validation",
+  "seededDefect": "DEFECT 1 (11 §K1): handlers/user.ts",
+  "goal": "Make POST /users enforce the documented rules for every request body field, as described in docs/api.md.",
+  "input": {
+    "kind": "files",
+    "relPaths": [
+      "src/handlers/user.ts",
+      "src/lib/validate.ts",
+      "src/errors.ts",
+      "docs/api.md"
+    ]
+  },
+  "approvedRules": [
+    {
+      "title": "Keep the public response format",
+      "content": "Every endpoint answers { data } or { error: { code, message } }. Never add, rename, or remove top-level response fields, and never return an empty body."
+    },
+    {
+      "title": "Use the shared validators",
+      "content": "Validate request input with the helpers in src/lib/validate.ts and reply 400 VALIDATION_FAILED on bad input."
+    }
+  ],
+  "acceptance": [
+    "A request whose age is negative, fractional, non-numeric, missing, or above the documented maximum is rejected with 400 and the { error: { code: 'VALIDATION_FAILED', message } } shape",
+    "A valid request still returns 201 with exactly the same data fields as before",
+    "No change to the public response fields or to other endpoints"
+  ],
+  "answerLeakTerms": [
+    "requireNonNegativeInteger",
+    "negative",
+    "150",
+    "Number.isInteger",
+    "age"
+  ]
+}
