@@ -1,7 +1,6 @@
 // Read-side DTO mapping for the runner handlers (02 §B2 view DTOs). Never leaks `root_realpath`; money is µUSD.
-import { contextManifestSchema, isTerminalRunStatus, stepOutputSchema } from '@relay/contracts';
+import { contextManifestSchema, invariant, isTerminalRunStatus, stepOutputSchema } from '@relay/contracts';
 import type {
-  ArtifactId,
   AttemptView,
   ContextManifest,
   Balances,
@@ -17,11 +16,22 @@ import type {
   StepOutput,
   StepView,
 } from '@relay/contracts';
-import type { AttemptRow, InspectorProjection, LedgerEntryRow, Repos, StepRow } from '@relay/storage';
+import type {
+  AttemptRow,
+  InspectorProjection,
+  LedgerEntryRow,
+  LedgerEntryWithStep,
+  Repos,
+  RunCosts,
+  RunRow,
+  RunSummaryProjection,
+  StepRow,
+} from '@relay/storage';
 import { toApprovalView } from './approvals.js';
 import { remaining } from './budget.js';
+import type { RunActionFacts } from './run-machine.js';
 import { allowedRunActions } from './run-machine.js';
-import { SnapshotError, effectiveStepSnapshot } from './snapshot.js';
+import { SnapshotError, effectiveModelSteps } from './snapshot.js';
 
 /**
  * True when any attempt settled more than it reserved (§9.5 "actual usage exceeds the estimate"). `overrun` in the cost
@@ -43,7 +53,7 @@ export function attemptsOverran(entries: readonly LedgerEntryRow[]): boolean {
 }
 
 /** Cost summary from balances + settled-by-certainty (02 `costSummarySchema`). */
-export function costSummaryOf(
+function costSummaryOf(
   b: Balances,
   settled: Readonly<Record<CostCertainty, Microusd>>,
   attemptOverran = false,
@@ -59,6 +69,11 @@ export function costSummaryOf(
     remaining: rem,
     overrun: rem < 0 || attemptOverran,
   };
+}
+
+/** Cost summary of one run's {@link RunCosts} (`LedgerRepo.runCosts`, or a projection's aggregates). */
+export function costSummaryOfRun(c: RunCosts): CostSummary {
+  return costSummaryOf(c.balances, c.settledByCertainty, c.attemptsOverran);
 }
 
 /** Accumulates ledger entries into a cost summary (per step or per run). */
@@ -78,31 +93,71 @@ export function costOfEntries(entries: readonly LedgerEntryRow[]): CostSummary {
   return costSummaryOf(b, settled as Record<CostCertainty, Microusd>, attemptsOverran(entries));
 }
 
-/** Every ledger entry of a run (keyset pages, oldest first). */
-export function allLedgerEntries(r: Repos, runId: RunDetail['id']): LedgerEntryRow[] {
-  const out: LedgerEntryRow[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = r.ledger.list(runId, { limit: 100, sort: 'created_asc', cursor });
-    if (!page.ok) return out;
-    out.push(...page.value.items);
-    if (page.value.nextCursor === null) return out;
-    cursor = page.value.nextCursor;
-  }
+/** Weakest first: a total mixing certainties is only as certain as its least certain part. */
+const CERTAINTY_WEAKEST_FIRST: readonly CostCertainty[] = ['unknown', 'estimated', 'calculated', 'reported'];
+
+/** The weakest of `certainties` (`unknown` < `estimated` < `calculated` < `reported`), or null when there is none. */
+export function weakestCertainty(certainties: Iterable<CostCertainty>): CostCertainty | null {
+  const seen = new Set(certainties);
+  return CERTAINTY_WEAKEST_FIRST.find((c) => seen.has(c)) ?? null;
 }
 
-function modelInfo(r: Repos, p: InspectorProjection, stepKey: StepKey): { providerId: ProviderId; modelId: string } | null {
+/** The certainty of a settled entry (a settle entry without one is `calculated`, FR-09). */
+export const settledCertainty = (e: LedgerEntryRow): CostCertainty => e.certainty ?? 'calculated';
+
+/** Groups ledger entries by attempt id (entries without an attempt are left out). */
+export function entriesByAttempt(entries: readonly LedgerEntryRow[]): Map<string, LedgerEntryRow[]> {
+  const out = new Map<string, LedgerEntryRow[]>();
+  for (const e of entries) {
+    if (e.attemptId === null) continue;
+    const list = out.get(e.attemptId);
+    if (list === undefined) out.set(e.attemptId, [e]);
+    else list.push(e);
+  }
+  return out;
+}
+
+/** Groups ledger rows by their attempt's step key (rows without an attempt are left out), in row order. */
+export function entriesByStep(rows: readonly LedgerEntryWithStep[]): Map<StepKey, LedgerEntryRow[]> {
+  const out = new Map<StepKey, LedgerEntryRow[]>();
+  for (const { entry, stepKey } of rows) {
+    if (stepKey === null) continue;
+    const list = out.get(stepKey);
+    if (list === undefined) out.set(stepKey, [entry]);
+    else list.push(entry);
+  }
+  return out;
+}
+
+/**
+ * The certainty of one attempt's settled cost, from its own `settle` ledger entries (reported / calculated /
+ * estimated; the weakest when mixed — e.g. `accept_estimated_charge` settles an unknown liability as `estimated`).
+ * `unknown` when the attempt only has unknown-bucket entries; null when it has neither (nothing charged).
+ */
+export function attemptCostCertainty(entries: readonly LedgerEntryRow[], attemptId: AttemptRow['id']): CostCertainty | null {
+  const own = entries.filter((e) => e.attemptId === attemptId);
+  const weakest = weakestCertainty(own.filter((e) => e.bucket === 'settled').map(settledCertainty));
+  if (weakest !== null) return weakest;
+  return own.some((e) => e.bucket === 'unknown') ? 'unknown' : null;
+}
+
+/** model of every step key from the effective snapshot (null for non-model steps or a malformed snapshot). */
+function modelsOf(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>): (stepKey: StepKey) => { providerId: ProviderId; modelId: string } | null {
+  let steps: ReturnType<typeof effectiveModelSteps>;
   try {
-    const s = effectiveStepSnapshot(r, p.run, stepKey);
-    return { providerId: s.profile.providerId, modelId: s.profile.modelId };
+    steps = effectiveModelSteps(r, run);
   } catch (e) {
-    if (e instanceof SnapshotError) return null;
+    if (e instanceof SnapshotError) return () => null;
     throw e;
   }
+  return (stepKey) => {
+    const s = steps.get(stepKey);
+    return s === undefined ? null : { providerId: s.profile.providerId, modelId: s.profile.modelId };
+  };
 }
 
 /** One step row → StepView. */
-export function toStepView(s: StepRow, model: { providerId: ProviderId; modelId: string } | null): StepView {
+function toStepView(s: StepRow, model: { providerId: ProviderId; modelId: string } | null): StepView {
   return {
     id: s.id,
     stepKey: s.stepKey,
@@ -118,43 +173,28 @@ export function toStepView(s: StepRow, model: { providerId: ProviderId; modelId:
   };
 }
 
-/** Weakest first: a total mixing certainties is only as certain as its least certain part. */
-const CERTAINTY_WEAKEST_FIRST: readonly CostCertainty[] = ['unknown', 'estimated', 'calculated', 'reported'];
-
-/**
- * The certainty of one attempt's settled cost, from its own `settle` ledger entries (reported / calculated /
- * estimated; the weakest when mixed — e.g. `accept_estimated_charge` settles an unknown liability as `estimated`).
- * `unknown` when the attempt only has unknown-bucket entries; null when it has neither (nothing charged).
- */
-export function attemptCostCertainty(entries: readonly LedgerEntryRow[], attemptId: AttemptRow['id']): CostCertainty | null {
-  const seen = new Set<CostCertainty>();
-  let hasUnknownBucket = false;
-  for (const e of entries) {
-    if (e.attemptId !== attemptId) continue;
-    if (e.bucket === 'settled') seen.add(e.certainty ?? 'calculated');
-    else if (e.bucket === 'unknown') hasUnknownBucket = true;
-  }
-  const weakest = CERTAINTY_WEAKEST_FIRST.find((c) => seen.has(c));
-  if (weakest !== undefined) return weakest;
-  return hasUnknownBucket ? 'unknown' : null;
+/** One step row → StepView with its effective model (`runs.getStep`; one snapshot parse, one revisions query). */
+export function stepViewOf(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>, s: StepRow): StepView {
+  return toStepView(s, modelsOf(r, run)(s.stepKey));
 }
 
 /**
- * One attempt → AttemptView (cost from the attempt's ledger balances and settle entries). `runEntries` are the run's
- * ledger entries when the caller already has them (avoids re-reading the ledger per attempt).
+ * One attempt → AttemptView. Cost from the ledger `entries` of the attempt (entries of other attempts are ignored, so
+ * the run's entries can be passed as they are): its balances and the certainty of its settle entries.
  */
-export function toAttemptView(
-  r: Repos,
-  a: AttemptRow,
-  stepKey: StepKey,
-  runEntries: readonly LedgerEntryRow[] = allLedgerEntries(r, a.runId),
-): AttemptView {
-  const bal = r.ledger.attemptBalances(a.id);
+export function toAttemptView(a: AttemptRow, stepKey: StepKey, entries: readonly LedgerEntryRow[]): AttemptView {
+  let settled = 0;
+  let unknown = 0;
+  for (const e of entries) {
+    if (e.attemptId !== a.id) continue;
+    if (e.bucket === 'settled') settled += e.deltaMicrousd;
+    else if (e.bucket === 'unknown') unknown += e.deltaMicrousd;
+  }
   const liability = a.state === 'unknown' || a.state === 'abandoned';
   const cost = liability
-    ? { microusd: bal.unknown, certainty: 'unknown' as const }
-    : a.usage !== null || bal.settled > 0
-      ? { microusd: bal.settled, certainty: attemptCostCertainty(runEntries, a.id) ?? ('calculated' as const) }
+    ? { microusd: unknown as Microusd, certainty: 'unknown' as const }
+    : a.usage !== null || settled > 0
+      ? { microusd: settled as Microusd, certainty: attemptCostCertainty(entries, a.id) ?? ('calculated' as const) }
       : null;
   const providerLatencyMs = a.firstByteAt !== null && a.finishedAt !== null ? Math.max(0, a.finishedAt - a.firstByteAt) : null;
   return {
@@ -176,6 +216,7 @@ export function toAttemptView(
   };
 }
 
+/** The latest row per step key (max revision, then retry), ordered by ordinal. */
 export function latestPerKey(steps: readonly StepRow[]): StepRow[] {
   const latest = new Map<string, StepRow>();
   for (const s of steps) {
@@ -187,12 +228,17 @@ export function latestPerKey(steps: readonly StepRow[]): StepRow[] {
   return [...latest.values()].sort((a, b) => a.ordinal - b.ordinal);
 }
 
+/** `RunSummary.stepProgress` over the latest rows (= `RunRepo.listSummaries`' grouped progress). */
+function stepProgressOf(latest: readonly StepRow[]): RunSummaryProjection['stepProgress'] {
+  return { done: latest.filter((s) => s.state === 'succeeded' || s.state === 'skipped').length, total: latest.length };
+}
+
 /**
- * RunSummary (list row) from an inspector projection. `cost.overrun` uses the projection's one-statement
- * `attemptsOverran` aggregate, so `runs.list` and project-export summaries agree with `runs.get` (no ledger scan).
+ * RunSummary (list row) from a summary projection (`RunRepo.listSummaries` / `summariesOf`, or an inspector
+ * projection through {@link toRunDetail}). `cost.overrun` uses the one-statement `attemptsOverran` aggregate, so
+ * `runs.list` and project-export summaries agree with `runs.get` (no ledger scan).
  */
-export function toRunSummary(p: InspectorProjection): RunSummary {
-  const latest = latestPerKey(p.steps);
+export function toRunSummary(p: RunSummaryProjection): RunSummary {
   return {
     id: p.run.id,
     projectId: p.run.projectId,
@@ -200,41 +246,51 @@ export function toRunSummary(p: InspectorProjection): RunSummary {
     workflow: { id: p.workflow.id, version: p.workflow.version, name: p.workflow.name },
     status: p.run.status,
     pauseReason: p.run.pauseReason,
-    stepProgress: { done: latest.filter((s) => s.state === 'succeeded' || s.state === 'skipped').length, total: latest.length },
-    cost: costSummaryOf(p.balances, p.settledByCertainty, p.attemptsOverran),
+    stepProgress: p.stepProgress,
+    cost: costSummaryOfRun(p),
     createdAt: p.run.createdAt,
     startedAt: p.run.startedAt,
     endedAt: p.run.endedAt,
   };
 }
 
-function hasPatch(r: Repos, runId: RunDetail['id']): boolean {
-  return r.artifacts.listForRun(runId, ['patch']).length > 0;
+/** F2 `allowedRunActions` facts, shared by `RunDetail.availableActions` and the run-action gate (run-actions `offered`). */
+export function runActionFacts(latest: readonly StepRow[], unknownAttempts: number, hasPatchArtifact: boolean): RunActionFacts {
+  return { unknownAttempts, hasFailedStep: latest.some((s) => s.state === 'failed'), hasPatchArtifact };
+}
+
+/** The step key of every step row id of a run. @throws invariant when an attempt's step row is not one of `steps` (FK). */
+function stepKeyLookup(steps: readonly StepRow[]): (stepRunId: StepRow['id']) => StepKey {
+  const keys = new Map(steps.map((s) => [s.id, s.stepKey]));
+  return (id) => {
+    const key = keys.get(id);
+    invariant(key !== undefined, 'an attempt references a step row of its own run (FK)');
+    return key;
+  };
 }
 
 /** RunDetail (inspector) with the server-computed actions. */
 export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
-  const stepKeyOf = new Map(p.steps.map((s) => [s.id, s.stepKey]));
+  const stepKeyOf = stepKeyLookup(p.steps);
   const unresolved = p.attempts.filter((a) => a.state === 'unknown');
   const latest = latestPerKey(p.steps);
-  const entries = allLedgerEntries(r, p.run.id);
+  // The ledger is only read when an unresolved attempt needs its cost view (10: no full read for most runs).
+  const entries = unresolved.length === 0 ? [] : r.ledger.listForRun(p.run.id).map((x) => x.entry);
+  const modelOf = modelsOf(r, p.run);
   return {
-    ...toRunSummary(p),
+    ...toRunSummary({ ...p, stepProgress: stepProgressOf(latest) }),
     limits: p.run.limits,
     input: p.run.input,
     contextHash: p.run.contextHash,
-    steps: p.steps.map((s) => toStepView(s, modelInfo(r, p, s.stepKey))),
+    steps: p.steps.map((s) => toStepView(s, modelOf(s.stepKey))),
     pendingApproval: p.pendingApproval === null ? null : toApprovalView(p.pendingApproval),
-    unresolvedAttempts: unresolved.map((a) => toAttemptView(r, a, stepKeyOf.get(a.stepRunId) ?? ('unknown' as StepKey), entries)),
+    unresolvedAttempts: unresolved.map((a) => toAttemptView(a, stepKeyOf(a.stepRunId), entries)),
     executionMsUsed: p.run.executionMsUsed,
     revisionCycle: p.run.revisionCycle,
     statusDetail: p.run.statusDetail,
     reportArtifactId: p.reportArtifactId,
-    availableActions: allowedRunActions(p.run, {
-      unknownAttempts: unresolved.length,
-      hasFailedStep: latest.some((s) => s.state === 'failed'),
-      hasPatchArtifact: isTerminalRunStatus(p.run.status) && hasPatch(r, p.run.id),
-    }),
+    availableActions: allowedRunActions(p.run, runActionFacts(latest, unresolved.length,
+      isTerminalRunStatus(p.run.status) && r.artifacts.listForRun(p.run.id, ['patch']).length > 0)),
   };
 }
 
@@ -268,15 +324,3 @@ export function toLedgerEntryView(e: LedgerEntryRow, stepKey: StepKey | null): L
     note: e.note,
   };
 }
-
-/** attemptId → stepKey for a run. */
-export function attemptStepKeys(r: Repos, runId: RunDetail['id']): Map<string, StepKey> {
-  const steps = new Map(r.steps.listForRun(runId).map((s) => [s.id as string, s.stepKey]));
-  return new Map(r.attempts.listForRun(runId).map((a) => [a.id as string, steps.get(a.stepRunId) ?? ('unknown' as StepKey)]));
-}
-
-/** Latest non-terminal-or-terminal output artifact of a step key, if any. */
-export function latestOutputArtifact(steps: readonly StepRow[], stepKey: StepKey): ArtifactId | null {
-  return latestPerKey(steps).find((s) => s.stepKey === stepKey)?.outputArtifactId ?? null;
-}
-

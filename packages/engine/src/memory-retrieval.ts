@@ -45,7 +45,7 @@ export interface RankedRecord extends RetrievableRecord {
 }
 
 /** The ranking query. */
-export interface RetrievalQuery {
+interface RetrievalQuery {
   readonly goal: string;
   readonly role: Role;
   readonly inputPaths: readonly string[];
@@ -96,7 +96,7 @@ export function excessRunSummaries(records: readonly RetrievableRecord[], ranked
 }
 
 /** Whether a record's role scope covers `role`. */
-export function scopeCovers(scope: MemoryRecordScope, role: Role): boolean {
+function scopeCovers(scope: MemoryRecordScope, role: Role): boolean {
   return scope.roles === 'all' || scope.roles.includes(role);
 }
 

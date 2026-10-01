@@ -1,49 +1,32 @@
-// 06 F17 (Wave-1 minimal): the run report. `generateReport` builds a `report.v1` object on every terminal
-// transition (post-commit effect), stores it as a `report` artifact (canonical JSON, never redacted), and appends
-// `report.created`. Idempotent: an existing report artifact is returned. `renderReportMarkdown` is the pure Markdown
-// view used by `artifacts.exportTo` (`what: 'report'`).
-import { REVIEW_OUTCOMES, err, errors, isTerminalRunStatus, ok, reportV1Schema } from '@relay/contracts';
-import type { ArtifactId, CostCertainty, Microusd, ReportV1, Result, ReviewOutcome, RunId, StepKey, TerminalRunStatus } from '@relay/contracts';
+// 06 F17: the run report. `generateReport` builds a `report.v1` object on every terminal transition (post-commit
+// effect), stores it as a `report` artifact (canonical JSON, never redacted), and appends `report.created`.
+// Idempotent: an existing report artifact is returned. `renderReportMarkdown` is the pure Markdown view used by
+// `artifacts.exportTo` (`what: 'report'`).
+import { REVIEW_OUTCOMES, err, errors, invariant, isTerminalRunStatus, ok, reportV1Schema } from '@relay/contracts';
+import type { ArtifactId, Microusd, ReportV1, Result, ReviewOutcome, RunId, StepKey, TerminalRunStatus } from '@relay/contracts';
 import type { LedgerEntryRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { ReportLimitationKey } from '@relay/templates';
 import { canonicalJson, utf8 } from './hash.js';
-import type { EngineCtx, OutputArtifactKind } from './ports.js';
+import type { EngineCtx, ModelStepSnapshot, OutputArtifactKind, RunSnapshot } from './ports.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
-import { SnapshotError, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
-import { allLedgerEntries, costOfEntries, latestPerKey } from './views.js';
+import { effectiveModelSteps, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
+import { costOfEntries, entriesByStep, latestPerKey, settledCertainty, weakestCertainty } from './views.js';
 
-const CERTAINTY_RANK: Readonly<Record<CostCertainty, number>> = { reported: 0, calculated: 1, estimated: 2, unknown: 3 };
-
-function stepCost(entries: readonly LedgerEntryRow[], attemptIds: ReadonlySet<string>): ReportV1['steps'][number]['cost'] {
-  let settled = 0;
-  let unknown = 0;
-  let certainty: CostCertainty = 'calculated';
-  for (const e of entries) {
-    if (e.attemptId === null || !attemptIds.has(e.attemptId)) continue;
-    if (e.bucket === 'settled') {
-      settled += e.deltaMicrousd;
-      const c = e.certainty ?? 'calculated';
-      if (CERTAINTY_RANK[c] > CERTAINTY_RANK[certainty]) certainty = c;
-    }
-    if (e.bucket === 'unknown') unknown += e.deltaMicrousd;
-  }
-  if (unknown > 0) certainty = 'unknown';
-  return { settledMicrousd: settled as Microusd, certainty, unknownMicrousd: unknown as Microusd };
+/**
+ * A step's cost over its attempts' ledger entries: settled and unknown from {@link costOfEntries}; the certainty is
+ * `unknown` while an unknown liability is open, else the weakest certainty of its settle entries (`calculated` when
+ * nothing settled) — the same ordering as the attempt views (an all-`reported` step reports `reported`).
+ */
+export function stepCost(entries: readonly LedgerEntryRow[]): ReportV1['steps'][number]['cost'] {
+  const cost = costOfEntries(entries);
+  const settled = (cost.settledReported + cost.settledCalculated + cost.settledEstimated) as Microusd;
+  const unknownSettled = entries.filter((e) => e.bucket === 'settled' && e.certainty === 'unknown').reduce((n, e) => n + e.deltaMicrousd, 0);
+  const certainty = cost.unknown > 0 ? 'unknown' : (weakestCertainty(entries.filter((e) => e.bucket === 'settled').map(settledCertainty)) ?? 'calculated');
+  return { settledMicrousd: (settled + unknownSettled) as Microusd, certainty, unknownMicrousd: cost.unknown };
 }
 
-function profileOf(r: Repos, run: RunRow, stepKey: StepKey): { providerId: ReportV1['steps'][number]['providerId']; modelId: string | null } {
-  try {
-    const s = effectiveStepSnapshot(r, run, stepKey);
-    return { providerId: s.profile.providerId, modelId: s.profile.modelId };
-  } catch (e) {
-    if (e instanceof SnapshotError) return { providerId: null, modelId: null };
-    throw e;
-  }
-}
-
-function outputOfKind(run: RunRow, latest: readonly StepRow[], kind: OutputArtifactKind): ArtifactId | null {
-  const snapshot = snapshotOf(run);
+function outputOfKind(snapshot: RunSnapshot, latest: readonly StepRow[], kind: OutputArtifactKind): ArtifactId | null {
   const rows = latest.filter((s) => {
     const snap = snapshot.steps[s.stepKey];
     return snap?.kind === 'model' && snap.outputKind === kind && s.outputArtifactId !== null;
@@ -51,8 +34,7 @@ function outputOfKind(run: RunRow, latest: readonly StepRow[], kind: OutputArtif
   return rows.at(-1)?.outputArtifactId ?? null;
 }
 
-function verdictOf(run: RunRow, latest: readonly StepRow[]): ReviewOutcome | null {
-  const snapshot = snapshotOf(run);
+function verdictOf(snapshot: RunSnapshot, latest: readonly StepRow[]): ReviewOutcome | null {
   const verify = latest.filter((s) => {
     const snap = snapshot.steps[s.stepKey];
     return snap?.kind === 'model' && snap.outputSchema === 'review.v1' && s.state === 'succeeded';
@@ -72,21 +54,39 @@ function limitationKeys(status: TerminalRunStatus, verifyRan: boolean, entries: 
   return keys;
 }
 
-/** Builds the report.v1 value of a terminal run (pure over the repos). */
-export function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run: RunRow & { status: TerminalRunStatus }): ReportV1 {
+/** The provider/model of a step from the effective model steps (both null for a non-model step). */
+function modelOf(models: ReadonlyMap<StepKey, ModelStepSnapshot>, stepKey: StepKey): Pick<ReportV1['steps'][number], 'providerId' | 'modelId'> {
+  const s = models.get(stepKey);
+  return s === undefined ? { providerId: null, modelId: null } : { providerId: s.profile.providerId, modelId: s.profile.modelId };
+}
+
+/**
+ * Builds the report.v1 value of a terminal run (pure over the repos): the snapshot is parsed once and the ledger and
+ * attempts are read once, then grouped per step key.
+ * @throws SnapshotError when the stored snapshot is malformed; invariant when an FK-bound row is missing.
+ */
+function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run: RunRow & { status: TerminalRunStatus }): ReportV1 {
   const version = r.workflows.getVersionById(run.workflowVersionId);
+  invariant(version !== undefined, 'a run references its workflow version (FK)');
+  const snapshot = snapshotOf(run);
+  const models = effectiveModelSteps(r, run, snapshot);
   const all = r.steps.listForRun(run.id);
   const latest = latestPerKey(all);
+  const stepKeyOf = new Map(all.map((s) => [s.id, s.stepKey]));
+  const keyOf = (stepRunId: StepRow['id']): StepKey => {
+    const key = stepKeyOf.get(stepRunId);
+    invariant(key !== undefined, 'an attempt / approval references a step row of its own run (FK)');
+    return key;
+  };
   const attempts = r.attempts.listForRun(run.id);
-  const entries = allLedgerEntries(r, run.id);
-  const verdict = verdictOf(run, latest);
+  const ledger = r.ledger.listForRun(run.id);
+  const entries = ledger.map((x) => x.entry);
+  const byStep = entriesByStep(ledger);
+  const verdict = verdictOf(snapshot, latest);
   const texts = ctx.templates.reportLimitations();
   const liabilities = attempts.filter((a) => a.state === 'unknown' || a.state === 'abandoned').flatMap((a) => {
-    const u = r.ledger.attemptBalances(a.id).unknown;
-    const step = all.find((s) => s.id === a.stepRunId);
-    return u > 0 && step !== undefined
-      ? [{ attemptId: a.id, stepKey: step.stepKey, liabilityMicrousd: u, state: a.state === 'unknown' ? ('unknown' as const) : ('abandoned' as const) }]
-      : [];
+    const u = entries.reduce((n, e) => (e.attemptId === a.id && e.bucket === 'unknown' ? n + e.deltaMicrousd : n), 0) as Microusd;
+    return u > 0 ? [{ attemptId: a.id, stepKey: keyOf(a.stepRunId), liabilityMicrousd: u, state: a.state === 'unknown' ? ('unknown' as const) : ('abandoned' as const) }] : [];
   });
   return {
     schemaId: 'report.v1',
@@ -95,34 +95,30 @@ export function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repo
     goal: run.goal,
     status: run.status,
     verdict,
-    workflow: { id: version?.workflowId ?? (run.workflowVersionId as unknown as ReportV1['workflow']['id']), version: version?.version ?? 1, contentHash: snapshotOf(run).workflowContentHash },
-    steps: latest.map((s) => {
-      const ids = new Set(attempts.filter((a) => all.some((x) => x.id === a.stepRunId && x.stepKey === s.stepKey)).map((a) => a.id as string));
-      return { stepKey: s.stepKey, revisionIndex: s.revisionIndex, retryIndex: s.retryIndex, state: s.state, profileName: s.profileName,
-        ...profileOf(r, run, s.stepKey), cost: stepCost(entries, ids) };
-    }),
+    workflow: { id: version.workflowId, version: version.version, contentHash: snapshot.workflowContentHash },
+    steps: latest.map((s) => ({ stepKey: s.stepKey, revisionIndex: s.revisionIndex, retryIndex: s.retryIndex, state: s.state, profileName: s.profileName,
+      ...modelOf(models, s.stepKey), cost: stepCost(byStep.get(s.stepKey) ?? []) })),
     totals: costOfEntries(entries),
     unknownLiabilities: liabilities,
     artifacts: {
-      findings: outputOfKind(run, latest, 'findings'),
-      plan: outputOfKind(run, latest, 'plan'),
-      patch: outputOfKind(run, latest, 'patch'),
-      review: outputOfKind(run, latest, 'review'),
+      findings: outputOfKind(snapshot, latest, 'findings'),
+      plan: outputOfKind(snapshot, latest, 'plan'),
+      patch: outputOfKind(snapshot, latest, 'patch'),
+      review: outputOfKind(snapshot, latest, 'review'),
     },
     limitations: limitationKeys(run.status, verdict !== null, entries).map((k) => texts[k]),
     snapshotUsed: hasSnapshotPreserved(r, run.id),
     generatedAt: ctx.clock.now(),
     approvals: r.approvals.listForRun(run.id).map((a) => ({
-      approvalId: a.id, stepKey: all.find((s) => s.id === a.stepRunId)?.stepKey ?? ('approve' as StepKey), planArtifactId: a.planArtifactId,
+      approvalId: a.id, stepKey: keyOf(a.stepRunId), planArtifactId: a.planArtifactId,
       planHash: a.planHash, decision: a.decision, decidedAt: a.decidedAt, note: a.decisionNote, invalidatedReason: a.invalidatedReason, createdAt: a.createdAt,
     })),
-    revisions: revisionsOf(run, all),
+    revisions: revisionsOf(run, snapshot, all),
   };
 }
 
 /** F17 revision summary: quality cycles vs the limit, plan re-dos (request_revision / replan), and the incomplete cause. */
-function revisionsOf(run: RunRow, all: readonly StepRow[]): NonNullable<ReportV1['revisions']> {
-  const snapshot = snapshotOf(run);
+function revisionsOf(run: RunRow, snapshot: RunSnapshot, all: readonly StepRow[]): NonNullable<ReportV1['revisions']> {
   const planRevisions = all.filter((s) => {
     const snap = snapshot.steps[s.stepKey];
     return snap?.kind === 'model' && snap.outputKind === 'plan' && s.revisionIndex > 0 && s.retryIndex === 0;

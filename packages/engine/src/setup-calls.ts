@@ -9,6 +9,7 @@ import { admitSetup, reserveEntries, settlementEntries } from './budget.js';
 import type { SettleAmount } from './budget.js';
 import { monthWindow } from './clock.js';
 import { logSafe } from './log-safe.js';
+import { adapterOf } from './provider-lookup.js';
 import { flagsOf } from './retry.js';
 import type { EngineCtx } from './ports.js';
 import { readSettings } from './settings.js';
@@ -16,7 +17,7 @@ import { readSettings } from './settings.js';
 /** 04 §D4: output allowance of the fallback connection-test request (providers size it per provider, e.g. OpenAI 256). */
 export const CONNECTION_TEST_MAX_OUTPUT_TOKENS = 16;
 /** F18: the connection test is aborted after 15 s. */
-export const CONNECTION_TEST_TIMEOUT_MS = 15_000;
+const CONNECTION_TEST_TIMEOUT_MS = 15_000;
 
 /** Fallback for the injected providers `connectionTestRequest` (same shape and text; 16 output tokens). */
 export function connectionTestRequest(providerId: ProviderId, modelId: string): ModelRequest {
@@ -91,12 +92,9 @@ export async function testProviderConnection(ctx: EngineCtx, input: { readonly p
   const credential = await ctx.credentials.resolve({ providerId, purpose: 'connection_test', attemptId: null });
   if (!credential.ok) return err(errors.authRequired(providerId));
   const entry = modelForTest(ctx.db.repos, providerId, input.modelId);
-  let adapter: ProviderAdapter;
-  try {
-    adapter = ctx.providers.get(providerId);
-  } catch {
-    return err(errors.modelUnsupported({ providerId, reason: 'no_adapter' }));
-  }
+  const found = adapterOf(ctx, providerId);
+  if (!found.ok) return found;
+  const adapter = found.value;
   if (entry === undefined) return err(errors.modelUnsupported({ providerId, reason: 'model_unknown' }));
   // N covers exactly what testConnection sends (the per-provider output allowance comes from @relay/providers).
   const request = (ctx.connectionTestRequest ?? connectionTestRequest)(providerId, entry.modelId);

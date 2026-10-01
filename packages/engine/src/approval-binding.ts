@@ -4,27 +4,22 @@
 // step's effective provider.
 import { errors } from '@relay/contracts';
 import type { AppError, ApprovalId, ApprovalStaleReason, EpochMs, ProviderId, RelPath, RunId, StepKey } from '@relay/contracts';
-import type { ApprovalRow, Repos, RunRow } from '@relay/storage';
+import type { ApprovalRow, Repos, RunRow, SnapshotBinding } from '@relay/storage';
 import type { ApprovalBinding } from './policy.js';
 import type { EngineCtx, RunSnapshot } from './ports.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent } from './run-machine.js';
-import { ancestorsOf, hasSnapshotPreserved, lastResnapshotSeq } from './snapshot.js';
-
-/** Event payload marker recording an approval invalidated because the project changed (B4). */
-export const PROJECT_CHANGED_MARK = 'approval_invalidated';
+import { PROJECT_CHANGED_MARK, ancestorsOf, isSnapshotPreserved, snapshotBindingOf } from './snapshot.js';
 
 /**
  * B4: the approval invalidated as `project_changed` when the user afterwards chose `use_preserved_snapshot` (its
  * `run.snapshot_preserved` event follows the invalidation record), else undefined — a new approval is then required.
  */
-export function preservedApproval(r: Repos, runId: RunId): ApprovalRow | undefined {
-  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
-  const mark = events.findLast((e) => e.type === 'error.recorded' && e.payload['kind'] === PROJECT_CHANGED_MARK);
-  if (mark === undefined || mark.seq < lastResnapshotSeq(events)) return undefined; // a re-snapshot needs a new approval
-  if (!events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > mark.seq)) return undefined;
-  const id = mark.payload['approvalId'];
-  const a = typeof id === 'string' ? r.approvals.get(id as ApprovalId) : undefined;
+export function preservedApproval(r: Repos, runId: RunId, binding: SnapshotBinding = snapshotBindingOf(r, runId)): ApprovalRow | undefined {
+  const mark = binding.invalidation;
+  if (mark === null || mark.seq < binding.resnapshotSeq) return undefined; // a re-snapshot needs a new approval
+  if (binding.preservedSeq <= mark.seq) return undefined; // no `run.snapshot_preserved` after the invalidation
+  const a = mark.approvalId === null ? undefined : r.approvals.get(mark.approvalId as ApprovalId);
   return a?.decision === 'approved' && a.invalidatedReason === 'project_changed' ? a : undefined;
 }
 
@@ -67,11 +62,6 @@ export async function inputDrift(ctx: Pick<EngineCtx, 'db' | 'projectFs'>, run: 
   return drift(live.ok ? new Map<string, string | null>(live.value.map((h) => [h.relPath, h.sha256])) : new Map());
 }
 
-/** The changed input paths only (see {@link inputDrift}). */
-export async function changedInputFiles(ctx: Pick<EngineCtx, 'db' | 'projectFs'>, run: Pick<RunRow, 'id' | 'projectId'>): Promise<RelPath[]> {
-  return (await inputDrift(ctx, run)).changed;
-}
-
 /** F6 #8 inputs (async: re-hashes the input files unless the run chose `use_preserved_snapshot`). */
 export async function loadApprovalBinding(
   ctx: Pick<EngineCtx, 'db' | 'projectFs'>,
@@ -79,6 +69,7 @@ export async function loadApprovalBinding(
   snapshot: RunSnapshot,
   stepKey: StepKey,
   providerId: ProviderId,
+  events: SnapshotBinding = snapshotBindingOf(ctx.db.repos, run.id),
 ): Promise<ApprovalBinding> {
   const r = ctx.db.repos;
   const planKey = [...ancestorsOf(snapshot, stepKey)].find((k) => {
@@ -88,8 +79,8 @@ export async function loadApprovalBinding(
   const planStep = planKey === undefined ? undefined : r.steps.latestFor(run.id, planKey);
   const planArtifact = planStep?.outputArtifactId == null ? undefined : r.artifacts.get(planStep.outputArtifactId);
   const valid = r.approvals.latestApprovedForRun(run.id);
-  const preserved = valid === undefined ? preservedApproval(r, run.id) : undefined;
-  const drift = hasSnapshotPreserved(r, run.id) ? null : await inputDrift(ctx, run);
+  const preserved = valid === undefined ? preservedApproval(r, run.id, events) : undefined;
+  const drift = isSnapshotPreserved(events) ? null : await inputDrift(ctx, run);
   return {
     approval: valid ?? preserved,
     preservedAfterProjectChange: preserved !== undefined,

@@ -48,6 +48,16 @@ export const terminalRunStatusSchema = z.enum(TERMINAL_RUN_STATUSES);
 /** Terminal run status. */
 export type TerminalRunStatus = z.infer<typeof terminalRunStatusSchema>;
 
+/**
+ * Non-terminal run statuses, in the order of the `runs_active_idx` partial index WHERE list (03 C3): storage builds its
+ * literal `status IN (…)` fragment from this array so the planner can prove the partial index applies.
+ */
+export const ACTIVE_RUN_STATUSES = ['queued', 'running', 'cancelling', 'awaiting_approval', 'paused', 'interrupted'] as const satisfies readonly RunStatus[];
+/** Schema for {@link ActiveRunStatus}. */
+export const activeRunStatusSchema = z.enum(ACTIVE_RUN_STATUSES);
+/** Active (non-terminal) run status. */
+export type ActiveRunStatus = z.infer<typeof activeRunStatusSchema>;
+
 /** True when `s` is a terminal run status. */
 export function isTerminalRunStatus(s: RunStatus): s is TerminalRunStatus {
   return (TERMINAL_RUN_STATUSES as readonly RunStatus[]).includes(s);

@@ -1,4 +1,5 @@
-// 06 F5: budget admission (§9.3) and settlement (§9.5). Pure: integer µUSD only, never floats (ADR-017).
+// 06 F5: budget admission (§9.3) and settlement (§9.5). Pure (integer µUSD only, never floats, ADR-017) except
+// `admitAgainstLedger`, which reads the project month window through the ledger repo.
 import { addMicrousd, computeCost, computeIterationsCost, microusd, subMicrousd } from '@relay/contracts';
 import type {
   AttemptId,
@@ -13,7 +14,8 @@ import type {
   RunId,
 } from '@relay/contracts';
 import type { NormalizedUsage } from '@relay/providers';
-import type { LedgerEntryInsert } from '@relay/storage';
+import type { LedgerEntryInsert, LedgerRepo, ProjectRow } from '@relay/storage';
+import { monthWindow } from './clock.js';
 
 /** C/R/U of a scope without the allowance. */
 export interface Outstanding {
@@ -46,6 +48,21 @@ export function admit(i: {
   return project.allowed ? { ok: true, breakdown: run } : { ok: false, breakdown: project };
 }
 
+/**
+ * §9.3 admission of `N` against the ledger — the ONE place that reads the project month window for an admission
+ * (dispatch reserve, next-admission re-checks, preflight, the queued-run readiness check). `run` is the run's balances
+ * (or a not-yet-started run's `{ L, 0, 0, 0 }`); the project check applies only when the project has an allowance.
+ */
+export function admitAgainstLedger(
+  ledger: Pick<LedgerRepo, 'projectMonthBalances'>,
+  i: { readonly run: Balances; readonly project: Pick<ProjectRow, 'id' | 'monthlyAllowanceMicrousd'>; readonly N: Microusd; readonly now: EpochMs },
+): Admission {
+  const L = i.project.monthlyAllowanceMicrousd;
+  if (L === null) return admit({ run: i.run, project: null, N: i.N });
+  const { start, end } = monthWindow(i.now);
+  return admit({ run: i.run, project: { L, ...ledger.projectMonthBalances(i.project.id, start, end) }, N: i.N });
+}
+
 /** F18: the providers.test allowance over this month's `scope='setup'` entries. */
 export function admitSetup(i: { readonly setup: Outstanding; readonly L: Microusd; readonly N: Microusd }): Admission {
   const b = breakdown('setup', i.L, i.setup, i.N);
@@ -74,7 +91,7 @@ export type SettleAmount =
   | { readonly kind: 'unknown' };
 
 /** Price sources for fallback iterations served by another model than the profile's (ADR-016). */
-export interface FallbackPriceLookup {
+interface FallbackPriceLookup {
   /** Prices of `modelId` of the attempt's provider, or undefined when the catalog does not know it. */
   readonly pricesFor: (modelId: string) => ModelPrices | undefined;
   /** Every catalog price of the attempt's provider (the unknown-model maximum). */
@@ -125,7 +142,7 @@ export function isOverrun(cost: SettleAmount, N: Microusd): boolean {
 const neg = (m: Microusd): Microusd => subMicrousd(microusd(0), m);
 
 /** Common ledger columns of one movement. */
-export interface LedgerRefs {
+interface LedgerRefs {
   readonly attemptId: AttemptId | null;
   readonly runId: RunId | null;
   readonly projectId: ProjectId | null;

@@ -6,8 +6,8 @@ import type { Repos, RunRow, StepRow } from '@relay/storage';
 import { logSafe, redactingLogger } from './log-safe.js';
 import { createCancellationRegistry, onWorkStopped } from './cancellation.js';
 import { executeModelAttempt } from './checkpoints.js';
-import { admit } from './budget.js';
-import { createWakeSignal, monthWindow } from './clock.js';
+import { admitAgainstLedger } from './budget.js';
+import { createWakeSignal } from './clock.js';
 import { createDeadlineWatcher } from './deadline.js';
 import type { DeadlineWatcher, EngineApi, EngineCtx, EngineDeps, RunSnapshot } from './ports.js';
 import type { ReadinessIssue } from './policy.js';
@@ -17,22 +17,23 @@ import { generateReport, regenerateMissingReports } from './report.js';
 import { eventForFailure } from './retry.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
-import type { Handler, ParsedInputOf } from './services.js';
-import { createHandlers, readSettings } from './services.js';
-import { effectiveStepSnapshot, snapshotOf } from './snapshot.js';
+import type { Handler, ParsedInputOf } from './handler-types.js';
+import { createHandlers } from './handlers.js';
+import { readSettings } from './settings.js';
+import { effectiveModelSteps, snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
 import { runFinalize } from './steps/finalize.js';
 import { openApproval } from './steps/approval.js';
 import { runIntake } from './steps/intake.js';
 
 /** Default idle wait when there is no work (commands wake the loop earlier). */
-export const IDLE_MS = 1_000;
+const IDLE_MS = 1_000;
 
 /** F1 step 4 / 03 C8 (R3-16): the raw-response retention sweep runs at boot and then every 24 h (injected timers). */
 export const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 /** What the loop should do next for a running run (pure). */
-export type NextStep =
+type NextStep =
   | { readonly kind: 'step'; readonly step: StepRow }
   | { readonly kind: 'wait_until'; readonly at: EpochMs }
   | { readonly kind: 'blocked_failed'; readonly step: StepRow }
@@ -88,25 +89,21 @@ async function applyTx(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent, from: 
  */
 export function queuedRunIssues(r: Repos, run: RunRow, now: EpochMs): ReadinessIssue[] {
   const project = r.projects.get(run.projectId);
-  const snapshot = snapshotOf(run);
-  const open = r.steps.latestPerStepKey(run.id)
-    .filter((s) => snapshot.steps[s.stepKey]?.kind === 'model' && s.state !== 'succeeded' && s.state !== 'skipped')
-    .sort((a, b) => a.ordinal - b.ordinal);
+  const models = effectiveModelSteps(r, run); // one parse + one revisions query for every step (17)
+  const open = r.steps.latestPerStepKey(run.id).flatMap((s) => {
+    const snap = models.get(s.stepKey);
+    return snap !== undefined && s.state !== 'succeeded' && s.state !== 'skipped' ? [{ step: s, snap }] : [];
+  }).sort((a, b) => a.step.ordinal - b.step.ordinal);
   const issues: ReadinessIssue[] = [];
-  for (const s of open) {
-    const snap = effectiveStepSnapshot(r, run, s.stepKey);
+  for (const { step: s, snap } of open) {
     const { providerId, modelId } = snap.profile;
     issues.push(...checkStepReadiness(project.providerPolicy.allowedProviderIds, { stepKey: s.stepKey, profile: snap.profile,
       capabilities: snap.profile.capabilities, catalogEntry: r.catalog.get(providerId, modelId), hasCredential: r.credentials.get(providerId) !== undefined }));
   }
-  const next = open.find((s) => s.state === 'ready' || s.state === 'pending');
+  const next = open.find((x) => x.step.state === 'ready' || x.step.state === 'pending');
   if (next !== undefined) {
-    const { start, end } = monthWindow(now);
-    const budget = budgetReadiness(admit({
-      run: r.ledger.runBalances(run.id), N: minimumReservation(effectiveStepSnapshot(r, run, next.stepKey)),
-      project: project.monthlyAllowanceMicrousd === null ? null
-        : { L: project.monthlyAllowanceMicrousd, ...r.ledger.projectMonthBalances(run.projectId, start, end) },
-    }));
+    const N = minimumReservation(next.snap);
+    const budget = budgetReadiness(admitAgainstLedger(r.ledger, { run: r.ledger.runBalances(run.id), project, N, now }));
     if (budget !== null) issues.push(budget);
   }
   return issues;
@@ -205,7 +202,7 @@ export async function tick(ctx: EngineCtx): Promise<boolean> {
  * Input issues of a runner channel. A workflow draft patch is strict (P0 edits only): an unknown key there is a
  * structural edit, reported as `structural_edit_p1` (02 §B5, §5.3).
  */
-export function inputIssues(channel: RunnerChannel, issues: Parameters<typeof toValidationIssues>[0]): ValidationIssue[] {
+function inputIssues(channel: RunnerChannel, issues: Parameters<typeof toValidationIssues>[0]): ValidationIssue[] {
   const mapped = toValidationIssues(issues);
   return channel === 'relay/v1/workflows.saveDraft'
     ? mapped.map((i) => (i.code === 'unrecognized_keys' ? { ...i, code: 'structural_edit_p1' } : i))

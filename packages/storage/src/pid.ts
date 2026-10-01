@@ -1,5 +1,5 @@
 /** `process.kill`-shaped signal function (injectable for tests). */
-export type KillFn = (pid: number, signal: number) => unknown;
+type KillFn = (pid: number, signal: number) => unknown;
 
 function errorCode(e: unknown): unknown {
   return typeof e === 'object' && e !== null && 'code' in e ? e.code : undefined;

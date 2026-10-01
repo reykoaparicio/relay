@@ -208,12 +208,12 @@ export class RowReader {
 }
 
 /** Record of string → string (prompt snapshots). */
-export function isStringRecord(v: unknown): v is Record<string, string> {
+function isStringRecord(v: unknown): v is Record<string, string> {
   return isRecord(v) && Object.values(v).every((x) => typeof x === 'string');
 }
 
 /** A plain JSON object. */
-export function isJsonObject(v: unknown): v is Record<string, unknown> {
+function isJsonObject(v: unknown): v is Record<string, unknown> {
   return isRecord(v);
 }
 
@@ -507,7 +507,7 @@ export function mapApproval(row: unknown): ApprovalRow {
   });
 }
 
-export function mapMemoryRecord(row: unknown): MemoryRecordRow {
+function mapMemoryRecord(row: unknown): MemoryRecordRow {
   const r = new RowReader('memory_records', row);
   return freeze({
     id: r.id('id', 'memory'),

@@ -1,7 +1,7 @@
-import type { EpochMs, RunId, StepRunId } from '@relay/contracts';
-import { RelayError, epochMsSchema, errors, invariant } from '@relay/contracts';
+import type { RunId, StepRunId } from '@relay/contracts';
+import { RelayError, errors, invariant } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
-import { mapStep, RowReader } from '../mappers.js';
+import { mapStep } from '../mappers.js';
 import { jsonParam, optionalParams, optionalSetClause, toJson } from '../sql.js';
 import type { StepRepo, StepRow } from '../types.js';
 import type { RepoDeps } from './deps.js';
@@ -100,24 +100,6 @@ export function createStepRepo(driver: SqlDriver, deps: RepoDeps): StepRepo {
         )
         .get(runId, stepKey);
       return row === undefined ? undefined : mapStep(row);
-    },
-    listEligible(runId, now) {
-      return driver
-        .prepare(
-          `${LATEST_ROWS} AND s.state IN ('ready', 'reserved') AND (s.not_before_at IS NULL OR s.not_before_at <= ?2)
-           ORDER BY s.ordinal, s.step_key`,
-        )
-        .all(runId, now)
-        .map(mapStep);
-    },
-    earliestNotBefore(runId, now): EpochMs | null {
-      const row = driver
-        .prepare(
-          `SELECT MIN(s.not_before_at) AS t FROM (${LATEST_ROWS}) s
-           WHERE s.state IN ('ready', 'reserved') AND s.not_before_at > ?2`,
-        )
-        .get(runId, now);
-      return new RowReader('step_runs', row, 't').asN('t', epochMsSchema);
     },
     setNotBefore(id, at) {
       driver.prepare('UPDATE step_runs SET not_before_at = ?, updated_at = ? WHERE id = ?').run(at, deps.clock.now(), id);

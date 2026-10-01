@@ -8,7 +8,7 @@ import { canonicalJson, sha256Hex } from './hash.js';
 import { checkProfile, findProfileByName } from './profiles.js';
 
 /** A default profile (§8.2 aliases). */
-export interface DefaultProfile {
+interface DefaultProfile {
   readonly name: string;
   readonly providerId: ProviderId;
   readonly modelId: string;

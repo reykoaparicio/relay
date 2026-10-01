@@ -83,6 +83,7 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
              AND (?2 IS NULL OR m.status IN (SELECT value FROM json_each(?2)))
              AND (?3 IS NULL OR m.type IN (SELECT value FROM json_each(?3)))
              AND (?4 IS NULL OR v.title LIKE ?4 ESCAPE '\\' OR v.content LIKE ?4 ESCAPE '\\')
+             AND (?5 IS NULL OR m.source_run_id = ?5)
            ORDER BY m.pinned DESC, m.updated_at DESC, m.id`,
         )
         .all(
@@ -90,6 +91,7 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
           q.statuses === undefined ? null : JSON.stringify(q.statuses),
           q.types === undefined ? null : JSON.stringify(q.types),
           q.query === undefined || q.query === '' ? null : likePattern(q.query),
+          q.sourceRunId ?? null,
         )
         .map(mapMemoryItem);
     },

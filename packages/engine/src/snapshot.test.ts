@@ -33,7 +33,7 @@ describe('run snapshot (FR-03, R3-13)', () => {
     const after = effectiveStepSnapshot(h.db.repos, run, 'review' as StepKey);
 
     expect(after.profile.name).toBe('Balanced');
-    expect(snapshotOf(h.db.repos.runs.get(run.id)).steps['review']).toEqual(before);
+    expect(snapshotOf(h.db.repos.runs.get(run.id)).steps['review' as StepKey]).toEqual(before);
     expect(() => effectiveStepSnapshot(h!.db.repos, run, 'approve' as StepKey)).toThrow(SnapshotError);
   });
 
@@ -55,7 +55,7 @@ describe('run snapshot (FR-03, R3-13)', () => {
   it('rejects a model step with an invalid instruction version / output allowance', async () => {
     h = await createHarness();
     const raw = h.db.repos.runs.get(await h.startRun()).snapshot as { steps: Record<string, Record<string, unknown>> };
-    const review = raw.steps['review'] ?? {};
+    const review = raw.steps['review' as StepKey] ?? {};
 
     expect(() => parseRunSnapshot({ ...raw, steps: { ...raw.steps, review: { ...review, maxOutputTokens: 0 } } })).toThrow(SnapshotError);
   });

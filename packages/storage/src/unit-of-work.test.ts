@@ -9,6 +9,7 @@ import type { FixtureDb } from './testing/fixtures.js';
 import { openFixtureDb, seedProject } from './testing/fixtures.js';
 import type { Db } from './types.js';
 import { createDb, openDb } from './unit-of-work.js';
+import { MIGRATIONS } from '../migrations/index.js';
 
 describe('unit of work', () => {
   let f: FixtureDb;
@@ -149,7 +150,7 @@ describe('openDb', () => {
     const second = await openDb(opts);
 
     expect(second.repos.settings.get('k')).toEqual({ a: 1 });
-    expect(second.schemaVersion()).toBe(1);
+    expect(second.schemaVersion()).toBe(MIGRATIONS.length);
     second.close();
   });
 

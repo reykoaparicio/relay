@@ -5,7 +5,7 @@
 // have a provider response id on providers that support request lookup.
 import { computeCost, errors, redactDeep, redactString } from '@relay/contracts';
 import type { ArtifactId, AttemptId, EpochMs, Microusd, RunId } from '@relay/contracts';
-import type { ModelRequest, NormalizedUsage, ProviderAdapter, ReconciliationResult } from '@relay/providers';
+import type { ModelRequest, NormalizedUsage, ReconciliationResult } from '@relay/providers';
 import type { AttemptRow, Repos } from '@relay/storage';
 import { resolveUnknownEntries, settlementEntries } from './budget.js';
 import type { SettleAmount } from './budget.js';
@@ -13,6 +13,7 @@ import type { ArtifactPut } from './checkpoints.js';
 import { isJsonText, putArtifact } from './checkpoints.js';
 import { canonicalJson, utf8 } from './hash.js';
 import { logSafe } from './log-safe.js';
+import { adapterOf } from './provider-lookup.js';
 import type { EngineCtx } from './ports.js';
 import { applyPostValidation, deferPause, isDeferrablePause } from './outcome.js';
 import type { ClassifiedOutcome, ResultFlags, Validation } from './retry.js';
@@ -117,11 +118,11 @@ export async function recoverOnStart(ctx: EngineCtx): Promise<RunId[]> {
 // ---------------------------------------------------------------- F9b reconcile task
 
 /** F9b: an `in_progress` answer is re-polled up to 3 times over 30 s (injected timers). */
-export const RECONCILE_MAX_POLLS = 3;
-export const RECONCILE_POLL_INTERVAL_MS = 10_000;
+const RECONCILE_MAX_POLLS = 3;
+const RECONCILE_POLL_INTERVAL_MS = 10_000;
 
 /** What reconciling one attempt did. */
-export type ReconcileOutcome = 'completed' | 'failed' | 'in_progress' | 'not_found' | 'skipped';
+type ReconcileOutcome = 'completed' | 'failed' | 'in_progress' | 'not_found' | 'skipped';
 
 /** Sleeps on the injected timers; resolves false when `signal` aborts first. */
 function pause(ctx: Pick<EngineCtx, 'timers'>, ms: number, signal: AbortSignal): Promise<boolean> {
@@ -299,12 +300,9 @@ async function settleResolution(ctx: EngineCtx, attempt: AttemptRow, res: Resolu
  * `in_progress` is re-polled up to {@link RECONCILE_MAX_POLLS} times; `not_found` leaves the attempt unknown.
  */
 export async function reconcileAttempt(ctx: EngineCtx, attempt: AttemptRow, signal: AbortSignal): Promise<ReconcileOutcome> {
-  let adapter: ProviderAdapter;
-  try {
-    adapter = ctx.providers.get(attempt.providerId);
-  } catch {
-    return 'skipped';
-  }
+  const found = adapterOf(ctx, attempt.providerId);
+  if (!found.ok) return 'skipped'; // no adapter: the attempt stays unknown (the user decides)
+  const adapter = found.value;
   const lookup = adapter.reconcile?.bind(adapter);
   const responseId = attempt.providerResponseId;
   if (lookup === undefined || responseId === null) return 'skipped';

@@ -52,26 +52,16 @@ describe('StepRepo', () => {
     expect(f.db.repos.steps.latestFor(run.id, 'nope' as StepKey)).toBeUndefined();
   });
 
-  it('listEligible respects not_before_at, and earliestNotBefore returns the minimum future value or null', () => {
+  it('setNotBefore writes and clears not_before_at', () => {
     const run = setup();
     const a = seedStep(f.db, f.clock, run.id, { stepKey: 'review', ordinal: 1 });
-    const b = seedStep(f.db, f.clock, run.id, { stepKey: 'plan', ordinal: 2 });
+
     f.db.repos.steps.setNotBefore(a.id, epochMs(5000));
-    f.db.repos.steps.setNotBefore(b.id, epochMs(7000));
+    const set = f.db.repos.steps.get(a.id).notBeforeAt;
+    f.db.repos.steps.setNotBefore(a.id, null);
 
-    const early = f.db.repos.steps.listEligible(run.id, epochMs(4000));
-    const mid = f.db.repos.steps.listEligible(run.id, epochMs(5000));
-    const nextWake = f.db.repos.steps.earliestNotBefore(run.id, epochMs(4000));
-    const afterA = f.db.repos.steps.earliestNotBefore(run.id, epochMs(5000));
-    f.db.repos.steps.setNotBefore(b.id, null);
-    const none = f.db.repos.steps.earliestNotBefore(run.id, epochMs(6000));
-
-    expect(early).toEqual([]);
-    expect(mid.map((s) => s.id)).toEqual([a.id]);
-    expect(nextWake).toBe(5000);
-    expect(afterA).toBe(7000);
-    expect(none).toBeNull();
-    expect(f.db.repos.steps.listEligible(run.id, epochMs(6000)).map((s) => s.id)).toEqual([a.id, b.id]);
+    expect(set).toBe(5000);
+    expect(f.db.repos.steps.get(a.id).notBeforeAt).toBeNull();
   });
 
   it('transition is compare-and-set and writes only the provided columns', () => {

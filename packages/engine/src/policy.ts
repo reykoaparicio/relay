@@ -151,7 +151,7 @@ export function checkDispatch(i: DispatchCheckInput): Result<void> {
 // ---------------------------------------------------------------- readiness (F13 runChecks + F14 preflight)
 
 /** The pause a readiness issue maps to when a queued run cannot start (F2 `queued → paused`, clarification 9). */
-export type ReadinessReason = 'setup_blocked' | 'auth_required' | 'budget_run' | 'budget_project';
+type ReadinessReason = 'setup_blocked' | 'auth_required' | 'budget_run' | 'budget_project';
 
 /**
  * One reason a run cannot start: shared by `runs.preflight` (listed as `issues`) and the loop's `runChecks` (the first
@@ -166,7 +166,7 @@ export interface ReadinessIssue {
 }
 
 /** What the readiness check reads about one model step's (effective) profile. Credential presence comes from the credential-ref repo, never the key. */
-export interface StepReadinessInput {
+interface StepReadinessInput {
   readonly stepKey: StepKey;
   readonly profile: Pick<ModelProfile, 'providerId' | 'modelId' | 'params'>;
   /** Snapshot or live capabilities; absent → the catalog entry's. */
@@ -214,7 +214,7 @@ export function budgetReadiness(decision: Admission): ReadinessIssue | null {
 }
 
 /** Preflight form path of an issue: the step's profile select, or the allowance it concerns. */
-export function readinessIssuePath(i: ReadinessIssue): string {
+function readinessIssuePath(i: ReadinessIssue): string {
   if (i.stepKey !== null) return `profileOverrides.${i.stepKey}`;
   return i.reason === 'budget_project' ? 'project.monthlyAllowanceMicrousd' : 'limitOverrides.budgetMicrousd';
 }

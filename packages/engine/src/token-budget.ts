@@ -3,10 +3,10 @@
 import type { ProfileSnapshot } from '@relay/contracts';
 
 /** 5% safety margin for estimator error (G1b). */
-export const INPUT_BUDGET_SAFETY = 0.95;
+const INPUT_BUDGET_SAFETY = 0.95;
 
 /** Token count + its basis (the manifest records the basis). */
-export interface TokenCount {
+interface TokenCount {
   readonly tokens: number;
   readonly basis: 'provider_count' | 'local_estimate';
 }
@@ -48,14 +48,14 @@ export interface FitItem {
 }
 
 /** `CONTEXT_TOO_LARGE` details (G1b). */
-export interface TooLargeDetails {
+interface TooLargeDetails {
   readonly mandatoryTokens: number;
   readonly budget: number;
   readonly largestItems: readonly { readonly relPath: string; readonly tokens: number }[];
 }
 
 /** Fit result: the optional items that fit (in priority order) and the ones omitted for `token_budget`. */
-export type FitResult =
+type FitResult =
   | { readonly ok: true; readonly included: readonly FitItem[]; readonly omitted: readonly FitItem[]; readonly totalTokens: number }
   | { readonly ok: false; readonly details: TooLargeDetails };
 

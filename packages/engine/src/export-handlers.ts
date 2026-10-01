@@ -5,26 +5,21 @@
 import { appError, err, errors, isTerminalRunStatus, looksLikeSecret, ok, patchV1Schema, reportV1Schema } from '@relay/contracts';
 import type {
   ArtifactId,
-  INTERNAL_RUNNER_OPS,
-  OPERATIONS,
   ProjectId,
   ReportV1,
   Result,
   RunId,
-  RunnerChannel,
   RunnerOutputOf,
   ValidationIssue,
 } from '@relay/contracts';
-import type { LedgerEntryRow, Repos } from '@relay/storage';
+import type { LedgerEntryWithStep, Repos, WorkflowVersionRow } from '@relay/storage';
 import { monthWindowOf } from './clock.js';
 import { fromUtf8, utf8 } from './hash.js';
+import type { ParsedInputOf } from './handler-types.js';
 import type { EngineCtx, ExportPort } from './ports.js';
 import { generateReport, renderReportMarkdown, usd6 } from './report.js';
-import { allLedgerEntries, attemptStepKeys, toLedgerEntryView, toRunSummary } from './views.js';
+import { toLedgerEntryView, toRunSummary } from './views.js';
 
-type Ops = typeof OPERATIONS & typeof INTERNAL_RUNNER_OPS;
-/** Parsed input of a runner channel (= services.ts `ParsedInputOf`; restated to keep the module graph acyclic). */
-type ParsedInputOf<C extends RunnerChannel> = Extract<Ops[keyof Ops], { channel: C }>['input']['_zod']['output'];
 
 /** Max bytes read back from one stored report / patch artifact. */
 const MAX_EXPORT_ARTIFACT_BYTES = 16 * 1024 * 1024;
@@ -66,7 +61,7 @@ async function readJson(ctx: EngineCtx, id: ArtifactId, entity: string): Promise
 }
 
 /** The run's report (generated once if the terminal run lacks one, F17); NOT_FOUND for a run that has not ended. */
-export async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>> {
+async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>> {
   const r = ctx.db.repos;
   let id = r.artifacts.listForRun(runId, ['report'])[0]?.id;
   if (id === undefined) {
@@ -149,19 +144,6 @@ export async function importDiffText(ctx: EngineCtx, input: ParsedInputOf<'relay
 
 // ---------------------------------------------------------------- projects.exportTo
 
-/** Every run id of a project (oldest first). */
-function projectRunIds(r: Repos, projectId: ProjectId): RunId[] {
-  const ids: RunId[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const page = r.runs.list({ projectId, limit: 100, sort: 'created_asc', cursor });
-    if (!page.ok) return ids;
-    ids.push(...page.value.items.map((run) => run.id));
-    if (page.value.nextCursor === null) return ids;
-    cursor = page.value.nextCursor;
-  }
-}
-
 /** Every string (keys included) of a JSON value that looks like a credential, with its JSON path. */
 export function findSecrets(value: unknown, path = ''): ValidationIssue[] {
   if (typeof value === 'string') {
@@ -177,22 +159,26 @@ export function findSecrets(value: unknown, path = ''): ValidationIssue[] {
   return [];
 }
 
-/** The workflow versions the exported runs used, plus each workflow's latest validated version. */
-function workflowVersions(r: Repos, runVersionIds: readonly string[]) {
-  const versions = new Map<string, NonNullable<ReturnType<Repos['workflows']['getVersionById']>>>();
-  for (const id of runVersionIds) {
-    const v = r.workflows.getVersionById(id as Parameters<Repos['workflows']['getVersionById']>[0]);
+/** The workflow versions the exported runs used, plus each workflow's latest validated version (each read once). */
+function workflowVersions(r: Repos, runVersionIds: readonly WorkflowVersionRow['id'][]) {
+  const versions = new Map<string, WorkflowVersionRow>();
+  for (const id of new Set(runVersionIds)) {
+    const v = r.workflows.getVersionById(id);
     if (v !== undefined) versions.set(v.id, v);
   }
-  for (const w of r.workflows.listWorkflows()) {
+  const workflows = r.workflows.listWorkflows();
+  for (const w of workflows) {
     const v = r.workflows.latestValidated(w.id);
     if (v !== undefined) versions.set(v.id, v);
   }
+  const names = new Map<string, string>(workflows.map((w) => [w.id, w.name]));
   return [...versions.values()].map((v) => ({
-    id: v.id, workflowId: v.workflowId, name: r.workflows.getWorkflow(v.workflowId)?.name ?? null, version: v.version, status: v.status,
+    id: v.id, workflowId: v.workflowId, name: names.get(v.workflowId) ?? null, version: v.version, status: v.status,
     contentHash: v.contentHash, spec: v.spec, prompts: v.prompts, createdAt: v.createdAt,
   }));
 }
+
+const ledgerViews = (rows: readonly LedgerEntryWithStep[]) => rows.map(({ entry, stepKey }) => toLedgerEntryView(entry, stepKey));
 
 /** Builds the project bundle (02 `projects.export`): no realpath, no credential refs, no raw provider responses. */
 async function projectBundle(ctx: EngineCtx, projectId: ProjectId, runIds: readonly RunId[]): Promise<Result<unknown>> {
@@ -202,22 +188,23 @@ async function projectBundle(ctx: EngineCtx, projectId: ProjectId, runIds: reado
     const full = r.memory.getWithRevisions(m.record.id);
     return { record: m.record, revisions: full?.revisions ?? [m.current], events: full?.events ?? [] };
   });
+  // Every run summary in 4 statements (2), not one inspector projection per run.
+  const summaries = r.runs.summariesOf(runIds);
   const runs = [];
-  for (const runId of runIds) {
-    const run = r.runs.get(runId);
-    const stepOf = attemptStepKeys(r, runId);
-    const hasReport = r.artifacts.listForRun(runId, ['report']).length > 0 || isTerminalRunStatus(run.status);
-    const report = hasReport ? await runReport(ctx, runId) : null;
+  for (const s of summaries) {
+    const { run } = s;
+    const hasReport = isTerminalRunStatus(run.status) || r.artifacts.listForRun(run.id, ['report']).length > 0;
+    const report = hasReport ? await runReport(ctx, run.id) : null;
     if (report !== null && !report.ok) return report;
-    const patch = await runPatchText(ctx, runId, report?.value ?? null);
+    const patch = await runPatchText(ctx, run.id, report?.value ?? null);
     if (!patch.ok && patch.error.code !== 'NOT_FOUND') return patch;
     runs.push({
-      summary: toRunSummary(r.runs.getInspectorProjection(runId)),
+      summary: toRunSummary(s),
       input: run.input,
       limits: run.limits,
       report: report?.value ?? null,
       patch: patch.ok ? patch.value : null,
-      ledger: allLedgerEntries(r, runId).map((e) => toLedgerEntryView(e, e.attemptId === null ? null : (stepOf.get(e.attemptId) ?? null))),
+      ledger: ledgerViews(r.ledger.listForRun(run.id)),
     });
   }
   return ok({
@@ -230,7 +217,7 @@ async function projectBundle(ctx: EngineCtx, projectId: ProjectId, runIds: reado
       updatedAt: project.updatedAt, archivedAt: project.archivedAt,
     },
     memory,
-    workflows: workflowVersions(r, runIds.map((id) => r.runs.get(id).workflowVersionId)),
+    workflows: workflowVersions(r, summaries.map((x) => x.run.workflowVersionId)),
     runs,
   });
 }
@@ -242,7 +229,7 @@ export async function exportProject(ctx: EngineCtx, input: ParsedInputOf<'relay/
   const r = ctx.db.repos;
   const project = r.projects.find(input.projectId);
   if (project === undefined) return err(errors.notFound('project'));
-  const runIds = input.runIds === undefined ? projectRunIds(r, project.id) : [...new Set(input.runIds)];
+  const runIds = input.runIds === undefined ? r.runs.idsForProject(project.id) : [...new Set(input.runIds)];
   if (runIds.some((id) => r.runs.find(id)?.projectId !== project.id)) return err(errors.notFound('run'));
   const bundle = await projectBundle(ctx, project.id, runIds);
   if (!bundle.ok) return bundle;
@@ -266,7 +253,7 @@ function csvField(v: string): string {
 }
 
 /** One CSV row per entry (RFC 4180, CRLF line ends); `delta_usd` is the exact 6-dp string, never a float. */
-export function ledgerCsv(rows: readonly { entry: LedgerEntryRow; stepKey: string | null }[]): string {
+export function ledgerCsv(rows: readonly LedgerEntryWithStep[]): string {
   const lines = [LEDGER_CSV_HEADER.join(',')];
   for (const { entry: e, stepKey } of rows) {
     lines.push([new Date(e.createdAt).toISOString(), e.runId ?? '', stepKey ?? '', e.attemptId ?? '', e.type, e.bucket,
@@ -280,21 +267,17 @@ export async function exportLedger(ctx: EngineCtx, input: ParsedInputOf<'relay/v
   const port = exportPort(ctx, 'relay/v1/ledger.exportTo');
   if (!port.ok) return port;
   const r = ctx.db.repos;
-  const rowsOf = (runId: RunId) => {
-    const stepOf = attemptStepKeys(r, runId);
-    return allLedgerEntries(r, runId).map((entry) => ({ entry, stepKey: entry.attemptId === null ? null : (stepOf.get(entry.attemptId) ?? null) }));
-  };
-  let rows: { entry: LedgerEntryRow; stepKey: string | null }[];
+  let rows: readonly LedgerEntryWithStep[];
   let name: string;
   if ('runId' in input) {
     if (r.runs.find(input.runId) === undefined) return err(errors.notFound('run'));
-    rows = rowsOf(input.runId);
+    rows = r.ledger.listForRun(input.runId);
     name = `relay-ledger-${input.runId}.csv`;
   } else {
     if (r.projects.find(input.projectId) === undefined) return err(errors.notFound('project'));
     const { start, end } = monthWindowOf(input.month);
-    rows = projectRunIds(r, input.projectId).flatMap(rowsOf).filter(({ entry }) => entry.createdAt >= start && entry.createdAt < end)
-      .sort((a, b) => a.entry.createdAt - b.entry.createdAt || (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
+    // One statement (4): every run entry of the project in the month, oldest first (`created_at, id`).
+    rows = r.ledger.listForProjectWindow(input.projectId, start, end);
     name = `relay-ledger-${input.projectId}-${input.month}.csv`;
   }
   const w = await port.value.writeFile(input.destinationRealpath, name, utf8(ledgerCsv(rows)), projectRoots(r));

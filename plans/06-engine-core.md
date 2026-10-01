@@ -69,7 +69,7 @@ export interface EngineApi {                 // one handler per runner-routed IP
 export function createEngine(deps: EngineDeps): EngineApi;
 ```
 
-`handle` dispatches through a `Record<RunnerChannel, Handler>` table in `services.ts`. The type system makes the table exhaustive, so a missing channel (public or internal) is a compile error. Each handler follows these rules:
+`handle` dispatches through a `Record<RunnerChannel, Handler>` table in `handlers.ts` (project handlers in `project-handlers.ts`, run read/command handlers in `run-handlers.ts`, the table types in `handler-types.ts`). The type system makes the table exhaustive, so a missing channel (public or internal) is a compile error. Each handler follows these rules:
 1. It performs idempotency lookup and storage for `idempotent` ops (`IdempotencyRepo`; stored results are small: ids plus status, 03 R4-30).
 2. It calls domain services.
 3. It maps to the DTO and returns `toIpc(result)`.
@@ -540,7 +540,7 @@ export function nextPurpose(step: StepRow, attempts: AttemptRow[]): AttemptPurpo
 
 Retry limits are read from the **step snapshot's `retryPolicy`** (`transport`, `schemaRepair`, `rateLimitWaits`; defaults `RETRY_DEFAULTS_PER_STEP` = 1 / 1 / 3), never from constants (R3-9). The counters live on the step row (`transport_retries_used`, `schema_repairs_used`, `rate_limit_waits_used`) and persist across restarts.
 
-**Backoff (R4-22).** A retry sets `step_runs.not_before_at`. `StepRepo.listEligible` filters `not_before_at IS NULL OR not_before_at <= now`, and the loop sleeps (injected timers) until the earliest `not_before_at` or a wake signal. No retry ever sleeps inside `executeModelAttempt`.
+**Backoff (R4-22).** A retry sets `step_runs.not_before_at`. The pure `selectNextStep` (over `StepRepo.latestPerStepKey`) treats a row as eligible only when `not_before_at IS NULL OR not_before_at <= now`, and the loop sleeps (injected timers) until the earliest `not_before_at` or a wake signal. No retry ever sleeps inside `executeModelAttempt`.
 
 | Result | Class | Limit (snapshot `retryPolicy`) | Step | Run event (when exhausted / immediate) |
 |---|---|---|---|---|
@@ -929,3 +929,20 @@ Recorded where the implemented APIs or later orchestrator rulings refine the tex
 - **runs.retryStep** follows this plan (CONFLICT for a non-failed step) over 02's "a ready/pending step keeps its row" wording; budget/setup pauses use `switch_profile`. `runs.increaseAllowance` also writes `limits_json.budgetMicrousd` and requires a strict increase (`VALIDATION_FAILED not_an_increase`).
 - **F18** sizes N from providers `connectionTestRequest` (injected `EngineDeps.connectionTestRequest`; OpenAI 256 output tokens), treats `truncated` as a working connection, and recovery moves an orphaned setup reservation to the setup liability at start. `app.createBackup` goes through `EngineDeps.backup` (runtime.ts wraps storage `createBackup` + `toDisplayPath`).
 - `attempt.stream_progress` events are persisted (≤ 1 / 500 ms) so the per-run `seq` stays gapless; every step/attempt-scoped event payload carries `stepRunId`.
+
+## Improvement review (2026-10-01): shared helpers and read paths
+
+Behaviour is unchanged except where a line says so.
+
+- **Handlers.** `handlers.ts` (the table), `project-handlers.ts`, `run-handlers.ts`, `handler-types.ts` (`ParsedInputOf`, `Handler`, `HandlerTable`; the memory and export handler modules import it instead of restating it). `runner.ts` reads `readSettings` from `settings.ts`.
+- **`runs.list` / project export** use `RunRepo.listSummaries` / `summariesOf` (4 statements per page, 03 C6); `toRunSummary` takes a `RunSummaryProjection`. `runs.getStep` builds only its own step view, reads the run's ledger once (grouped per attempt), and filters events in SQL (`EventRepo.listForStep`). `toRunDetail` reads the ledger only when an unknown attempt needs its cost view.
+- **Snapshot binding (F6 #8, B4).** `snapshotBindingOf` = one `EventRepo.snapshotBinding` statement; `hasSnapshotPreserved` / `preservedApproval` derive from it. `prepare` reads it once and passes it to context assembly, `loadApprovalBinding`, and `loadValidationInputs`.
+- **Ledger reads.** `LedgerRepo.listForRun` / `listForProjectWindow` (one statement each, step keys joined) replace the page-draining loops; the project-month CSV is byte-identical (test against the old algorithm). `reevaluateProjectBudget` reads every `paused(budget_project)` run (`listPausedFor`) — it used to stop at 100.
+- **One admission helper.** `budget.admitAgainstLedger(ledger, { run, project, N, now })`: reserve, next-admission re-checks, preflight, and the queued-run readiness check.
+- **One cost path.** `LedgerRepo.runCosts` (one `RUN_COSTS_SQL`), `views.weakestCertainty` for attempts and report steps. *Changed:* a report step whose settle entries are all `reported` now reports `reported` (the old step rank started at `calculated` and could never reach it).
+- **Idempotency (02 §B0)** goes through `idempotency.ts`: the request is hashed once per handler; `replayStoredId` validates the stored id (*changed:* a malformed stored id is INTERNAL `idempotency_result_invalid`, never a cast); `recordResult` asserts the put.
+- **Adapter lookup (fail closed).** `provider-lookup.ts`: `adapterOf` → MODEL_UNSUPPORTED `no_adapter`; `liveCapabilities` treats a missing adapter and a throwing `capabilities()` (logged with `logSafe`) the same way. *Changed:* `profiles.upsert`, `workflows.validate`, and `runs.preflight` used to fall back to the catalog capabilities when no adapter served the provider; they now report `no_adapter` like `runs.start` and dispatch already did.
+- **Imported diff.** `steps/input-diff.ts` `readInputDiff` applies the intake checks (an `input_diff` of the run's project within the size cap) for intake, context assembly (*changed:* it used to skip the kind/project/size checks), and output validation (logs `validation.diff_unreadable`).
+- **Snapshot.** `RunSnapshot.steps` is keyed by validated `StepKey`s (`parseRunSnapshot` checks each key; iterate with `stepEntries`); `effectiveModelSteps` parses once with one config-revisions query.
+- **F4 structure.** `executeModelAttempt` = `prepare` → `reserve` (`preAdmissionPause`, `insertReservedAttempt`) → `recordDispatchIntent` → `dispatch` → `settleAndFinish`; `requiresApproval` is computed once in `prepare`. Every crash hook (`beforeReservationTx`, `afterDispatchIntent`, `afterProviderResponse`, `afterStepCommit`) stays at the same point relative to its transaction.
+- **Workflow drafts (§5.3).** `P0_EDITABLE` is the single source of `WorkflowVersionView.editable`; `editable.limits` stays true by design. `applyDraftPatch` refuses a section whose flag is false with `locked_field`.

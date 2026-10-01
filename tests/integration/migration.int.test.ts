@@ -59,6 +59,12 @@ describe.skipIf(!existsSync(FIXTURE_DB_PATH))('migration @m4', () => {
     h = await createHarness({ userDataDir, projectRoot: await copyFixture('sample-api'), start: false });
 
     expect(h.db.schemaVersion()).toBe(MIGRATIONS.length);
+    // The committed fixture is a schema-v1 DB, so this is a real upgrade (0002 indexes) — not a no-op open.
+    expect(fromVersion).toBeLessThan(MIGRATIONS.length);
+    const indexes = queryAll(dbPath, "SELECT name FROM sqlite_master WHERE type = 'index'").map((r) => r['name']);
+    expect(indexes).toEqual(expect.arrayContaining(['attempts_run_idx', 'memory_events_record_idx', 'run_memory_snapshot_record_idx',
+      'run_events_type_idx', 'ledger_project_window_idx']));
+    expect(integrityCheck(dbPath)).toBe('ok');
     const backups = existsSync(join(userDataDir, 'backups')) ? await readdir(join(userDataDir, 'backups')) : [];
     if (fromVersion < MIGRATIONS.length) expect(backups.some((b) => b.includes(`-pre-v${String(MIGRATIONS.length)}`))).toBe(true);
     else expect(backups).toEqual([]); // nothing pending → no pre-migration backup
@@ -70,6 +76,7 @@ describe.skipIf(!existsSync(FIXTURE_DB_PATH))('migration @m4', () => {
   it('a forward migration over the pilot DB takes a pre-migration backup and keeps every balance (synthetic next version) @m4', async () => {
     const { userDataDir, dbPath } = await freshCopy();
     const before = sqlBalances(dbPath);
+    const fromVersion = Number(queryAll(dbPath, 'SELECT MAX(version) AS v FROM schema_migrations')[0]?.['v']);
     const next: Migration = { version: MIGRATIONS.length + 1, name: 'k7_probe', sql: 'CREATE TABLE k7_probe (id INTEGER PRIMARY KEY);' };
 
     const db = await openTestDb({ path: dbPath, clock: systemClock, backupsDir: join(userDataDir, 'backups'), migrations: [...MIGRATIONS, next] });
@@ -86,6 +93,7 @@ describe.skipIf(!existsSync(FIXTURE_DB_PATH))('migration @m4', () => {
     const backupDb = join(userDataDir, 'backups', pre!, 'relay.sqlite');
     expect(integrityCheck(backupDb)).toBe('ok');
     expect(sqlBalances(backupDb)).toEqual(before);
-    expect(Number(queryAll(backupDb, 'SELECT MAX(version) AS v FROM schema_migrations')[0]?.['v'])).toBe(MIGRATIONS.length);
+    // The backup is the DB as it was before ANY pending migration ran (the fixture's own version).
+    expect(Number(queryAll(backupDb, 'SELECT MAX(version) AS v FROM schema_migrations')[0]?.['v'])).toBe(fromVersion);
   });
 });

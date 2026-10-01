@@ -2,11 +2,9 @@ import type { EpochMs, ProjectId, Result } from '@relay/contracts';
 import { RelayError, err, errors, idSchema, microusd, ok } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
 import { mapProject, mapProjectWithRoot, readInt, RowReader } from '../mappers.js';
-import { bit, jsonParam, optionalParams, optionalSetClause, toJson } from '../sql.js';
+import { ACTIVE_STATUS_IN, bit, jsonParam, optionalParams, optionalSetClause, toJson } from '../sql.js';
 import type { ProjectPatch, ProjectRepo, ProjectRow } from '../types.js';
 import type { RepoDeps } from './deps.js';
-
-const ACTIVE_STATUSES = ['queued', 'running', 'cancelling', 'awaiting_approval', 'paused', 'interrupted'];
 
 const UPDATE_SQL = `UPDATE projects SET ${optionalSetClause([
   'name',
@@ -66,6 +64,10 @@ export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRep
         .all(bit(opts.includeArchived ?? false))
         .map(mapProject);
     },
+    findActiveByRoot(rootRealpath) {
+      const row = driver.prepare('SELECT * FROM projects WHERE root_realpath = ? AND archived_at IS NULL').get(rootRealpath);
+      return row === undefined ? undefined : mapProject(row);
+    },
     update(id: ProjectId, patch: ProjectPatch, expectedUpdatedAt: EpochMs): Result<ProjectRow> {
       const current = find(id);
       if (current === undefined) {
@@ -118,14 +120,14 @@ export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRep
         .prepare(
           `SELECT
              (SELECT count(*) FROM runs WHERE project_id = ?1) AS runs,
-             (SELECT id FROM runs WHERE project_id = ?1 AND status IN (SELECT value FROM json_each(?2))
+             (SELECT id FROM runs WHERE project_id = ?1 AND ${ACTIVE_STATUS_IN}
                ORDER BY created_at DESC, id DESC LIMIT 1) AS active_run_id,
              (SELECT count(*) FROM memory_records WHERE project_id = ?1 AND status = 'approved') AS approved_memory,
              (SELECT count(*) FROM memory_records WHERE project_id = ?1 AND status = 'suggested') AS suggestions,
              (SELECT COALESCE(SUM(delta_microusd), 0) FROM ledger_entries
-               WHERE scope = 'run' AND project_id = ?1 AND bucket = 'settled' AND created_at >= ?3) AS tracked`,
+               WHERE scope = 'run' AND project_id = ?1 AND bucket = 'settled' AND created_at >= ?2) AS tracked`,
         )
-        .get(id, JSON.stringify(ACTIVE_STATUSES), monthStart);
+        .get(id, monthStart);
       const r = new RowReader('projects', row, 'active_run_id');
       return {
         runs: r.int('runs'),

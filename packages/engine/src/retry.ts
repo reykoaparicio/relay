@@ -10,9 +10,9 @@ import type { AbortReason } from './ports.js';
 import type { RunMachineEvent } from './run-machine.js';
 
 /** Transport retry backoff (§7.6). */
-export const TRANSPORT_BACKOFF_MS = 2_000;
+const TRANSPORT_BACKOFF_MS = 2_000;
 /** Rate-limit wait when the provider sent no retry-after. */
-export const DEFAULT_RATE_LIMIT_WAIT_MS = 2_000;
+const DEFAULT_RATE_LIMIT_WAIT_MS = 2_000;
 
 /** What happened to one attempt. */
 export type OutcomeKind =
@@ -30,7 +30,7 @@ export type OutcomeKind =
   | 'scope_changed';
 
 /** Final attempt state an outcome maps to. */
-export type FinalAttemptState = 'succeeded' | 'failed' | 'failed_before_dispatch' | 'unknown';
+type FinalAttemptState = 'succeeded' | 'failed' | 'failed_before_dispatch' | 'unknown';
 
 /** Classified outcome of one attempt (F7). */
 export interface ClassifiedOutcome {
@@ -164,7 +164,7 @@ export function classify(
 }
 
 /** Which step counter a retry consumes. */
-export type RetryCounter = 'transport' | 'schema_repair' | 'rate_limit';
+type RetryCounter = 'transport' | 'schema_repair' | 'rate_limit';
 
 /** What happens to the step after an attempt. */
 export type AttemptPlan =

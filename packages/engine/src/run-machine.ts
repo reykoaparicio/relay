@@ -62,14 +62,11 @@ export type RunMachineEvent =
 export type RunMachineEventType = RunMachineEvent['type'];
 
 /** A legal transition, or ILLEGAL. */
-export type RunTransition = { readonly to: RunStatus; readonly pauseReason: PauseReason | null } | { readonly error: 'ILLEGAL' };
+type RunTransition = { readonly to: RunStatus; readonly pauseReason: PauseReason | null } | { readonly error: 'ILLEGAL' };
 
 const ILLEGAL = { error: 'ILLEGAL' } as const;
 const to = (status: RunStatus): RunTransition => ({ to: status, pauseReason: null });
 const paused = (reason: PauseReason): RunTransition => ({ to: 'paused', pauseReason: reason });
-
-/** True for completed / incomplete / cancelled / failed. */
-export const isTerminal = (s: RunStatus): boolean => isTerminalRunStatus(s);
 
 type Rule = (ev: RunMachineEvent) => RunTransition;
 type Rules = Readonly<Partial<Record<RunMachineEventType, Rule>>>;
@@ -234,7 +231,7 @@ export type PostCommitEffect =
   | { readonly kind: 'terminal'; readonly runId: RunId };
 
 /** The slice of the engine context effects need. */
-export type EffectsCtx = Pick<EngineCtx, 'emit' | 'wake' | 'deadlines' | 'onTerminal' | 'logger'>;
+type EffectsCtx = Pick<EngineCtx, 'emit' | 'wake' | 'deadlines' | 'onTerminal' | 'logger'>;
 
 /** Runs post-commit effects in order. A failing effect is logged and never undoes the committed state. */
 export async function runEffects(ctx: EffectsCtx, fx: readonly PostCommitEffect[]): Promise<void> {
@@ -285,7 +282,7 @@ function leaveRunningAt(ev: RunMachineEvent, now: EpochMs): EpochMs {
  * Why a run ended `incomplete` (the inspector must not claim "revision limit reached" for a verifier verdict):
  * `details.incompleteCause` (+ the cycle counts for the limit case).
  */
-export function incompleteDetail(ev: Extract<RunMachineEvent, { type: 'REVISION_LIMIT' }>): AppError {
+function incompleteDetail(ev: Extract<RunMachineEvent, { type: 'REVISION_LIMIT' }>): AppError {
   const cycles = ev.cause === 'revision_limit' ? { revisionCycle: ev.revisionCycle ?? null, maxRevisionCycles: ev.maxRevisionCycles ?? null } : {};
   return appError('LIMIT_REACHED', {
     userMessage: ev.cause === 'revision_limit'
@@ -347,7 +344,7 @@ export function applyRunEvent(r: Repos, run: RunRow, requested: RunMachineEvent,
   if (clearDeferred) r.runs.setDeferredPause(run.id, null);
   if (t.to === 'running') r.runs.enterRunning(run.id, now);
   if (run.status === 'running' && t.to !== 'running') r.runs.leaveRunning(run.id, leaveRunningAt(ev, now));
-  const terminal = isTerminal(t.to);
+  const terminal = isTerminalRunStatus(t.to);
   if (ev.type === 'USER_PAUSE' || ev.type === 'RESUME_RESOLVED' || terminal) r.runs.setPauseRequested(run.id, false);
   const detail = statusDetailOf(ev);
   const event = appendRunEvent(r, fx, run.id, 'run.status_changed', {

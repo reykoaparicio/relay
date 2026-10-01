@@ -6,7 +6,7 @@ import type { Result, StepKey } from '@relay/contracts';
 import type { CrashHookCtx, EngineTestHooks } from '../ports.js';
 
 /** The five crash points (06 F13 table). */
-export const CRASH_HOOK_NAMES = ['beforeReservationTx', 'afterDispatchIntent', 'afterProviderResponse', 'afterStepCommit', 'afterApprovalCommit'] as const;
+const CRASH_HOOK_NAMES = ['beforeReservationTx', 'afterDispatchIntent', 'afterProviderResponse', 'afterStepCommit', 'afterApprovalCommit'] as const;
 /** A crash point. */
 export type CrashHookName = (typeof CRASH_HOOK_NAMES)[number];
 

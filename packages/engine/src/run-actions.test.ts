@@ -72,7 +72,7 @@ describe('runs.resume continue', () => {
       const run = r.runs.get(runId);
       const s = r.steps.latestFor(runId, 'intake' as StepKey);
       if (s === undefined) throw new Error('intake');
-      const snap = snapshotOf(run).steps['review'];
+      const snap = snapshotOf(run).steps['review' as StepKey];
       if (snap?.kind !== 'model') throw new Error('review');
       r.attempts.insert({ id: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, runId, stepRunId: s.id, seq: 1, purpose: 'initial', providerId: snap.profile.providerId,
         modelId: snap.profile.modelId, profileSnapshot: snap.profile, requestFingerprint: 'f'.repeat(64), state: 'reserved', reservationMicrousd: 10,

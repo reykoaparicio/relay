@@ -1,12 +1,13 @@
-import type { AttemptId, CostCertainty, Microusd, ProjectId, Result, RunId } from '@relay/contracts';
-import { invariant, ok } from '@relay/contracts';
+import type { AttemptId, ProjectId, Result, RunId } from '@relay/contracts';
+import { invariant, ok, stepKeySchema } from '@relay/contracts';
 import { decodeCursor, encodeCursor } from '../cursor.js';
 import type { SqlDriver } from '../driver.js';
 import { mapLedgerEntry, RowReader } from '../mappers.js';
 import { KEYSET } from '../sql.js';
-import type { LedgerEntryRow, LedgerRepo, Page, PageRequest, WindowBalances } from '../types.js';
+import type { LedgerEntryRow, LedgerEntryWithStep, LedgerRepo, Page, PageRequest, WindowBalances } from '../types.js';
 import type { RepoDeps } from './deps.js';
 import { RUN_BALANCES_SQL, RUN_COSTS_SQL } from './ledger-sql.js';
+import { readRunCosts } from './runs.js';
 
 // §9.3 month windows are half-open [start, end). C counts settled entries inside the window; R and U are the
 // outstanding totals with no date filter (an open reservation or unknown liability from last month still binds).
@@ -20,6 +21,14 @@ const SETUP_WINDOW_SQL = windowSql("scope = 'setup'");
 
 const listSql = (sort: 'created_desc' | 'created_asc', withCursor: boolean): string =>
   `SELECT * FROM ledger_entries WHERE run_id = ? ${withCursor ? `AND ${KEYSET[sort].after}` : ''} ${KEYSET[sort].order} LIMIT ?`;
+
+/** Ledger rows + the step key of their attempt (`attempts.step_run_id` is FK-bound, so a non-null attempt has one). */
+const WITH_STEP_SELECT = `SELECT l.*, s.step_key AS entry_step_key FROM ledger_entries l
+  LEFT JOIN attempts a ON a.id = l.attempt_id LEFT JOIN step_runs s ON s.id = a.step_run_id`;
+
+function withStep(row: unknown): LedgerEntryWithStep {
+  return { entry: mapLedgerEntry(row), stepKey: new RowReader('ledger_entries', row).asN('entry_step_key', stepKeySchema) };
+}
 
 function readWindow(row: unknown): WindowBalances {
   const r = new RowReader('ledger_entries', row, 'c');
@@ -103,17 +112,26 @@ export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo 
       return { reserved: r.money('reserved'), unknown: r.money('unknown'), settled: r.money('settled') };
     },
     list,
-    attemptsOverran(runId) {
-      return new RowReader('ledger_entries', driver.prepare(RUN_COSTS_SQL).get(runId), 'l').bool('overran');
+    runCosts(runId) {
+      return readRunCosts(driver.prepare(RUN_COSTS_SQL).get(runId));
     },
-    settledByCertainty(runId): Readonly<Record<CostCertainty, Microusd>> {
-      const r = new RowReader('ledger_entries', driver.prepare(RUN_COSTS_SQL).get(runId), 'l');
-      return {
-        reported: r.money('s_reported'),
-        calculated: r.money('s_calculated'),
-        estimated: r.money('s_estimated'),
-        unknown: r.money('s_unknown'),
-      };
+    listForRun(runId) {
+      return driver.prepare(`${WITH_STEP_SELECT} WHERE l.run_id = ? ORDER BY l.created_at, l.id`).all(runId).map(withStep);
+    },
+    listForProjectWindow(projectId, startMs, endMs) {
+      return driver
+        .prepare(
+          `${WITH_STEP_SELECT} WHERE l.scope = 'run' AND l.project_id = ? AND l.created_at >= ? AND l.created_at < ?
+           ORDER BY l.created_at, l.id`,
+        )
+        .all(projectId, startMs, endMs)
+        .map(withStep);
+    },
+    attemptsOverran(runId) {
+      return readRunCosts(driver.prepare(RUN_COSTS_SQL).get(runId)).attemptsOverran;
+    },
+    settledByCertainty(runId) {
+      return readRunCosts(driver.prepare(RUN_COSTS_SQL).get(runId)).settledByCertainty;
     },
   };
 }

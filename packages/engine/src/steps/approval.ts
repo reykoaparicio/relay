@@ -6,7 +6,7 @@ import type { ProviderId, RelPath, RunId, StepKey, StepRunId } from '@relay/cont
 import { fromUtf8 } from '../hash.js';
 import type { EngineCtx, RunSnapshot } from '../ports.js';
 import { appendRunEvent, applyRunEvent } from '../run-machine.js';
-import { ancestorsOf, effectiveStepSnapshot, snapshotOf } from '../snapshot.js';
+import { ancestorsOf, effectiveStepSnapshot, snapshotOf, stepEntries } from '../snapshot.js';
 import { applyStepEvent } from '../step-machine.js';
 import { blockRun, commitIfReady } from './local.js';
 
@@ -19,11 +19,8 @@ export function planStepKeyOf(snapshot: RunSnapshot, approvalKey: StepKey): Step
 }
 
 /** Model steps that depend on the approval step (they receive context after approval). */
-export function stepsAfterApproval(snapshot: RunSnapshot, approvalKey: StepKey): StepKey[] {
-  return Object.keys(snapshot.steps).filter((k) => {
-    const s = snapshot.steps[k];
-    return s?.kind === 'model' && ancestorsOf(snapshot, k as StepKey).has(approvalKey);
-  }) as StepKey[];
+function stepsAfterApproval(snapshot: RunSnapshot, approvalKey: StepKey): StepKey[] {
+  return stepEntries(snapshot).flatMap(([k, s]) => (s.kind === 'model' && ancestorsOf(snapshot, k).has(approvalKey) ? [k] : []));
 }
 
 /** Opens the approval for `stepRunId`. */

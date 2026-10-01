@@ -11,7 +11,7 @@ import type { TestDb } from './unit-of-work.js';
 import { openTestDb } from './unit-of-work.js';
 import { join, dirname } from 'node:path';
 
-const EXTRA: Migration = { version: 2, name: 'extra', sql: 'CREATE TABLE extra_things (id TEXT PRIMARY KEY) STRICT;' };
+const EXTRA: Migration = { version: MIGRATIONS.length + 1, name: 'extra', sql: 'CREATE TABLE extra_things (id TEXT PRIMARY KEY) STRICT;' };
 
 describe('migrate', () => {
   const open: TestDb[] = [];
@@ -83,9 +83,10 @@ describe('migrate', () => {
 
     const r = await migrate(driver, { migrations: [...MIGRATIONS, EXTRA], clock, backupsDir });
 
-    expect(r).toEqual({ from: 1, to: 2 });
-    expect(readdirSync(backupsDir)).toEqual(['20260930-123456-pre-v2']);
-    expect(existsSync(join(backupsDir, '20260930-123456-pre-v2', 'relay.sqlite'))).toBe(true);
+    const pre = `20260930-123456-pre-v${String(EXTRA.version)}`;
+    expect(r).toEqual({ from: MIGRATIONS.length, to: EXTRA.version });
+    expect(readdirSync(backupsDir)).toEqual([pre]);
+    expect(existsSync(join(backupsDir, pre, 'relay.sqlite'))).toBe(true);
     driver.close();
   });
 

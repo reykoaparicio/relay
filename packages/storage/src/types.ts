@@ -124,6 +124,8 @@ export interface ProjectRepo {
   /** Runner-internal; includes the realpath. @throws RelayError NOT_FOUND */
   getWithRoot(id: ProjectId): ProjectWithRoot;
   list(opts?: { readonly includeArchived?: boolean }): readonly ProjectRow[];
+  /** The non-archived project registered at `rootRealpath` (one statement on `projects_root_active_uq`), if any. */
+  findActiveByRoot(rootRealpath: string): ProjectRow | undefined;
   /**
    * Optimistic concurrency on `updated_at`: CONFLICT when `expectedUpdatedAt` does not match, or when the project is
    * archived (archived projects are read-only); NOT_FOUND when it does not exist.
@@ -252,11 +254,21 @@ export interface WorkflowDraftPatch {
   readonly contentHash: Sha256;
 }
 
+/** One `workflows.list` row: the workflow with its latest validated and draft version numbers. */
+export interface WorkflowSummaryRow {
+  readonly id: WorkflowId;
+  readonly name: string;
+  readonly latestValidatedVersion: number | null;
+  readonly draftVersion: number | null;
+}
+
 export interface WorkflowRepo {
   /** Returns the workflow with `slug`, inserting it when absent. */
   ensureWorkflow(slug: string, name: string): WorkflowRow;
   getWorkflow(id: WorkflowId): WorkflowRow | undefined;
   listWorkflows(): readonly WorkflowRow[];
+  /** {@link listWorkflows} (same order) with each latest validated / draft version number, in one statement. */
+  listSummaries(): readonly WorkflowSummaryRow[];
   getVersion(workflowId: WorkflowId, version: number | 'draft'): WorkflowVersionRow | undefined;
   getVersionById(id: WorkflowVersionId): WorkflowVersionRow | undefined;
   latestValidated(workflowId: WorkflowId): WorkflowVersionRow | undefined;
@@ -377,18 +389,40 @@ export interface RunInputFile {
   readonly capturedAt: EpochMs;
 }
 
-/** Everything the run inspector needs, fetched with a fixed number of statements (no N+1). */
-export interface InspectorProjection {
-  readonly run: RunRow;
-  readonly workflow: { readonly id: WorkflowId; readonly name: string; readonly version: number };
-  readonly steps: readonly StepRow[];
-  readonly attempts: readonly AttemptRow[];
+/** A run's ledger aggregates, from ONE statement (`RUN_COSTS_SQL`). */
+export interface RunCosts {
   readonly balances: Balances;
   readonly settledByCertainty: Readonly<Record<CostCertainty, Microusd>>;
   /** Some attempt settled more than it reserved (§9.5), from the same ledger statement as the balances. */
   readonly attemptsOverran: boolean;
+}
+
+/** The workflow a run was started from. */
+export interface RunWorkflowRef {
+  readonly id: WorkflowId;
+  readonly name: string;
+  readonly version: number;
+}
+
+/** Everything the run inspector needs, fetched with a fixed number of statements (no N+1). */
+export interface InspectorProjection extends RunCosts {
+  readonly run: RunRow;
+  readonly workflow: RunWorkflowRef;
+  readonly steps: readonly StepRow[];
+  readonly attempts: readonly AttemptRow[];
   readonly pendingApproval: ApprovalRow | null;
   readonly reportArtifactId: ArtifactId | null;
+}
+
+/**
+ * One `runs.list` row (the RunSummary inputs): the run, its workflow, the latest-row step progress, and the ledger
+ * aggregates. Built for a whole page at once ({@link RunRepo.listSummaries}), never per run.
+ */
+export interface RunSummaryProjection extends RunCosts {
+  readonly run: RunRow;
+  readonly workflow: RunWorkflowRef;
+  /** Over the latest row per step key: `done` = succeeded or skipped. */
+  readonly stepProgress: { readonly done: number; readonly total: number };
 }
 
 export interface RunRepo {
@@ -425,6 +459,14 @@ export interface RunRepo {
   inputFiles(runId: RunId): readonly RunInputFile[];
   /** ≤ 6 statements. @throws RelayError NOT_FOUND */
   getInspectorProjection(runId: RunId): InspectorProjection;
+  /** {@link list} with each row's summary aggregates: 4 statements per page whatever its size (no per-run projection). */
+  listSummaries(q: RunListQuery): Result<Page<RunSummaryProjection>>;
+  /** The summaries of `ids` in the given order (unknown ids are left out): 3 statements whatever the count. */
+  summariesOf(ids: readonly RunId[]): readonly RunSummaryProjection[];
+  /** Every run id of the project, oldest first (`created_at, id`), in one statement. */
+  idsForProject(projectId: ProjectId): readonly RunId[];
+  /** Every `paused` run of the project with `pauseReason`, newest first (= `list`'s default), in one statement (no page limit). */
+  listPausedFor(projectId: ProjectId, pauseReason: PauseReason): readonly RunRow[];
 }
 
 // ---------------------------------------------------------------- steps
@@ -494,10 +536,6 @@ export interface StepRepo {
   /** One row per step key: the max (revision_index, retry_index). Ordered by ordinal. */
   latestPerStepKey(runId: RunId): readonly StepRow[];
   latestFor(runId: RunId, stepKey: StepKey): StepRow | undefined;
-  /** Latest rows in `ready`/`reserved` with `not_before_at` null or ≤ now, ordered by ordinal. */
-  listEligible(runId: RunId, now: EpochMs): readonly StepRow[];
-  /** Minimum `not_before_at` > now among latest `ready`/`reserved` rows, or null. */
-  earliestNotBefore(runId: RunId, now: EpochMs): EpochMs | null;
   setNotBefore(id: StepRunId, at: EpochMs | null): void;
   /** CAS on state. Returns whether the row changed. */
   transition(id: StepRunId, from: readonly StepState[], to: StepState, fields: StepTransitionFields): boolean;
@@ -573,6 +611,8 @@ export interface AttemptRepo {
   transition(id: AttemptId, from: readonly AttemptState[], to: AttemptState, fields: AttemptTransitionFields): boolean;
   listForStep(stepRunId: StepRunId): readonly AttemptRow[];
   listForRun(runId: RunId): readonly AttemptRow[];
+  /** Number of the run's attempts in `state` (one COUNT, no row is loaded or parsed). */
+  countInState(runId: RunId, state: AttemptState): number;
   /** Attempts in created/reserved/dispatching/unknown, optionally for one run. */
   listUnresolved(runId?: RunId): readonly AttemptRow[];
   /** Write-once per column (COALESCE): never overwrites an id, can still fill the other one. */
@@ -627,16 +667,32 @@ export interface AttemptBalances {
   readonly settled: Microusd;
 }
 
+/** A ledger entry with the step key of its attempt (null for an entry without attempt). */
+export interface LedgerEntryWithStep {
+  readonly entry: LedgerEntryRow;
+  readonly stepKey: StepKey | null;
+}
+
 export interface LedgerRepo {
   /** Appends entries sharing one fresh `group_id` (atomic moves). */
   append(entries: readonly LedgerEntryInsert[]): readonly LedgerEntryRow[];
   runBalances(runId: RunId): Balances;
+  /** Balances + settled by certainty + the §9.5 overrun flag of a run, in ONE statement. */
+  runCosts(runId: RunId): RunCosts;
+  /** Every entry of the run, oldest first (`created_at, id`), with its attempt's step key, in one statement. */
+  listForRun(runId: RunId): readonly LedgerEntryWithStep[];
+  /**
+   * Every run-scope entry of the project created in `[startMs, endMs)`, oldest first (`created_at, id`), with its
+   * attempt's step key, in one statement (`ledger.exportTo` for a project month).
+   */
+  listForProjectWindow(projectId: ProjectId, startMs: EpochMs, endMs: EpochMs): readonly LedgerEntryWithStep[];
   projectMonthBalances(projectId: ProjectId, monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
   setupBalances(monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
   attemptBalances(attemptId: AttemptId): AttemptBalances;
   list(runId: RunId, page: PageRequest): Result<Page<LedgerEntryRow>>;
+  /** `runCosts(runId).settledByCertainty`. */
   settledByCertainty(runId: RunId): Readonly<Record<CostCertainty, Microusd>>;
-  /** Some attempt of the run settled more than it reserved (§9.5 overrun), in one aggregate statement. */
+  /** Some attempt of the run settled more than it reserved (§9.5 overrun): `runCosts(runId).attemptsOverran`. */
   attemptsOverran(runId: RunId): boolean;
 }
 
@@ -829,6 +885,8 @@ export interface MemoryListQuery {
   readonly types?: readonly MemoryType[] | undefined;
   /** Case-insensitive substring over the current title and content. */
   readonly query?: string | undefined;
+  /** Only records proposed by this run (`source_run_id`). */
+  readonly sourceRunId?: RunId | undefined;
 }
 
 /** Attribute patch for {@link MemoryRepo.setAttributes}. */
@@ -882,11 +940,33 @@ export interface MemoryRepo {
 
 // ---------------------------------------------------------------- events, idempotency, lease
 
+/** Payload `kind`s {@link EventRepo.snapshotBinding} looks for (engine constants; repos hold no engine rules). */
+export interface SnapshotBindingKinds {
+  /** `context.assembled { kind }` recorded by an input re-snapshot. */
+  readonly resnapshot: string;
+  /** `error.recorded { kind, approvalId }` recorded when an approval was invalidated by a project change. */
+  readonly approvalInvalidated: string;
+}
+
+/** The run-event facts of a run's input-snapshot binding (06 F6 / B4), read in one statement. */
+export interface SnapshotBinding {
+  /** Seq of the latest re-snapshot event (0 when none). */
+  readonly resnapshotSeq: number;
+  /** Seq of the latest `run.snapshot_preserved` (0 when none). */
+  readonly preservedSeq: number;
+  /** The latest approval-invalidation event: its seq and payload `approvalId` (null when not a string), or null. */
+  readonly invalidation: { readonly seq: number; readonly approvalId: string | null } | null;
+}
+
 export interface EventRepo {
   /** seq = COALESCE(MAX(seq), 0) + 1 in the same statement. Payload must already be redacted. */
   append(runId: RunId, type: RunEventType, payload: object): RunEvent;
   list(runId: RunId, afterSeq: number, limit: number): readonly RunEvent[];
   lastSeq(runId: RunId): number;
+  /** One statement of scalar subqueries on `run_events_type_idx` (no scan of the run's whole log). */
+  snapshotBinding(runId: RunId, kinds: SnapshotBindingKinds): SnapshotBinding;
+  /** Events of the run whose payload names `stepRunId` or one of `attemptIds` (`runs.getStep`), by seq. */
+  listForStep(runId: RunId, stepRunId: StepRunId, attemptIds: readonly AttemptId[]): readonly RunEvent[];
 }
 
 /** Small idempotent-replay result: ids + status, never a DTO (R4-30; ≤ 2048 bytes). */

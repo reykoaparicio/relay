@@ -11,8 +11,8 @@ import {
   sha256Schema,
   stepKeySchema,
 } from '@relay/contracts';
-import type { ModelOutputSchemaId, RunEvent, RunId, StepKey } from '@relay/contracts';
-import type { Repos, RunRow } from '@relay/storage';
+import type { ModelOutputSchemaId, ProfileSnapshot, RunId, StepKey } from '@relay/contracts';
+import type { Repos, RunRow, SnapshotBinding } from '@relay/storage';
 import type {
   ApprovalStepSnapshot,
   ModelStepSnapshot,
@@ -106,8 +106,12 @@ function parseStep(v: unknown, key: string): StepSnapshot {
  */
 export function parseRunSnapshot(raw: unknown): RunSnapshot {
   if (!isRecord(raw) || !isRecord(raw['steps'])) throw new SnapshotError('root');
-  const steps: Record<string, StepSnapshot> = {};
-  for (const [key, v] of Object.entries(raw['steps'])) steps[key] = parseStep(v, key);
+  const steps: Partial<Record<StepKey, StepSnapshot>> = {};
+  for (const [key, v] of Object.entries(raw['steps'])) {
+    const k = stepKeySchema.safeParse(key);
+    if (!k.success) throw new SnapshotError(`step key ${key.slice(0, 40)}`);
+    steps[k.data] = parseStep(v, key);
+  }
   const hash = sha256Schema.safeParse(raw['workflowContentHash']);
   const ids = raw['memoryIncludeIds'];
   if (!hash.success || typeof raw['catalogVersion'] !== 'string' || !(ids === null || Array.isArray(ids))) throw new SnapshotError('meta');
@@ -124,9 +128,9 @@ export function snapshotOf(run: Pick<RunRow, 'snapshot'>): RunSnapshot {
   return parseRunSnapshot(run.snapshot);
 }
 
-/** The snapshot of one step, or undefined. */
-export function stepSnapshotOf(snapshot: RunSnapshot, stepKey: StepKey): StepSnapshot | undefined {
-  return snapshot.steps[stepKey];
+/** The snapshot's steps as `[stepKey, step]` pairs, in insertion (ordinal) order (keys validated by the parser). */
+export function stepEntries(snapshot: RunSnapshot): [StepKey, StepSnapshot][] {
+  return (Object.entries(snapshot.steps) as [StepKey, StepSnapshot | undefined][]).flatMap(([k, s]) => (s === undefined ? [] : [[k, s]]));
 }
 
 /**
@@ -138,6 +142,23 @@ export function effectiveStepSnapshot(r: Repos, run: Pick<RunRow, 'id' | 'snapsh
   if (s?.kind !== 'model') throw new SnapshotError(`${stepKey} is not a model step`);
   const revised = r.configRevisions.effectiveProfile(run.id, stepKey);
   return revised === null ? s : { ...s, profile: revised };
+}
+
+/**
+ * R3-13 for every model step at once: the snapshot parsed once and ONE `run_config_revisions` query (the latest
+ * revision per step key wins), instead of a parse + a query per step.
+ * @throws SnapshotError when the stored snapshot is malformed.
+ */
+export function effectiveModelSteps(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>, snapshot: RunSnapshot = snapshotOf(run)): ReadonlyMap<StepKey, ModelStepSnapshot> {
+  const revised = new Map<StepKey, ProfileSnapshot>();
+  for (const rev of r.configRevisions.list(run.id)) revised.set(rev.stepKey, rev.profileSnapshot); // ascending: the latest wins
+  const out = new Map<StepKey, ModelStepSnapshot>();
+  for (const [key, s] of stepEntries(snapshot)) {
+    if (s.kind !== 'model') continue;
+    const profile = revised.get(key);
+    out.set(key, profile === undefined ? s : { ...s, profile });
+  }
+  return out;
 }
 
 /** Every step key `stepKey` depends on, directly or transitively. */
@@ -164,23 +185,29 @@ export function requiresApproval(snapshot: RunSnapshot, stepKey: StepKey): boole
 
 /** Model step keys of the snapshot, in insertion (ordinal) order. */
 export function modelStepKeys(snapshot: RunSnapshot): StepKey[] {
-  return Object.entries(snapshot.steps).flatMap(([k, s]) => (s.kind === 'model' ? [k as StepKey] : []));
+  return stepEntries(snapshot).flatMap(([k, s]) => (s.kind === 'model' ? [k] : []));
 }
 
 /** `context.assembled` payload kind recorded when `resnapshot_and_replan` replaced the run's input snapshot (F10). */
 export const RESNAPSHOT_KIND = 'resnapshot';
 
-/** Seq of the run's latest input re-snapshot (`context.assembled { kind: resnapshot }`), 0 when none. */
-export function lastResnapshotSeq(events: readonly RunEvent[]): number {
-  return events.findLast((e) => e.type === 'context.assembled' && e.payload['kind'] === RESNAPSHOT_KIND)?.seq ?? 0;
+/** Event payload marker recording an approval invalidated because the project changed (B4). */
+export const PROJECT_CHANGED_MARK = 'approval_invalidated';
+
+/** The run's snapshot-binding event facts, in one statement (`EventRepo.snapshotBinding`). */
+export function snapshotBindingOf(r: Repos, runId: RunId): SnapshotBinding {
+  return r.events.snapshotBinding(runId, { resnapshot: RESNAPSHOT_KIND, approvalInvalidated: PROJECT_CHANGED_MARK });
 }
 
 /**
- * Whether the user chose `use_preserved_snapshot` for this run's CURRENT input snapshot (F6: its
+ * Whether the user chose `use_preserved_snapshot` for the run's CURRENT input snapshot (F6: its
  * `run.snapshot_preserved` event, recorded after the latest re-snapshot — a re-snapshot starts a fresh binding).
  */
+export function isSnapshotPreserved(b: SnapshotBinding): boolean {
+  return b.preservedSeq > b.resnapshotSeq;
+}
+
+/** {@link isSnapshotPreserved} of the run, read now. */
 export function hasSnapshotPreserved(r: Repos, runId: RunId): boolean {
-  const events = r.events.list(runId, 0, Number.MAX_SAFE_INTEGER);
-  const since = lastResnapshotSeq(events);
-  return events.some((e) => e.type === 'run.snapshot_preserved' && e.seq > since);
+  return isSnapshotPreserved(snapshotBindingOf(r, runId));
 }

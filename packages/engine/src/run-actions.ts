@@ -3,7 +3,7 @@
 // `paused(budget_project)` runs after a project allowance edit. Async resolution (profiles, estimates, file hashes)
 // happens BEFORE each transaction; the transaction re-reads the run, applies the decision + the run transition, and
 // stores the idempotency result (02 §B0: a replay returns the stored result and never re-applies the decision).
-import { RUN_LIMIT_MAXIMUMS, err, errors, ok } from '@relay/contracts';
+import { RUN_LIMIT_MAXIMUMS, err, errors, isTerminalRunStatus, ok } from '@relay/contracts';
 import type {
   AppError,
   AttemptId,
@@ -26,23 +26,26 @@ import type {
 import type { ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
 import type { InputDrift } from './approval-binding.js';
 import { inputDrift, invalidateApproval } from './approval-binding.js';
-import { admit, resolveUnknownEntries } from './budget.js';
+import { admitAgainstLedger, resolveUnknownEntries } from './budget.js';
 import { buildModelRequest } from './checkpoints.js';
-import { monthWindow } from './clock.js';
 import { executionMsAt } from './deadline.js';
 import { requestHash } from './hash.js';
+import type { IdempotentRequest } from './idempotency.js';
+import { recordResult, replayStoredId } from './idempotency.js';
 import type { EngineCtx } from './ports.js';
+import { logSafe } from './log-safe.js';
 import { toModelProfile } from './profiles.js';
+import { adapterOf } from './provider-lookup.js';
 import { resumeIfUnknownsResolved } from './recovery.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
-import { allowedRunActions, appendRunEvent, applyRunEvent, isTerminal, runEffects } from './run-machine.js';
+import { allowedRunActions, appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import { resolveProfile } from './run-start.js';
-import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
+import { RESNAPSHOT_KIND, ancestorsOf, effectiveModelSteps, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf, stepEntries } from './snapshot.js';
 import type { Snapshotted } from './steps/intake.js';
 import { diffReferencedPaths, inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
-import { costSummaryOf, toRunDetail } from './views.js';
+import { costSummaryOfRun, runActionFacts, toRunDetail } from './views.js';
 
 // ---------------------------------------------------------------- shared helpers
 
@@ -56,16 +59,20 @@ async function inTx<T>(ctx: EngineCtx, fn: Tx<T>): Promise<Result<T>> {
   return res;
 }
 
-/** Idempotent replay (02 §B0): the stored ids, CONFLICT for the same key with another request, or null. */
-function storedFor(r: Repos, op: string, input: { readonly idempotencyKey: string }): Result<{ runId: RunId; status: string | undefined }> | null {
-  const stored = r.idempotency.get(op, input.idempotencyKey);
-  if (stored === undefined) return null;
-  if (stored.requestHash !== requestHash({ ...input })) return err(errors.conflict({ reason: 'idempotency_key_reused', op }));
-  return ok({ runId: stored.result.ids['runId'] as RunId, status: stored.result.status });
+/** The keyed request of a run action (02 §B0); the request is hashed once per handler call. */
+function keyed(op: string, input: { readonly idempotencyKey: string }): IdempotentRequest {
+  return { op, key: input.idempotencyKey, hash: requestHash({ ...input }) };
 }
 
-function remember(r: Repos, op: string, input: { readonly idempotencyKey: string }, runId: RunId): void {
-  r.idempotency.put(op, input.idempotencyKey, requestHash({ ...input }), { ids: { runId }, status: r.runs.get(runId).status });
+/** Idempotent replay (02 §B0): the stored run id, CONFLICT for the same key with another request, or null. */
+function storedFor(ctx: EngineCtx, r: Repos, req: IdempotentRequest): Result<RunId> | null {
+  const stored = replayStoredId(ctx, r, req, 'runId', 'run');
+  return stored === null || !stored.ok ? stored : ok(stored.value.id);
+}
+
+/** Records the action's result (the run id + its status now) in the caller's tx. */
+function remember(r: Repos, req: IdempotentRequest, runId: RunId): void {
+  recordResult(r, req, { ids: { runId }, status: r.runs.get(runId).status });
 }
 
 const notApplicable = (run: RunRow, decision: string): AppError =>
@@ -76,9 +83,8 @@ const notApplicable = (run: RunRow, decision: string): AppError =>
  * run's current state is refused (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree.
  */
 function offered(r: Repos, run: RunRow, action: RunAction, decision: string): AppError | null {
-  const unknownAttempts = r.attempts.listForRun(run.id).filter((a) => a.state === 'unknown').length;
-  const hasFailedStep = r.steps.latestPerStepKey(run.id).some((s) => s.state === 'failed');
-  const actions = allowedRunActions(run, { unknownAttempts, hasFailedStep, hasPatchArtifact: false });
+  const facts = runActionFacts(r.steps.latestPerStepKey(run.id), r.attempts.countInState(run.id, 'unknown'), false);
+  const actions = allowedRunActions(run, facts);
   return actions.includes(action) ? null : notApplicable(run, decision);
 }
 
@@ -151,14 +157,15 @@ export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Pro
     if (!assembled.ok) return null;
     const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId: 'estimate', runId, stepKey: step.stepKey, purpose },
       r.projects.get(run.projectId).providerPolicy.providerOptions);
-    const adapter = ctx.providers.get(stepSnap.profile.providerId);
+    const adapter = adapterOf(ctx, stepSnap.profile.providerId);
+    if (!adapter.ok) return null; // no adapter: the dispatch-time check pauses the run (fail closed there)
     const credential = await ctx.credentials.resolve({ providerId: stepSnap.profile.providerId, purpose: 'dispatch', attemptId: null });
-    const estimate = await adapter.estimate(request, stepSnap.profile.prices, {
+    const estimate = await adapter.value.estimate(request, stepSnap.profile.prices, {
       ...(credential.ok ? { apiKey: credential.value } : {}), priceCatalogVersion: stepSnap.profile.priceCatalogVersion,
     });
     return estimate.upperAllowanceMicrousd;
   } catch (e) {
-    ctx.logger.warn('estimate.next_failed', { runId, err: e instanceof Error ? e.name : 'unknown' });
+    ctx.logger.warn('estimate.next_failed', { runId, err: logSafe(e) });
     return null;
   }
 }
@@ -166,19 +173,14 @@ export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Pro
 /** Read-only §9.3 admission of N for `run` inside the caller's tx (null N = nothing to admit → passes). */
 function nextAdmission(r: Repos, run: RunRow, N: Microusd | null, now: EpochMs): { ok: boolean; breakdown: BudgetBreakdown | null } {
   if (N === null) return { ok: true, breakdown: null };
-  const project = r.projects.get(run.projectId);
-  const { start, end } = monthWindow(now);
-  const decision = admit({
-    run: r.ledger.runBalances(run.id), N,
-    project: project.monthlyAllowanceMicrousd === null ? null : { L: project.monthlyAllowanceMicrousd, ...r.ledger.projectMonthBalances(run.projectId, start, end) },
-  });
+  const decision = admitAgainstLedger(r.ledger, { run: r.ledger.runBalances(run.id), project: r.projects.get(run.projectId), N, now });
   return { ok: decision.ok, breakdown: decision.breakdown };
 }
 
 // ---------------------------------------------------------------- runs.resume
 
 /** Parsed `runs.resume` input. */
-export interface ResumeInput {
+interface ResumeInput {
   readonly idempotencyKey: string;
   readonly runId: RunId;
   readonly decision: RecoveryDecision;
@@ -189,7 +191,7 @@ type Prepared = { readonly profile?: ProfileSnapshot; readonly drift?: InputDrif
 function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: EpochMs): Result<void> {
   if (run.status === 'interrupted') {
     // F2: RECOVERY_DECIDED only when every unknown attempt has been decided (review_recovery).
-    const unknownAttempts = r.attempts.listForRun(run.id).filter((a) => a.state === 'unknown').length;
+    const unknownAttempts = r.attempts.countInState(run.id, 'unknown');
     if (unknownAttempts > 0) return err(errors.conflict({ reason: 'unknown_attempts', unknownAttempts }));
     // A reconciled overrun (X > liability) or scope change is never acknowledged by review_recovery: `applyRunEvent`
     // applies the durable deferred pause instead (budget_overrun → acknowledge_overrun), as for a live run (BH-2, BH-6).
@@ -200,7 +202,8 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
   // (F2 truth table) refuses `resume` otherwise, before this runs.
   if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked', 'unknown_outcome'])) return err(notApplicable(run, 'continue'));
   if (run.pauseReason === 'auth_required') {
-    const missing = [...new Set(openModelSteps(r, run).map((s) => effectiveStepSnapshot(r, run, s.stepKey).profile.providerId))]
+    const models = effectiveModelSteps(r, run);
+    const missing = [...new Set(openModelSteps(r, run).flatMap((s) => models.get(s.stepKey)?.profile.providerId ?? []))]
       .find((p) => r.credentials.get(p) === undefined);
     if (missing !== undefined) return err(errors.authRequired(missing));
   }
@@ -259,12 +262,10 @@ function resumeReplan(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: Run
   if (!isPausedFor(run, ['approval_stale'])) return err(notApplicable(run, 'resnapshot_and_replan'));
   if (pre.resnapshot !== undefined) resnapshotInputs(r, fx, run, pre.resnapshot, pre.drift, now);
   const snapshot = snapshotOf(run);
-  const planKey = Object.keys(snapshot.steps).find((k) => {
-    const s = snapshot.steps[k];
-    return s?.kind === 'model' && s.outputSchema === 'plan.v1';
-  }) as StepKey | undefined;
+  const steps = stepEntries(snapshot);
+  const planKey = steps.find(([, s]) => s.kind === 'model' && s.outputSchema === 'plan.v1')?.[0];
   if (planKey === undefined) return err(errors.conflict({ reason: 'no_plan_step' }));
-  const downstream = Object.keys(snapshot.steps).filter((k) => ancestorsOf(snapshot, k as StepKey).has(planKey)) as StepKey[];
+  const downstream = steps.flatMap(([k]) => (ancestorsOf(snapshot, k).has(planKey) ? [k] : []));
   for (const a of [r.approvals.latestApprovedForRun(run.id), r.approvals.pendingForRun(run.id)]) {
     if (a !== undefined) invalidateApproval(r, fx, run.id, a.id, 'plan_changed', now);
   }
@@ -364,19 +365,19 @@ async function prepareResume(ctx: EngineCtx, run: RunRow, d: RecoveryDecision): 
 
 /** `runs.resume` (every RecoveryDecision kind). */
 export async function resumeRun(ctx: EngineCtx, input: ResumeInput): Promise<Result<{ status: RunStatus }>> {
-  const OP = 'runs.resume';
-  const replay = storedFor(ctx.db.repos, OP, input);
-  if (replay !== null) return replay.ok ? ok({ status: ctx.db.repos.runs.get(replay.value.runId).status }) : replay;
+  const req = keyed('runs.resume', input);
+  const replay = storedFor(ctx, ctx.db.repos, req);
+  if (replay !== null) return replay.ok ? ok({ status: ctx.db.repos.runs.get(replay.value).status }) : replay;
   const run = ctx.db.repos.runs.get(input.runId);
   const pre = await prepareResume(ctx, run, input.decision);
   if (!pre.ok) return pre;
   const res = await inTx(ctx, (r, fx, now) => {
-    const again = storedFor(r, OP, input);
-    if (again !== null) return again.ok ? ok({ status: r.runs.get(again.value.runId).status }) : again;
+    const again = storedFor(ctx, r, req);
+    if (again !== null) return again.ok ? ok({ status: r.runs.get(again.value).status }) : again;
     const cur = r.runs.get(input.runId);
     const applied = applyResume(r, fx, ctx, cur, input.decision, pre.value, now);
     if (!applied.ok) return applied;
-    remember(r, OP, input, cur.id);
+    remember(r, req, cur.id);
     return ok({ status: r.runs.get(cur.id).status });
   });
   if (res.ok) ctx.wake.signal();
@@ -386,14 +387,14 @@ export async function resumeRun(ctx: EngineCtx, input: ResumeInput): Promise<Res
 // ---------------------------------------------------------------- runs.increaseAllowance
 
 /** Parsed `runs.increaseAllowance` input. */
-export interface IncreaseAllowanceInput {
+interface IncreaseAllowanceInput {
   readonly idempotencyKey: string;
   readonly runId: RunId;
   readonly newAllowanceMicrousd: Microusd;
 }
 
 function costNow(r: Repos, runId: RunId): CostSummary {
-  return costSummaryOf(r.ledger.runBalances(runId), r.ledger.settledByCertainty(runId), r.ledger.attemptsOverran(runId));
+  return costSummaryOfRun(r.ledger.runCosts(runId)); // one statement (9)
 }
 
 /**
@@ -401,14 +402,14 @@ function costNow(r: Repos, runId: RunId): CostSummary {
  * RESUME_RESOLVED on `paused(budget_run | budget_overrun)` when the next admission would now pass.
  */
 export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowanceInput): Promise<Result<{ cost: CostSummary; status: RunStatus; budget: BudgetBreakdown | null }>> {
-  const OP = 'runs.increaseAllowance';
-  const replay = storedFor(ctx.db.repos, OP, input);
+  const req = keyed('runs.increaseAllowance', input);
+  const replay = storedFor(ctx, ctx.db.repos, req);
   if (replay !== null) return replay.ok ? ok({ cost: costNow(ctx.db.repos, input.runId), status: ctx.db.repos.runs.get(input.runId).status, budget: null }) : replay;
   const before = ctx.db.repos.runs.get(input.runId);
   const N = isPausedFor(before, ['budget_run', 'budget_overrun']) ? await estimateNextReservation(ctx, before.id) : null;
   const res = await inTx(ctx, (r, fx, now) => {
     const run = r.runs.get(input.runId);
-    if (isTerminal(run.status) || run.status === 'cancelling') return err(errors.conflict({ reason: 'run_terminal', status: run.status }));
+    if (isTerminalRunStatus(run.status) || run.status === 'cancelling') return err(errors.conflict({ reason: 'run_terminal', status: run.status }));
     const L = r.ledger.runBalances(run.id).L;
     if (input.newAllowanceMicrousd <= L) {
       return err(errors.validationFailed([{ path: 'newAllowanceMicrousd', message: 'The new allowance must be larger than the current one.', code: 'not_an_increase' }]));
@@ -423,7 +424,7 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
       if (next.ok) applyRunEvent(r, r.runs.get(run.id), { type: 'RESUME_RESOLVED' }, now, fx);
       else budget = next.breakdown;
     }
-    remember(r, OP, input, run.id);
+    remember(r, req, run.id);
     return ok({ cost: costNow(r, run.id), status: r.runs.get(run.id).status, budget });
   });
   if (res.ok) ctx.wake.signal();
@@ -435,8 +436,8 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
  * admission would now pass gets RESUME_RESOLVED. Returns the resumed run ids.
  */
 export async function reevaluateProjectBudget(ctx: EngineCtx, projectId: RunRow['projectId']): Promise<RunId[]> {
-  const page = ctx.db.repos.runs.list({ projectId, statuses: ['paused'], limit: 100 });
-  const runs = page.ok ? page.value.items.filter((x) => x.pauseReason === 'budget_project') : [];
+  // Every such run (newest first, as before), in one statement — no page limit: a 101st paused run is re-evaluated too.
+  const runs = ctx.db.repos.runs.listPausedFor(projectId, 'budget_project');
   const resumed: RunId[] = [];
   for (const run of runs) {
     const N = await estimateNextReservation(ctx, run.id);
@@ -455,7 +456,7 @@ export async function reevaluateProjectBudget(ctx: EngineCtx, projectId: RunRow[
 // ---------------------------------------------------------------- runs.decideUnknown
 
 /** Parsed `runs.decideUnknown` input. */
-export interface DecideUnknownInput {
+interface DecideUnknownInput {
   readonly idempotencyKey: string;
   readonly runId: RunId;
   readonly attemptId: AttemptId;
@@ -497,15 +498,15 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
 
 /** `runs.decideUnknown` (§4.4, §7.5) on a paused or `interrupted` run with an unresolved unknown attempt. */
 export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): Promise<Result<RunDetail>> {
-  const OP = 'runs.decideUnknown';
-  const replay = storedFor(ctx.db.repos, OP, input);
+  const req = keyed('runs.decideUnknown', input);
+  const replay = storedFor(ctx, ctx.db.repos, req);
   if (replay !== null) return replay.ok ? ok(runDetail(ctx, input.runId)) : replay;
   const res = await inTx(ctx, (r, fx, now) => {
     const run = r.runs.get(input.runId);
     if (run.status !== 'paused' && run.status !== 'interrupted') return err(notApplicable(run, input.decision));
     const applied = applyUnknownDecision(r, fx, run, input, now);
     if (!applied.ok) return applied;
-    remember(r, OP, input, run.id);
+    remember(r, req, run.id);
     return ok(undefined);
   });
   if (!res.ok) return res;
@@ -516,7 +517,7 @@ export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): 
 // ---------------------------------------------------------------- runs.retryStep
 
 /** Parsed `runs.retryStep` input. */
-export interface RetryStepInput {
+interface RetryStepInput {
   readonly idempotencyKey: string;
   readonly runId: RunId;
   readonly stepId: StepRunId;
@@ -541,7 +542,7 @@ function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: R
   if (latest?.id !== step.id || step.state !== 'failed' || snapshotOf(run).steps[step.stepKey]?.kind !== 'model') {
     return err(errors.conflict({ reason: 'step_not_failed', state: step.state }));
   }
-  if (r.attempts.listForRun(run.id).some((a) => a.state === 'unknown')) return err(errors.conflict({ reason: 'unknown_attempts' }));
+  if (r.attempts.countInState(run.id, 'unknown') > 0) return err(errors.conflict({ reason: 'unknown_attempts' }));
   // No attempt-limit pre-check (finding 2): at `maxAttempts` the retried row reaches the F4 reserve checkpoint, which
   // pauses `limit_attempts` — from which raise_limits continues. Refusing here left no working action.
   if (profile !== null) reviseConfig(r, fx, run, step.stepKey, profile, revisionReason(run));
@@ -554,8 +555,8 @@ function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: R
 
 /** `runs.retryStep`: a new row (`retry_index + 1`, fresh counters) for the failed step; the failed row is kept. */
 export async function retryStep(ctx: EngineCtx, input: RetryStepInput): Promise<Result<RunDetail>> {
-  const OP = 'runs.retryStep';
-  const replay = storedFor(ctx.db.repos, OP, input);
+  const req = keyed('runs.retryStep', input);
+  const replay = storedFor(ctx, ctx.db.repos, req);
   if (replay !== null) return replay.ok ? ok(runDetail(ctx, input.runId)) : replay;
   const run = ctx.db.repos.runs.get(input.runId);
   let profile: ProfileSnapshot | null = null;
@@ -569,7 +570,7 @@ export async function retryStep(ctx: EngineCtx, input: RetryStepInput): Promise<
   const res = await inTx(ctx, (r, fx, now) => {
     const applied = applyRetryStep(r, fx, ctx, r.runs.get(input.runId), input, profile, now);
     if (!applied.ok) return applied;
-    remember(r, OP, input, input.runId);
+    remember(r, req, input.runId);
     return ok(undefined);
   });
   if (!res.ok) return res;

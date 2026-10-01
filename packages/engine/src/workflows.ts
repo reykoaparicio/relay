@@ -17,12 +17,26 @@ import type {
 } from '@relay/contracts';
 import type { Repos, WorkflowVersionRow } from '@relay/storage';
 import { requestHash } from './hash.js';
+import type { IdempotentRequest } from './idempotency.js';
+import { recordResult, replayStoredId } from './idempotency.js';
 import type { EngineCtx } from './ports.js';
 import { checkProfile, findProfileByName, profileWarningMessage } from './profiles.js';
+import { liveCapabilities } from './provider-lookup.js';
 import { workflowContentHash } from './seed.js';
 
 const issue = (path: string, message: string, code: string): ValidationIssue => ({ path, message, code });
 const reasonOf = (v: unknown): string => (typeof v === 'string' ? v : 'model_unsupported');
+
+/** Which P0 draft-patch sections are editable (`WorkflowVersionView.editable`). */
+type EditableFlags = WorkflowVersionView['editable'];
+
+/**
+ * §5.3 P0 edit surface: prompts, profile names, limits, maxOutputTokens, retry policy, and memory scope; structure is
+ * P1. `limits` stays editable on every version BY DESIGN (§5.3 "Save creates a draft revision": a limit edit only
+ * ever lands in a new draft, and a running run keeps the limits snapshotted at start). `applyDraftPatch` enforces
+ * these flags, so the view and the server can never disagree.
+ */
+const P0_EDITABLE: EditableFlags = { prompts: true, profiles: true, limits: true, maxOutputTokens: true, retryPolicy: true, memoryScope: true, structure: false };
 
 /** `workflows.get` view of a version row. */
 export function toWorkflowView(version: WorkflowVersionRow): WorkflowVersionView {
@@ -39,18 +53,37 @@ export function toWorkflowView(version: WorkflowVersionRow): WorkflowVersionView
     spec: version.spec,
     contentHash: version.contentHash,
     prompts,
-    editable: { prompts: true, profiles: true, limits: true, maxOutputTokens: true, retryPolicy: true, memoryScope: true, structure: false },
+    editable: P0_EDITABLE,
   };
 }
 
 // ---------------------------------------------------------------- saveDraft
 
-/** Applies a P0 patch to `base` (pure). Unknown / approval step keys and unused prompt keys are `structural_edit_p1`. */
+/** `locked_field` issues for every patch section whose `editable` flag is false. */
+function lockedSections(patch: WorkflowDraftPatch, editable: EditableFlags): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const locked = (path: string) => issues.push(issue(path, 'This field cannot be edited.', 'locked_field'));
+  if (patch.prompts !== undefined && !editable.prompts) locked('prompts');
+  if (patch.limits !== undefined && !editable.limits) locked('limits');
+  for (const [key, e] of Object.entries(patch.steps ?? {})) {
+    if (e.profile !== undefined && !editable.profiles) locked(`steps.${key}.profile`);
+    if (e.maxOutputTokens !== undefined && !editable.maxOutputTokens) locked(`steps.${key}.maxOutputTokens`);
+    if (e.retryPolicy !== undefined && !editable.retryPolicy) locked(`steps.${key}.retryPolicy`);
+    if (e.memoryScope !== undefined && !editable.memoryScope) locked(`steps.${key}.memoryScope`);
+  }
+  return issues;
+}
+
+/**
+ * Applies a P0 patch to `base` (pure). Unknown / approval step keys and unused prompt keys are `structural_edit_p1`;
+ * a section whose `editable` flag is false is `locked_field` (default {@link P0_EDITABLE}).
+ */
 export function applyDraftPatch(
   base: { readonly spec: WorkflowSpec; readonly prompts: Readonly<Record<string, string>> },
   patch: WorkflowDraftPatch,
+  editable: EditableFlags = P0_EDITABLE,
 ): Result<{ spec: WorkflowSpec; prompts: Record<string, string> }> {
-  const issues: ValidationIssue[] = [];
+  const issues: ValidationIssue[] = lockedSections(patch, editable);
   const modelVersions = new Set(base.spec.steps.flatMap((s) => (s.kind === 'model' ? [s.instructionVersion] : [])));
   for (const key of Object.keys(patch.prompts ?? {})) {
     if (!modelVersions.has(key)) issues.push(issue(`prompts.${key}`, 'No step uses this instruction version.', 'structural_edit_p1'));
@@ -74,7 +107,7 @@ export function applyDraftPatch(
 }
 
 /** Parsed `workflows.saveDraft` input. */
-export interface SaveDraftInput {
+interface SaveDraftInput {
   readonly workflowId: WorkflowId;
   readonly expectedDraftRevision: number;
   readonly patch: WorkflowDraftPatch;
@@ -125,12 +158,9 @@ async function modelStepIssues(ctx: EngineCtx, s: StepSpec & { kind: 'model' }, 
   const row = findProfileByName(r, s.profile);
   if (row === undefined) return { issues: [...issues, issue(`${path}.profile`, `No profile named "${s.profile.slice(0, 40)}".`, 'unknown_profile')], warnings, upper: null };
   const entry = r.catalog.get(row.providerId, row.modelId);
-  let caps = entry?.capabilities;
-  try {
-    caps = await ctx.providers.get(row.providerId).capabilities(row.modelId);
-  } catch {
-    // no adapter: the catalog snapshot decides (fail closed below when the catalog does not know the model)
-  }
+  const live = await liveCapabilities(ctx, row.providerId, row.modelId); // fail closed (provider-lookup.ts)
+  if (!live.ok) issues.push(issue(`${path}.profile`, live.error.userMessage, 'no_adapter'));
+  const caps = live.ok ? live.value : entry?.capabilities;
   const checked = checkProfile(row, entry, caps);
   if (!checked.ok) issues.push(issue(`${path}.profile`, checked.error.userMessage, reasonOf(checked.error.details?.['reason'])));
   const maxOut = s.maxOutputTokens ?? row.params.maxOutputTokens;
@@ -143,7 +173,7 @@ async function modelStepIssues(ctx: EngineCtx, s: StepSpec & { kind: 'model' }, 
 }
 
 /** F14 validation of a spec + prompts (graph, catalog, credentials as warnings, budget vs the first step). */
-export async function validateSpec(ctx: EngineCtx, spec: WorkflowSpec, prompts: Readonly<Record<string, string>>): Promise<WorkflowValidationResult> {
+async function validateSpec(ctx: EngineCtx, spec: WorkflowSpec, prompts: Readonly<Record<string, string>>): Promise<WorkflowValidationResult> {
   const parsed = workflowSpecSchema.safeParse(spec);
   if (!parsed.success) return { valid: false, issues: toValidationIssues(parsed.error.issues), warnings: [] };
   const issues: ValidationIssue[] = [];
@@ -173,13 +203,11 @@ export async function validateWorkflow(ctx: EngineCtx, input: { readonly workflo
 
 /** `workflows.publish`: the draft → an immutable validated version (only when validation passes). */
 export async function publishWorkflow(ctx: EngineCtx, input: { readonly idempotencyKey: string; readonly workflowId: WorkflowId }): Promise<Result<WorkflowVersionView>> {
-  const OP = 'workflows.publish';
-  const hash = requestHash({ ...input });
+  const req: IdempotentRequest = { op: 'workflows.publish', key: input.idempotencyKey, hash: requestHash({ ...input }) };
   const replay = (r: Repos): Result<WorkflowVersionView> | null => {
-    const stored = r.idempotency.get(OP, input.idempotencyKey);
-    if (stored === undefined) return null;
-    if (stored.requestHash !== hash) return err(errors.conflict({ reason: 'idempotency_key_reused', op: OP }));
-    const v = r.workflows.getVersionById(stored.result.ids['workflowVersionId'] as WorkflowVersionRow['id']);
+    const stored = replayStoredId(ctx, r, req, 'workflowVersionId', 'workflowVersion');
+    if (stored === null || !stored.ok) return stored;
+    const v = r.workflows.getVersionById(stored.value.id);
     return v === undefined ? err(errors.notFound('workflow_version')) : ok(toWorkflowView(v));
   };
   const early = replay(ctx.db.repos);
@@ -196,7 +224,7 @@ export async function publishWorkflow(ctx: EngineCtx, input: { readonly idempote
     if (cur?.status !== 'draft' || cur.draftRevision !== draft.draftRevision || !r.workflows.markValidated(draft.id, now)) {
       return err(errors.conflict({ reason: 'draft_changed' }));
     }
-    r.idempotency.put(OP, input.idempotencyKey, hash, { ids: { workflowVersionId: draft.id }, status: 'validated' });
+    recordResult(r, req, { ids: { workflowVersionId: draft.id }, status: 'validated' });
     const published = r.workflows.getVersionById(draft.id);
     return published === undefined ? err(errors.notFound('workflow_version')) : ok(toWorkflowView(published));
   });

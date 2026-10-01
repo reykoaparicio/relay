@@ -111,7 +111,7 @@ export interface ApprovalStepSnapshot {
 }
 
 /** Snapshot of a synthetic engine step (F15). */
-export interface LocalStepSnapshot {
+interface LocalStepSnapshot {
   readonly kind: 'intake' | 'finalize';
   readonly dependsOn: readonly StepKey[];
 }
@@ -121,7 +121,8 @@ export type StepSnapshot = ModelStepSnapshot | ApprovalStepSnapshot | LocalStepS
 
 /** `runs.snapshot_json` (F15): revision 0 of the run configuration; never mutated. */
 export interface RunSnapshot {
-  readonly steps: Readonly<Record<string, StepSnapshot>>;
+  /** Keyed by validated step keys (`parseRunSnapshot`); iterate with `stepEntries`. */
+  readonly steps: Readonly<Partial<Record<StepKey, StepSnapshot>>>;
   readonly workflowContentHash: Sha256;
   readonly catalogVersion: string;
   /**
@@ -191,14 +192,14 @@ export interface ExportPort {
 }
 
 /** Storage C8 retention sweep, injected by runtime.ts. */
-export interface MaintenancePort {
+interface MaintenancePort {
   sweepRawResponses(now: EpochMs, retentionDays: number): Promise<unknown>;
   /** §10.4 project-history purge (`memory.purgeProjectHistory`). */
   purgeProjectHistory(projectId: ProjectId): Promise<{ readonly purgedSnapshots: number; readonly purgedArtifacts: number; readonly failed: number }>;
 }
 
 /** Whether a request to `providerId` can be looked up after a crash (04 `supportsRequestLookupFor`). */
-export type RequestLookupPolicy = (
+type RequestLookupPolicy = (
   providerId: ProviderId,
   capabilities: Pick<ModelCapabilities, 'supportsRequestLookup'>,
   providerOptions?: ModelRequest['providerOptions'],

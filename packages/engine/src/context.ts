@@ -3,7 +3,7 @@
 // memoryScope and ranked (G2); 4 selected files read from the `input_file` snapshot artifacts (the live disk is used
 // only for the stale check); 5 the upstream structured outputs the step needs (§7.7); 6 token count; 7 G1b fit
 // (optional items dropped whole, never truncated); 8 the manifest (G4).
-import { INPUT_CAPS, OUTPUT_SCHEMAS, err, errors, ok } from '@relay/contracts';
+import { OUTPUT_SCHEMAS, err, errors, ok } from '@relay/contracts';
 import type {
   AppError,
   ArtifactId,
@@ -38,7 +38,8 @@ import {
   renderTaskDocument,
   renderUpstreamBlock,
 } from './prompt-render.js';
-import { snapshotOf } from './snapshot.js';
+import { snapshotOf, stepEntries } from './snapshot.js';
+import { readInputDiff } from './steps/input-diff.js';
 import type { FitItem, TokenEstimator } from './token-budget.js';
 import { createLocalEstimator, fitToBudget, inputBudget, localTokens } from './token-budget.js';
 
@@ -87,7 +88,7 @@ function instructions(db: Db, run: RunRow, instructionVersion: string): Result<s
 }
 
 /** The system prompt: role instructions + the output contract. No dynamic content (cache-stable). */
-export function systemPrompt(roleText: string, schemaId: string): string {
+function systemPrompt(roleText: string, schemaId: string): string {
   return `${roleText.trimEnd()}\n\nOutput contract: respond with one JSON object that matches the "${schemaId}" schema supplied with this request.`;
 }
 
@@ -142,7 +143,7 @@ async function staleCheck(deps: ContextAssemblerDeps, root: () => Promise<Result
 }
 
 /** The user document sections in their fixed order (G3). Empty sections are dropped. */
-export interface DocumentParts {
+interface DocumentParts {
   readonly goal: string;
   readonly rules?: string;
   readonly upstream?: readonly string[];
@@ -152,7 +153,7 @@ export interface DocumentParts {
 }
 
 /** Renders the user document: goal, constraints, project rules, upstream outputs, imported diff, files, repair. */
-export function renderUserDocument(p: DocumentParts): string {
+function renderUserDocument(p: DocumentParts): string {
   return renderTaskDocument([renderGoal(p.goal), renderConstraints(), p.rules ?? '', ...(p.upstream ?? []), p.diffBlock ?? '', ...p.fileBlocks, p.repairBlock]);
 }
 
@@ -191,15 +192,12 @@ export function renderStepRules(records: readonly RetrievableRecord[], step: Pic
 /** The imported diff for review/plan steps (07 G3), or null. */
 export async function diffBlock(
   deps: Pick<ContextAssemblerDeps, 'db' | 'artifacts'>,
-  input: { readonly run: Pick<RunRow, 'input'>; readonly stepSpec: { readonly outputSchema: string } },
+  input: { readonly run: Pick<RunRow, 'input' | 'projectId'>; readonly stepSpec: { readonly outputSchema: string } },
 ): Promise<Result<string | null>> {
   const { run, stepSpec } = input;
   if (run.input.kind !== 'diff' || (stepSpec.outputSchema !== 'findings.v1' && stepSpec.outputSchema !== 'plan.v1')) return ok(null);
-  const row = deps.db.repos.artifacts.get(run.input.diffArtifactId);
-  if (row === undefined) return err(errors.notFound('input_diff'));
-  const bytes = await deps.artifacts.read(row.relPath, INPUT_CAPS.maxDiffBytes);
-  if (!bytes.ok) return bytes;
-  return ok(renderDiffBlock({ artifactId: row.id, text: fromUtf8(bytes.value) }));
+  const diff = await readInputDiff(deps, run.projectId, run.input.diffArtifactId);
+  return diff.ok ? ok(renderDiffBlock({ artifactId: diff.value.row.id, text: diff.value.text })) : diff;
 }
 
 /** G3 schema-repair block: issues of the latest prior attempt when this attempt repairs its schema. */
@@ -219,11 +217,7 @@ export function latestOutputStep(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>,
   readonly maxRevision?: number;
   readonly accept?: (s: StepRow) => boolean;
 } = {}): StepRow | undefined {
-  const steps = snapshotOf(run).steps;
-  const keys = new Set(Object.keys(steps).filter((k) => {
-    const s = steps[k];
-    return s?.kind === 'model' && s.outputSchema === schemaId;
-  }));
+  const keys = new Set<string>(stepEntries(snapshotOf(run)).flatMap(([k, s]) => (s.kind === 'model' && s.outputSchema === schemaId ? [k] : [])));
   const max = o.maxRevision ?? Number.MAX_SAFE_INTEGER;
   return r.steps.listForRun(run.id)
     .filter((s) => keys.has(s.stepKey) && s.state === 'succeeded' && s.outputArtifactId !== null && s.revisionIndex <= max && (o.accept?.(s) ?? true))
@@ -232,7 +226,7 @@ export function latestOutputStep(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>,
 }
 
 /** Output values by schema id. */
-export interface OutputValues {
+interface OutputValues {
   'findings.v1': FindingsV1;
   'plan.v1': PlanV1;
   'patch.v1': PatchV1;

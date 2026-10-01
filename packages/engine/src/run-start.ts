@@ -1,12 +1,11 @@
 // 06 F15: `runs.start` / `runs.preflight` — the FR-03 snapshot service. Async resolution happens BEFORE the
 // transaction (R4-29); the transaction inserts the run, the step rows (synthetic intake/finalize included), the
 // `allowance_set` ledger entry, the idempotency key, and `run.created`.
-import { DEFAULT_LIMITS, RESERVED_STEP_KEYS, err, errors, ok, runLimitsSchema, toValidationIssues } from '@relay/contracts';
+import { DEFAULT_LIMITS, RESERVED_STEP_KEYS, err, errors, microusd, ok, runLimitsSchema, toValidationIssues } from '@relay/contracts';
 import type {
   AppError,
   EpochMs,
   Microusd,
-  ModelCapabilities,
   ModelProfile,
   ProfileId,
   ProfileSnapshot,
@@ -22,27 +21,29 @@ import type {
 } from '@relay/contracts';
 import type { UsageEstimate } from '@relay/providers';
 import type { MemoryItem, ProjectRow, Repos, StepInsert, WorkflowVersionRow } from '@relay/storage';
-import { admit, allowanceSetEntries } from './budget.js';
+import { admitAgainstLedger, allowanceSetEntries } from './budget.js';
 import { buildModelRequest } from './checkpoints.js';
 import type { Outstanding } from './budget.js';
-import { monthWindow } from './clock.js';
 import { diffBlock, renderStepPrompt, renderStepRules, retrievableOf } from './context.js';
 import { requestHash } from './hash.js';
+import type { IdempotentRequest } from './idempotency.js';
+import { recordResult, replayStoredId } from './idempotency.js';
 import { selectRunMemory } from './memory.js';
 import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './ports.js';
 import type { ReadinessIssue } from './policy.js';
 import { budgetReadiness, checkStepReadiness, toPreflightIssue } from './policy.js';
 import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
+import { adapterOf, liveCapabilities } from './provider-lookup.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
-import { outputKindOf } from './snapshot.js';
+import { outputKindOf, stepEntries } from './snapshot.js';
 import { diffReferencedPaths } from './steps/intake.js';
 
 /** Parsed `runs.start` input (the IPC schema output). */
 export type StartInput = Omit<RunStartInput, 'idempotencyKey'> & { readonly idempotencyKey?: string };
 
 /** Everything resolved before the transaction. */
-export interface PreparedRun {
+interface PreparedRun {
   readonly project: ProjectRow;
   readonly version: WorkflowVersionRow;
   readonly snapshot: RunSnapshot;
@@ -60,12 +61,9 @@ export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKe
     return err(errors.permissionDenied('provider_not_allowed', { details: { stepKey, providerId: ref.providerId } }));
   }
   const entry = ctx.db.repos.catalog.get(ref.providerId, ref.modelId);
-  let capabilities;
-  try {
-    capabilities = await ctx.providers.get(ref.providerId).capabilities(ref.modelId);
-  } catch {
-    return err(errors.modelUnsupported({ providerId: ref.providerId, modelId: ref.modelId, reason: 'no_adapter' }));
-  }
+  const live = await liveCapabilities(ctx, ref.providerId, ref.modelId);
+  if (!live.ok) return live;
+  const capabilities = live.value;
   const checked = checkProfile(ref, entry, capabilities);
   if (!checked.ok) return checked;
   if (entry === undefined) return err(errors.modelUnsupported({ providerId: ref.providerId, modelId: ref.modelId })); // narrowed above
@@ -98,7 +96,7 @@ async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: Workf
   for (const key of Object.keys(overrides)) {
     if (!modelKeys.has(key as StepKey)) return err(validationError(`profileOverrides.${key}`, 'Not a model step of this workflow.', 'unknown_step'));
   }
-  const steps: Record<string, StepSnapshot> = { [INTAKE]: { kind: 'intake', dependsOn: [] } };
+  const steps: Partial<Record<StepKey, StepSnapshot>> = { [INTAKE]: { kind: 'intake', dependsOn: [] } };
   for (const s of spec.steps) {
     const dependsOn = s.dependsOn.length === 0 ? [INTAKE] : [...s.dependsOn];
     if (s.kind === 'approval') {
@@ -133,7 +131,7 @@ function checkInput(r: Repos, input: StartInput): AppError | null {
 }
 
 /** Resolves and validates everything `runs.start` needs (shared with preflight; no writes). */
-export async function prepareRun(ctx: EngineCtx, input: StartInput, o: { readonly lenient?: boolean } = {}): Promise<Result<PreparedRun>> {
+async function prepareRun(ctx: EngineCtx, input: StartInput, o: { readonly lenient?: boolean } = {}): Promise<Result<PreparedRun>> {
   const r = ctx.db.repos;
   const project = r.projects.find(input.projectId);
   if (project === undefined) return err(errors.notFound('project'));
@@ -160,13 +158,11 @@ function stepRows(ctx: EngineCtx, runId: RunId, p: PreparedRun, now: EpochMs): S
 
 /** `runs.start`. A replay of the same idempotency key returns the stored `{ runId, status }`. */
 export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Result<{ runId: RunId; status: RunStatus }>> {
-  const hash = requestHash({ ...input });
+  const req: IdempotentRequest = { op: OP, key: input.idempotencyKey, hash: requestHash({ ...input }) };
   const replay = (): Result<{ runId: RunId; status: RunStatus }> | null => {
-    const stored = ctx.db.repos.idempotency.get(OP, input.idempotencyKey);
-    if (stored === undefined) return null;
-    if (stored.requestHash !== hash) return err(errors.conflict({ reason: 'idempotency_key_reused', op: OP }));
-    const runId = stored.result.ids['runId'] as RunId;
-    return ok({ runId, status: ctx.db.repos.runs.get(runId).status });
+    const stored = replayStoredId(ctx, ctx.db.repos, req, 'runId', 'run');
+    if (stored === null || !stored.ok) return stored;
+    return ok({ runId: stored.value.id, status: ctx.db.repos.runs.get(stored.value.id).status });
   };
   const early = replay();
   if (early !== null) return early;
@@ -183,7 +179,7 @@ export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Re
       snapshot: p.snapshot, limits: p.limits, idempotencyKey: input.idempotencyKey, createdAt: now });
     r.steps.insertMany(stepRows(ctx, runId, p, now));
     r.ledger.append(allowanceSetEntries({ L: p.limits.budgetMicrousd, attemptId: null, runId, projectId: p.project.id, priceCatalogVersion: null, createdAt: now }));
-    r.idempotency.put(OP, input.idempotencyKey, hash, { ids: { runId }, status: 'queued' });
+    recordResult(r, req, { ids: { runId }, status: 'queued' });
     appendRunEvent(r, fx, runId, 'run.created', { workflowVersionId: p.version.id, goal: input.goal, limits: p.limits });
     fx.push({ kind: 'emit', event: { type: 'run.status', runId, status: 'queued', pauseReason: null, seq: r.events.lastSeq(runId) } });
     fx.push({ kind: 'wake' });
@@ -193,7 +189,7 @@ export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Re
   return result;
 }
 
-const ZERO: Outstanding = { C: 0 as Outstanding['C'], R: 0 as Outstanding['R'], U: 0 as Outstanding['U'] };
+const ZERO: Outstanding = { C: microusd(0), R: microusd(0), U: microusd(0) };
 
 /**
  * B7: N of the first model step built exactly like dispatch (F4): the same prompt rendering (role instructions,
@@ -212,20 +208,16 @@ async function estimateFirstReservation(
 ): Promise<Result<UsageEstimate>> {
   const roleText = p.version.prompts[first.instructionVersion];
   if (roleText === undefined) return err(errors.modelUnsupported({ reason: 'instructions_missing' }));
-  const diff = await diffBlock(ctx, { run: { input: input.input }, stepSpec: first });
+  const diff = await diffBlock(ctx, { run: { input: input.input, projectId: p.project.id }, stepSpec: first });
   if (!diff.ok) return diff;
   const ordered = [...files].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0)); // = inputFiles ORDER BY rel_path
   const rules = renderStepRules(memory.map(retrievableOf), first, input.goal, ordered.map((f) => f.relPath));
   const prompt = renderStepPrompt({ roleText, schemaId: first.outputSchema, goal: input.goal, rules, diffBlock: diff.value, files: ordered, repairBlock: '' });
   const request = buildModelRequest(ctx.templates, first, prompt, { attemptId: 'preflight', runId: 'preflight', stepKey, purpose: 'initial' },
     p.project.providerPolicy.providerOptions);
-  let adapter;
-  try {
-    adapter = ctx.providers.get(first.profile.providerId);
-  } catch {
-    return err(errors.modelUnsupported({ providerId: first.profile.providerId, reason: 'no_adapter' }));
-  }
-  return ok(await adapter.estimate(request, first.profile.prices, { priceCatalogVersion: first.profile.priceCatalogVersion }));
+  const adapter = adapterOf(ctx, first.profile.providerId);
+  if (!adapter.ok) return adapter;
+  return ok(await adapter.value.estimate(request, first.profile.prices, { priceCatalogVersion: first.profile.priceCatalogVersion }));
 }
 
 /**
@@ -252,7 +244,7 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     files = read.value.files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, content: f.content, size: f.size }));
   }
   const issues = await profileIssues(ctx, p, input);
-  const models = Object.entries(p.snapshot.steps).flatMap(([k, s]) => (s.kind === 'model' ? [{ key: k as StepKey, snap: s }] : []));
+  const models = stepEntries(p.snapshot).flatMap(([key, snap]) => (snap.kind === 'model' ? [{ key, snap }] : []));
   // The first reservation is the first model step of the SPEC; when its profile could not be resolved there is no N.
   const firstKey = p.version.spec.steps.find((s) => s.kind === 'model')?.id;
   const first = models.find((m) => m.key === firstKey);
@@ -266,13 +258,7 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     estimatedInputTokens = estimate.value.inputTokens;
     basis = estimate.value.basis;
   }
-  const { start, end } = monthWindow(ctx.clock.now());
-  const L = p.project.monthlyAllowanceMicrousd;
-  const admission = admit({
-    run: { L: p.limits.budgetMicrousd, ...ZERO },
-    project: L === null ? null : { L, ...ctx.db.repos.ledger.projectMonthBalances(p.project.id, start, end) },
-    N,
-  });
+  const admission = admitAgainstLedger(ctx.db.repos.ledger, { run: { L: p.limits.budgetMicrousd, ...ZERO }, project: p.project, N, now: ctx.clock.now() });
   const budget = admission.breakdown;
   const budgetIssue = budgetReadiness(admission);
   if (budgetIssue !== null) issues.push(budgetIssue);
@@ -305,14 +291,11 @@ async function profileIssues(ctx: EngineCtx, p: PreparedRun, input: StartInput):
         error: errors.notFound('profile', {}, { details: { stepKey: s.id }, userMessage: `No profile named "${s.profile.slice(0, 40)}".` }) });
       continue;
     }
-    let capabilities: ModelCapabilities | undefined;
-    try {
-      capabilities = await ctx.providers.get(ref.providerId).capabilities(ref.modelId);
-    } catch {
-      capabilities = undefined; // no adapter: the catalog snapshot decides
-    }
-    issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile: ref, capabilities,
+    const live = await liveCapabilities(ctx, ref.providerId, ref.modelId);
+    issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile: ref, capabilities: live.ok ? live.value : undefined,
       catalogEntry: r.catalog.get(ref.providerId, ref.modelId), hasCredential: r.credentials.get(ref.providerId) !== undefined }));
+    // Fail closed (provider-lookup.ts): capabilities that cannot be read are an issue, never a catalog guess.
+    if (!live.ok) issues.push({ stepKey: s.id, reason: 'setup_blocked', code: 'no_adapter', error: live.error });
   }
   return issues;
 }

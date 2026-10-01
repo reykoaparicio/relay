@@ -26,6 +26,7 @@ import {
 import type { ArtifactStore } from '@relay/tools';
 import { globalTimers } from './clock.js';
 import { createContextAssembler } from './context.js';
+import { logSafe } from './log-safe.js';
 import { createMemoryService } from './memory.js';
 import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, ExportPort, Logger, ProjectFsPort, Timers } from './ports.js';
 import { createEngine } from './runner.js';
@@ -107,7 +108,7 @@ export function createBackupPort(o: { db: Db; userDataDir: string; clock: Clock;
         const b = await createBackup({ db: o.db, userDataDir: o.userDataDir, clock: o.clock });
         return ok({ backupDisplayPath: toDisplayPath(b.dir, o.homeDir ?? homedir()), createdAt: b.manifest.createdAt, sizeBytes: b.sizeBytes });
       } catch (e) {
-        o.logger.error('backup.failed', { err: e instanceof Error ? e.name : 'unknown' });
+        o.logger.error('backup.failed', { err: logSafe(e) });
         return err(errors.artifactWriteFailed());
       }
     },

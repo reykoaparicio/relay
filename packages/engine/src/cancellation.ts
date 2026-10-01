@@ -5,6 +5,12 @@ import { applyRunEvent, runEffects } from './run-machine.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { skipOpenSteps } from './step-machine.js';
 
+/** Type guard for the reason this registry aborts a controller with (`AbortSignal.reason` is `any`). */
+export function isAbortReason(v: unknown): v is AbortReason {
+  if (typeof v !== 'object' || v === null || !('kind' in v)) return false;
+  return v.kind === 'cancel' || v.kind === 'deadline';
+}
+
 /** Creates the registry. Controllers are registered BEFORE the step-3 tx, so any later cancel aborts them (F4). */
 export function createCancellationRegistry(): CancellationRegistry {
   const byRun = new Map<RunId, Set<AbortController>>();

@@ -1,14 +1,22 @@
-import type { Balances, CostCertainty, Microusd, Result, RunId, RunStatus } from '@relay/contracts';
+import type { ProjectId, Result, RunId, RunStatus } from '@relay/contracts';
 import { RelayError, TERMINAL_RUN_STATUSES, errors, idSchema, invariant, isTerminalRunStatus, ok } from '@relay/contracts';
 import { decodeCursor, encodeCursor } from '../cursor.js';
 import type { SqlDriver, SqlParam } from '../driver.js';
 import { mapApproval, mapAttempt, mapInputFile, mapRun, mapStep, RowReader } from '../mappers.js';
-import { bit, KEYSET, toJson } from '../sql.js';
-import type { InspectorProjection, Page, RunListQuery, RunRepo, RunRow, RunStatusFields } from '../types.js';
+import { ACTIVE_STATUS_IN, bit, KEYSET, toJson } from '../sql.js';
+import type {
+  InspectorProjection,
+  Page,
+  RunCosts,
+  RunListQuery,
+  RunRepo,
+  RunRow,
+  RunStatusFields,
+  RunSummaryProjection,
+  RunWorkflowRef,
+} from '../types.js';
 import type { RepoDeps } from './deps.js';
-import { RUN_COSTS_SQL } from './ledger-sql.js';
-
-const ACTIVE_STATUSES: readonly RunStatus[] = ['queued', 'running', 'cancelling', 'awaiting_approval', 'paused', 'interrupted'];
+import { RUNS_COSTS_SQL, RUN_COSTS_SQL } from './ledger-sql.js';
 
 /** Status filter via json_each keeps one static statement per sort (00b §4: whitelisted fragments only). */
 const listSql = (sort: 'created_desc' | 'created_asc', withCursor: boolean): string =>
@@ -21,12 +29,13 @@ const UPDATE_STATUS_SQL = `UPDATE runs SET status = ?, pause_reason = ?, status_
     started_at = COALESCE(?, started_at), updated_at = ?
   WHERE id = ? AND status IN (SELECT value FROM json_each(?))`;
 
-function readBalances(row: unknown): { balances: Balances; settled: Record<CostCertainty, Microusd>; overran: boolean } {
+/** Reads one {@link RUN_COSTS_SQL} / {@link RUNS_COSTS_SQL} row. */
+export function readRunCosts(row: unknown): RunCosts {
   const r = new RowReader('ledger_entries', row, 'l');
   return {
-    overran: r.bool('overran'),
+    attemptsOverran: r.bool('overran'),
     balances: { L: r.money('l'), C: r.money('c'), R: r.money('r'), U: r.money('u') },
-    settled: {
+    settledByCertainty: {
       reported: r.money('s_reported'),
       calculated: r.money('s_calculated'),
       estimated: r.money('s_estimated'),
@@ -34,6 +43,28 @@ function readBalances(row: unknown): { balances: Balances; settled: Record<CostC
     },
   };
 }
+
+const ZERO_COSTS: RunCosts = readRunCosts({ l: 0, c: 0, r: 0, u: 0, s_reported: 0, s_calculated: 0, s_estimated: 0, s_unknown: 0, overran: 0 });
+
+/** Workflow of each run (`?1` = JSON array of run ids). */
+const RUNS_WORKFLOW_SQL = `SELECT r.id AS run_id, w.id AS wf_id, w.name AS wf_name, v.version AS wf_version
+  FROM runs r JOIN workflow_versions v ON v.id = r.workflow_version_id JOIN workflows w ON w.id = v.workflow_id
+  WHERE r.id IN (SELECT value FROM json_each(?1))`;
+
+/** Latest-row step progress of each run (`?1` = JSON array of run ids); = the engine's `latestPerKey` + done count. */
+const RUNS_PROGRESS_SQL = `SELECT s.run_id AS run_id, COUNT(*) AS total,
+    COALESCE(SUM(CASE WHEN s.state IN ('succeeded', 'skipped') THEN 1 ELSE 0 END), 0) AS done
+  FROM step_runs s WHERE s.run_id IN (SELECT value FROM json_each(?1)) AND NOT EXISTS (
+    SELECT 1 FROM step_runs o WHERE o.run_id = s.run_id AND o.step_key = s.step_key
+      AND (o.revision_index, o.retry_index) > (s.revision_index, s.retry_index))
+  GROUP BY s.run_id`;
+
+function readWorkflowRef(row: unknown): RunWorkflowRef {
+  const wf = new RowReader('workflows', row, 'wf_id');
+  return { id: wf.id('wf_id', 'workflow'), name: wf.text('wf_name'), version: wf.int('wf_version') };
+}
+
+const runIdOf = (row: unknown): string => new RowReader('runs', row, 'run_id').text('run_id');
 
 export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
   const find = (id: RunId): RunRow | undefined => {
@@ -99,14 +130,13 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
     if (row === undefined) {
       throw new RelayError(errors.notFound('run'));
     }
-    const wf = new RowReader('workflows', row, 'wf_id');
     // 2–6: steps, attempts, ledger aggregates, pending approval, latest report artifact
     const steps = driver
       .prepare('SELECT * FROM step_runs WHERE run_id = ? ORDER BY ordinal, revision_index, retry_index')
       .all(runId)
       .map(mapStep);
     const attempts = driver.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at, seq').all(runId).map(mapAttempt);
-    const costs = readBalances(driver.prepare(RUN_COSTS_SQL).get(runId));
+    const costs = readRunCosts(driver.prepare(RUN_COSTS_SQL).get(runId));
     const approval = driver
       .prepare(
         `SELECT * FROM approvals WHERE run_id = ? AND decision IS NULL AND invalidated_at IS NULL
@@ -118,15 +148,32 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       .get(runId);
     return {
       run: mapRun(row),
-      workflow: { id: wf.id('wf_id', 'workflow'), name: wf.text('wf_name'), version: wf.int('wf_version') },
+      workflow: readWorkflowRef(row),
       steps,
       attempts,
-      balances: costs.balances,
-      settledByCertainty: costs.settled,
-      attemptsOverran: costs.overran,
+      ...costs,
       pendingApproval: approval === undefined ? null : mapApproval(approval),
       reportArtifactId: report === undefined ? null : new RowReader('artifacts', report).as('id', idSchema('artifact')),
     };
+  };
+
+  /** 3 statements for any number of runs: workflow, progress, costs (each grouped over the ids). */
+  const summariesFor = (runs: readonly RunRow[]): RunSummaryProjection[] => {
+    if (runs.length === 0) return [];
+    const ids = JSON.stringify(runs.map((r) => r.id));
+    const workflows = new Map(driver.prepare(RUNS_WORKFLOW_SQL).all(ids).map((row) => [runIdOf(row), readWorkflowRef(row)]));
+    const progress = new Map(
+      driver.prepare(RUNS_PROGRESS_SQL).all(ids).map((row) => {
+        const p = new RowReader('step_runs', row, 'run_id');
+        return [runIdOf(row), { done: p.int('done'), total: p.int('total') }];
+      }),
+    );
+    const costs = new Map(driver.prepare(RUNS_COSTS_SQL).all(ids).map((row) => [runIdOf(row), readRunCosts(row)]));
+    return runs.map((run) => {
+      const workflow = workflows.get(run.id);
+      invariant(workflow !== undefined, 'every run references a workflow version (FK)');
+      return { run, workflow, stepProgress: progress.get(run.id) ?? { done: 0, total: 0 }, ...(costs.get(run.id) ?? ZERO_COSTS) };
+    });
   };
 
   return {
@@ -162,10 +209,8 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       return row === undefined ? undefined : mapRun(row);
     },
     listActive() {
-      return driver
-        .prepare('SELECT * FROM runs WHERE status IN (SELECT value FROM json_each(?)) ORDER BY created_at, id')
-        .all(JSON.stringify(ACTIVE_STATUSES))
-        .map(mapRun);
+      // Literal IN list (not json_each): the planner then uses the runs_active_idx partial index.
+      return driver.prepare(`SELECT * FROM runs WHERE ${ACTIVE_STATUS_IN} ORDER BY created_at, id`).all().map(mapRun);
     },
     listTerminalWithoutReport() {
       return driver
@@ -236,5 +281,27 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       return driver.prepare('SELECT * FROM run_input_files WHERE run_id = ? ORDER BY rel_path').all(runId).map(mapInputFile);
     },
     getInspectorProjection,
+    listSummaries(q) {
+      const page = list(q);
+      return page.ok ? ok({ items: summariesFor(page.value.items), nextCursor: page.value.nextCursor }) : page;
+    },
+    summariesOf(ids) {
+      if (ids.length === 0) return [];
+      const rows = driver.prepare('SELECT * FROM runs WHERE id IN (SELECT value FROM json_each(?))').all(JSON.stringify(ids)).map(mapRun);
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      return summariesFor(ids.flatMap((id) => byId.get(id) ?? []));
+    },
+    idsForProject(projectId: ProjectId) {
+      return driver
+        .prepare('SELECT id FROM runs WHERE project_id = ? ORDER BY created_at, id')
+        .all(projectId)
+        .map((row) => new RowReader('runs', row).id('id', 'run'));
+    },
+    listPausedFor(projectId, pauseReason) {
+      return driver
+        .prepare("SELECT * FROM runs WHERE project_id = ? AND status = 'paused' AND pause_reason = ? ORDER BY created_at DESC, id DESC")
+        .all(projectId, pauseReason)
+        .map(mapRun);
+    },
   };
 }

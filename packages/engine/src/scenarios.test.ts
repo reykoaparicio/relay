@@ -175,7 +175,7 @@ describe('runs.decideUnknown (§7.5)', () => {
     expect(r.ledger.settledByCertainty(runId).estimated).toBe(a.reservationMicrousd);
     expect(ledgerTypes(r, runId).filter((e) => e.attemptId === a.id).map((e) => e.type)).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown', 'resolve_unknown', 'settle']);
     // The attempt's own view derives certainty from its settle entries: the accepted charge is an estimate.
-    expect(toAttemptView(r, r.attempts.get(a.id), 'review' as StepKey).cost).toEqual({ microusd: a.reservationMicrousd, certainty: 'estimated' });
+    expect(toAttemptView(r.attempts.get(a.id), 'review' as StepKey, r.ledger.listForRun(runId).map((x) => x.entry)).cost).toEqual({ microusd: a.reservationMicrousd, certainty: 'estimated' });
   });
 
   it('rejects a second decision (CONFLICT), an unknown attempt id (NOT_FOUND), and a run that is not waiting on unknowns', async () => {

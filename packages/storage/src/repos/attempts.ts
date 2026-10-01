@@ -91,6 +91,9 @@ export function createAttemptRepo(driver: SqlDriver): AttemptRepo {
     listForRun(runId) {
       return driver.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at, seq').all(runId).map(mapAttempt);
     },
+    countInState(runId, state) {
+      return readInt('attempts', driver.prepare('SELECT COUNT(*) AS n FROM attempts WHERE run_id = ? AND state = ?').get(runId, state), 'n');
+    },
     listUnresolved(runId) {
       return driver
         .prepare(`SELECT * FROM attempts WHERE (?1 IS NULL OR run_id = ?1) AND state IN ${UNRESOLVED} ORDER BY created_at, id`)

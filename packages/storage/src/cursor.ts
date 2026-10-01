@@ -4,7 +4,7 @@ import { err, ok } from '@relay/contracts';
 import type { ListSort } from './types.js';
 
 /** Decoded keyset position. */
-export interface CursorPosition {
+interface CursorPosition {
   readonly createdAt: number;
   readonly id: string;
 }

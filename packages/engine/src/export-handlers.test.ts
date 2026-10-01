@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createTwoFilesPatch } from 'diff';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { EpochMs, LedgerEntryId, RunId } from '@relay/contracts';
+import type { EpochMs, LedgerEntryId, ProjectId, RunId, StepKey } from '@relay/contracts';
 import type { ModelRequest } from '@relay/providers';
-import type { LedgerEntryRow } from '@relay/storage';
+import type { LedgerEntryRow, Repos } from '@relay/storage';
+import { monthWindowOf } from './clock.js';
 import { LEDGER_CSV_HEADER, findSecrets, ledgerCsv } from './export-handlers.js';
 import { REPORT_UNTOUCHED_NOTE, usd6 } from './report.js';
 import { SAMPLE_FILES, createHarness } from './testing/harness.js';
@@ -168,8 +169,8 @@ describe('ledger.exportTo', () => {
   it('formats the exact CSV: header, ISO UTC times, 6-dp USD strings (no floats), RFC 4180 quoting, CRLF', () => {
     const csv = ledgerCsv([
       { entry: entry({ type: 'allowance_set', bucket: 'allowance', deltaMicrousd: 2_000_000 as never, createdAt: 1_700_000_000_000 as EpochMs }), stepKey: null },
-      { entry: entry({ attemptId: 'att_1' as never, type: 'settle', bucket: 'settled', deltaMicrousd: 1 as never, certainty: 'calculated', priceCatalogVersion: '2026-09,x', createdAt: 1_700_000_000_001 as EpochMs }), stepKey: 'review' },
-      { entry: entry({ attemptId: 'att_1' as never, type: 'release', deltaMicrousd: -123_456_789 as never, createdAt: 1_700_000_000_002 as EpochMs }), stepKey: 'review' },
+      { entry: entry({ attemptId: 'att_1' as never, type: 'settle', bucket: 'settled', deltaMicrousd: 1 as never, certainty: 'calculated', priceCatalogVersion: '2026-09,x', createdAt: 1_700_000_000_001 as EpochMs }), stepKey: 'review' as StepKey },
+      { entry: entry({ attemptId: 'att_1' as never, type: 'release', deltaMicrousd: -123_456_789 as never, createdAt: 1_700_000_000_002 as EpochMs }), stepKey: 'review' as StepKey },
     ]);
 
     expect(csv).toBe([
@@ -201,6 +202,67 @@ describe('ledger.exportTo', () => {
     expect(await readFile(byMonth.ok ? byMonth.data.writtenRealpath : '', 'utf8')).toBe(runCsv);
     expect(await readFile(otherMonth.ok ? otherMonth.data.writtenRealpath : '', 'utf8')).toBe(`${LEDGER_CSV_HEADER.join(',')}\r\n`);
     expect(errOf(await x.engine.handle('relay/v1/ledger.exportTo', { runId, destinationRealpath: x.projectRoot }))).toEqual(['PERMISSION_DENIED', 'inside_project']);
+  });
+});
+
+/** The pre-refactor `ledger.exportTo` project-month rows: every run paged, each run's ledger paged, step keys per run, then filtered and sorted. */
+function legacyProjectMonthCsv(r: Repos, projectId: ProjectId, month: string): string {
+  const { start, end } = monthWindowOf(month);
+  const runIds: RunId[] = [];
+  for (let cursor: string | undefined; ;) {
+    const page = r.runs.list({ projectId, limit: 100, sort: 'created_asc', cursor });
+    if (!page.ok) throw new Error(page.error.code);
+    runIds.push(...page.value.items.map((x) => x.id));
+    if (page.value.nextCursor === null) break;
+    cursor = page.value.nextCursor;
+  }
+  const rows = runIds.flatMap((runId) => {
+    const steps = new Map(r.steps.listForRun(runId).map((x) => [x.id as string, x.stepKey]));
+    const stepOf = new Map(r.attempts.listForRun(runId).map((a) => [a.id as string, steps.get(a.stepRunId) ?? ('unknown' as StepKey)]));
+    const entries: LedgerEntryRow[] = [];
+    for (let cursor: string | undefined; ;) {
+      const page = r.ledger.list(runId, { limit: 100, sort: 'created_asc', cursor });
+      if (!page.ok) throw new Error(page.error.code);
+      entries.push(...page.value.items);
+      if (page.value.nextCursor === null) break;
+      cursor = page.value.nextCursor;
+    }
+    return entries.map((entry) => ({ entry, stepKey: entry.attemptId === null ? null : (stepOf.get(entry.attemptId) ?? null) }));
+  }).filter(({ entry }) => entry.createdAt >= start && entry.createdAt < end)
+    .sort((a, b) => a.entry.createdAt - b.entry.createdAt || (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
+  return ledgerCsv(rows);
+}
+
+describe('ledger.exportTo project month: one statement, byte-identical CSV (4)', () => {
+  it('writes exactly the CSV of the old per-run paging: two runs, month edges, same-ms ties across runs, >100 entries in a run', async () => {
+    const x = await harness();
+    const done = await completedRun(x);
+    const queued = await x.startRun({ key: 'second-run-key-0001' });
+    const dest = await tempDir();
+    const month = new Date(x.clock.now()).toISOString().slice(0, 7);
+    const { start, end } = monthWindowOf(month);
+    const attempts = x.db.repos.attempts.listForRun(done);
+    const at = (ms: number) => ms as EpochMs;
+    x.db.tx('immediate', (r) => {
+      for (const [i, a] of attempts.entries()) {
+        // Same created_at across runs (ties break on id), entries just outside the month, and >100 per run (paging).
+        r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: i + 1, runId: done, projectId: x.projectId, attemptId: a.id, createdAt: at(start) }]);
+        r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: -(i + 1), runId: queued, projectId: x.projectId, createdAt: at(start) }]);
+      }
+      r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: 7, runId: done, projectId: x.projectId, createdAt: at(start - 1) }]);
+      r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: 8, runId: queued, projectId: x.projectId, createdAt: at(end) }]);
+      r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: 9, runId: queued, projectId: x.projectId, createdAt: at(end - 1) }]);
+      for (let i = 0; i < 120; i++) {
+        r.ledger.append([{ scope: 'run', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: 1, runId: queued, projectId: x.projectId, createdAt: at(start + 10 + (i % 7)) }]);
+      }
+      r.ledger.append([{ scope: 'setup', type: 'allowance_change', bucket: 'allowance', deltaMicrousd: 5, createdAt: at(start + 1) }]);
+    });
+
+    const res = await x.engine.handle('relay/v1/ledger.exportTo', { projectId: x.projectId, month, destinationRealpath: dest });
+
+    const csv = await readFile(res.ok ? res.data.writtenRealpath : '', 'utf8');
+    expect(csv).toBe(legacyProjectMonthCsv(x.db.repos, x.projectId, month));
+    expect(csv.trimEnd().split('\r\n').length).toBeGreaterThan(130);
   });
 });
 

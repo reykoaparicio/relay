@@ -8,6 +8,7 @@ const PAIRS: readonly (readonly [readonly string[], z.ZodEnum])[] = [
   [status.EFFORT_LEVELS, status.effortSchema],
   [status.RUN_STATUSES, status.runStatusSchema],
   [status.TERMINAL_RUN_STATUSES, status.terminalRunStatusSchema],
+  [status.ACTIVE_RUN_STATUSES, status.activeRunStatusSchema],
   [status.PAUSE_REASONS, status.pauseReasonSchema],
   [status.STEP_STATES, status.stepStateSchema],
   [status.ATTEMPT_STATES, status.attemptStateSchema],

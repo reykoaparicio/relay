@@ -28,7 +28,7 @@ import { isMandatory } from './memory-retrieval.js';
 import type { Logger, MemoryServicePort } from './ports.js';
 
 /** Dependencies of the memory service. */
-export interface MemoryServiceDeps {
+interface MemoryServiceDeps {
   readonly db: Db;
   readonly artifacts: ArtifactStore;
   readonly clock: Clock;
@@ -64,9 +64,9 @@ export function transitionMemory(from: MemoryStatus | null, action: MemoryAction
 }
 
 /** §5.5 user message for the secret guard. */
-export const SECRET_MESSAGE = "Provider credentials and secrets don't belong in memory";
+const SECRET_MESSAGE = "Provider credentials and secrets don't belong in memory";
 /** At most this many suggestions per run (07 G5). */
-export const MAX_SUGGESTIONS_PER_RUN = 3;
+const MAX_SUGGESTIONS_PER_RUN = 3;
 const ALL_ROLES: MemoryRecordScope = { roles: 'all' };
 
 /** Secret guard (§5.5): VALIDATION_FAILED when any text looks like a credential. */
@@ -111,7 +111,7 @@ function getItem(r: Repos, id: MemoryId): Result<MemoryItem> {
 }
 
 /** Applies `action` to the record (CAS on status) and records its event row. */
-export function moveMemory(r: Repos, env: MemoryEnv, item: MemoryItem, action: MemoryAction, detail?: unknown): Result<MemoryStatus> {
+function moveMemory(r: Repos, env: MemoryEnv, item: MemoryItem, action: MemoryAction, detail?: unknown): Result<MemoryStatus> {
   const from = item.record.status;
   const to = transitionMemory(from, action);
   if (to === null) return err(illegal(item, action));
@@ -123,7 +123,7 @@ export function moveMemory(r: Repos, env: MemoryEnv, item: MemoryItem, action: M
 }
 
 /** A new record (create / propose / record_summary). */
-export interface NewRecord {
+interface NewRecord {
   readonly projectId: ProjectId;
   readonly type: MemoryType;
   readonly title: string;
@@ -138,7 +138,7 @@ export interface NewRecord {
 }
 
 /** Inserts a record + revision 1 + its first event. */
-export function insertMemory(r: Repos, env: MemoryEnv, action: 'create' | 'propose' | 'record_summary', rec: NewRecord): MemoryItem {
+function insertMemory(r: Repos, env: MemoryEnv, action: 'create' | 'propose' | 'record_summary', rec: NewRecord): MemoryItem {
   const status = transitionMemory(null, action) ?? 'suggested';
   const item = r.memory.insertRecord(
     { id: env.ids.next('memory'), projectId: rec.projectId, type: rec.type, status, scope: rec.scope, pinned: rec.pinned ?? false,
@@ -230,7 +230,7 @@ export function approveSuggestion(r: Repos, env: MemoryEnv, i: {
 }
 
 /** `memory.update` input (02). */
-export interface UpdateInput {
+interface UpdateInput {
   readonly recordId: MemoryId;
   readonly expectedRevision: number;
   readonly title?: string | undefined;
@@ -466,20 +466,22 @@ async function collectProposals(deps: MemoryServiceDeps, run: RunRow): Promise<P
   const out: Proposal[] = [];
   const reviewStep = latestOutputStep(r, run, 'review.v1');
   const review = reviewStep === undefined ? null : await readOutput(deps, reviewStep, 'review.v1');
-  for (const p of review?.value.memoryProposals ?? []) {
-    out.push({ ...p, artifactId: review?.artifactId ?? ('' as ArtifactId), sourceRefs: review?.value.sourceRefs ?? [] });
+  if (review !== null) {
+    for (const p of review.value.memoryProposals) out.push({ ...p, artifactId: review.artifactId, sourceRefs: review.value.sourceRefs });
   }
   const planStep = latestOutputStep(r, run, 'plan.v1');
   const plan = planStep === undefined ? null : await readOutput(deps, planStep, 'plan.v1');
-  for (const d of plan?.value.decisions ?? []) {
-    out.push({ type: 'project_decision', title: d.title, content: d.content, rationale: 'Recorded by the planner as a lasting project decision.',
-      conflictsWith: [], artifactId: plan?.artifactId ?? ('' as ArtifactId), sourceRefs: plan?.value.sourceRefs ?? [] });
+  if (plan !== null) {
+    for (const d of plan.value.decisions) {
+      out.push({ type: 'project_decision', title: d.title, content: d.content, rationale: 'Recorded by the planner as a lasting project decision.',
+        conflictsWith: [], artifactId: plan.artifactId, sourceRefs: plan.value.sourceRefs });
+    }
   }
   return out;
 }
 
 /** Why {@link chooseProposals} skipped a proposal. */
-export type ProposalSkipReason = 'invalid' | 'secret_detected' | 'duplicate';
+type ProposalSkipReason = 'invalid' | 'secret_detected' | 'duplicate';
 
 /**
  * Keeps valid, secret-free, non-duplicate proposals (≤ 3). Pure. A duplicate has the same title key AND
@@ -523,7 +525,7 @@ function selectProposals(deps: MemoryServiceDeps, run: RunRow, proposals: readon
 async function proposeFromRun(deps: MemoryServiceDeps, runId: RunId): Promise<Result<void>> {
   const r = deps.db.repos;
   const run = r.runs.get(runId);
-  const own = r.memory.list({ projectId: run.projectId }).filter((x) => x.record.sourceRunId === runId && x.record.type !== 'run_summary');
+  const own = r.memory.list({ projectId: run.projectId, sourceRunId: runId }).filter((x) => x.record.type !== 'run_summary');
   if (own.length > 0) return ok(undefined);
   const chosen = selectProposals(deps, run, await collectProposals(deps, run));
   if (chosen.length === 0) return ok(undefined);
@@ -557,7 +559,7 @@ export function runSummaryText(i: { readonly goal: string; readonly verdict: str
 async function recordRunSummary(deps: MemoryServiceDeps, runId: RunId): Promise<Result<void>> {
   const r = deps.db.repos;
   const run = r.runs.get(runId);
-  if (r.memory.list({ projectId: run.projectId, types: ['run_summary'] }).some((x) => x.record.sourceRunId === runId)) return ok(undefined);
+  if (r.memory.list({ projectId: run.projectId, types: ['run_summary'], sourceRunId: runId }).length > 0) return ok(undefined);
   const verdict = latestOutputStep(r, run, 'review.v1')?.outcome ?? null;
   const planStep = latestOutputStep(r, run, 'plan.v1');
   const plan = planStep === undefined ? null : await readOutput(deps, planStep, 'plan.v1');

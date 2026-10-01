@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { RUNNER_CHANNELS } from '@relay/contracts';
 import type { RunnerChannel, StepKey } from '@relay/contracts';
 import { tick } from './runner.js';
-import { createHandlers } from './services.js';
+import { createHandlers } from './handlers.js';
 import { SAMPLE_FILES, createHarness } from './testing/harness.js';
 import type { Harness, HarnessOptions } from './testing/harness.js';
 

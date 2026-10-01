@@ -22,10 +22,10 @@ export function outcomeLabel(value: unknown): string | null {
 }
 
 /** Where the outcome comes from: the live step-7 settle (step `executing`) or F9b reconcile (step `unknown`). */
-export type OutcomeSource = 'live' | 'reconcile';
+type OutcomeSource = 'live' | 'reconcile';
 
 /** Inputs of {@link applyPostValidation}. */
-export interface PostValidationInput {
+interface PostValidationInput {
   readonly source: OutcomeSource;
   readonly stepRunId: StepRow['id'];
   readonly runId: StepRow['runId'];
@@ -106,7 +106,7 @@ export function applyPostValidation(
 }
 
 /** Event payload marker of the audit event a deferred pause appends (`error.recorded { kind }`). */
-export const DEFERRED_PAUSE_MARK = 'deferred_pause';
+const DEFERRED_PAUSE_MARK = 'deferred_pause';
 
 type DeferrableEvent = Extract<RunMachineEvent, { type: 'BUDGET_OVERRUN' | 'APPROVAL_STALE' }>;
 

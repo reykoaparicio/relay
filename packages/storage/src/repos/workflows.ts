@@ -1,7 +1,7 @@
 import type { Result, WorkflowId, WorkflowVersionId } from '@relay/contracts';
 import { err, errors, invariant, ok } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
-import { mapWorkflow, mapWorkflowVersion } from '../mappers.js';
+import { mapWorkflow, mapWorkflowVersion, RowReader } from '../mappers.js';
 import { jsonParam, optionalParams, optionalSetClause, toJson } from '../sql.js';
 import type { WorkflowRepo, WorkflowRow, WorkflowVersionRow } from '../types.js';
 import type { RepoDeps } from './deps.js';
@@ -39,6 +39,20 @@ export function createWorkflowRepo(driver: SqlDriver, deps: RepoDeps): WorkflowR
     },
     listWorkflows() {
       return driver.prepare('SELECT * FROM workflows ORDER BY created_at, id').all().map(mapWorkflow);
+    },
+    listSummaries() {
+      return driver
+        .prepare(
+          `SELECT w.id, w.name,
+             (SELECT MAX(v.version) FROM workflow_versions v WHERE v.workflow_id = w.id AND v.status = 'validated') AS latest_validated,
+             (SELECT v.version FROM workflow_versions v WHERE v.workflow_id = w.id AND v.status = 'draft') AS draft_version
+           FROM workflows w ORDER BY w.created_at, w.id`,
+        )
+        .all()
+        .map((row) => {
+          const r = new RowReader('workflows', row);
+          return { id: r.id('id', 'workflow'), name: r.text('name'), latestValidatedVersion: r.intN('latest_validated'), draftVersion: r.intN('draft_version') };
+        });
     },
     getVersion(workflowId, version) {
       if (version === 'draft') {

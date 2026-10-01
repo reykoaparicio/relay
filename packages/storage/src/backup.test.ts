@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MIGRATIONS } from '../migrations/index.js';
 import { createBackup } from './backup.js';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import type { FixtureDb } from './testing/fixtures.js';
@@ -67,7 +68,7 @@ describe('createBackup', () => {
     expect(existsSync(join(b.dir, 'artifacts', 'run', 'a1'))).toBe(true);
     expect(existsSync(join(b.dir, 'artifacts', 'run', 'purged'))).toBe(false);
     expect(existsSync(join(b.dir, 'secrets'))).toBe(false);
-    expect(JSON.parse(readFileSync(join(b.dir, 'manifest.json'), 'utf8'))).toMatchObject({ schemaVersion: 1, artifactCount: 1 });
+    expect(JSON.parse(readFileSync(join(b.dir, 'manifest.json'), 'utf8'))).toMatchObject({ schemaVersion: MIGRATIONS.length, artifactCount: 1 });
     expect(b.sizeBytes).toBeGreaterThan(5);
     copy.close();
     live.close();
@@ -91,7 +92,7 @@ describe('createBackup', () => {
     const b = await createBackup({ db, userDataDir: userData, clock: f.clock });
 
     expect(late).toBeDefined();
-    expect(b.manifest).toMatchObject({ schemaVersion: 1, artifactCount: 1, sha256s: [inSnapshot.sha256] });
+    expect(b.manifest).toMatchObject({ schemaVersion: MIGRATIONS.length, artifactCount: 1, sha256s: [inSnapshot.sha256] });
     expect(existsSync(join(b.dir, 'artifacts', 'run', 'in-snapshot'))).toBe(true);
     expect(existsSync(join(b.dir, 'artifacts', 'run', 'late-x'))).toBe(false);
   });

@@ -7,6 +7,8 @@ import type { AppError, ApprovalDecision, ApprovalId, ApprovalView, ProviderId, 
 import type { ApprovalRow, Repos } from '@relay/storage';
 import { inputDrift, projectChangedError } from './approval-binding.js';
 import { requestHash } from './hash.js';
+import type { IdempotentRequest } from './idempotency.js';
+import { recordResult, storedResult } from './idempotency.js';
 import type { EngineCtx } from './ports.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -15,7 +17,7 @@ import { applyStepEvent, skipOpenSteps } from './step-machine.js';
 import { planStepKeyOf } from './steps/approval.js';
 
 /** Parsed `approvals.decide` input. */
-export interface DecideInput {
+interface DecideInput {
   readonly idempotencyKey: string;
   readonly approvalId: ApprovalId;
   readonly planHash: Sha256;
@@ -25,7 +27,7 @@ export interface DecideInput {
 }
 
 /** `approvals.decide` output. */
-export interface DecideOutput {
+interface DecideOutput {
   readonly approval: ApprovalView;
   readonly runStatus: RunStatus;
 }
@@ -73,10 +75,9 @@ async function checkInputsUnchanged(ctx: EngineCtx, a: ApprovalRow): Promise<App
   return drift.changed.length === 0 ? null : projectChangedError(drift);
 }
 
-function replay(ctx: EngineCtx, input: DecideInput): Result<DecideOutput> | null {
-  const stored = ctx.db.repos.idempotency.get(OP, input.idempotencyKey);
-  if (stored === undefined) return null;
-  if (stored.requestHash !== requestHash({ ...input })) return err(errors.conflict({ reason: 'idempotency_key_reused', op: OP }));
+function replay(ctx: EngineCtx, req: IdempotentRequest, input: DecideInput): Result<DecideOutput> | null {
+  const stored = storedResult(ctx.db.repos, req);
+  if (stored === null || !stored.ok) return stored;
   const a = ctx.db.repos.approvals.get(input.approvalId);
   if (a === undefined) return err(errors.notFound('approval'));
   return ok({ approval: toApprovalView(a), runStatus: ctx.db.repos.runs.get(a.runId).status });
@@ -117,8 +118,9 @@ function applyDecision(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, a: Appr
 
 /** `approvals.decide`. */
 export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promise<Result<DecideOutput>> {
-  const replayed = replay(ctx, input);
-  if (replayed !== null) return replayed; // 1. idempotency lookup first, before any hashing
+  const req: IdempotentRequest = { op: OP, key: input.idempotencyKey, hash: requestHash({ ...input }) };
+  const replayed = replay(ctx, req, input);
+  if (replayed !== null) return replayed; // 1. idempotency lookup first, before any plan/file hashing
   const a = ctx.db.repos.approvals.get(input.approvalId);
   if (a === undefined) return err(errors.notFound('approval'));
   if (a.decision !== null) return err(errors.conflict({ reason: 'already_decided' }));
@@ -148,8 +150,7 @@ export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promis
     applyDecision(r, fx, ctx, a, input);
     appendRunEvent(r, fx, a.runId, 'approval.decided', { approvalId: a.id, stepRunId: a.stepRunId, decision: input.decision });
     const status = r.runs.get(a.runId).status;
-    const stored = r.idempotency.put(OP, input.idempotencyKey, requestHash({ ...input }), { ids: { approvalId: a.id }, status });
-    if (!stored.ok) throw new Error('idempotency put failed after a fresh lookup'); // unreachable within one writer
+    recordResult(r, req, { ids: { approvalId: a.id }, status }); // unreachable conflict within one writer
     const row = r.approvals.get(a.id);
     return ok({ approval: toApprovalView(row ?? a), runStatus: status });
   });

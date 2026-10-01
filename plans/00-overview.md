@@ -297,7 +297,7 @@ ADRs 001–010 are copied from spec §24.1. New ADRs:
 | 07 Context/Memory/Templates | done | fixed BH-1..8 | |
 | 08 Desktop host | done (H1–H10) | security audit clean; hardening/preload/handler/logger tests added | hardenedRuntime off until a Developer ID exists (accepted risk); GrantFileProtocolExtraPrivileges stays on (file:// renderer) |
 | 09 Design system | done | fixed B1–B13 | ConflictCompare slots, ConfirmDialog secondary action, date input |
-| 10 Renderer | done (J1–J10) | fixed J9/J10 B1–B14; dead stub UI removed | `editable.limits` always true; full third-party license list not bundled |
+| 10 Renderer | done (J1–J10) | fixed J9/J10 B1–B14; dead stub UI removed | `editable.limits` always true: by design (§5.3; `P0_EDITABLE` in engine `workflows.ts`, enforced by `applyDraftPatch`); full third-party license list not bundled |
 | 11 Integration | done (27 suites) | – | |
 | 12 E2E | done (36) | – | |
 | 13 Release/Demo/Eval | done (M1–M5) | packaging fix (no node_modules in asar); demo scratch-dir guard fix | founder: spending cap, baseline choice, demo launch mode, live-labelled prepared runs |

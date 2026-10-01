@@ -39,9 +39,9 @@ describe('runs.start (F15)', () => {
     const run = r.runs.get(first.data.runId);
     const snap = snapshotOf(run);
     expect(Object.keys(snap.steps)).toEqual(['intake', 'review', 'plan', 'approve', 'implement', 'verify', 'finalize']);
-    expect(snap.steps['review']?.dependsOn).toEqual(['intake']);
-    expect(snap.steps['finalize']?.dependsOn).toEqual(['verify']);
-    const review = snap.steps['review'];
+    expect(snap.steps['review' as StepKey]?.dependsOn).toEqual(['intake']);
+    expect(snap.steps['finalize' as StepKey]?.dependsOn).toEqual(['verify']);
+    const review = snap.steps['review' as StepKey];
     expect(review?.kind === 'model' && [review.profile.name, review.profile.modelId, review.maxOutputTokens, review.profile.priceCatalogVersion])
       .toEqual(['Economy', 'claude-haiku-4-5', 8_000, '2026-09-25']);
     expect(r.steps.listForRun(run.id).map((s) => [s.stepKey, s.ordinal, s.state])).toEqual([

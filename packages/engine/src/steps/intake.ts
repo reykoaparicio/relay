@@ -2,7 +2,7 @@
 // `run_input_files` (each row carries its artifact id), snapshot memory, and set `runs.context_hash`. A diff-input run
 // (05 E5, ADR-015) snapshots the CURRENT project files its imported diff references, read through the same confined
 // pipeline (the diff's paths are re-checked against the project's exclusions first).
-import { INPUT_CAPS, err, errors, ok } from '@relay/contracts';
+import { ok } from '@relay/contracts';
 import type { AppError, ArtifactId, EpochMs, ProjectId, Result, RunId, Sha256, StepRunId } from '@relay/contracts';
 import type { Repos, RunInputFile, RunRow } from '@relay/storage';
 import type { InputFileRef, SelectedFile } from '@relay/tools';
@@ -11,6 +11,7 @@ import type { EngineCtx } from '../ports.js';
 import { appendRunEvent } from '../run-machine.js';
 import { snapshotOf } from '../snapshot.js';
 import { applyStepEvent } from '../step-machine.js';
+import { readInputDiff } from './input-diff.js';
 import { blockRun, commitIfReady, setupBlocked } from './local.js';
 
 /** One selected file read at intake (or re-snapshot) and its `input_file` snapshot artifact. */
@@ -51,11 +52,9 @@ export async function snapshotSelectedFiles(ctx: EngineCtx, runId: RunId, relPat
  * exist and are readable now are returned (added files have no current content; deleted ones are gone).
  */
 export async function diffReferencedPaths(ctx: EngineCtx, projectId: ProjectId, diffArtifactId: ArtifactId): Promise<Result<string[]>> {
-  const row = ctx.db.repos.artifacts.get(diffArtifactId);
-  if (row?.kind !== 'input_diff' || row.projectId !== projectId || row.sizeBytes > INPUT_CAPS.maxDiffBytes) return err(errors.notFound('input_diff'));
-  const bytes = await ctx.artifacts.read(row.relPath, INPUT_CAPS.maxDiffBytes);
-  if (!bytes.ok) return bytes;
-  const diff = ctx.projectFs.parseDiff(new TextDecoder('utf-8').decode(bytes.value));
+  const stored = await readInputDiff(ctx, projectId, diffArtifactId);
+  if (!stored.ok) return stored;
+  const diff = ctx.projectFs.parseDiff(stored.value.text);
   if (!diff.ok) return diff;
   const project = ctx.db.repos.projects.getWithRoot(projectId);
   const root = await ctx.projectFs.openRoot(project.rootRealpath);

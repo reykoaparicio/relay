@@ -1,5 +1,6 @@
 // Small helpers for static, parameterized SQL (00b §4). Column names passed here are compile-time constants of the
 // repositories, never user or model text.
+import { ACTIVE_RUN_STATUSES, invariant } from '@relay/contracts';
 import type { SqlParam } from './driver.js';
 import type { ListSort } from './types.js';
 
@@ -37,3 +38,16 @@ export const KEYSET: Record<ListSort, { readonly after: string; readonly order: 
   created_desc: { after: '(created_at, id) < (?, ?)', order: 'ORDER BY created_at DESC, id DESC' },
   created_asc: { after: '(created_at, id) > (?, ?)', order: 'ORDER BY created_at ASC, id ASC' },
 };
+
+/**
+ * A SQL literal list (`'a', 'b'`) of compile-time enum constants (never user or model text; each value is asserted to
+ * be a lowercase identifier). Used where a literal `IN (…)` is needed so the planner can match a partial index, which
+ * a bound `json_each(?)` list cannot do.
+ */
+function sqlLiteralList(values: readonly string[]): string {
+  for (const v of values) invariant(/^[a-z_]+$/.test(v), `not an enum constant: ${v}`);
+  return values.map((v) => `'${v}'`).join(', ');
+}
+
+/** `status IN (…active…)`, term-for-term the `runs_active_idx` partial index WHERE (03 C3), so that index is used. */
+export const ACTIVE_STATUS_IN = `status IN (${sqlLiteralList(ACTIVE_RUN_STATUSES)})`;

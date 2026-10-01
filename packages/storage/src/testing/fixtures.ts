@@ -149,7 +149,7 @@ export function newId<P extends IdPrefixKey>(p: P): IdOf<P> {
   return ID_GEN.next(p);
 }
 
-export function seedWorkflowVersion(db: Db, clock: Clock): WorkflowVersionId {
+function seedWorkflowVersion(db: Db, clock: Clock): WorkflowVersionId {
   const wf = db.repos.workflows.ensureWorkflow('review-propose-fix', 'Review');
   const existing = db.repos.workflows.getVersion(wf.id, 1);
   if (existing !== undefined) {

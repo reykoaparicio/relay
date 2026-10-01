@@ -66,7 +66,7 @@ export function renderDiffBlock(d: { readonly artifactId: string; readonly text:
 }
 
 /** One approved memory record rendered as a project rule. */
-export interface RuleBlockInput {
+interface RuleBlockInput {
   readonly id: string;
   readonly revision: number;
   readonly type: string;

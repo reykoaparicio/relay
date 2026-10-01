@@ -33,7 +33,7 @@ export const STEP_EVENTS = [
 export type StepEvent = (typeof STEP_EVENTS)[number];
 
 /** Terminal step states are immutable; a retry is always a new row (R4-20). */
-export const TERMINAL_STEP_STATES: readonly StepState[] = ['succeeded', 'failed', 'skipped'];
+const TERMINAL_STEP_STATES: readonly StepState[] = ['succeeded', 'failed', 'skipped'];
 
 /** True for succeeded / failed / skipped. */
 export function isTerminalStep(s: StepState): boolean {

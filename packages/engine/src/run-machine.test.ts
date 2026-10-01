@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { PAUSE_REASONS, RUN_STATUSES, errors } from '@relay/contracts';
+import { PAUSE_REASONS, RUN_STATUSES, errors, isTerminalRunStatus } from '@relay/contracts';
 import type { ApprovalId, AttemptId, PauseReason, RunStatus } from '@relay/contracts';
 import type { PostCommitEffect, RunMachineEvent, RunMachineEventType } from './run-machine.js';
-import { allowedRunActions, applyRunEvent, isTerminal, runEffects, transitionRun } from './run-machine.js';
+import { allowedRunActions, applyRunEvent, runEffects, transitionRun } from './run-machine.js';
 import { createHarness } from './testing/harness.js';
 import type { Harness } from './testing/harness.js';
 
@@ -136,7 +136,7 @@ describe('transitionRun (F2 table)', () => {
   });
 
   it('treats completed/incomplete/cancelled/failed as terminal', () => {
-    expect(RUN_STATUSES.filter(isTerminal)).toEqual(['cancelled', 'completed', 'incomplete', 'failed']);
+    expect(RUN_STATUSES.filter(isTerminalRunStatus)).toEqual(['cancelled', 'completed', 'incomplete', 'failed']);
   });
 });
 
