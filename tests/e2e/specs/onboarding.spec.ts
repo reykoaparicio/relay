@@ -40,9 +40,8 @@ test.describe('onboarding', { tag: '@m1' }, () => {
     await expect(page.getByRole('textbox', { name: 'Project name' })).toHaveValue(project.name);
     await ob.continue('Create project and continue');
 
-    // Project rule (memory.create may still be stubbed in M1: then the graceful notice is asserted and skipped).
-    const rule = await ob.addRule('Preserve the existing public response format');
-    test.info().annotations.push({ type: 'project-rule', description: rule });
+    // Project rule (memory.create).
+    await ob.addRule('Preserve the existing public response format');
 
     await ob.expectStep('Choose a workflow template');
     await expect(page.getByRole('radio', { name: /Review and propose a fix · v1/ })).toBeChecked();
@@ -60,7 +59,7 @@ test.describe('onboarding', { tag: '@m1' }, () => {
     await expect(review.getByRole('listitem').filter({ hasText: /^Anthropic:/ })).toBeVisible();
     await ob.startButton().click();
 
-    // Lands on the run inspector (a placeholder in M1).
+    // Lands on the run inspector.
     await new RunInspector(page).expectLoaded();
     await expect(page).toHaveURL(/#\/p\/prj_[^/]+\/runs\/run_[^/]+$/);
 

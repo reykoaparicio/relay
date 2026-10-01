@@ -5,13 +5,15 @@ import type { ReactNode } from 'react';
 import { addMicrousd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
 import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
-import { PROVIDER_LABELS, statusPresentation } from '../../lib/format';
+import { formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
 import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
 import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
 import type { IncompleteCause } from '../run-inspector/inspector-model';
 
 type ReportStep = ReportV1['steps'][number];
+type ReportApproval = NonNullable<ReportV1['approvals']>[number];
+type ReportRevisions = NonNullable<ReportV1['revisions']>;
 
 function Section({ title, children, aside }: { readonly title: string; readonly children: ReactNode; readonly aside?: ReactNode }) {
   const id = useId();
@@ -76,7 +78,10 @@ const INCOMPLETE_NOTE: Readonly<Record<IncompleteCause, string>> = {
 
 export function SummarySection({ report, run }: { readonly report: ReportV1; readonly run: RunDetail | undefined }) {
   const verdict = VERDICT_TEXT[report.status];
-  const cause = report.status === 'incomplete' && run !== undefined ? incompleteCauseOf(run) : null;
+  const cause =
+    report.status !== 'incomplete'
+      ? null
+      : ((run === undefined ? null : incompleteCauseOf(run)) ?? report.revisions?.incompleteCause ?? null);
   const verdictTitle =
     report.status === 'completed' && report.verdict !== 'accept'
       ? 'Completed'
@@ -110,15 +115,6 @@ export function SummarySection({ report, run }: { readonly report: ReportV1; rea
           },
           { id: 'profiles', term: 'Profiles used', value: profilesUsed(report.steps) },
           { id: 'providers', term: 'Providers', value: providersUsed(report.steps) },
-          ...(run === undefined
-            ? []
-            : [
-                {
-                  id: 'revisions',
-                  term: 'Revisions',
-                  value: `${String(run.revisionCycle)} of ${String(run.limits.maxRevisionCycles)} revision cycles`,
-                },
-              ]),
           ...(report.snapshotUsed
             ? [{ id: 'snapshot', term: 'Snapshot', value: 'The preserved snapshot was used; files changed after it are not reflected.' }]
             : []),
@@ -175,6 +171,106 @@ export function FindingsSection({ findings, error, hasFindings }: { readonly fin
   return (
     <Section title="Findings" aside={findings === undefined ? undefined : <span className="subtle">{findings.findings.length} findings</span>}>
       {body}
+    </Section>
+  );
+}
+
+const NOT_RECORDED = 'Not recorded in this report.';
+
+const DECISION_TEXT: Readonly<Record<NonNullable<ReportApproval['decision']>, string>> = {
+  approved: 'approved',
+  revision_requested: 'revision requested',
+  rejected: 'rejected',
+};
+
+/** Why an approval stopped binding (contracts APPROVAL_STALE_REASONS, 06 F17). */
+const INVALIDATED_TEXT: Readonly<Record<NonNullable<ReportApproval['invalidatedReason']>, string>> = {
+  plan_changed: 'plan changed',
+  scope_changed: 'file scope changed',
+  project_changed: 'project files changed',
+  provider_changed: 'providers changed',
+};
+
+function Timestamp({ epochMs }: { readonly epochMs: number }) {
+  return <time dateTime={toIsoString(epochMs)}>{formatAbsoluteTime(epochMs)}</time>;
+}
+
+/**
+ * Every approval the run opened, oldest first (`report.v1.approvals`, optional: reports from before wave 4 lack it).
+ * The note is the user's own text, rendered as plain text.
+ */
+export function ApprovalsSection({ report }: { readonly report: ReportV1 }) {
+  const approvals = report.approvals;
+  let body: ReactNode;
+  if (approvals === undefined) body = <p className="subtle">{NOT_RECORDED}</p>;
+  else if (approvals.length === 0) body = <p className="subtle">No approval was requested.</p>;
+  else {
+    body = (
+      <ul className="list">
+        {approvals.map((a) => (
+          <li key={a.approvalId} className="list-item" style={{ cursor: 'default' }} data-testid="report-approval">
+            <span className="row">
+              <span className="title">
+                {stepTitle(a)}: {a.decision === null ? 'not decided' : DECISION_TEXT[a.decision]}
+              </span>
+              {a.invalidatedReason === null ? null : (
+                <span className="badge warning">invalidated: {INVALIDATED_TEXT[a.invalidatedReason]}</span>
+              )}
+            </span>
+            <span className="meta">
+              {a.decidedAt === null ? (
+                <>
+                  Opened <Timestamp epochMs={a.createdAt} />; no decision recorded
+                </>
+              ) : (
+                <>
+                  Decided <Timestamp epochMs={a.decidedAt} />
+                </>
+              )}{' '}
+              · plan <Hash value={a.planHash} label={`plan hash of the ${stepTitle(a)} approval`} />
+            </span>
+            {a.note === null || a.note === '' ? null : (
+              <p className="small" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+                Note: {a.note}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <Section title="Approvals">{body}</Section>;
+}
+
+const INCOMPLETE_CAUSE_TEXT: Readonly<Record<NonNullable<ReportRevisions['incompleteCause']>, string>> = {
+  revision_limit: 'Revision limit reached: the reviewer still requested changes.',
+  verifier_incomplete: 'The workflow reviewer marked the result incomplete.',
+};
+
+/** Quality revision cycles vs the run limit, plan revisions, and why an incomplete run ended (`report.v1.revisions`). */
+export function RevisionsSection({ report }: { readonly report: ReportV1 }) {
+  const r = report.revisions;
+  return (
+    <Section title="Revisions">
+      {r === undefined ? (
+        <p className="subtle">{NOT_RECORDED}</p>
+      ) : (
+        <KeyValueList
+          items={[
+            { id: 'cycles', term: 'Quality revision cycles', value: `${String(r.cycles)} of ${String(r.maxCycles)}` },
+            { id: 'plans', term: 'Plan revisions', value: String(r.planRevisions) },
+            ...(report.status === 'incomplete'
+              ? [
+                  {
+                    id: 'cause',
+                    term: 'Why the run is incomplete',
+                    value: r.incompleteCause === null ? 'Not recorded' : INCOMPLETE_CAUSE_TEXT[r.incompleteCause],
+                  },
+                ]
+              : []),
+          ]}
+        />
+      )}
     </Section>
   );
 }

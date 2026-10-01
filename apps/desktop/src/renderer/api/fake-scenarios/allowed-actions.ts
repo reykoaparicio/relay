@@ -27,7 +27,8 @@ function pausedActions(reason: PauseReason, ctx: AllowedActionsContext): RunActi
       return ['resume', 'choose_profile', 'stop'];
     case 'unknown_outcome':
       if (ctx.unknownAttempts > 0) return ['decide_unknown', 'stop'];
-      return ctx.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['stop'];
+      // Every unknown is decided: retry / re-profile a failed step, else resume (06 F2: every pause has a way out).
+      return ctx.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['resume', 'stop'];
     case 'auth_required':
       return ['reconnect_provider', 'resume', 'stop'];
     case 'user':
@@ -44,6 +45,11 @@ export function allowedRunActions(
   pauseReason: PauseReason | null,
   ctx: AllowedActionsContext,
 ): RunAction[] {
+  // An unresolved unknown attempt is decidable from any pause (06 F2 clarification 15).
+  if (status === 'paused' && ctx.unknownAttempts > 0) {
+    const base = pauseReason === null ? (['stop'] as RunAction[]) : pausedActions(pauseReason, ctx);
+    return base.includes('decide_unknown') ? base : [...base.filter((a) => a !== 'stop'), 'decide_unknown', 'stop'];
+  }
   switch (status) {
     case 'queued':
       return ['cancel'];
@@ -52,7 +58,7 @@ export function allowedRunActions(
     case 'awaiting_approval':
       return ['approve', 'request_revision', 'reject', 'cancel'];
     case 'paused':
-      return pauseReason === null ? ['resume', 'stop'] : pausedActions(pauseReason, ctx);
+      return pauseReason === null ? ['stop'] : pausedActions(pauseReason, ctx);
     case 'interrupted':
       return ctx.unknownAttempts > 0 ? ['review_recovery', 'decide_unknown', 'stop'] : ['review_recovery', 'stop'];
     case 'cancelling':

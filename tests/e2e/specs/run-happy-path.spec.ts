@@ -15,14 +15,9 @@ const DURATION = /^\d[\d.,]*\s?(ms|s|min)\b/;
 
 /**
  * Exported files: exactly a Markdown report (with "Limitations") and a .patch, neither containing the provider key
- * or the project's .env value. While `artifacts.exportTo` is still stubbed (outcome 'not_available'), nothing may be
- * written at all.
+ * or the project's .env value.
  */
-async function expectExportedFiles(outcome: 'exported' | 'not_available', exportDir: string): Promise<void> {
-  if (outcome === 'not_available') {
-    expect(await readdir(exportDir)).toEqual([]);
-    return;
-  }
+async function expectExportedFiles(exportDir: string): Promise<void> {
   await expect.poll(async () => (await readdir(exportDir)).length).toBe(2);
   const files = (await readdir(exportDir)).sort();
   expect(files.filter((f) => f.endsWith('.md'))).toHaveLength(1);
@@ -31,7 +26,11 @@ async function expectExportedFiles(outcome: 'exported' | 'not_available', export
     const body = await readFile(path.join(exportDir, f), 'utf8');
     expect(body, f).not.toContain(FAKE_ANTHROPIC_KEY);
     expect(body, f).not.toContain(SECRET_VALUE);
-    if (f.endsWith('.md')) expect(body, f).toContain('Limitations');
+    if (f.endsWith('.md')) {
+      expect(body, f).toContain('Limitations');
+      expect(body, f).toContain('## Approvals');
+      expect(body, f).toContain('## Revisions');
+    }
   }
 }
 
@@ -95,13 +94,20 @@ test.describe('run happy path', { tag: '@m2' }, () => {
     await report.expectLoaded();
     await report.expectNotModifiedBanner();
     await expect(report.limitations()).toBeVisible();
+    // report.v1 approvals / revisions (06 F17): the one plan approval, decided "approved"; no revision cycle used.
+    await expect(report.approvals()).toHaveCount(1);
+    await expect(report.approvals().first()).toContainText('Approve plan: approved');
+    await expect(report.approvals().first()).toContainText(/Decided /);
+    await expect(report.approvals().first()).not.toContainText('invalidated:');
+    await expect(report.revisionsValue('Quality revision cycles')).toHaveText(/^0 of \d+$/);
+    await expect(report.revisionsValue('Plan revisions')).toHaveText('0');
+    await expect(report.revisions().getByText('Why the run is incomplete')).toHaveCount(0);
 
     const exportDir = await makeTempDir('export-');
     try {
       await stubDialogs({ exportDir });
-      const outcome = await report.exportBoth();
-      testInfo.annotations.push({ type: 'artifacts.export', description: outcome });
-      await expectExportedFiles(outcome, exportDir);
+      await report.exportBoth();
+      await expectExportedFiles(exportDir);
     } finally {
       await safeRemove(exportDir);
     }

@@ -114,6 +114,8 @@ export interface FakeWorld {
   importDiffWarnings: string[];
   /** Providers whose `providers.test` fails with AUTH_REQUIRED. */
   authFailing: Set<string>;
+  /** `memory.purgeProjectHistory`: how many files fail to purge (reported as `failed`, retried by the next sweep). */
+  purgeFailures: number;
   /** idempotencyKey → first result (02 §B0: a replay returns the first result). */
   idempotency: Map<string, unknown>;
   /** Next id number for created entities. */
@@ -480,6 +482,20 @@ export interface RunSpec {
   readonly streaming?: boolean;
   readonly revisionCycle?: number;
   readonly limits?: { readonly maxAttempts?: number; readonly executionTimeoutSeconds?: number };
+  /** Paused straight from `queued` (06 F13 runChecks): never started, no attempt, nothing reserved. */
+  readonly neverStarted?: boolean;
+  /**
+   * `report.v1` approvals / revisions of a terminal run: `'legacy'` = a report generated before wave 4 (both absent);
+   * otherwise overrides of the derived defaults.
+   */
+  readonly report?: 'legacy' | { readonly approvals?: readonly ReportApprovalSpec[]; readonly revisions?: In<typeof reportV1Schema>['revisions'] };
+}
+
+/** One `report.v1.approvals[]` entry of a fake report (ids, hashes and times are derived). */
+export interface ReportApprovalSpec {
+  readonly decision: 'approved' | 'revision_requested' | 'rejected' | null;
+  readonly note?: string | null;
+  readonly invalidatedReason?: 'plan_changed' | 'scope_changed' | 'project_changed' | 'provider_changed' | null;
 }
 
 /** Every entity a run owns, ready to be merged into the world. */
@@ -576,11 +592,49 @@ const STEP_OUTPUT: Partial<Record<StepKeyName, { schemaId: string; kind: Artifac
 
 const TERMINAL: readonly RunStatus[] = ['completed', 'incomplete', 'cancelled', 'failed'];
 
+/**
+ * `report.v1.approvals` / `revisions` of a terminal run (06 F17). Defaults: one approval of the plan when it was
+ * proposed (approved when the approval step succeeded, rejected when it was skipped, else not decided), and the run's
+ * revision cycle with the incomplete cause of its status detail.
+ */
+function reportRecord(spec: RunSpec, createdAt: number, planArtifactId: string | null, approveState: StepState | undefined) {
+  if (spec.report === 'legacy') return {};
+  const custom = spec.report;
+  const derived: ReportApprovalSpec[] =
+    planArtifactId === null || approveState === undefined || approveState === 'pending'
+      ? []
+      : [{ decision: approveState === 'succeeded' ? 'approved' : approveState === 'skipped' ? 'rejected' : null }];
+  const list = custom?.approvals ?? derived;
+  const approvals = planArtifactId === null ? [] : list.map((a, i) => {
+    const opened = createdAt + 60_000 + i * 10 * MINUTE;
+    return {
+      approvalId: sid('approval', spec.n * 10 + i),
+      stepKey: 'approve',
+      planArtifactId,
+      planHash: sha(`6f4a${String(i)}`),
+      decision: a.decision,
+      decidedAt: a.decision === null ? null : opened + 2 * MINUTE,
+      note: a.note ?? null,
+      invalidatedReason: a.invalidatedReason ?? null,
+      createdAt: opened,
+    };
+  });
+  const cause = spec.statusDetail?.details?.['incompleteCause'];
+  const revisions = custom?.revisions ?? {
+    cycles: spec.revisionCycle ?? 0,
+    maxCycles: 2,
+    planRevisions: Math.max(0, approvals.length - 1),
+    incompleteCause:
+      spec.status === 'incomplete' && (cause === 'revision_limit' || cause === 'verifier_incomplete') ? cause : null,
+  };
+  return { approvals, revisions };
+}
+
 /** Builds a run and everything it owns from a {@link RunSpec}. */
 export function buildRun(now: number, spec: RunSpec): BuiltRun {
   const runId = sid('run', spec.n);
   const createdAt = now - spec.agoMs;
-  const startedAt = spec.status === 'queued' ? null : createdAt + 2_000;
+  const startedAt = spec.status === 'queued' || spec.neverStarted === true ? null : createdAt + 2_000;
   const endedAt = TERMINAL.includes(spec.status) && startedAt !== null ? startedAt + spec.durationMs : null;
   const artifacts: Array<[string, StoredArtifact]> = [];
   const stepDetails: StepDetail[] = [];
@@ -726,6 +780,7 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
       limitations: ['Relay proposed a patch. It was not applied to your project.'],
       snapshotUsed: false,
       generatedAt: endedAt ?? now,
+      ...reportRecord(spec, createdAt, planArtifact?.[0] ?? null, approvalStep?.state),
     });
     artifacts.push([reportArtifactId, artifact(reportArtifactId, runId, null, 'report', 'report.v1', endedAt ?? now, report)]);
   }
@@ -927,6 +982,8 @@ export interface WorldOptions {
   readonly workflowIssues?: readonly ValidationIssue[];
   /** Providers whose last connection test failed with AUTH_REQUIRED. */
   readonly authFailed?: readonly ('anthropic' | 'openai')[];
+  /** Providers with no stored key (disconnected), e.g. a run that pauses auth_required at queued. */
+  readonly disconnected?: readonly ('anthropic' | 'openai')[];
   readonly secureStorage?: boolean;
   readonly preflightBlocked?: boolean;
   readonly projectAllowance?: number | null;
@@ -944,7 +1001,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
   const authFailed = new Set<string>(o.authFailed ?? []);
   const fresh = o.fresh ?? false;
   const provider = (providerId: 'anthropic' | 'openai' | 'gemini', displayName: string, connectedLabel: string | null) => {
-    const label = fresh ? null : connectedLabel;
+    const label = fresh || (o.disconnected ?? []).some((d) => d === providerId) ? null : connectedLabel;
     return providerStatusSchema.parse({
       providerId,
       displayName,
@@ -1037,6 +1094,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     dialogCancels: new Set(),
     importDiffWarnings: [],
     authFailing: authFailed,
+    purgeFailures: 0,
     idempotency: new Map(),
     nextId: 5_000,
     now: () => now,

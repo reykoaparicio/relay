@@ -158,12 +158,73 @@ describe('ReportPage', () => {
       ...run,
       statusDetail: details === null ? null : { ...appError('LIMIT_REACHED'), details },
     };
+    // Keep the report's own record consistent with the run (report.v1 `revisions.incompleteCause`).
+    const stored = run.reportArtifactId === null ? undefined : bridge.world.artifacts.get(run.reportArtifactId);
+    if (stored?.content.kind === 'json') {
+      const value = stored.content.value as { revisions?: { incompleteCause: unknown } };
+      if (value.revisions !== undefined) value.revisions = { ...value.revisions, incompleteCause: details?.incompleteCause ?? null };
+    }
     renderApp(`${P}/runs/${run.id}/report`, { bridge });
     await ready();
     const alert = screen.getAllByText(lead).find((el) => el.tagName === 'STRONG');
     expect(alert).toBeDefined();
     expect(screen.getByText(note)).toBeInTheDocument();
     if (details?.incompleteCause !== 'revision_limit') expect(screen.queryByText(/revision limit reached/i)).not.toBeInTheDocument();
+  });
+
+  it('approvals and revisions from report.v1: decision, decided time, plain-text note, invalidated badge', async () => {
+    open('incomplete-report');
+    await ready();
+    const approvals = screen.getByRole('region', { name: 'Approvals' });
+    const items = within(approvals).getAllByTestId('report-approval');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent('Approve plan: revision requested');
+    expect(within(items[0] as HTMLElement).getByText('invalidated: plan changed')).toBeInTheDocument();
+    // The note is the user's text, shown as plain text (never parsed as markup).
+    expect(within(items[0] as HTMLElement).getByText('Note: Keep the 422 body shape <b>unchanged</b>.')).toBeInTheDocument();
+    expect(approvals.querySelector('b')).toBeNull();
+    expect(within(items[0] as HTMLElement).getByText(/^Decided/).querySelector('time')).toHaveAttribute('datetime');
+    expect(items[1]).toHaveTextContent('Approve plan: approved');
+    expect(within(items[1] as HTMLElement).queryByText(/^invalidated:/)).not.toBeInTheDocument();
+
+    const revisions = screen.getByRole('region', { name: 'Revisions' });
+    expect(within(revisions).getByText('Quality revision cycles')).toBeInTheDocument();
+    expect(within(revisions).getByText('2 of 2')).toBeInTheDocument();
+    expect(within(revisions).getByText('Plan revisions')).toBeInTheDocument();
+    expect(within(revisions).getByText('1')).toBeInTheDocument();
+    expect(within(revisions).getByText('Revision limit reached: the reviewer still requested changes.')).toBeInTheDocument();
+  });
+
+  it('a completed run lists its approval as approved and no incomplete cause', async () => {
+    open('completed');
+    await ready();
+    const approvals = screen.getByRole('region', { name: 'Approvals' });
+    expect(within(approvals).getByTestId('report-approval')).toHaveTextContent('Approve plan: approved');
+    const revisions = screen.getByRole('region', { name: 'Revisions' });
+    expect(within(revisions).getByText('0 of 2')).toBeInTheDocument();
+    expect(within(revisions).queryByText('Why the run is incomplete')).not.toBeInTheDocument();
+  });
+
+  it('an undecided approval says "not decided" with the time it was opened', async () => {
+    const bridge = createFakeBridge('cancelled');
+    const run = bridge.world.runs[0];
+    if (run?.reportArtifactId == null) throw new Error('no report');
+    const stored = bridge.world.artifacts.get(run.reportArtifactId);
+    if (stored?.content.kind !== 'json') throw new Error('no report json');
+    const value = stored.content.value as { approvals: Array<Record<string, unknown>> };
+    value.approvals = value.approvals.map((a) => ({ ...a, decision: null, decidedAt: null }));
+    renderApp(`${P}/runs/${run.id}/report`, { bridge });
+    await ready();
+    const item = within(screen.getByRole('region', { name: 'Approvals' })).getByTestId('report-approval');
+    expect(item).toHaveTextContent('Approve plan: not decided');
+    expect(item).toHaveTextContent(/Opened .+; no decision recorded/);
+  });
+
+  it('an older report without approvals or revisions says so in both sections', async () => {
+    open('report-legacy');
+    await ready();
+    expect(within(screen.getByRole('region', { name: 'Approvals' })).getByText('Not recorded in this report.')).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Revisions' })).getByText('Not recorded in this report.')).toBeInTheDocument();
   });
 
   it('a run without a report yet links back to the inspector', async () => {

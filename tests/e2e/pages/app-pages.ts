@@ -108,7 +108,16 @@ export class NewRun {
   }
 
   async submit(): Promise<void> {
-    await this.form().getByRole('button', { name: 'Start run' }).click();
+    await this.startButton().click();
+  }
+
+  startButton(): Locator {
+    return this.form().getByRole('button', { name: 'Start run' });
+  }
+
+  /** The error summary ("N problems prevent starting this run"), listing client and preflight problems. */
+  problemSummary(): Locator {
+    return this.form().getByRole('alert').filter({ hasText: /problems? prevents? starting this run/ });
   }
 
   /** "Approved memory records to include" (MemoryPicker): one checkbox per approved record, pinned ones locked on. */
@@ -171,23 +180,13 @@ export class Settings {
     return mode === 'keychain' ? 'Stored with macOS Keychain protection (safeStorage)' : 'Memory only · cleared when Relay quits';
   }
 
-  /**
-   * Clicks "Test connection" and asserts the outcome: a passed test shows latency and cost; while `providers.test` is
-   * still stubbed (INTERNAL not_implemented) the card shows the graceful "Not available yet" notice instead.
-   */
-  async testAndExpectOutcome(displayName: string): Promise<'passed' | 'not_available'> {
+  /** Clicks "Test connection" and asserts the passed outcome: latency and cost are shown. */
+  async testAndExpectPassed(displayName: string): Promise<void> {
     await this.test(displayName);
-    const card = this.providerCard(displayName);
-    const passed = card.getByText(/^Test request to /);
-    const notAvailable = card.getByText('Not available yet in this build');
-    await expect(passed.or(notAvailable)).toBeVisible();
-    if (await notAvailable.isVisible()) {
-      await expect(card.getByText('The key is saved. Relay uses it when a run starts.')).toBeVisible();
-      return 'not_available';
-    }
+    const passed = this.providerCard(displayName).getByText(/^Test request to /);
+    await expect(passed).toBeVisible();
     await expect(passed).toContainText(/\d+(\.\d+)?\s?m?s/);
     await expect(passed).toContainText(/\$\d/);
-    return 'passed';
   }
 
   providerCard(displayName: string): Locator {

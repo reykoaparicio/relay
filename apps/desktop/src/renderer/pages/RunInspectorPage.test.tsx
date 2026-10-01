@@ -85,6 +85,11 @@ const STATES: readonly StateCase[] = [
   { state: 'failed', scenario: 'failed', banner: 'Run failed because of an internal error', proof: 'Open diagnostics' },
   { state: 'completed', scenario: 'completed', banner: 'Accepted by the workflow reviewer', proof: /does not guarantee the code is correct/ },
   { state: 'incomplete', scenario: 'incomplete', banner: 'Revision limit reached (2 of 2)' },
+  // Queued → paused before any attempt (06 F13 runChecks): no step ran, nothing was reserved.
+  { state: 'auth-failed (queued)', scenario: 'queued-auth-required', banner: 'No API key is connected for OpenAI', proof: /The run has not started: nothing was sent/ },
+  { state: 'provider-unavailable (setup, queued)', scenario: 'queued-setup-blocked', banner: 'A setup check failed before the run started', proof: 'This provider is not allowed for the project.' },
+  { state: 'budget-paused (queued)', scenario: 'queued-budget', banner: /^Paused before the first request: the next request needs \$0\.12, only \$0\.10 remains$/, proof: /The run has not started/ },
+  { state: 'unknown-outcome (all decided)', scenario: 'unknown-outcome-decided', banner: 'Every request with an unknown outcome has been decided', proof: 'Recovery' },
 ];
 
 describe('RunInspectorPage', () => {
@@ -108,6 +113,64 @@ describe('RunInspectorPage', () => {
       if (run.availableActions.includes(action)) expect(found.length, `${action} should be shown`).toBeGreaterThan(0);
       else expect(found, `${action} must not be shown`).toHaveLength(0);
     }
+  });
+
+  it('queued auth_required: the step that needs the provider is selected, it has no attempts, and Reconnect provider links to Settings', async () => {
+    const user = userEvent.setup();
+    const { router } = open('queued-auth-required');
+    await ready();
+    expect(screen.getByRole('heading', { level: 2, name: 'Plan a fix' })).toBeInTheDocument();
+    expect(screen.getByText('Needed by: Plan')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Attempts' }));
+    expect(await screen.findByText('No attempts yet. Nothing has been sent to a provider.')).toBeInTheDocument();
+    await user.click(within(screen.getByTestId('status-banner')).getByRole('link', { name: 'Reconnect provider' }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/settings/providers');
+    });
+  });
+
+  it('queued auth_required: Resume while the key is still missing shows AUTH_REQUIRED and keeps the run paused', async () => {
+    const user = userEvent.setup();
+    const { bridge, run } = open('queued-auth-required');
+    await ready();
+    await user.click(within(screen.getByTestId('status-banner')).getByRole('button', { name: 'Resume' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/runs.resume')[0]?.input).toMatchObject({ runId: run.id, decision: { kind: 'continue' } });
+    expect(bridge.world.runs[0]?.status).toBe('paused');
+    expect(await screen.findByText(/AUTH_REQUIRED/)).toBeInTheDocument();
+  });
+
+  it('queued setup_blocked: Choose profile targets the step named by the readiness issue', async () => {
+    const user = userEvent.setup();
+    const { bridge, run } = open('queued-setup-blocked');
+    await ready();
+    await user.click(within(screen.getByTestId('status-banner')).getByRole('button', { name: 'Choose another profile' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Choose another profile for Plan a fix' });
+    await user.click(within(dialog).getByRole('button', { name: 'Switch profile and continue' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/runs.resume')[0]?.input).toMatchObject({
+      runId: run.id,
+      decision: { kind: 'switch_profile', stepKey: 'plan' },
+    });
+  });
+
+  it('paused(unknown_outcome) offering resume maps it to runs.resume { kind: continue }', async () => {
+    const user = userEvent.setup();
+    const { bridge, run } = open('unknown-outcome-decided');
+    await ready();
+    const panel = screen.getByRole('region', { name: 'Recovery' });
+    await user.click(within(panel).getByRole('button', { name: 'Resume' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/runs.resume')[0]?.input).toMatchObject({ runId: run.id, decision: { kind: 'continue' } });
+    await waitFor(() => {
+      expect(bridge.world.runs[0]?.status).toBe('running');
+    });
   });
 
   it('approve sends the displayed plan and context hashes', async () => {

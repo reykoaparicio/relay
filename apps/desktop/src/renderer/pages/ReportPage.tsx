@@ -21,11 +21,13 @@ import type { Panel } from '../components/ui';
 import { toViewError } from '../api/errors';
 import { diffStats } from '../features/outputs/OutputViews';
 import {
+  ApprovalsSection,
   ArtifactsSection,
   CostSection,
   ExportDialog,
   FindingsSection,
   LimitationsSection,
+  RevisionsSection,
   SummarySection,
   TerminalLead,
 } from '../features/report/ReportSections';
@@ -191,6 +193,10 @@ export function ReportPage() {
     <div className="stack">
       <SummarySection report={report} run={run} />
       <FindingsSection findings={findings} error={findingsQ.error} hasFindings={report.artifacts.findings !== null} />
+      <div className="grid grid-cols-2 items-start gap-5 max-[1024px]:grid-cols-1">
+        <ApprovalsSection report={report} />
+        <RevisionsSection report={report} />
+      </div>
       <LimitationsSection report={report} />
       <div className="grid grid-cols-2 items-start gap-5 max-[1024px]:grid-cols-1">
         <CostSection report={report} />

@@ -1,6 +1,7 @@
 import { test, expect } from '../fixtures.js';
 import { setupOwnProject, startRunViaNewRun } from '../flows.js';
 import { Runs } from '../pages/app-pages.js';
+import { Report } from '../pages/report.js';
 import { RunInspector } from '../pages/run-inspector.js';
 import { Shell } from '../pages/shell.js';
 
@@ -48,6 +49,21 @@ test.describe('approval controls', { tag: '@m2' }, () => {
     expect(calls.filter((c) => c.stepKey === 'implement')).toHaveLength(2);
     expect(calls.filter((c) => c.stepKey === 'verify')).toHaveLength(2);
 
+    // Report (report.v1 approvals / revisions, 06 F17): the sent-back plan with its note, then the approved one;
+    // one plan revision and one quality revision cycle.
+    await inspector.viewReportLink().click();
+    const report = new Report(page);
+    await report.expectLoaded();
+    await expect(report.approvals()).toHaveCount(2);
+    await expect(report.approvals().nth(0)).toContainText('Approve plan: revision requested');
+    await expect(report.approvals().nth(0)).toContainText(
+      'Note: Keep the existing 400 response body shape; only add the id check.',
+    );
+    await expect(report.approvals().nth(1)).toContainText('Approve plan: approved');
+    await expect(report.approvals().nth(1)).not.toContainText('invalidated:');
+    await expect(report.revisionsValue('Plan revisions')).toHaveText('1');
+    await expect(report.revisionsValue('Quality revision cycles')).toHaveText(/^1 of \d+$/);
+
     // Reject path on a new run → Cancelled; nothing after the approval runs.
     const rejectRunId = await startRunViaNewRun(page, GOAL_REJECT);
     await inspector.expectAwaitingApproval();
@@ -60,6 +76,10 @@ test.describe('approval controls', { tag: '@m2' }, () => {
       'plan',
     ]);
     expect(await callLog()).toHaveLength(before);
+    await inspector.viewReportLink().click();
+    await report.expectLoaded();
+    await expect(report.approvals()).toHaveCount(1);
+    await expect(report.approvals().first()).toContainText('Approve plan: rejected');
 
     await new Shell(page).nav('Runs');
     const runs = new Runs(page);

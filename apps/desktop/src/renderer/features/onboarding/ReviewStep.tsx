@@ -24,7 +24,8 @@ import { useNextAction } from '../common/useNextAction';
 import { budgetFromError } from '../new-run/new-run-model';
 import { paths } from '../shell/paths';
 import { checkAllowance, checkWhole, LIMIT_BOUNDS } from '../run-setup/limits';
-import { modelSteps, profileOverridesFor } from '../run-setup/model-steps';
+import { modelSteps, profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
+import { issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
 import { PreflightSummary, ProvidersReceiving } from '../run-setup/PreflightSummary';
 import { MissingPrerequisite } from './RuleTemplateSteps';
 import { StepFrame } from './StepFrame';
@@ -49,10 +50,12 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const allowance = checkAllowance(state.allowanceText ?? '3.00');
   const cycles = checkWhole(state.revisionText ?? '2', LIMIT_BOUNDS.maxRevisionCycles);
   const relPaths = (preview.data?.included ?? []).slice(0, INPUT_CAPS.maxFiles).map((f) => f.relPath);
+  const rows =
+    workflow.data === undefined || profiles.data === undefined ? [] : modelSteps(workflow.data.spec, profiles.data);
   const overrides =
     workflow.data === undefined || profiles.data === undefined
       ? undefined
-      : profileOverridesFor(modelSteps(workflow.data.spec, profiles.data), state.profileSelection);
+      : profileOverridesFor(rows, state.profileSelection);
   const base =
     project === null || wf === null || relPaths.length === 0
       ? null
@@ -164,6 +167,8 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const budgetError = budgetFromError(preflight.error);
   const budget = budgetError ?? (pf !== undefined && !pf.budget.allowed ? pf.budget : null);
   const blocked = budget !== null;
+  // budget_run / budget_project restate the blocked budget, which has its own alert below.
+  const issues = pf === undefined ? [] : problemIssues(pf.issues, blocked);
   const preflightFailed = preflight.error !== null && budgetError === null;
   const checked = fresh !== undefined && fresh.issues.length === 0 && fresh.budget.allowed;
   const canStart = goalError !== null || (checked && !blocked);
@@ -178,7 +183,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       ? 'Waiting for the file preview.'
       : preflightFailed
         ? 'The run check failed. Retry it above.'
-        : pf !== undefined && pf.issues.length > 0 && settledCheck
+        : issues.length > 0 && settledCheck
           ? 'Fix the problems above to start.'
           : 'Checking…';
 
@@ -254,15 +259,35 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
               { id: 'workflow', term: 'Workflow', value: `${wf.name} · v${String(wf.version)}` },
             ]}
           />
-          {pf.issues.length === 0 ? null : (
+          {issues.length === 0 ? null : (
             <InlineAlert
               tone="danger"
-              title={`${String(pf.issues.length)} problem${pf.issues.length === 1 ? '' : 's'} prevent starting`}
+              title={`${String(issues.length)} problem${issues.length === 1 ? '' : 's'} prevent starting`}
+              actions={
+                issues.some((i) => i.code === MISSING_CREDENTIAL) ? (
+                  <Button
+                    onClick={() => {
+                      go('connect-provider');
+                    }}
+                  >
+                    Connect provider
+                  </Button>
+                ) : undefined
+              }
             >
               <ul style={{ margin: 0, paddingLeft: 16 }}>
-                {pf.issues.map((i) => (
-                  <li key={`${i.path}:${i.code}`}>{i.message}</li>
-                ))}
+                {issues.map((i) => {
+                  const stepKey = stepKeyOfPath(i.path);
+                  const row = stepKey === null ? undefined : rows.find((r) => r.stepKey === stepKey);
+                  const providerId =
+                    stepKey === null ? null : stepProviderId(stepKey, rows, state.profileSelection, profiles.data);
+                  return (
+                    <li key={`${i.path}:${i.code}`}>
+                      {issueMessage(i, providerId, row === undefined ? null : ROLE_LABELS[row.role])}{' '}
+                      <code className="small">{i.code}</code>
+                    </li>
+                  );
+                })}
               </ul>
             </InlineAlert>
           )}

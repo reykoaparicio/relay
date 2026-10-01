@@ -208,6 +208,102 @@ describe('fake bridge', () => {
     expect(fakeScenarioFromUrl({ search: '?fake=nope', hash: '' })).toBe('awaiting-approval');
   });
 
+  describe('06 F14 readiness parity (preflight issues, queued pauses)', () => {
+    const base = {
+      projectId: FAKE_PROJECT_ID,
+      workflowId: FAKE_WORKFLOW_ID,
+      workflowVersion: 3,
+      goal: 'g',
+      input: { kind: 'files' as const, relPaths: ['src/a.ts'] },
+    };
+    const preflight = async (bridge: ReturnType<typeof createFakeBridge>, extra: Record<string, unknown> = {}) => {
+      const r = await bridge.invoke('relay/v1/runs.preflight', { ...base, ...extra });
+      if (!r.ok) throw new Error(r.error.code);
+      return r.data;
+    };
+
+    it('lists missing_credential per step whose provider has no key, at profileOverrides.<step>', async () => {
+      const pf = await preflight(createFakeBridge('missing-credential'));
+      expect(pf.issues).toEqual([
+        { path: 'profileOverrides.plan', code: 'missing_credential', message: 'No API key is connected for this provider.' },
+        { path: 'profileOverrides.verify', code: 'missing_credential', message: 'No API key is connected for this provider.' },
+      ]);
+      expect(pf.budget.allowed).toBe(true);
+      // An override to a connected provider's profile clears the step's issue.
+      const capable = 'prf_00000000000000000000000003';
+      const fixed = await preflight(createFakeBridge('missing-credential'), { profileOverrides: { plan: capable, verify: capable } });
+      expect(fixed.issues).toEqual([]);
+    });
+
+    it('lists provider_not_allowed as an issue (not a PERMISSION_DENIED error); runs.start stays strict', async () => {
+      const bridge = createFakeBridge('awaiting-approval');
+      const project = bridge.world.projects[0];
+      if (project === undefined) throw new Error('no project');
+      bridge.world.projects[0] = { ...project, providerPolicy: { ...project.providerPolicy, allowedProviderIds: ['anthropic'] } };
+      const pf = await preflight(bridge);
+      expect(pf.issues.map((i) => `${i.path}:${i.code}`)).toEqual([
+        'profileOverrides.plan:provider_not_allowed',
+        'profileOverrides.verify:provider_not_allowed',
+      ]);
+      const start = await bridge.invoke('relay/v1/runs.start', { ...base, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZK' });
+      expect(start.ok ? null : start.error).toMatchObject({ code: 'PERMISSION_DENIED', details: { reason: 'provider_not_allowed' } });
+    });
+
+    it('lists budget_run at limitOverrides.budgetMicrousd when budget.allowed is false', async () => {
+      const pf = await preflight(createFakeBridge('budget-blocked'));
+      expect(pf.budget.allowed).toBe(false);
+      expect(pf.issues).toContainEqual({
+        path: 'limitOverrides.budgetMicrousd',
+        code: 'budget_run',
+        message: 'The run allowance cannot cover the first reservation.',
+      });
+    });
+
+    it('runs.start accepts a missing credential: the run pauses auth_required with no attempt, then resumes once connected', async () => {
+      const bridge = createFakeBridge('missing-credential');
+      const res = await bridge.invoke('relay/v1/runs.start', { ...base, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZJ' });
+      if (!res.ok) throw new Error(res.error.code);
+      expect(res.data.status).toBe('paused');
+      const run = bridge.world.runs.find((r) => r.id === res.data.runId);
+      expect(run).toMatchObject({ status: 'paused', pauseReason: 'auth_required', startedAt: null });
+      expect(run?.statusDetail).toMatchObject({ code: 'AUTH_REQUIRED', details: { providerId: 'openai', stepKey: 'plan' } });
+      expect(run?.availableActions).toEqual(['reconnect_provider', 'resume', 'stop']);
+      expect(run?.steps.every((s) => s.state === 'pending')).toBe(true);
+      for (const s of run?.steps ?? []) expect(bridge.world.steps.get(s.id)?.attempts).toEqual([]);
+      const early = await bridge.invoke('relay/v1/runs.resume', { runId: res.data.runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZH', decision: { kind: 'continue' } });
+      expect(early.ok ? null : early.error.code).toBe('AUTH_REQUIRED');
+      await bridge.invoke('relay/v1/providers.connect', { providerId: 'openai', apiKey: 'sk-test-0000000000000000', storage: 'session' });
+      const resumed = await bridge.invoke('relay/v1/runs.resume', { runId: res.data.runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZG', decision: { kind: 'continue' } });
+      expect(resumed.ok ? resumed.data.status : null).toBe('running');
+      expect(bridge.world.runs.find((r) => r.id === res.data.runId)?.startedAt).not.toBeNull();
+    });
+
+    it('queued pause scenarios have no attempts and no start time', () => {
+      for (const s of ['queued-auth-required', 'queued-setup-blocked', 'queued-budget'] as const) {
+        const bridge = createFakeBridge(s);
+        const run = bridge.world.runs[0];
+        expect(run?.status, s).toBe('paused');
+        expect(run?.startedAt, s).toBeNull();
+        for (const step of run?.steps ?? []) expect(bridge.world.steps.get(step.id)?.attempts, s).toEqual([]);
+      }
+    });
+
+    it('paused(unknown_outcome) with every unknown decided and no failed step offers resume', () => {
+      const run = createFakeBridge('unknown-outcome-decided').world.runs[0];
+      expect(run?.availableActions).toEqual(['resume', 'stop']);
+    });
+  });
+
+  it('memory.purgeProjectHistory reports purged and failed files (03 C8)', async () => {
+    const bridge = createFakeBridge('completed');
+    const ok = await bridge.invoke('relay/v1/memory.purgeProjectHistory', { projectId: PROJECT, confirmPhrase: 'purge' });
+    expect(ok.ok ? ok.data : null).toMatchObject({ failed: 0 });
+    bridge.world.purgeFailures = 2;
+    const partial = await bridge.invoke('relay/v1/memory.purgeProjectHistory', { projectId: PROJECT, confirmPhrase: 'purge' });
+    expect(partial.ok ? partial.data.failed : null).toBe(2);
+    expect(partial.ok ? partial.data.purgedArtifacts : null).toBeGreaterThan(0);
+  });
+
   it('runs.preflight memory: absent = every approved record, [] = pinned only, a list = pinned + those', async () => {
     const bridge = createFakeBridge('awaiting-approval');
     const approved = bridge.world.memory.filter((m) => m.status === 'approved');

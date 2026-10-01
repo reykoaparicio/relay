@@ -173,11 +173,23 @@ export function defaultStep(run: RunDetail): StepView | undefined {
   const attention = [...latest].reverse().find((s) => ATTENTION_STATES.has(s.state));
   if (attention !== undefined) return attention;
   if (run.status === 'paused' || run.status === 'queued') {
+    const named = pauseStepOf(run, latest);
+    if (named !== undefined) return named;
     const next = latest.find((s) => s.state === 'ready' || s.state === 'pending');
     if (next !== undefined) return next;
   }
   const done = [...latest].reverse().find((s) => s.state !== 'pending');
   return done ?? latest[0];
+}
+
+/**
+ * The not-yet-run step a readiness pause names (`statusDetail.details.stepKey`: a queued run paused auth_required /
+ * setup_blocked for one step's profile, 06 F13), when that step's latest row has not run.
+ */
+function pauseStepOf(run: RunDetail, latest: readonly StepView[]): StepView | undefined {
+  const key = run.statusDetail?.details?.['stepKey'];
+  if (typeof key !== 'string') return undefined;
+  return latest.find((s) => s.stepKey === key && (s.state === 'ready' || s.state === 'pending' || s.state === 'reserved'));
 }
 
 /**
@@ -188,6 +200,7 @@ export function blockedStep(run: RunDetail): StepView | undefined {
   const latest = run.steps.filter((s) => isLatestRow(s, run.steps));
   return (
     [...latest].reverse().find((s) => s.state === 'failed') ??
+    (run.status === 'paused' ? pauseStepOf(run, latest) : undefined) ??
     latest.find((s) => s.profileName !== null && (s.state === 'ready' || s.state === 'pending' || s.state === 'reserved')) ??
     [...latest].reverse().find((s) => s.state === 'unknown')
   );

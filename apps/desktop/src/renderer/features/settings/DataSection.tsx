@@ -354,6 +354,28 @@ function RetentionCard({ retentionDays, setupAllowance }: { readonly retentionDa
 
 const PURGE_PHRASE = 'purge';
 
+const plural = (n: number, one: string, many: string) => `${String(n)} ${n === 1 ? one : many}`;
+
+/**
+ * The purge result as a toast (03 C8). `purgedArtifacts` / `failed` are optional in the contract (older runners omit
+ * them). Files that could not be removed stay unpurged and the next retention sweep retries them, so the toast says so
+ * instead of reporting success.
+ */
+export function purgeToast(res: { readonly purgedSnapshots: number; readonly purgedArtifacts?: number | undefined; readonly failed?: number | undefined }): {
+  readonly title: string;
+  readonly body: string;
+  readonly tone: 'success' | 'warning';
+} {
+  const parts = [`${plural(res.purgedSnapshots, 'run snapshot no longer holds', 'run snapshots no longer hold')} memory copies.`];
+  if (res.purgedArtifacts !== undefined) parts.push(`${plural(res.purgedArtifacts, 'stored file', 'stored files')} removed.`);
+  const failed = res.failed ?? 0;
+  if (failed > 0) {
+    parts.push(`${plural(failed, 'file', 'files')} could not be removed; they will be retried.`);
+    return { title: 'Project history partly purged', body: parts.join(' '), tone: 'warning' };
+  }
+  return { title: 'Project history purged', body: parts.join(' '), tone: 'success' };
+}
+
 function PurgeCard({ project, explicit }: { readonly project: Project; readonly explicit: boolean }) {
   const titleId = useId();
   const phraseId = useId();
@@ -369,12 +391,7 @@ function PurgeCard({ project, explicit }: { readonly project: Project; readonly 
       setPhrase('');
       void queryClient.invalidateQueries({ queryKey: ['memory', project.id] });
       void queryClient.invalidateQueries({ queryKey: ['memory-record'] });
-      toast.show({
-        key: `purge:${project.id}`,
-        title: 'Project history purged',
-        body: `${String(res.purgedSnapshots)} run snapshot${res.purgedSnapshots === 1 ? '' : 's'} no longer hold memory copies.`,
-        tone: 'success',
-      });
+      toast.show({ key: `purge:${project.id}`, ...purgeToast(res) });
     },
   });
   const confirmed = phrase.trim().toLowerCase() === PURGE_PHRASE;
@@ -385,8 +402,8 @@ function PurgeCard({ project, explicit }: { readonly project: Project; readonly 
       </h2>
       <FallbackProjectNote project={project} explicit={explicit} />
       <p className="small muted">
-        Removes memory copies kept inside run snapshots of <strong>{project.name}</strong>, and old memory revisions. Run
-        reports that quoted that memory lose the quoted text. To stop using a single record, archive or delete it on the{' '}
+        Removes memory copies kept inside run snapshots of <strong>{project.name}</strong>, and the stored raw provider
+        responses and context manifests of its runs. Run reports that quoted that memory lose the quoted text. To stop using a single record, archive or delete it on the{' '}
         <Link to={paths.memory(project.id)}>Memory</Link> page instead.
       </p>
       <div>
@@ -425,8 +442,8 @@ function PurgeCard({ project, explicit }: { readonly project: Project; readonly 
         </p>
         <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
           <li>Memory copies inside every run snapshot of “{project.name}” are removed.</li>
-          <li>Earlier revisions of memory records are removed; each record keeps its current text.</li>
-          <li>Runs, ledgers and artifacts other than memory copies are kept. Project files are never touched.</li>
+          <li>Stored raw provider responses and context manifests of these runs are removed.</li>
+          <li>Memory records keep their text and revisions. Runs, ledgers, reports, plans and patches are kept. Project files are never touched.</li>
         </ul>
         <Field label={`Type “${PURGE_PHRASE}” to confirm purging the history of “${project.name}”`} id={phraseId}>
           {(control) => <TextInput {...control} value={phrase} onValueChange={setPhrase} autoComplete="off" />}

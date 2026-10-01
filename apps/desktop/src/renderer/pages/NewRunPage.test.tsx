@@ -78,6 +78,46 @@ describe('NewRunPage (J7)', () => {
     expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
   });
 
+  it('missing credential (06 F14): each affected step names the provider, links to Settings → Providers, and blocks Start', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'missing-credential' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Tighten validation');
+    const summary = await screen.findByRole('alert', { name: /2 problems prevent starting this run/ }, SLOW);
+    const planLink = within(summary).getByRole('link', {
+      name: 'Planner: no API key is connected for OpenAI. Connect it, or choose a profile whose provider is connected.',
+    });
+    expect(within(summary).getAllByText('missing_credential')).toHaveLength(2);
+    const plan = screen.getByRole('combobox', { name: /Planner profile \(Plan step\)/ });
+    expect(plan).toHaveAttribute('aria-invalid', 'true');
+    await user.click(planLink);
+    expect(plan).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    await user.type(screen.getByRole('spinbutton', { name: /Max attempts/ }), '{Enter}');
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
+    const connect = within(summary).getAllByRole('link', { name: 'Connect provider' });
+    expect(connect).toHaveLength(2);
+    await user.click(connect[0] as HTMLElement);
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe('/settings/providers');
+    });
+  });
+
+  it('missing credential: choosing a profile whose provider is connected clears the problem and allows Start', async () => {
+    const user = userEvent.setup();
+    renderApp(NEW_RUN, { scenario: 'missing-credential' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Tighten validation');
+    await screen.findByRole('alert', { name: /2 problems prevent starting this run/ }, SLOW);
+    for (const name of [/Planner profile \(Plan step\)/, /Reviewer profile \(Verify step\)/]) {
+      const select = screen.getByRole('combobox', { name });
+      await user.selectOptions(select, within(select).getByRole('option', { name: /^Capable · Anthropic/ }));
+    }
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText('missing_credential')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
+  });
+
   it('a limit above RUN_LIMIT_MAXIMUMS shows a field error at once', async () => {
     const user = userEvent.setup();
     renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
@@ -107,6 +147,9 @@ describe('NewRunPage (J7)', () => {
     expect(amount('U')).toBe('$0.00');
     expect(amount('N')).toBe('$1.50');
     expect(within(panel).getByText('$3.10 > $3.00 → blocked')).toBeInTheDocument();
+    // The preflight also lists `budget_run` (06 F14); the budget card already shows it, so it is not a second problem.
+    expect(screen.queryByText('budget_run')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert', { name: /problems? prevents? starting/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
     expect(screen.getByText(/Blocked by the run allowance/)).toBeInTheDocument();
     expect(within(panel).getByRole('textbox', { name: /New run allowance/ })).toHaveValue('3.10');

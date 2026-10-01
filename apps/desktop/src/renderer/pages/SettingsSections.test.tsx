@@ -400,6 +400,22 @@ describe('Settings → Storage & data (J10)', () => {
       });
     });
     expect(await screen.findByText('Project history purged')).toBeInTheDocument();
+    expect(screen.getByText(/stored files removed\./)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be removed/)).not.toBeInTheDocument();
+  });
+
+  it('purge: files that could not be removed are reported (they are retried), not hidden behind a success', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/data', { scenario: 'awaiting-approval' });
+    bridge.world.purgeFailures = 3;
+    await section('Purge project history');
+    await user.click(screen.getByRole('button', { name: 'Purge project history…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Purge the history of “Example API”?' });
+    await user.type(within(dialog).getByRole('textbox', { name: /Type “purge” to confirm/ }), 'purge');
+    await user.click(within(dialog).getByRole('button', { name: 'Purge project history' }));
+    expect(await screen.findByText('Project history partly purged')).toBeInTheDocument();
+    expect(screen.getByText(/3 files could not be removed; they will be retried\./)).toBeInTheDocument();
+    expect(screen.queryByText('Project history purged')).not.toBeInTheDocument();
   });
 });
 

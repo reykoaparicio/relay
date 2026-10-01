@@ -41,6 +41,12 @@ export const FAKE_SCENARIOS = [
   'no-secure-storage',
   'first-launch',
   'validation-errors',
+  'missing-credential',
+  'queued-auth-required',
+  'queued-setup-blocked',
+  'queued-budget',
+  'unknown-outcome-decided',
+  'report-legacy',
 ] as const;
 export type FakeScenarioName = (typeof FAKE_SCENARIOS)[number];
 
@@ -101,6 +107,9 @@ const INVALID_PATCH_DETAILS = {
   repairsMax: 1,
   rawResponseArtifactId: RAW_RESPONSE_ARTIFACT_ID,
 };
+
+/** A run paused straight from `queued` (06 F13 runChecks): no step ran, no attempt, nothing reserved or spent. */
+const NEVER_STARTED = { neverStarted: true, steps: {}, durationMs: 0, cost: {} } as const;
 
 const DONE_TO_APPROVAL = { intake: 'succeeded', review: 'succeeded', plan: 'succeeded' } as const;
 const DONE_TO_IMPLEMENT = { ...DONE_TO_APPROVAL, approve: 'succeeded' } as const;
@@ -296,6 +305,14 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
           steps: ALL_DONE,
           revisionCycle: 2,
           cost: { reported: 1_370_000 },
+          // report.v1: the first plan was sent back (and its approval invalidated by the re-plan), the second approved.
+          report: {
+            approvals: [
+              { decision: 'revision_requested', note: 'Keep the 422 body shape <b>unchanged</b>.', invalidatedReason: 'plan_changed' },
+              { decision: 'approved' },
+            ],
+            revisions: { cycles: 2, maxCycles: 2, planRevisions: 1, incompleteCause: 'revision_limit' },
+          },
           statusDetail: appError('LIMIT_REACHED', {
             userMessage: 'The reviewer still requested changes when the revision limit was reached.',
             details: { limit: 'revisions', incompleteCause: 'revision_limit', revisionCycle: 2, maxRevisionCycles: 2 },
@@ -308,6 +325,51 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { workflowDraft: true });
     case 'no-secure-storage':
       return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), { secureStorage: false });
+    case 'report-legacy':
+      // A report generated before wave 4: no approvals[] and no revisions.
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 }, report: 'legacy' }));
+    case 'missing-credential':
+      // New run: the Balanced profile's provider (OpenAI) has no key → preflight `missing_credential` (06 F14).
+      return { runs: [...HISTORY], memory: 'full', disconnected: ['openai'] };
+    case 'queued-auth-required':
+      return withFocus(
+        focus('paused', 'auth_required', {
+          ...NEVER_STARTED,
+          statusDetail: appError('AUTH_REQUIRED', {
+            userMessage: 'No API key is connected for this provider.',
+            details: { providerId: 'openai', stepKey: 'plan' },
+          }),
+        }),
+        { disconnected: ['openai'] },
+      );
+    case 'queued-setup-blocked':
+      return withFocus(
+        focus('paused', 'setup_blocked', {
+          ...NEVER_STARTED,
+          statusDetail: appError('PERMISSION_DENIED', {
+            userMessage: 'This provider is not allowed for the project.',
+            details: { reason: 'provider_not_allowed', providerId: 'openai', stepKey: 'plan' },
+          }),
+        }),
+      );
+    case 'queued-budget':
+      return withFocus(
+        focus('paused', 'budget_run', {
+          ...NEVER_STARTED,
+          cost: { allowance: 100_000 },
+          statusDetail: appError('BUDGET_BLOCKED', {
+            details: { L: 100_000, C: 0, R: 0, U: 0, N: 120_000, scope: 'run', total: 120_000, allowed: false },
+          }),
+        }),
+      );
+    case 'unknown-outcome-decided':
+      // Every unknown request was decided and no step failed: the engine offers resume (06 F2).
+      return withFocus(
+        focus('paused', 'unknown_outcome', {
+          steps: DONE_TO_IMPLEMENT,
+          statusDetail: appError('REQUEST_OUTCOME_UNKNOWN'),
+        }),
+      );
     case 'first-launch':
       return { runs: [], memory: 'setup-only', fresh: true };
     case 'validation-errors':

@@ -83,12 +83,14 @@ describe('OnboardingPage (J6)', () => {
     await heading('Pick role profiles and a run allowance');
     expect(await screen.findByRole('table', { name: 'Model profile for each role' })).toBeInTheDocument();
     expect(screen.getByLabelText(/Run allowance/)).toHaveValue('3.00');
+    // Only Anthropic is connected: move the roles whose default profile uses OpenAI to an Anthropic profile.
+    await useAnthropicOnly(user);
     await clickContinue(user);
 
     // 8 review-and-start
     await heading('Review the input and start');
     expect(await screen.findByText('First reservation')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await user.click(await startEnabled());
     await waitFor(() => {
       expect(router.state.location.pathname).toMatch(/^\/p\/prj_\w+\/runs\/run_\w+$/);
     });
@@ -101,6 +103,18 @@ describe('OnboardingPage (J6)', () => {
     expect(bridge.world.settings.onboardingCompletedAt).not.toBeNull();
     expect(bridge.world.settings.activeProjectId).toBe(bridge.world.projects[0]?.id);
     expect(document.body.innerHTML).not.toContain(KEY);
+  });
+
+  it('review-and-start: a role whose provider has no key blocks Start with a "Connect provider" way back (06 F14)', async () => {
+    const user = userEvent.setup();
+    const { bridge } = await walkToReview(user, { scenario: 'missing-credential' });
+    expect(await screen.findByText('2 problems prevent starting', {}, SLOW)).toBeInTheDocument();
+    expect(screen.getAllByText(/no API key is connected for OpenAI/)).toHaveLength(2);
+    expect(screen.getAllByText('missing_credential')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Connect provider' }));
+    await heading('Connect a model provider');
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
   });
 
   it('own folder, session key, and a rule step that stays skippable when memory.create fails (generic ErrorView)', async () => {
@@ -357,6 +371,15 @@ async function continueWhenEnabled(user: ReturnType<typeof userEvent.setup>) {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
   });
   await clickContinue(user);
+}
+
+/** Selects the Anthropic "Capable" profile for every role whose current profile uses OpenAI (step 7 table). */
+async function useAnthropicOnly(user: ReturnType<typeof userEvent.setup>) {
+  const table = await screen.findByRole('table', { name: 'Model profile for each role' });
+  for (const select of within(table).getAllByRole('combobox')) {
+    const chosen = (select as HTMLSelectElement).selectedOptions[0]?.textContent ?? '';
+    if (chosen.includes('OpenAI')) await user.selectOptions(select, within(select).getByRole('option', { name: /^Capable · Anthropic/ }));
+  }
 }
 
 /** Walks the sample flow (a provider is already connected) to review-and-start. */

@@ -8,6 +8,8 @@ export interface FormProblem {
   readonly message: string;
   /** Stable error code shown beside the message (text, never color only). */
   readonly code?: string;
+  /** A way to fix it outside the form (e.g. a "Connect provider" link), rendered after the message. */
+  readonly action?: ReactNode;
 }
 
 export interface ErrorSummaryProps {
@@ -74,6 +76,7 @@ export function ErrorSummary({ problems, focusOnMount = false, title = defaultTi
                   <code className="small">{p.code}</code>
                 </>
               )}
+              {p.action === undefined ? null : <> · {p.action}</>}
             </li>
           ))}
         </ul>

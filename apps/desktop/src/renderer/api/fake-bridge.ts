@@ -33,6 +33,7 @@ import type {
   RunDetail,
   RunEvent,
   RunStatus,
+  ValidationIssue,
   WorkflowDraftPatch,
   WorkflowVersionView,
 } from '@relay/contracts';
@@ -124,6 +125,8 @@ function setRunStatus(
     statusDetail: status === 'paused' ? merged.statusDetail : null,
     pendingApproval: status === 'awaiting_approval' ? merged.pendingApproval : null,
     endedAt: terminal ? (merged.endedAt ?? (ctx.now() as RunDetail['createdAt'])) : null,
+    // A run paused from `queued` has never started; it starts when it first runs.
+    startedAt: status === 'running' && merged.startedAt === null ? (ctx.now() as RunDetail['createdAt']) : merged.startedAt,
     availableActions: allowedRunActions(status, pauseReason, {
       unknownAttempts: merged.unresolvedAttempts.length,
       hasFailedStep: merged.steps.some((s) => s.state === 'failed'),
@@ -279,6 +282,59 @@ function fakeBudget(w: FakeWorld, allowance: number | undefined) {
   const L = allowance ?? 3_000_000;
   const total = C + R + N;
   return { L, C, R, U: 0, N, scope: 'run' as const, total, allowed: total <= L };
+}
+
+/** Engine `profileWarningMessage` texts of the readiness codes the fake reports (06 F14). */
+const READINESS_MESSAGES = {
+  missing_credential: 'No API key is connected for this provider.',
+  provider_not_allowed: 'This provider is not allowed for the project.',
+} as const;
+
+/**
+ * 06 F14 preflight readiness per model step of the spec, on its effective profile (spec name ⊕ `profileOverrides`):
+ * unknown profile, provider not permitted by the project, no connected credential. Paths `profileOverrides.<step>`.
+ */
+function readinessIssues(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>): ValidationIssue[] {
+  const project = w.projects.find((p) => p.id === input.projectId);
+  const version = w.workflowVersions.find((v) => v.workflowId === input.workflowId && v.version === input.workflowVersion);
+  if (project === undefined || version === undefined) return [];
+  const issues: ValidationIssue[] = [];
+  for (const step of version.spec.steps) {
+    if (step.kind !== 'model') continue;
+    const path = `profileOverrides.${step.id}`;
+    const overrideId = input.profileOverrides?.[step.id];
+    const profile =
+      overrideId === undefined
+        ? w.profiles.find((p) => p.profile.name.toLowerCase() === step.profile.toLowerCase())
+        : w.profiles.find((p) => p.profile.id === overrideId);
+    if (profile === undefined) {
+      issues.push({ path, code: 'unknown_profile', message: `No profile named "${step.profile.slice(0, 40)}".` });
+      continue;
+    }
+    const providerId = profile.profile.providerId;
+    if (!project.providerPolicy.allowedProviderIds.includes(providerId)) {
+      issues.push({ path, code: 'provider_not_allowed', message: READINESS_MESSAGES.provider_not_allowed });
+    }
+    if (w.providers.find((p) => p.providerId === providerId)?.connected !== true) {
+      issues.push({ path, code: 'missing_credential', message: READINESS_MESSAGES.missing_credential });
+    }
+  }
+  return issues;
+}
+
+/** The provider of the first step whose credential is missing (the queued run pauses `auth_required` for it). */
+function firstMissingCredential(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>): { stepKey: string; providerId: string } | null {
+  const issue = readinessIssues(w, input).find((i) => i.code === 'missing_credential');
+  if (issue === undefined) return null;
+  const stepKey = issue.path.slice('profileOverrides.'.length);
+  const version = w.workflowVersions.find((v) => v.workflowId === input.workflowId && v.version === input.workflowVersion);
+  const step = version?.spec.steps.find((s) => s.id === stepKey);
+  const overrideId = input.profileOverrides?.[stepKey];
+  const profile =
+    overrideId === undefined
+      ? w.profiles.find((p) => step?.kind === 'model' && p.profile.name.toLowerCase() === step.profile.toLowerCase())
+      : w.profiles.find((p) => p.profile.id === overrideId);
+  return { stepKey, providerId: profile?.profile.providerId ?? 'anthropic' };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -543,23 +599,56 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
       },
       firstReservation: { N: budget.N, basis: 'local_estimate' as const },
       budget,
-      issues: w.preflightIssues,
+      issues: [
+        ...readinessIssues(w, input),
+        // The same fact as `budget.allowed = false` (06 F14), at the run allowance field.
+        ...(budget.allowed
+          ? []
+          : [{ path: 'limitOverrides.budgetMicrousd', code: 'budget_run', message: 'The run allowance cannot cover the first reservation.' }]),
+        ...w.preflightIssues,
+      ],
     };
   },
   'runs.start': (w, input, ctx) => {
     if (w.preflightIssues.length > 0) fail(errors.validationFailed(w.preflightIssues));
+    // runs.start stays strict about profiles and the provider policy (06 F14); a missing credential is not an error:
+    // the run pauses auth_required while queued, before any reservation or call.
+    const readiness = readinessIssues(w, input);
+    if (readiness.some((i) => i.code === 'unknown_profile')) fail(errors.notFound('profile'));
+    if (readiness.some((i) => i.code === 'provider_not_allowed')) fail(errors.permissionDenied('provider_not_allowed'));
     const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
     if (!budget.allowed) fail(errors.budgetBlocked(budget as never));
     const n = w.nextId++;
-    const built = buildRun(ctx.now(), {
-      n,
-      goal: input.goal,
-      status: 'running',
-      agoMs: 0,
-      durationMs: 0,
-      steps: { intake: 'succeeded', review: 'executing' },
-      cost: { allowance: input.limitOverrides?.budgetMicrousd ?? 3_000_000, reserved: 540_000 },
-    });
+    const allowance = input.limitOverrides?.budgetMicrousd ?? 3_000_000;
+    const missing = firstMissingCredential(w, input);
+    const built = buildRun(
+      ctx.now(),
+      missing === null
+        ? {
+            n,
+            goal: input.goal,
+            status: 'running',
+            agoMs: 0,
+            durationMs: 0,
+            steps: { intake: 'succeeded', review: 'executing' },
+            cost: { allowance, reserved: 540_000 },
+          }
+        : {
+            n,
+            goal: input.goal,
+            status: 'paused',
+            pauseReason: 'auth_required',
+            neverStarted: true,
+            agoMs: 0,
+            durationMs: 0,
+            steps: {},
+            cost: { allowance },
+            statusDetail: errors.authRequired(missing.providerId as never, {
+              details: { stepKey: missing.stepKey },
+              userMessage: READINESS_MESSAGES.missing_credential,
+            }),
+          },
+    );
     w.runs = [built.run, ...w.runs];
     for (const s of built.steps) w.steps.set(s.step.id, s);
     w.events.set(built.run.id, built.events);
@@ -603,6 +692,13 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const run = findRun(w, input.runId);
     const allowed = run.status === 'paused' || run.status === 'interrupted';
     if (!allowed) fail(errors.conflict({ status: run.status }));
+    if (run.status === 'paused' && run.pauseReason === 'auth_required' && input.decision.kind === 'continue') {
+      // 06 resumeContinue: still no credential for a provider the run needs → AUTH_REQUIRED, the run stays paused.
+      const providerId = run.statusDetail?.details?.['providerId'];
+      if (typeof providerId === 'string' && w.providers.find((p) => p.providerId === providerId)?.connected !== true) {
+        fail(errors.authRequired(providerId as never));
+      }
+    }
     const d = input.decision;
     const limits =
       d.kind === 'raise_limits'
@@ -865,7 +961,11 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   },
   'memory.purgeProjectHistory': (w, input) => {
     if (!w.projects.some((p) => p.id === input.projectId)) fail(errors.notFound('project'));
-    return { purgedSnapshots: w.runs.filter((r) => r.projectId === input.projectId).length };
+    const runs = w.runs.filter((r) => r.projectId === input.projectId);
+    // 03 C8: raw responses + context manifests of the project's runs; `purgeFailures` of them stay for the next sweep.
+    const files = runs.reduce((sum, r) => sum + r.steps.filter((s) => s.profileName !== null && s.state !== 'pending').length * 2, 0);
+    const failed = Math.min(w.purgeFailures, files);
+    return { purgedSnapshots: runs.length, purgedArtifacts: files - failed, failed };
   },
 
   // ---------- artifacts ----------

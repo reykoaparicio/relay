@@ -63,23 +63,13 @@ export class Onboarding {
     return this.fileTree().getByRole('listitem').filter({ has: this.page.getByText(relPath, { exact: true }) });
   }
 
-  /**
-   * Adds one project rule. Returns 'saved', or 'not_available' when `memory.create` is still stubbed in this build
-   * (the step then shows the graceful notice and offers "Continue without a rule", which this clicks).
-   */
-  async addRule(text: string): Promise<'saved' | 'not_available'> {
+  /** Adds one project rule (`memory.create`) and lands on "Choose a workflow template". */
+  async addRule(text: string): Promise<void> {
     await this.expectStep('Add one project rule');
     const region = this.step('Add one project rule');
     await region.getByRole('textbox', { name: 'Rule' }).fill(text);
     await region.getByRole('button', { name: 'Save rule and continue' }).click();
-    const templateHeading = this.step('Choose a workflow template').getByRole('heading', { level: 2 });
-    const notice = region.getByText('Not available yet in this build');
-    await expect(templateHeading.or(notice)).toBeVisible();
-    if (await templateHeading.isVisible()) return 'saved';
-    await expect(region.getByText('Project rules cannot be saved in this build yet.')).toBeVisible();
-    await region.getByRole('button', { name: 'Continue without a rule' }).click();
     await this.expectStep('Choose a workflow template');
-    return 'not_available';
   }
 
   async setAllowance(dollars: string): Promise<void> {

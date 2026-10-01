@@ -53,25 +53,31 @@ export class Report {
     await expect(dialog).toBeHidden();
   }
 
-  /**
-   * Export both files. Returns 'exported', or 'not_available' while `artifacts.exportTo` is still stubbed in the
-   * runner (INTERNAL not_implemented): the dialog then turns into "Export failed" with the graceful notice, which
-   * this asserts and closes.
-   */
-  async exportBoth(): Promise<'exported' | 'not_available'> {
+  /** Export both files; the "Export saved" toast confirms it (the export dir must already be stubbed). */
+  async exportBoth(): Promise<void> {
     await this.page.getByRole('main').locator('header').getByRole('button', { name: 'Export…' }).click();
     const dialog = this.page.getByRole('dialog', { name: 'Export the run' });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('radio', { name: /^Both/ }).check();
     await dialog.getByRole('button', { name: 'Export 2 files', exact: true }).click();
-    const failed = this.page.getByRole('dialog', { name: 'Export failed' });
-    const saved = this.page.getByText('Export saved');
-    await expect(saved.or(failed)).toBeVisible();
-    if (await saved.isVisible()) return 'exported';
-    await expect(failed.getByText('Not available yet in this build')).toBeVisible();
-    await expect(failed.getByText('Run is intact; retry export only after updating Relay.')).toBeVisible();
-    await failed.getByRole('button', { name: 'Close', exact: true }).click();
-    await expect(failed).toBeHidden();
-    return 'not_available';
+    await expect(dialog).toBeHidden();
+    await expect(this.page.getByText('Export saved')).toBeVisible();
+  }
+
+  /** Report.v1 approvals: one list item per approval the run opened. */
+  approvals(): Locator {
+    return this.section('Approvals').getByRole('listitem');
+  }
+
+  revisions(): Locator {
+    return this.section('Revisions');
+  }
+
+  /** The value next to a Revisions term ("Quality revision cycles", "Plan revisions", …). */
+  revisionsValue(term: string): Locator {
+    return this.revisions()
+      .getByRole('term')
+      .filter({ hasText: new RegExp(`^${term}$`) })
+      .locator('xpath=following-sibling::dd[1]');
   }
 }

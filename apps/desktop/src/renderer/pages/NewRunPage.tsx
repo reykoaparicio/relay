@@ -42,7 +42,14 @@ import {
   problemsFromError,
 } from '../features/new-run/new-run-model';
 import { LIMIT_BOUNDS } from '../features/run-setup/limits';
-import { modelSteps } from '../features/run-setup/model-steps';
+import { modelSteps, ROLE_LABELS } from '../features/run-setup/model-steps';
+import {
+  issueMessage,
+  MISSING_CREDENTIAL,
+  problemIssues,
+  stepKeyOfPath,
+  stepProviderId,
+} from '../features/run-setup/preflight-issues';
 import { PreflightSummary, ProvidersReceiving } from '../features/run-setup/PreflightSummary';
 import { ProfileAssignmentTable } from '../features/run-setup/ProfileAssignmentTable';
 import { href, paths } from '../features/shell/paths';
@@ -160,8 +167,25 @@ export function NewRunPage() {
     budgetFromError(preflightError);
   const serverProblems: FormProblem[] = [];
   if (pf !== undefined && preflightError === null) {
-    for (const i of pf.issues)
-      serverProblems.push({ fieldId: fieldForPath(i.path, form.source), message: i.message, code: i.code });
+    // budget_run / budget_project restate `budget.allowed = false`: the budget card already shows that block.
+    for (const i of problemIssues(pf.issues, budget !== null)) {
+      const stepKey = stepKeyOfPath(i.path);
+      const row = stepKey === null ? undefined : rows.find((r) => r.stepKey === stepKey);
+      const providerId =
+        stepKey === null ? null : stepProviderId(stepKey, rows, form.profileSelection, profiles.data);
+      serverProblems.push({
+        fieldId: fieldForPath(i.path, form.source),
+        message: issueMessage(i, providerId, row === undefined ? null : ROLE_LABELS[row.role]),
+        code: i.code,
+        ...(i.code === MISSING_CREDENTIAL
+          ? {
+              action: (
+<Link to={paths.settings('providers')}>Connect provider</Link>
+              ),
+            }
+          : {}),
+      });
+    }
   }
   // System errors (runner down, internal, conflict) are not form problems: they render as an ErrorView.
   const isSystemError = (e: unknown) => {

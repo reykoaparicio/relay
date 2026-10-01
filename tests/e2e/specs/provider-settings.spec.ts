@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures.js';
-import { Settings } from '../pages/app-pages.js';
+import { FAKE_ANTHROPIC_KEY, setupOwnProject } from '../flows.js';
+import { NewRun, Runs, Settings } from '../pages/app-pages.js';
 import type { StorageMode } from '../pages/app-pages.js';
 import { Shell } from '../pages/shell.js';
 import { scanForSecrets } from '../secret-scan.js';
@@ -48,9 +49,8 @@ test.describe('provider settings', { tag: '@m1' }, () => {
     expect(connected.filesScanned.some((f) => /^secrets\/crd_.+\.bin$/.test(f))).toBe(storage.mode === 'keychain');
     expect(connected.hits).toEqual([]);
 
-    // Test: a latency/cost result, or (providers.test still stubbed) the graceful "not available" notice.
-    const outcome = await settings.testAndExpectOutcome('Anthropic');
-    testInfo.annotations.push({ type: 'providers.test', description: outcome });
+    // Test: a latency and cost label.
+    await settings.testAndExpectPassed('Anthropic');
 
     // Remove both keys.
     for (const c of connections) {
@@ -76,5 +76,51 @@ test.describe('provider settings', { tag: '@m1' }, () => {
     expect(closed.tablesDumped.length).toBeGreaterThan(0);
     expect(live.hits).toEqual([]);
     expect(closed.hits).toEqual([]);
+  });
+
+  // 12 §L4: after a disconnect, a run that needs the provider cannot start. The preflight reports `missing_credential`
+  // (06 F14) on every step whose profile uses it, with a "Connect provider" way out; reconnecting clears it.
+  test('disconnect blocks starting a run that needs the provider (missing_credential → Connect provider)', async ({
+    page,
+    stubDialogs,
+    project,
+    callLog,
+  }) => {
+    await setupOwnProject(page, stubDialogs, project);
+    const shell = new Shell(page);
+    await shell.nav('Settings');
+    const settings = new Settings(page);
+    await settings.expectLoaded();
+    await settings.section('Providers');
+    await settings.disconnect('Anthropic');
+    await expect(settings.providerCard('Anthropic').getByText('Not connected')).toBeVisible();
+
+    await shell.nav('Runs');
+    const runs = new Runs(page);
+    await runs.expectLoaded();
+    await runs.startWorkflow();
+    const form = new NewRun(page);
+    await form.expectLoaded();
+    await form.fillGoal('Validate the user id parameter in the user handler.');
+    const summary = form.problemSummary();
+    await expect(summary).toBeVisible({ timeout: 15_000 });
+    await expect(summary.getByText('missing_credential').first()).toBeVisible();
+    await expect(summary.getByRole('link', { name: /no API key is connected for Anthropic/ }).first()).toBeVisible();
+    await expect(form.startButton()).toBeDisabled();
+    await expect(page.getByText('All checks passed. Ready to start.')).toHaveCount(0);
+
+    // The fix: "Connect provider" opens Settings → Providers; reconnecting makes the same form startable.
+    await summary.getByRole('link', { name: 'Connect provider' }).first().click();
+    await settings.expectLoaded();
+    await settings.connect('Anthropic', FAKE_ANTHROPIC_KEY, 'session');
+    await expect(settings.providerCard('Anthropic').getByText('Connected', { exact: true })).toBeVisible();
+    await shell.nav('Runs');
+    await runs.startWorkflow();
+    await form.expectLoaded();
+    await form.fillGoal('Validate the user id parameter in the user handler.');
+    await form.expectReady();
+    await expect(form.problemSummary()).toHaveCount(0);
+    // Nothing was ever sent while the key was missing.
+    expect(await callLog()).toEqual([]);
   });
 });

@@ -19,7 +19,7 @@ import {
   StatusBadge,
 } from '../../components/ui';
 import type { RecoveryDecisionDetail } from '../../components/ui';
-import { DESTRUCTIVE_RUN_ACTIONS, formatDuration, PROVIDER_LABELS, RUN_ACTION_LABELS, statusPresentation } from '../../lib/format';
+import { DESTRUCTIVE_RUN_ACTIONS, formatDuration, PROVIDER_LABELS, RUN_ACTION_LABELS, statusPresentation, stepKeyLabel } from '../../lib/format';
 import { paths } from '../shell/paths';
 import {
   bannerActions,
@@ -170,6 +170,9 @@ interface BannerContent {
 
 function pausedContent(reason: PauseReason, run: RunDetail, events: readonly RunEvent[], step: StepView | undefined): BannerContent {
   const detail = run.statusDetail;
+  /** Paused from `queued` (06 F2 clarification 9): no step ran, no attempt exists, nothing was reserved. */
+  const notStarted = run.startedAt === null;
+  const stepKeyDetail = stringDetail(detail, 'stepKey');
   const code = detail === null ? null : (
     <p className="subtle">
       Error code <code>{detail.code}</code>
@@ -180,22 +183,27 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
     case 'budget_project': {
       const b = breakdownOf(detail);
       const project = reason === 'budget_project';
+      const before = notStarted ? 'Paused before the first request' : 'Paused before dispatch';
       return {
         title:
           b === null
             ? project
-              ? "Paused before dispatch: the next request would exceed the project's monthly allowance"
-              : "Paused before dispatch: the next request would exceed this run's allowance"
+              ? `${before}: the next request would exceed the project's monthly allowance`
+              : `${before}: the next request would exceed this run's allowance`
             : (
                 <>
-                  Paused before dispatch: the next request needs <Money value={b.N} />, only{' '}
+                  {before}: the next request needs <Money value={b.N} />, only{' '}
                   <Money value={microusd(Math.max(0, b.L - b.C - b.R - b.U))} /> remains
                   {project ? ' this month' : ''}
                 </>
               ),
         body: (
           <>
-            <p>Nothing was sent to the provider. Completed steps and artifacts are kept.</p>
+            <p>
+              {notStarted
+                ? 'The run has not started: nothing was sent to a provider and nothing was reserved.'
+                : 'Nothing was sent to the provider. Completed steps and artifacts are kept.'}
+            </p>
             {b === null ? null : <BudgetBreakdownTable breakdown={b} />}
             <p className="subtle">
               {project
@@ -323,10 +331,12 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
     }
     case 'setup_blocked':
       return {
-        title: 'A setup check failed before the step could start',
+        title: notStarted ? 'A setup check failed before the run started' : 'A setup check failed before the step could start',
         body: (
           <>
             <p>{detail?.userMessage ?? 'Relay could not start the next step with the current setup.'}</p>
+            {notStarted ? <p>Nothing was sent to a provider and nothing was reserved.</p> : null}
+            {stepKeyDetail === null ? null : <p className="subtle">Step: {stepKeyLabel(stepKeyDetail)}</p>}
             {stringDetail(detail, 'modelId') === null ? null : (
               <p className="subtle">
                 Model <span className="mono">{stringDetail(detail, 'modelId')}</span>
@@ -339,6 +349,13 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
         ),
       };
     case 'unknown_outcome':
+      if (run.unresolvedAttempts.length === 0) {
+        // Every unknown request is decided (06 F2): the run can resume from its last completed step.
+        return {
+          title: 'Every request with an unknown outcome has been decided',
+          body: <p>Resume continues the run from its last completed step. Stop ends it; finished steps and costs are kept.</p>,
+        };
+      }
       return {
         title: 'The request may have been sent; its charge is unknown',
         body: (
@@ -349,6 +366,22 @@ function pausedContent(reason: PauseReason, run: RunDetail, events: readonly Run
         ),
       };
     case 'auth_required':
+      if (notStarted) {
+        // Queued → paused(auth_required): no credential ref for a provider the run needs (06 F13 runChecks).
+        return {
+          title: `No API key is connected for ${providerName(stringDetail(detail, 'providerId'))}`,
+          body: (
+            <>
+              <p>
+                The run has not started: nothing was sent to a provider and nothing was reserved. Connect the provider in
+                Settings, then resume.
+              </p>
+              {stepKeyDetail === null ? null : <p className="subtle">Needed by: {stepKeyLabel(stepKeyDetail)}</p>}
+              <p className="subtle">Relay does not show or log the key.</p>
+            </>
+          ),
+        };
+      }
       return {
         title: `${providerName(stringDetail(detail, 'providerId'))} rejected the stored credential`,
         body: (
