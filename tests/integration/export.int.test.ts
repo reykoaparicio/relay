@@ -71,5 +71,27 @@ describe('artifact export @m4', () => {
     expect(await readdir(inside)).toEqual([]);
   });
 
-  it.todo('artifacts.exportTo over IPC (runner op is not_implemented yet): read-only dest → ARTIFACT_WRITE_FAILED, retry ok, inside project → PERMISSION_DENIED');
+  it('artifacts.exportTo over the runner op: read-only dest → ARTIFACT_WRITE_FAILED, retry ok, inside project → PERMISSION_DENIED @m4', async () => {
+    const { x, runId } = await completedRun();
+    const dest = await makeTempDir('relay-export-');
+    await chmod(dest, 0o555);
+    readOnly.push(dest);
+    const runBefore = x.db.repos.runs.get(runId);
+
+    const failed = await x.call('relay/v1/artifacts.exportTo', { runId, what: 'both', destinationRealpath: dest });
+    expect(failed.ok ? null : failed.error.code).toBe('ARTIFACT_WRITE_FAILED');
+    expect(x.db.repos.runs.get(runId)).toEqual(runBefore);
+
+    await chmod(dest, 0o755);
+    const retried = await x.call('relay/v1/artifacts.exportTo', { runId, what: 'both', destinationRealpath: dest });
+    expect(retried.ok && retried.data.writtenRealpaths.length).toBe(2);
+    expect((await readdir(dest)).length).toBe(2);
+
+    const inside = join(x.projectRoot, 'exports');
+    await mkdir(inside);
+    const insideRes = await x.call('relay/v1/artifacts.exportTo', { runId, what: 'both', destinationRealpath: inside });
+    expect(insideRes.ok ? null : insideRes.error.code).toBe('PERMISSION_DENIED');
+    expect(await readdir(inside)).toEqual([]);
+    expect(x.db.repos.runs.get(runId)).toEqual(runBefore);
+  });
 });

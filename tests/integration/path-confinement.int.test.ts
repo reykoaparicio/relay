@@ -99,7 +99,28 @@ describe('path confinement @m3', () => {
     expect(checked.ok ? null : [checked.error.code, checked.error.details]).toEqual(['PERMISSION_DENIED', { reason: 'excluded', denied: [{ relPath: '.env', reason: 'secret' }] }]);
   });
 
-  it.todo('artifacts.importDiffText touching .env → PERMISSION_DENIED end to end (the runner op is not_implemented yet; Wave 3 G/F work)');
+  it('artifacts.importDiffText touching .env → PERMISSION_DENIED end to end; the diff text is never persisted @m3', async () => {
+    h = await createHarness({ start: false });
+    const marker = 'sk-fixture-DO-NOT-READ-import-1234567890';
+    const text = ['--- a/.env', '+++ b/.env', '@@ -1 +1 @@', '-SAMPLE_API_TOKEN=old', `+SAMPLE_API_TOKEN=${marker}`, ''].join('\n');
+
+    const res = await h.call('relay/v1/artifacts.importDiffText', { projectId: h.projectId, text, fileName: 'leak.diff' });
+
+    expect(res.ok ? null : [res.error.code, JSON.stringify(res.error.details)]).toEqual(['PERMISSION_DENIED', expect.stringContaining('secret')]);
+    expect(dumpAllValues(h.dbPath).filter((v) => v.value.includes(marker))).toEqual([]);
+  });
+
+  it('artifacts.importDiffText with a ../ path → refused, and a clean diff is accepted @m3', async () => {
+    h = await createHarness({ start: false });
+    const escape = ['--- a/../outside/x.ts', '+++ b/../outside/x.ts', '@@ -1 +1 @@', '-a', '+b', ''].join('\n');
+    const clean = ['--- a/src/handlers/user.ts', '+++ b/src/handlers/user.ts', '@@ -1 +1 @@', '-a', '+b', ''].join('\n');
+
+    const bad = await h.call('relay/v1/artifacts.importDiffText', { projectId: h.projectId, text: escape, fileName: 'escape.diff' });
+    const good = await h.call('relay/v1/artifacts.importDiffText', { projectId: h.projectId, text: clean, fileName: 'ok.diff' });
+
+    expect(bad.ok ? null : bad.error.code).toMatch(/^(VALIDATION_FAILED|PERMISSION_DENIED)$/);
+    expect(good.ok).toBe(true);
+  });
 
   it('patch.outside-scope → rejected by patch validation (never applied) → paused(output_invalid) @m3', async () => {
     const outside = JSON.parse(readFileSync(`${FIXTURES_DIR}provider-responses/patch.outside-scope.json`, 'utf8')) as unknown;
