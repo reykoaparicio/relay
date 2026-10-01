@@ -85,6 +85,8 @@ const TABLE: readonly Row[] = [
   ['interrupted', SAMPLES.RECOVERY_DECIDED, 'queued', null],
   ['interrupted', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
   ['interrupted', SAMPLES.STOP_REQUESTED, 'cancelled', null],
+  ['interrupted', SAMPLES.BUDGET_OVERRUN, 'paused', 'budget_overrun'], // clarification 14 (deferred reconciled overrun)
+  ['interrupted', SAMPLES.APPROVAL_STALE, 'paused', 'approval_stale'],
   ['cancelling', SAMPLES.WORK_STOPPED, 'cancelled', null],
   ['cancelling', SAMPLES.RUNNER_LOST, 'cancelled', null],
 ];

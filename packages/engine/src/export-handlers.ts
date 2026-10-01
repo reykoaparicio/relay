@@ -1,0 +1,302 @@
+// 02 INTERNAL_RUNNER_OPS export/import handlers (05 E5/E7, 06 F17, FR-10): `artifacts.exportTo` (report Markdown /
+// concatenated patch), `artifacts.importDiffText` (ADR-015), `projects.exportTo` (JSON bundle, secret-scanned), and
+// `ledger.exportTo` (CSV, exact 6-dp USD strings). Writes go through the injected ExportPort (tools `writeExportFile`:
+// realpath re-resolution, refusal inside/containing a project root, never overwriting). No credential ever leaves.
+import { appError, err, errors, isTerminalRunStatus, looksLikeSecret, ok, patchV1Schema, reportV1Schema } from '@relay/contracts';
+import type {
+  ArtifactId,
+  INTERNAL_RUNNER_OPS,
+  OPERATIONS,
+  ProjectId,
+  ReportV1,
+  Result,
+  RunId,
+  RunnerChannel,
+  RunnerOutputOf,
+  ValidationIssue,
+} from '@relay/contracts';
+import type { LedgerEntryRow, Repos } from '@relay/storage';
+import { monthWindowOf } from './clock.js';
+import { fromUtf8, utf8 } from './hash.js';
+import type { EngineCtx, ExportPort } from './ports.js';
+import { generateReport, renderReportMarkdown, usd6 } from './report.js';
+import { allLedgerEntries, attemptStepKeys, toLedgerEntryView, toRunSummary } from './views.js';
+
+type Ops = typeof OPERATIONS & typeof INTERNAL_RUNNER_OPS;
+/** Parsed input of a runner channel (= services.ts `ParsedInputOf`; restated to keep the module graph acyclic). */
+type ParsedInputOf<C extends RunnerChannel> = Extract<Ops[keyof Ops], { channel: C }>['input']['_zod']['output'];
+
+/** Max bytes read back from one stored report / patch artifact. */
+const MAX_EXPORT_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+function unavailable(ctx: EngineCtx, channel: string) {
+  return appError('INTERNAL', { userMessage: 'This feature is not available in this build yet.', correlationId: ctx.ids.next('correlation'),
+    details: { reason: 'not_implemented', channel } });
+}
+
+function internal(ctx: EngineCtx, reason: string, entity: string) {
+  return appError('INTERNAL', { correlationId: ctx.ids.next('correlation'), details: { reason, entity } });
+}
+
+function exportPort(ctx: EngineCtx, channel: string): Result<ExportPort> {
+  return ctx.exports === undefined ? err(unavailable(ctx, channel)) : ok(ctx.exports);
+}
+
+/** Every registered project root (archived included): FR-10 refuses exports inside or containing any of them. */
+export function projectRoots(r: Repos): string[] {
+  return r.projects.list({ includeArchived: true }).map((p) => r.projects.getWithRoot(p.id).rootRealpath);
+}
+
+async function readArtifactText(ctx: EngineCtx, id: ArtifactId, entity: string): Promise<Result<string>> {
+  const row = ctx.db.repos.artifacts.get(id);
+  if (row === undefined) return err(errors.notFound(entity));
+  if (row.purgedAt !== null) return err(errors.notFound(entity, { purged: true }, { details: { purgedAt: row.purgedAt } }));
+  const bytes = await ctx.artifacts.read(row.relPath, Math.min(Math.max(row.sizeBytes, 1), MAX_EXPORT_ARTIFACT_BYTES));
+  return bytes.ok ? ok(fromUtf8(bytes.value)) : bytes;
+}
+
+async function readJson(ctx: EngineCtx, id: ArtifactId, entity: string): Promise<Result<unknown>> {
+  const text = await readArtifactText(ctx, id, entity);
+  if (!text.ok) return text;
+  try {
+    return ok(JSON.parse(text.value) as unknown);
+  } catch {
+    return err(internal(ctx, 'artifact_not_json', entity));
+  }
+}
+
+/** The run's report (generated once if the terminal run lacks one, F17); NOT_FOUND for a run that has not ended. */
+export async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>> {
+  const r = ctx.db.repos;
+  let id = r.artifacts.listForRun(runId, ['report'])[0]?.id;
+  if (id === undefined) {
+    if (!isTerminalRunStatus(r.runs.get(runId).status)) return err(errors.notFound('report', {}, { details: { reason: 'run_not_terminal' } }));
+    const made = await generateReport(ctx, runId);
+    if (!made.ok) return made;
+    id = made.value;
+  }
+  const json = await readJson(ctx, id, 'report');
+  if (!json.ok) return json;
+  const parsed = reportV1Schema.safeParse(json.value);
+  return parsed.success ? ok(parsed.data) : err(internal(ctx, 'artifact_invalid', 'report'));
+}
+
+/** The run's validated patch as one `.patch` text (each file's unified diff, newline-terminated, in order). */
+async function runPatchText(ctx: EngineCtx, runId: RunId, report: ReportV1 | null): Promise<Result<string>> {
+  const id = report?.artifacts.patch ?? ctx.db.repos.artifacts.listForRun(runId, ['patch']).at(-1)?.id;
+  if (id === undefined) return err(errors.notFound('patch'));
+  const json = await readJson(ctx, id, 'patch');
+  if (!json.ok) return json;
+  const parsed = patchV1Schema.safeParse(json.value);
+  if (!parsed.success) return err(internal(ctx, 'artifact_invalid', 'patch'));
+  return ok(parsed.data.files.map((f) => (f.unifiedDiff.endsWith('\n') ? f.unifiedDiff : `${f.unifiedDiff}\n`)).join(''));
+}
+
+/** `artifacts.exportTo`: report → Markdown (`.md`), patch → concatenated unified diffs (`.patch`), or both. */
+export async function exportRunArtifacts(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/artifacts.exportTo'>): Promise<Result<RunnerOutputOf<'relay/v1/artifacts.exportTo'>>> {
+  const port = exportPort(ctx, 'relay/v1/artifacts.exportTo');
+  if (!port.ok) return port;
+  const r = ctx.db.repos;
+  if (r.runs.find(input.runId) === undefined) return err(errors.notFound('run'));
+  const files: { name: string; text: string }[] = [];
+  let report: ReportV1 | null = null;
+  if (input.what !== 'patch') {
+    const rep = await runReport(ctx, input.runId);
+    if (!rep.ok) return rep;
+    report = rep.value;
+    files.push({ name: `relay-report-${input.runId}.md`, text: renderReportMarkdown(rep.value) });
+  }
+  if (input.what !== 'report') {
+    const patch = await runPatchText(ctx, input.runId, report);
+    if (!patch.ok) return patch;
+    files.push({ name: `relay-patch-${input.runId}.patch`, text: patch.value });
+  }
+  // Everything is read and rendered before the first write; the run itself is never touched (§17.1 retry only export).
+  const roots = projectRoots(r);
+  const written: string[] = [];
+  for (const f of files) {
+    const w = await port.value.writeFile(input.destinationRealpath, f.name, utf8(f.text), roots);
+    if (!w.ok) return w;
+    written.push(w.value.writtenRealpath);
+  }
+  return ok({ writtenRealpaths: written });
+}
+
+/**
+ * `artifacts.importDiffText` (05 E5, ADR-015): parse (size cap, every path normalized), check every referenced path
+ * against the project (excluded / outside-root → PERMISSION_DENIED), then store the text as a project-scoped
+ * `input_diff` artifact. Returns the files it touches and the parse warnings.
+ */
+export async function importDiffText(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/artifacts.importDiffText'>): Promise<Result<RunnerOutputOf<'relay/v1/artifacts.importDiffText'>>> {
+  const r = ctx.db.repos;
+  const project = r.projects.find(input.projectId);
+  if (project === undefined) return err(errors.notFound('project'));
+  const diff = ctx.projectFs.parseDiff(input.text);
+  if (!diff.ok) return diff;
+  const root = await ctx.projectFs.openRoot(r.projects.getWithRoot(project.id).rootRealpath);
+  if (!root.ok) return root;
+  const checked = await ctx.projectFs.checkDiffPaths(root.value, diff.value, { exclusions: project.exclusions });
+  if (!checked.ok) return checked;
+  const id = ctx.ids.next('artifact');
+  const put = await ctx.artifacts.put({ scopeDir: `artifacts/${project.id}`, artifactId: id, bytes: utf8(input.text), mediaType: 'text/x-diff; charset=utf-8' });
+  if (!put.ok) return put;
+  const row = ctx.db.tx('immediate', (tx) => tx.artifacts.insertIfAbsent({ id, runId: null, projectId: project.id, kind: 'input_diff',
+    relPath: put.value.relPath, sha256: put.value.sha256, sizeBytes: put.value.sizeBytes,
+    mediaType: 'text/x-diff; charset=utf-8', createdAt: ctx.clock.now() }));
+  const files = [...new Set(diff.value.files.map((f) => f.newPath ?? f.oldPath).filter((p): p is NonNullable<typeof p> => p !== null))];
+  return ok({ artifactId: row.id, files, parseWarnings: [...diff.value.warnings] });
+}
+
+// ---------------------------------------------------------------- projects.exportTo
+
+/** Every run id of a project (oldest first). */
+function projectRunIds(r: Repos, projectId: ProjectId): RunId[] {
+  const ids: RunId[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = r.runs.list({ projectId, limit: 100, sort: 'created_asc', cursor });
+    if (!page.ok) return ids;
+    ids.push(...page.value.items.map((run) => run.id));
+    if (page.value.nextCursor === null) return ids;
+    cursor = page.value.nextCursor;
+  }
+}
+
+/** Every string (keys included) of a JSON value that looks like a credential, with its JSON path. */
+export function findSecrets(value: unknown, path = ''): ValidationIssue[] {
+  if (typeof value === 'string') {
+    return looksLikeSecret(value) ? [{ path: path === '' ? '(root)' : path, message: 'This value looks like a credential.', code: 'secret_detected' }] : [];
+  }
+  if (Array.isArray(value)) return value.flatMap((v, i) => findSecrets(v, `${path}[${String(i)}]`));
+  if (typeof value === 'object' && value !== null) {
+    return Object.entries(value).flatMap(([k, v]) => {
+      const p = path === '' ? k : `${path}.${k}`;
+      return [...(looksLikeSecret(k) ? [{ path: p, message: 'This key looks like a credential.', code: 'secret_detected' }] : []), ...findSecrets(v, p)];
+    });
+  }
+  return [];
+}
+
+/** The workflow versions the exported runs used, plus each workflow's latest validated version. */
+function workflowVersions(r: Repos, runVersionIds: readonly string[]) {
+  const versions = new Map<string, NonNullable<ReturnType<Repos['workflows']['getVersionById']>>>();
+  for (const id of runVersionIds) {
+    const v = r.workflows.getVersionById(id as Parameters<Repos['workflows']['getVersionById']>[0]);
+    if (v !== undefined) versions.set(v.id, v);
+  }
+  for (const w of r.workflows.listWorkflows()) {
+    const v = r.workflows.latestValidated(w.id);
+    if (v !== undefined) versions.set(v.id, v);
+  }
+  return [...versions.values()].map((v) => ({
+    id: v.id, workflowId: v.workflowId, name: r.workflows.getWorkflow(v.workflowId)?.name ?? null, version: v.version, status: v.status,
+    contentHash: v.contentHash, spec: v.spec, prompts: v.prompts, createdAt: v.createdAt,
+  }));
+}
+
+/** Builds the project bundle (02 `projects.export`): no realpath, no credential refs, no raw provider responses. */
+async function projectBundle(ctx: EngineCtx, projectId: ProjectId, runIds: readonly RunId[]): Promise<Result<unknown>> {
+  const r = ctx.db.repos;
+  const project = r.projects.get(projectId);
+  const memory = r.memory.list({ projectId, statuses: ['suggested', 'approved', 'archived', 'rejected'] }).map((m) => {
+    const full = r.memory.getWithRevisions(m.record.id);
+    return { record: m.record, revisions: full?.revisions ?? [m.current], events: full?.events ?? [] };
+  });
+  const runs = [];
+  for (const runId of runIds) {
+    const run = r.runs.get(runId);
+    const stepOf = attemptStepKeys(r, runId);
+    const hasReport = r.artifacts.listForRun(runId, ['report']).length > 0 || isTerminalRunStatus(run.status);
+    const report = hasReport ? await runReport(ctx, runId) : null;
+    if (report !== null && !report.ok) return report;
+    const patch = await runPatchText(ctx, runId, report?.value ?? null);
+    if (!patch.ok && patch.error.code !== 'NOT_FOUND') return patch;
+    runs.push({
+      summary: toRunSummary(r.runs.getInspectorProjection(runId)),
+      input: run.input,
+      limits: run.limits,
+      report: report?.value ?? null,
+      patch: patch.ok ? patch.value : null,
+      ledger: allLedgerEntries(r, runId).map((e) => toLedgerEntryView(e, e.attemptId === null ? null : (stepOf.get(e.attemptId) ?? null))),
+    });
+  }
+  return ok({
+    format: 'relay.project-export',
+    formatVersion: 1,
+    exportedAt: new Date(ctx.clock.now()).toISOString(),
+    project: {
+      id: project.id, name: project.name, exclusions: project.exclusions, providerPolicy: project.providerPolicy,
+      monthlyAllowanceMicrousd: project.monthlyAllowanceMicrousd, isDemo: project.isDemo, createdAt: project.createdAt,
+      updatedAt: project.updatedAt, archivedAt: project.archivedAt,
+    },
+    memory,
+    workflows: workflowVersions(r, runIds.map((id) => r.runs.get(id).workflowVersionId)),
+    runs,
+  });
+}
+
+/** `projects.exportTo`: the JSON bundle, refused (VALIDATION_FAILED) when any string in it looks like a credential. */
+export async function exportProject(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/projects.exportTo'>): Promise<Result<RunnerOutputOf<'relay/v1/projects.exportTo'>>> {
+  const port = exportPort(ctx, 'relay/v1/projects.exportTo');
+  if (!port.ok) return port;
+  const r = ctx.db.repos;
+  const project = r.projects.find(input.projectId);
+  if (project === undefined) return err(errors.notFound('project'));
+  const runIds = input.runIds === undefined ? projectRunIds(r, project.id) : [...new Set(input.runIds)];
+  if (runIds.some((id) => r.runs.find(id)?.projectId !== project.id)) return err(errors.notFound('run'));
+  const bundle = await projectBundle(ctx, project.id, runIds);
+  if (!bundle.ok) return bundle;
+  const secrets = findSecrets(bundle.value);
+  if (secrets.length > 0) {
+    ctx.logger.warn('export.secret_refused', { projectId: project.id, paths: secrets.map((s) => s.path).slice(0, 20) });
+    return err(errors.validationFailed(secrets.slice(0, 50), { userMessage: 'The export was not written: it contains text that looks like a credential.' }));
+  }
+  const w = await port.value.writeFile(input.destinationRealpath, `relay-project-${project.id}.json`, utf8(`${JSON.stringify(bundle.value, null, 2)}\n`), projectRoots(r));
+  return w.ok ? ok({ writtenRealpath: w.value.writtenRealpath }) : w;
+}
+
+// ---------------------------------------------------------------- ledger.exportTo
+
+/** The CSV header (02 `ledger.export`, §5.6). */
+export const LEDGER_CSV_HEADER = ['created_at', 'run', 'step', 'attempt', 'type', 'bucket', 'delta_usd', 'certainty', 'price_catalog_version'] as const;
+
+/** RFC 4180 field: quoted when it holds a comma, quote, or line break. */
+function csvField(v: string): string {
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** One CSV row per entry (RFC 4180, CRLF line ends); `delta_usd` is the exact 6-dp string, never a float. */
+export function ledgerCsv(rows: readonly { entry: LedgerEntryRow; stepKey: string | null }[]): string {
+  const lines = [LEDGER_CSV_HEADER.join(',')];
+  for (const { entry: e, stepKey } of rows) {
+    lines.push([new Date(e.createdAt).toISOString(), e.runId ?? '', stepKey ?? '', e.attemptId ?? '', e.type, e.bucket,
+      usd6(e.deltaMicrousd), e.certainty ?? '', e.priceCatalogVersion ?? ''].map(csvField).join(','));
+  }
+  return `${lines.join('\r\n')}\r\n`;
+}
+
+/** `ledger.exportTo`: one run's entries, or every run entry of a project created in the month (oldest first). */
+export async function exportLedger(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/ledger.exportTo'>): Promise<Result<RunnerOutputOf<'relay/v1/ledger.exportTo'>>> {
+  const port = exportPort(ctx, 'relay/v1/ledger.exportTo');
+  if (!port.ok) return port;
+  const r = ctx.db.repos;
+  const rowsOf = (runId: RunId) => {
+    const stepOf = attemptStepKeys(r, runId);
+    return allLedgerEntries(r, runId).map((entry) => ({ entry, stepKey: entry.attemptId === null ? null : (stepOf.get(entry.attemptId) ?? null) }));
+  };
+  let rows: { entry: LedgerEntryRow; stepKey: string | null }[];
+  let name: string;
+  if ('runId' in input) {
+    if (r.runs.find(input.runId) === undefined) return err(errors.notFound('run'));
+    rows = rowsOf(input.runId);
+    name = `relay-ledger-${input.runId}.csv`;
+  } else {
+    if (r.projects.find(input.projectId) === undefined) return err(errors.notFound('project'));
+    const { start, end } = monthWindowOf(input.month);
+    rows = projectRunIds(r, input.projectId).flatMap(rowsOf).filter(({ entry }) => entry.createdAt >= start && entry.createdAt < end)
+      .sort((a, b) => a.entry.createdAt - b.entry.createdAt || (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
+    name = `relay-ledger-${input.projectId}-${input.month}.csv`;
+  }
+  const w = await port.value.writeFile(input.destinationRealpath, name, utf8(ledgerCsv(rows)), projectRoots(r));
+  return w.ok ? ok({ writtenRealpath: w.value.writtenRealpath }) : w;
+}

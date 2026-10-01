@@ -32,6 +32,7 @@ import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
 import { outputKindOf } from './snapshot.js';
+import { diffReferencedPaths } from './steps/intake.js';
 
 /** Parsed `runs.start` input (the IPC schema output). */
 export type StartInput = Omit<RunStartInput, 'idempotencyKey'> & { readonly idempotencyKey?: string };
@@ -221,11 +222,14 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
   if (!prepared.ok) return prepared;
   const p = prepared.value;
   let files: { relPath: string; sha256: string; content: string; size: number }[] = [];
-  if (input.input.kind === 'files') {
+  // A diff-input run's context carries the current files its diff references (read like intake will read them).
+  const relPaths = input.input.kind === 'files' ? ok(input.input.relPaths) : await diffReferencedPaths(ctx, p.project.id, input.input.diffArtifactId);
+  if (!relPaths.ok) return relPaths;
+  if (relPaths.value.length > 0) {
     const project = ctx.db.repos.projects.getWithRoot(p.project.id);
     const root = await ctx.projectFs.openRoot(project.rootRealpath);
     if (!root.ok) return root;
-    const read = await ctx.projectFs.readSelected(root.value, input.input.relPaths, { exclusions: project.exclusions });
+    const read = await ctx.projectFs.readSelected(root.value, relPaths.value, { exclusions: project.exclusions });
     if (!read.ok) return read;
     files = read.value.files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, content: f.content, size: f.size }));
   }

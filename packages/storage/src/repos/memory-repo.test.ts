@@ -160,4 +160,21 @@ describe('MemoryRepo', () => {
 
     expect(f.db.repos.memory.runSnapshot(run.id)).toEqual([]);
   });
+
+  it('setAttributes replaces only the given attributes (null clears a date) and countRunSnapshots counts copies', () => {
+    const p = seedProject(f.db, f.clock);
+    const m = add(p.id, { expiresAt: f.clock.now() + 5000 });
+    const run = seedRun(f.db, f.clock, p.id);
+    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', included: true }]);
+
+    f.db.repos.memory.setAttributes(m.record.id, { pinned: true, reviewAt: epochMs(77) }, epochMs(50));
+    const pinned = f.db.repos.memory.get(m.record.id)?.record;
+    f.db.repos.memory.setAttributes(m.record.id, { scope: { roles: ['planner'] }, expiresAt: null }, epochMs(60));
+    const scoped = f.db.repos.memory.get(m.record.id)?.record;
+
+    expect([pinned?.pinned, pinned?.reviewAt, pinned?.expiresAt, pinned?.updatedAt]).toEqual([true, 77, f.clock.now() + 5000, 50]);
+    expect([scoped?.scope, scoped?.pinned, scoped?.reviewAt, scoped?.expiresAt]).toEqual([{ roles: ['planner'] }, true, 77, null]);
+    expect(f.db.repos.memory.countRunSnapshots(m.record.id)).toBe(1);
+    expect(f.db.repos.memory.countRunSnapshots(newId('memory'))).toBe(0);
+  });
 });

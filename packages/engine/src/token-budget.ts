@@ -1,5 +1,5 @@
-// 07 G1b (Wave-1 minimum): token counting and the input budget. The full optional-item fit algorithm
-// (`fitToBudget`) lands with G1 in Wave 3; in Wave 1 every selected file is mandatory.
+// 07 G1b: token counting, the input budget, and the fit algorithm (`fitToBudget`, pure). Files are included whole or
+// not at all: an item is never truncated (§10.2 "ask the user to narrow scope").
 import type { ProfileSnapshot } from '@relay/contracts';
 
 /** 5% safety margin for estimator error (G1b). */
@@ -37,4 +37,57 @@ export function inputBudget(profile: ProfileSnapshot, maxOutputTokens: number): 
   const byCaps = capIn === undefined ? Number.MAX_SAFE_INTEGER : capIn - maxOutputTokens;
   const byProfile = profile.params.maxInputTokens ?? Number.MAX_SAFE_INTEGER;
   return Math.max(0, Math.floor(Math.min(byCaps, byProfile) * INPUT_BUDGET_SAFETY));
+}
+
+/** One context item for the fit algorithm (its rendered block, counted as a whole). */
+export interface FitItem {
+  readonly kind: 'file' | 'memory';
+  /** relPath (file) or memory record id. */
+  readonly ref: string;
+  readonly tokens: number;
+}
+
+/** `CONTEXT_TOO_LARGE` details (G1b). */
+export interface TooLargeDetails {
+  readonly mandatoryTokens: number;
+  readonly budget: number;
+  readonly largestItems: readonly { readonly relPath: string; readonly tokens: number }[];
+}
+
+/** Fit result: the optional items that fit (in priority order) and the ones omitted for `token_budget`. */
+export type FitResult =
+  | { readonly ok: true; readonly included: readonly FitItem[]; readonly omitted: readonly FitItem[]; readonly totalTokens: number }
+  | { readonly ok: false; readonly details: TooLargeDetails };
+
+/** Number of items listed in `largestItems`. */
+const LARGEST_ITEMS = 5;
+
+/**
+ * G1b. `mandatoryTokens` covers everything that must be sent (system prompt, goal, constraints, upstream, pinned
+ * rules, mandatory files); `mandatory` lists the mandatory items for the overflow report. Optional items are taken in
+ * the given priority order until the next one does not fit; that item and every later one are omitted.
+ */
+export function fitToBudget(i: {
+  readonly budget: number;
+  readonly mandatoryTokens: number;
+  readonly mandatory: readonly FitItem[];
+  readonly optional: readonly FitItem[];
+}): FitResult {
+  if (i.mandatoryTokens > i.budget) {
+    const largestItems = [...i.mandatory]
+      .sort((a, b) => b.tokens - a.tokens || (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0))
+      .slice(0, LARGEST_ITEMS)
+      .map((m) => ({ relPath: m.ref, tokens: m.tokens }));
+    return { ok: false, details: { mandatoryTokens: i.mandatoryTokens, budget: i.budget, largestItems } };
+  }
+  let total = i.mandatoryTokens;
+  let cut = i.optional.length;
+  for (const [n, item] of i.optional.entries()) {
+    if (total + item.tokens > i.budget) {
+      cut = n;
+      break;
+    }
+    total += item.tokens;
+  }
+  return { ok: true, included: i.optional.slice(0, cut), omitted: i.optional.slice(cut), totalTokens: total };
 }

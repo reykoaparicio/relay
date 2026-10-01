@@ -2,8 +2,9 @@
 // (lint override). H7's runner entry, K's crash child, D9b, and M's scripts all build the engine through it.
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, statSync } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createIdGen, err, errors, ok, systemClock, toDisplayPath } from '@relay/contracts';
 import type { Clock, ModelCapabilities, PushEvent } from '@relay/contracts';
 import { connectionTestRequest, createProviderRegistry, loadCatalogEntries, supportsRequestLookupFor } from '@relay/providers';
@@ -12,12 +13,21 @@ import { createBackup, createMaintenance, openDb } from '@relay/storage';
 import type { Db } from '@relay/storage';
 import { createTemplateRegistry } from '@relay/templates';
 import type { TemplateRegistry } from '@relay/templates';
-import { createArtifactStore, hashFiles, openProjectRoot, readSelected, scanProject } from '@relay/tools';
+import {
+  checkDiffPaths,
+  createArtifactStore,
+  hashFiles,
+  openProjectRoot,
+  parseImportedDiff,
+  readSelected,
+  scanProject,
+  writeExportFile,
+} from '@relay/tools';
 import type { ArtifactStore } from '@relay/tools';
 import { globalTimers } from './clock.js';
 import { createContextAssembler } from './context.js';
 import { createMemoryService } from './memory.js';
-import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, Logger, ProjectFsPort, Timers } from './ports.js';
+import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, ExportPort, Logger, ProjectFsPort, Timers } from './ports.js';
 import { createEngine } from './runner.js';
 import { seedDatabase } from './seed.js';
 
@@ -68,6 +78,24 @@ export function createProjectFs(userDataDir: string): ProjectFsPort {
     readSelected: (root, relPaths, opts) => readSelected(root, relPaths, opts),
     hashFiles: (root, relPaths) => hashFiles(root, relPaths),
     scan: (root, opts) => scanProject(root, opts),
+    parseDiff: (text) => parseImportedDiff(text),
+    checkDiffPaths: (root, diff, opts) => checkDiffPaths(root, diff, opts),
+  };
+}
+
+/**
+ * `*.exportTo` writes over tools `writeExportFile` (05 E7: realpath re-resolution, FR-10 project-root refusal, `O_EXCL`
+ * + name suffixing). An existing directory receives `defaultName`; any other path is a save-dialog file path.
+ */
+export function createExportPort(): ExportPort {
+  return {
+    async writeFile(destination, defaultName, bytes, projectRoots) {
+      const isDir = await stat(destination).then((s) => s.isDirectory(), () => false);
+      const dir = isDir ? destination : dirname(destination);
+      const written = await writeExportFile(dir, isDir ? defaultName : basename(destination), bytes, projectRoots);
+      if (!written.ok) return written;
+      return ok({ writtenRealpath: join(await realpath(dir), written.value.fileName) });
+    },
   };
 }
 
@@ -113,16 +141,18 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
       logger.warn(event, fields);
     } });
     const projectFs = createProjectFs(o.userDataDir);
-    const memory = createMemoryService();
+    const emit = o.emit ?? (() => undefined);
+    const memory = createMemoryService({ db, artifacts, clock, ids, logger, emit });
     const context = createContextAssembler({ db, projectFs, artifacts, templates, memory });
     const maintenance = createMaintenance({ db, artifacts, clock });
     const engine = createEngine({
       db, providers, projectFs, artifacts, context, memory, templates, credentials: o.credentials, maintenance, clock, ids, logger,
-      emit: o.emit ?? (() => undefined), timers, hooks: o.hooks, idleMs: o.idleMs,
+      emit, timers, hooks: o.hooks, idleMs: o.idleMs,
       diagnostics: { dbSizeBytes: () => statSync(dbPath).size },
       requestLookup: supportsRequestLookupFor,
       connectionTestRequest,
       backup: createBackupPort({ db, userDataDir: o.userDataDir, clock, logger }),
+      exports: createExportPort(),
     });
     return {
       engine, db, projectFs, artifacts, providers,

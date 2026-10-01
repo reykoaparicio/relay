@@ -5,7 +5,6 @@ import { contextManifestSchema, errors } from '@relay/contracts';
 import type { RunId, StepKey } from '@relay/contracts';
 import type { AttemptRow } from '@relay/storage';
 import { createContextAssembler } from './context.js';
-import { createMemoryService } from './memory.js';
 import type { AssembleInput, ModelStepSnapshot } from './ports.js';
 import { tick } from './runner.js';
 import { effectiveStepSnapshot } from './snapshot.js';
@@ -40,7 +39,7 @@ function inputFor(harness: Harness, runId: RunId, stepKey: string, over: Partial
 }
 
 function assembler(harness: Harness) {
-  return createContextAssembler({ db: harness.db, projectFs: harness.ctx.projectFs, artifacts: harness.ctx.artifacts, templates: harness.ctx.templates, memory: createMemoryService() });
+  return createContextAssembler({ db: harness.db, projectFs: harness.ctx.projectFs, artifacts: harness.ctx.artifacts, templates: harness.ctx.templates, memory: harness.ctx.memory });
 }
 
 describe('context assembler (Wave-1 stub: §10.2 steps 1, 2, 4, 6, 8)', () => {
@@ -173,5 +172,158 @@ describe('context assembler (Wave-1 stub: §10.2 steps 1, 2, 4, 6, 8)', () => {
     expect(review.value.user.match(/<\/untrusted_diff>/g)).toHaveLength(1);
     expect(implement.value.user).not.toContain('untrusted_diff');
     expect(review.value.manifest.files).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Wave 3: G1 steps 3, 5, 7 (memory, upstream, fit)
+
+async function untilApproval(harness: Harness, o: { relPaths?: readonly string[] } = {}): Promise<RunId> {
+  await harness.engine.start();
+  const runId = await harness.startRun(o);
+  await harness.waitForStatus(runId, ['awaiting_approval']);
+  return runId;
+}
+
+async function approveRun(harness: Harness, runId: RunId): Promise<void> {
+  const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
+  const a = detail.ok ? detail.data.pendingApproval : null;
+  await harness.engine.handle('relay/v1/approvals.decide', { idempotencyKey: `approve-${runId.slice(-12)}`, approvalId: a?.id ?? '', planHash: a?.planHash ?? '',
+    contextHash: a?.contextHash ?? '', decision: 'approved' });
+}
+
+async function remember(harness: Harness, key: string, o: { type?: 'user_rule' | 'project_decision' | 'source_reference'; content: string; roles?: 'all' | ('reviewer' | 'planner')[]; pinned?: boolean; sourceFile?: string }) {
+  const res = await harness.engine.handle('relay/v1/memory.create', { idempotencyKey: `ctx-mem-${key}-00001`, projectId: harness.projectId, type: o.type ?? 'project_decision',
+    title: `Rule ${key}`, content: o.content, scope: { roles: o.roles ?? 'all' }, ...(o.pinned === undefined ? {} : { pinned: o.pinned }),
+    ...(o.sourceFile === undefined ? {} : { sourceFile: { relPath: o.sourceFile } }) });
+  if (!res.ok) throw new Error(`memory.create: ${res.error.code}`);
+  return res.data;
+}
+
+describe('context assembler (07 G1 complete)', () => {
+  it('is byte-stable for the fixture review step (snapshot of the rendered document)', async () => {
+    const { harness, runId } = await afterIntake();
+
+    const res = await assembler(harness).assemble(inputFor(harness, runId, 'review'));
+
+    if (!res.ok) throw new Error(res.error.code);
+    expect(res.value.user).toMatchSnapshot();
+  });
+
+  it('step 3: renders the run memory snapshot filtered by memoryScope; pinned rules always; mid-run edits do not leak in', async () => {
+    const harness = await createHarness();
+    h = harness;
+    const pinned = await remember(harness, 'pin', { type: 'user_rule', content: 'Pinned planner rule.', roles: ['planner'], pinned: true });
+    const reviewer = await remember(harness, 'rev', { content: 'Reviewer decision original.', roles: ['reviewer'] });
+    const planner = await remember(harness, 'pln', { content: 'Planner-only decision.', roles: ['planner'] });
+    const source = await remember(harness, 'src', { type: 'source_reference', content: 'Error codes live in src/errors.ts.', sourceFile: 'src/errors.ts' });
+    for (const n of [1, 2, 3]) {
+      harness.db.repos.memory.insertRecord(
+        { id: harness.ids.next('memory'), projectId: harness.projectId, type: 'run_summary', status: 'approved', scope: { roles: 'all' }, createdAt: harness.clock.now() },
+        { id: harness.ids.next('memoryRevision'), title: `Run summary ${String(n)}`, content: `Summary ${String(n)}.`, sourceRefs: [], author: 'user', createdAt: harness.clock.now() },
+      );
+    }
+    const runId = await harness.startRun({ relPaths: ['src/handlers/user.ts', 'src/lib/format.ts'] });
+    await tick(harness.ctx);
+    await tick(harness.ctx);
+    const edited = await harness.engine.handle('relay/v1/memory.update', { recordId: reviewer.id, expectedRevision: 1, content: 'Reviewer decision EDITED.' });
+    await writeFile(join(harness.projectRoot, 'src', 'errors.ts'), 'export const CHANGED = 1;\n');
+    const base = inputFor(harness, runId, 'review');
+
+    const res = await assembler(harness).assemble(base);
+    const typed = await assembler(harness).assemble({ ...base, stepSpec: { ...base.stepSpec, memoryScope: { roles: 'step_role', types: ['source_reference'] } } });
+    const all = await assembler(harness).assemble({ ...base, stepSpec: { ...base.stepSpec, memoryScope: { roles: 'all', types: ['user_rule', 'project_decision', 'source_reference'] } } });
+
+    if (!res.ok || !typed.ok || !all.ok || !edited.ok) throw new Error('assemble failed');
+    const ids = (m: typeof res.value.manifest) => m.memory.filter((x) => x.included).map((x) => x.recordId);
+    expect(res.value.user).toContain('Reviewer decision original.');
+    expect(res.value.user).not.toContain('EDITED');
+    expect(res.value.user).toContain('<project_rules approved_by="user">');
+    expect(res.value.user.indexOf('<project_rules')).toBeLessThan(res.value.user.indexOf('<untrusted_file'));
+    expect(new Set(ids(res.value.manifest))).toEqual(new Set([pinned.id, reviewer.id, source.id, ...ids(res.value.manifest).filter((i) => ![pinned.id, reviewer.id, source.id].includes(i))]));
+    expect(ids(res.value.manifest)).not.toContain(planner.id);
+    expect(res.value.manifest.memory.filter((m) => m.type === 'run_summary' && m.included)).toHaveLength(2);
+    expect(res.value.manifest.omitted).toEqual([expect.objectContaining({ kind: 'memory', reason: 'excluded_by_policy' })]);
+    expect(res.value.manifest.memory.find((m) => m.recordId === source.id)).toEqual(expect.objectContaining({ stale: true }));
+    expect(res.value.user).toContain('source_changed="true"');
+    expect(res.value.manifest.memory.find((m) => m.recordId === pinned.id)).toEqual(expect.objectContaining({ pinned: true, included: true }));
+    expect(new Set(ids(typed.value.manifest))).toEqual(new Set([pinned.id, source.id]));
+    expect(ids(all.value.manifest)).toContain(planner.id);
+  });
+
+  it('step 5: plan gets findings.v1; implement gets plan.v1 + findings.v1 with plan-scope files mandatory and the rest optional', async () => {
+    const harness = await createHarness();
+    h = harness;
+    const runId = await untilApproval(harness);
+
+    const plan = await assembler(harness).assemble(inputFor(harness, runId, 'plan', { preservedSnapshot: true }));
+    const implement = await assembler(harness).assemble(inputFor(harness, runId, 'implement', { preservedSnapshot: true }));
+
+    if (!plan.ok || !implement.ok) throw new Error('assemble failed');
+    expect(plan.value.manifest.upstream.map((u) => [u.stepKey, u.schemaId])).toEqual([['review', 'findings.v1']]);
+    expect(plan.value.user).toContain('<untrusted_upstream step="review" schema="findings.v1"');
+    expect(implement.value.manifest.upstream.map((u) => [u.stepKey, u.schemaId])).toEqual([['plan', 'plan.v1'], ['review', 'findings.v1']]);
+    const reasons = Object.fromEntries(implement.value.manifest.files.map((f) => [f.relPath, f.reason]));
+    expect(reasons).toEqual({
+      'src/errors.ts': 'referenced_by_findings', 'src/handlers/health.ts': 'referenced_by_findings', 'src/handlers/orders.ts': 'plan_scope',
+      'src/handlers/user.ts': 'plan_scope', 'src/lib/format.ts': 'plan_scope', 'src/lib/validate.ts': 'referenced_by_findings',
+    });
+    expect(implement.value.manifest.files.every((f) => f.included)).toBe(true);
+  });
+
+  it('step 7: optional files are dropped whole (lowest priority first) and recorded in omitted; plan-scope files never', async () => {
+    const harness = await createHarness();
+    h = harness;
+    const runId = await untilApproval(harness);
+    const base = inputFor(harness, runId, 'implement', { preservedSnapshot: true });
+    const full = await assembler(harness).assemble(base);
+    if (!full.ok) throw new Error('assemble failed');
+    const tight = { ...base.snapshot, capabilities: { ...base.snapshot.capabilities,
+      maxInputTokens: base.stepSpec.maxOutputTokens + Math.floor((full.value.estimatedInputTokens - 1) / 0.95) } };
+
+    const res = await assembler(harness).assemble({ ...base, snapshot: tight });
+
+    if (!res.ok) throw new Error(res.error.code);
+    const m = res.value.manifest;
+    expect(m.omitted.length).toBeGreaterThanOrEqual(1);
+    expect(m.omitted.every((o) => o.kind === 'file' && o.reason === 'token_budget')).toBe(true);
+    expect(m.omitted.map((o) => o.ref)).toContain('src/lib/validate.ts'); // lowest priority: last in path order
+    expect(m.files.filter((f) => f.reason === 'plan_scope').every((f) => f.included)).toBe(true);
+    expect(m.files.filter((f) => !f.included).map((f) => f.relPath)).toEqual(m.omitted.map((o) => o.ref).sort());
+    expect(res.value.user).not.toContain('path="src/lib/validate.ts"');
+    expect(res.value.estimatedInputTokens).toBeLessThanOrEqual(m.tokens.budget);
+  });
+
+  it('step 6/7: a provider count above the budget drops optional items until it fits, else CONTEXT_TOO_LARGE', async () => {
+    const harness = await createHarness();
+    h = harness;
+    const runId = await untilApproval(harness);
+    const base = inputFor(harness, runId, 'implement', { preservedSnapshot: true });
+    const strict = (marker: string) => createContextAssembler({ db: harness.db, projectFs: harness.ctx.projectFs, artifacts: harness.ctx.artifacts, templates: harness.ctx.templates,
+      estimator: { count: ({ user }) => Promise.resolve({ tokens: user.includes(marker) ? Number.MAX_SAFE_INTEGER : 10, basis: 'provider_count' }) } });
+
+    const dropped = await strict('path="src/errors.ts"').assemble(base);
+    const blocked = await strict('<goal>').assemble(base);
+
+    if (!dropped.ok) throw new Error(dropped.error.code);
+    expect(dropped.value.manifest.tokens).toEqual(expect.objectContaining({ estimatedInput: 10, basis: 'provider_count' }));
+    expect(dropped.value.manifest.omitted.map((o) => o.ref)).toContain('src/errors.ts');
+    expect(blocked.ok ? null : blocked.error.code).toBe('CONTEXT_TOO_LARGE');
+  });
+
+  it('verify gets patch.v1 + plan.v1; an implement revision gets the verifier requestedChanges block', async () => {
+    const harness = await createHarness({ scenario: 'revise-then-accept' });
+    h = harness;
+    const runId = await untilApproval(harness);
+    await approveRun(harness, runId);
+    await harness.waitForStatus(runId, ['completed']);
+
+    const verify = await assembler(harness).assemble(inputFor(harness, runId, 'verify'));
+    const implement = await assembler(harness).assemble(inputFor(harness, runId, 'implement'));
+
+    if (!verify.ok || !implement.ok) throw new Error('assemble failed');
+    expect(verify.value.manifest.upstream.map((u) => [u.stepKey, u.schemaId])).toEqual([['implement', 'patch.v1'], ['plan', 'plan.v1']]);
+    expect(implement.value.manifest.revisionIndex).toBe(1);
+    expect(implement.value.manifest.upstream.map((u) => [u.stepKey, u.schemaId])).toEqual([['plan', 'plan.v1'], ['review', 'findings.v1'], ['verify', 'review.v1']]);
+    expect(implement.value.user).toMatch(/<untrusted_upstream step="verify" schema="review.v1" artifact="art_[0-9A-Z]+">\n\{"outcome":"revise","requestedChanges":\[/);
   });
 });

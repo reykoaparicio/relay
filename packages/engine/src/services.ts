@@ -34,7 +34,9 @@ import type {
 import type { ArtifactRow, CredentialRefRow, Repos } from '@relay/storage';
 import type { ProjectRoot } from '@relay/tools';
 import { decideApproval } from './approvals.js';
+import { exportLedger, exportProject, exportRunArtifacts, importDiffText } from './export-handlers.js';
 import { monthWindow, monthWindowOf } from './clock.js';
+import * as memoryOps from './memory-handlers.js';
 import { fromUtf8, requestHash } from './hash.js';
 import type { EngineCtx } from './ports.js';
 import { deleteProfile, profilesWithWarnings, upsertProfile } from './profiles.js';
@@ -373,7 +375,6 @@ async function createBackupOp(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/app
 /** Builds the exhaustive handler table over the engine context. */
 export function createHandlers(ctx: EngineCtx): HandlerTable {
   const r = ctx.db.repos;
-  const todo = <C extends RunnerChannel>(channel: C): Handler<C> => () => Promise.resolve(err(notImplemented(ctx, channel)));
   const sync = <T>(f: () => Result<T>): Promise<Result<T>> => Promise.resolve(f());
   return {
     // app
@@ -396,7 +397,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/projects.archive': (input) => sync(() => archiveProject(ctx, input.projectId)),
     'relay/v1/projects.createFromRoot': (input) => createFromRoot(ctx, input),
     'relay/v1/projects.previewRoot': (input) => previewRoot(ctx, input),
-    'relay/v1/projects.exportTo': todo('relay/v1/projects.exportTo'),
+    'relay/v1/projects.exportTo': (input) => exportProject(ctx, input),
     // providers
     'relay/v1/providers.list': () => sync(() => ok(LISTED_PROVIDERS.map((p) => providerStatus(r, p)))),
     'relay/v1/providers.test': (input) => testProviderConnection(ctx, input),
@@ -450,21 +451,21 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
       }),
     // approvals (F10)
     'relay/v1/approvals.decide': (input) => decideApproval(ctx, input),
-    // memory (G5, Wave 3)
-    'relay/v1/memory.list': todo('relay/v1/memory.list'),
-    'relay/v1/memory.get': todo('relay/v1/memory.get'),
-    'relay/v1/memory.create': todo('relay/v1/memory.create'),
-    'relay/v1/memory.update': todo('relay/v1/memory.update'),
-    'relay/v1/memory.approve': todo('relay/v1/memory.approve'),
-    'relay/v1/memory.reject': todo('relay/v1/memory.reject'),
-    'relay/v1/memory.archive': todo('relay/v1/memory.archive'),
-    'relay/v1/memory.delete': todo('relay/v1/memory.delete'),
-    'relay/v1/memory.resolveConflict': todo('relay/v1/memory.resolveConflict'),
-    'relay/v1/memory.purgeProjectHistory': todo('relay/v1/memory.purgeProjectHistory'),
+    // memory (07 G5)
+    'relay/v1/memory.list': (input) => memoryOps.list(ctx, input),
+    'relay/v1/memory.get': (input) => memoryOps.get(ctx, input),
+    'relay/v1/memory.create': (input) => memoryOps.create(ctx, input),
+    'relay/v1/memory.update': (input) => memoryOps.update(ctx, input),
+    'relay/v1/memory.approve': (input) => memoryOps.approve(ctx, input),
+    'relay/v1/memory.reject': (input) => memoryOps.reject(ctx, input),
+    'relay/v1/memory.archive': (input) => memoryOps.archive(ctx, input),
+    'relay/v1/memory.delete': (input) => memoryOps.remove(ctx, input),
+    'relay/v1/memory.resolveConflict': (input) => memoryOps.resolveConflict(ctx, input),
+    'relay/v1/memory.purgeProjectHistory': (input) => memoryOps.purgeProjectHistory(ctx, input),
     // artifacts
     'relay/v1/artifacts.get': (input) => getArtifact(ctx, input),
-    'relay/v1/artifacts.importDiffText': todo('relay/v1/artifacts.importDiffText'),
-    'relay/v1/artifacts.exportTo': todo('relay/v1/artifacts.exportTo'),
+    'relay/v1/artifacts.importDiffText': (input) => importDiffText(ctx, input),
+    'relay/v1/artifacts.exportTo': (input) => exportRunArtifacts(ctx, input),
     // ledger
     'relay/v1/ledger.runSummary': (input) => sync(() => runSummaryCost(ctx, input.runId)),
     'relay/v1/ledger.projectSummary': (input) =>
@@ -485,6 +486,6 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
           nextCursor: page.value.nextCursor,
         });
       }),
-    'relay/v1/ledger.exportTo': todo('relay/v1/ledger.exportTo'),
+    'relay/v1/ledger.exportTo': (input) => exportLedger(ctx, input),
   };
 }

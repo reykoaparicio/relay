@@ -1,5 +1,5 @@
 // Engine test harness (06 unit tests): a migrated temp DB, a temp userData dir, a temp project root, the fake
-// provider registry, the real artifact store + confined fs, the Wave-1 context/memory, and one shared EngineCtx.
+// provider registry, the real artifact store + confined fs, the context assembler and memory service, and one shared EngineCtx.
 // Never exported from the barrel (R2-2).
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -19,7 +19,7 @@ import { createContextAssembler } from '../context.js';
 import { createMemoryService } from '../memory.js';
 import type { ContextAssemblerPort, CredentialResolver, EngineApi, EngineCtx, EngineTestHooks, Logger } from '../ports.js';
 import { createEngineContext, createEngineFromContext } from '../runner.js';
-import { createBackupPort, createProjectFs } from '../runtime.js';
+import { createBackupPort, createExportPort, createProjectFs } from '../runtime.js';
 import { seedDatabase } from '../seed.js';
 import { createManualClock, createManualTimers } from './manual-timers.js';
 import type { ManualClock, ManualTimers } from './manual-timers.js';
@@ -112,14 +112,15 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   const providers = o.providers?.(baseProviders) ?? baseProviders;
   const artifacts = createArtifactStore({ userDataDir, clock });
   const projectFs = createProjectFs(userDataDir);
-  const memory = createMemoryService();
-  const baseContext = createContextAssembler({ db, projectFs, artifacts, templates, memory });
   const events: PushEvent[] = [];
+  const memory = createMemoryService({ db, artifacts, clock, ids, logger, emit: (e) => events.push(e) });
+  const baseContext = createContextAssembler({ db, projectFs, artifacts, templates, memory });
   const ctx = createEngineContext({
     db, providers, projectFs, artifacts, context: o.context?.(baseContext) ?? baseContext, memory, templates,
     credentials: o.credentials ?? OK_CREDENTIALS, maintenance: createMaintenance({ db, artifacts, clock }), clock, ids, logger,
     emit: (e) => events.push(e), timers, hooks: o.hooks, idleMs: 60_000,
     requestLookup: supportsRequestLookupFor, connectionTestRequest, backup: createBackupPort({ db, userDataDir, clock, logger, homeDir: userDataDir }),
+    exports: createExportPort(),
   });
   const engine = createEngineFromContext(ctx);
   const created = await engine.handle('relay/v1/projects.createFromRoot', {

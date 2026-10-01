@@ -32,6 +32,7 @@ import { executionMsAt } from './deadline.js';
 import { requestHash } from './hash.js';
 import type { EngineCtx } from './ports.js';
 import { toModelProfile } from './profiles.js';
+import { pendingDeferredPause } from './outcome.js';
 import { resumeIfUnknownsResolved } from './recovery.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
@@ -39,7 +40,7 @@ import { appendRunEvent, applyRunEvent, isTerminal, runEffects } from './run-mac
 import { resolveProfile } from './run-start.js';
 import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
 import type { Snapshotted } from './steps/intake.js';
-import { inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
+import { diffReferencedPaths, inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
 import { allLedgerEntries, attemptsOverran, costSummaryOf, toRunDetail } from './views.js';
 
@@ -164,7 +165,9 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
     // F2: RECOVERY_DECIDED only when every unknown attempt has been decided (review_recovery).
     const unknownAttempts = r.attempts.listForRun(run.id).filter((a) => a.state === 'unknown').length;
     if (unknownAttempts > 0) return err(errors.conflict({ reason: 'unknown_attempts', unknownAttempts }));
-    applyRunEvent(r, run, { type: 'RECOVERY_DECIDED' }, now, fx);
+    // A reconciled overrun (X > liability) or scope change is never acknowledged by review_recovery: the run pauses
+    // with that reason (budget_overrun → acknowledge_overrun), the same invariant as a live run (BH-2, BH-6).
+    applyRunEvent(r, run, pendingDeferredPause(r, run.id) ?? { type: 'RECOVERY_DECIDED' }, now, fx);
     return ok(undefined);
   }
   if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked'])) return err(notApplicable(run, 'continue'));
@@ -316,10 +319,13 @@ async function prepareResume(ctx: EngineCtx, run: RunRow, d: RecoveryDecision): 
   }
   if (d.kind === 'resnapshot_and_replan' && isPausedFor(run, ['approval_stale'])) {
     const drift = await inputDrift(ctx, run);
-    if (drift.changed.length === 0 || run.input.kind !== 'files') return ok({ drift });
+    if (drift.changed.length === 0) return ok({ drift });
     // F10: the project changed — re-read and re-snapshot the run's files through the tools (outside any tx). A file
-    // that can no longer be read (deleted, excluded, too large) fails the decision with that error.
-    const files = await snapshotSelectedFiles(ctx, run.id, run.input.relPaths);
+    // that can no longer be read (deleted, excluded, too large) fails the decision with that error. A diff-input run
+    // re-reads the current files its imported diff references.
+    const relPaths = run.input.kind === 'files' ? ok(run.input.relPaths) : await diffReferencedPaths(ctx, run.projectId, run.input.diffArtifactId);
+    if (!relPaths.ok) return relPaths;
+    const files = await snapshotSelectedFiles(ctx, run.id, relPaths.value);
     if ('error' in files) return err(files.error);
     return ok({ drift, resnapshot: files });
   }

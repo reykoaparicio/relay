@@ -1,4 +1,4 @@
-// 07 G3 (Wave-1 pieces): deterministic rendering of the user context document + injection hygiene (§11.4).
+// 07 G3: deterministic rendering of the user context document + injection hygiene (§11.4).
 // Same inputs → same bytes (stable context_hash, prompt caching). Repo text and model output are DATA inside
 // <untrusted_*> blocks; nothing rendered here can change permissions or budgets (those are typed checks, F5/F6).
 import type { ValidationIssue } from '@relay/contracts';
@@ -63,6 +63,34 @@ export function renderFileBlock(f: { readonly relPath: string; readonly sha256: 
 export function renderDiffBlock(d: { readonly artifactId: string; readonly text: string }): string {
   const body = escapeForBlock(d.text);
   return `<untrusted_diff artifact="${escapeAttr(d.artifactId)}">\n${body}${body.endsWith('\n') || body === '' ? '' : '\n'}</untrusted_diff>`;
+}
+
+/** One approved memory record rendered as a project rule. */
+export interface RuleBlockInput {
+  readonly id: string;
+  readonly revision: number;
+  readonly type: string;
+  readonly title: string;
+  readonly content: string;
+  readonly stale: boolean;
+}
+
+/**
+ * `<project_rules approved_by="user">` with one `<rule>` per approved memory record (§10.1: instruction-like memory
+ * is kept separate from source material). Empty when there are no records. Only approved snapshot records reach here.
+ */
+export function renderRulesBlock(rules: readonly RuleBlockInput[]): string {
+  if (rules.length === 0) return '';
+  const lines = rules.map((r) => {
+    const stale = r.stale ? ' source_changed="true"' : '';
+    return `<rule id="${escapeAttr(r.id)}" revision="${String(r.revision)}" type="${escapeAttr(r.type)}" title="${escapeAttr(r.title)}"${stale}>${escapeForBlock(r.content)}</rule>`;
+  });
+  return ['<project_rules approved_by="user">', ...lines, '</project_rules>'].join('\n');
+}
+
+/** An upstream structured output (canonical JSON) as an untrusted block (§7.7: only the structured artifacts). */
+export function renderUpstreamBlock(u: { readonly stepKey: string; readonly schemaId: string; readonly artifactId: string; readonly json: string }): string {
+  return `<untrusted_upstream step="${escapeAttr(u.stepKey)}" schema="${escapeAttr(u.schemaId)}" artifact="${escapeAttr(u.artifactId)}">\n${escapeForBlock(u.json)}\n</untrusted_upstream>`;
 }
 
 /** Schema-repair block: the validation issues of the previous attempt (its invalid output is NOT echoed back). */

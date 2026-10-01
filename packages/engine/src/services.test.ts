@@ -28,7 +28,7 @@ describe('handler table (F1)', () => {
     const res = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'resume-key-000001', runId: 'run_01J9ZZZZZZZZZZZZZZZZZZZZZ0', decision: { kind: 'continue' } });
     const memory = await x.engine.handle('relay/v1/memory.list', { projectId: x.projectId });
     expect(res.ok ? null : res.error.code).toBe('NOT_FOUND'); // implemented: the run does not exist
-    expect(memory.ok ? null : memory.error).toMatchObject({ code: 'INTERNAL', details: { reason: 'not_implemented', channel: 'relay/v1/memory.list' } });
+    expect(memory.ok ? memory.data : memory.error).toEqual([]); // implemented (07 G5): an empty project has no memory
   });
 
   it('rejects invalid input with VALIDATION_FAILED and unknown channels', async () => {

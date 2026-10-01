@@ -1,7 +1,9 @@
 // 06 F13 intake (R4-6): read the selected files ONCE, snapshot them as `input_file` artifacts, record
-// `run_input_files` (each row carries its artifact id), snapshot memory, and set `runs.context_hash`.
-import { INPUT_CAPS, errors } from '@relay/contracts';
-import type { AppError, EpochMs, RunId, Sha256, StepRunId } from '@relay/contracts';
+// `run_input_files` (each row carries its artifact id), snapshot memory, and set `runs.context_hash`. A diff-input run
+// (05 E5, ADR-015) snapshots the CURRENT project files its imported diff references, read through the same confined
+// pipeline (the diff's paths are re-checked against the project's exclusions first).
+import { INPUT_CAPS, err, errors, ok } from '@relay/contracts';
+import type { AppError, ArtifactId, EpochMs, ProjectId, Result, RunId, Sha256, StepRunId } from '@relay/contracts';
 import type { Repos, RunInputFile, RunRow } from '@relay/storage';
 import type { InputFileRef, SelectedFile } from '@relay/tools';
 import { computeIntakeContextHash } from '../manifest.js';
@@ -43,6 +45,30 @@ export async function snapshotSelectedFiles(ctx: EngineCtx, runId: RunId, relPat
   });
 }
 
+/**
+ * The current project files an imported diff references (05 E5): the stored `input_diff` artifact of `projectId` is
+ * parsed again, every path it names is re-checked (exclusions, outside-root → PERMISSION_DENIED), and the paths that
+ * exist and are readable now are returned (added files have no current content; deleted ones are gone).
+ */
+export async function diffReferencedPaths(ctx: EngineCtx, projectId: ProjectId, diffArtifactId: ArtifactId): Promise<Result<string[]>> {
+  const row = ctx.db.repos.artifacts.get(diffArtifactId);
+  if (row?.kind !== 'input_diff' || row.projectId !== projectId || row.sizeBytes > INPUT_CAPS.maxDiffBytes) return err(errors.notFound('input_diff'));
+  const bytes = await ctx.artifacts.read(row.relPath, INPUT_CAPS.maxDiffBytes);
+  if (!bytes.ok) return bytes;
+  const diff = ctx.projectFs.parseDiff(new TextDecoder('utf-8').decode(bytes.value));
+  if (!diff.ok) return diff;
+  const project = ctx.db.repos.projects.getWithRoot(projectId);
+  const root = await ctx.projectFs.openRoot(project.rootRealpath);
+  if (!root.ok) return root;
+  const checked = await ctx.projectFs.checkDiffPaths(root.value, diff.value, { exclusions: project.exclusions });
+  if (!checked.ok) return checked;
+  const named = [...new Set(diff.value.files.flatMap((f) => [f.oldPath, f.newPath]).filter((p): p is NonNullable<typeof p> => p !== null))];
+  if (named.length === 0) return ok([]);
+  const live = await ctx.projectFs.hashFiles(root.value, named);
+  if (!live.ok) return live;
+  return ok(live.value.filter((h) => h.sha256 !== null).map((h) => h.relPath));
+}
+
 /** Inserts the `input_file` artifact rows of `files` (caller's tx) and returns the matching `run_input_files` rows. */
 export function inputFileRows(r: Repos, run: Pick<RunRow, 'id' | 'projectId'>, files: readonly Snapshotted[], now: EpochMs): RunInputFile[] {
   return files.map(({ file, ref }) => {
@@ -73,9 +99,12 @@ export async function runIntake(ctx: EngineCtx, runId: RunId, stepRunId: StepRun
     if ('error' in read) return blockRun(ctx, runId, setupBlocked(read.error));
     files = read;
   } else {
-    const diff = ctx.db.repos.artifacts.get(run.input.diffArtifactId);
-    if (diff?.kind !== 'input_diff' || diff.projectId !== run.projectId || diff.sizeBytes > INPUT_CAPS.maxDiffBytes) {
-      return blockRun(ctx, runId, setupBlocked(errors.notFound('input_diff')));
+    const paths = await diffReferencedPaths(ctx, run.projectId, run.input.diffArtifactId);
+    if (!paths.ok) return blockRun(ctx, runId, setupBlocked(paths.error));
+    if (paths.value.length > 0) {
+      const read = await snapshotSelectedFiles(ctx, runId, paths.value);
+      if ('error' in read) return blockRun(ctx, runId, setupBlocked(read.error));
+      files = read;
     }
   }
   const memory = ctx.memory.snapshotForRun(runId, run.projectId, { includeIds: snapshotOf(run).memoryIncludeIds });

@@ -1,6 +1,7 @@
 // 06 F17 (Wave-1 minimal): the run report. `generateReport` builds a `report.v1` object on every terminal
 // transition (post-commit effect), stores it as a `report` artifact (canonical JSON, never redacted), and appends
-// `report.created`. Idempotent: an existing report artifact is returned. The Markdown renderer lands in Wave 4.
+// `report.created`. Idempotent: an existing report artifact is returned. `renderReportMarkdown` is the pure Markdown
+// view used by `artifacts.exportTo` (`what: 'report'`).
 import { REVIEW_OUTCOMES, err, errors, isTerminalRunStatus, ok, reportV1Schema } from '@relay/contracts';
 import type { ArtifactId, CostCertainty, Microusd, ReportV1, Result, ReviewOutcome, RunId, StepKey, TerminalRunStatus } from '@relay/contracts';
 import type { LedgerEntryRow, Repos, RunRow, StepRow } from '@relay/storage';
@@ -139,4 +140,82 @@ export async function generateReport(ctx: EngineCtx, runId: RunId): Promise<Resu
   });
   await runEffects(ctx, fx);
   return ok(row.id);
+}
+
+// ---------------------------------------------------------------- Markdown (artifacts.exportTo)
+
+/** Exact µUSD → `"0.012345"` dollars (6 dp, integer arithmetic only; never a float). */
+export function usd6(m: number): string {
+  const abs = BigInt(Math.abs(m));
+  const s = `${(abs / 1_000_000n).toString()}.${(abs % 1_000_000n).toString().padStart(6, '0')}`;
+  return m < 0 ? `-${s}` : s;
+}
+
+const money = (m: number): string => `$${usd6(m)}`;
+
+/** One Markdown table cell: pipes escaped, line breaks flattened. */
+function cell(v: string | number | null): string {
+  return v === null ? '—' : String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+/** Free text as a Markdown blockquote (every line quoted, so it cannot open headings or fences of its own). */
+function quote(text: string): string {
+  return text.split(/\r?\n/).map((l) => `> ${l}`).join('\n');
+}
+
+/** Exported alongside every report: Relay never writes to the project (FR-10). */
+export const REPORT_UNTOUCHED_NOTE = 'Original project files were not modified.';
+
+/** F17: the pure Markdown rendering of a `report.v1` value (limitations, unknown charges, certainty breakdown). */
+export function renderReportMarkdown(report: ReportV1): string {
+  const t = report.totals;
+  const lines: string[] = [
+    `# Relay run report — ${report.runId}`,
+    '',
+    `- Status: ${report.status}`,
+    `- Verdict: ${report.verdict ?? 'not reviewed'}`,
+    `- Workflow: ${report.workflow.id} v${String(report.workflow.version)} (${report.workflow.contentHash})`,
+    `- Project: ${report.projectId}`,
+    `- Generated: ${new Date(report.generatedAt).toISOString()}`,
+    ...(report.snapshotUsed ? ['- Input: the preserved snapshot was used after the project changed'] : []),
+    '',
+    '## Goal',
+    '',
+    quote(report.goal),
+    '',
+    '## Steps',
+    '',
+    '| Step | Revision | Retry | State | Profile | Model | Settled (USD) | Certainty | Unknown (USD) |',
+    '|---|---|---|---|---|---|---|---|---|',
+    ...report.steps.map((s) => `| ${[s.stepKey, s.revisionIndex, s.retryIndex, s.state, s.profileName,
+      s.providerId === null ? null : `${s.providerId}/${s.modelId ?? '?'}`, usd6(s.cost.settledMicrousd), s.cost.certainty,
+      usd6(s.cost.unknownMicrousd)].map(cell).join(' | ')} |`),
+    '',
+    '## Cost (tracked by Relay)',
+    '',
+    `- Run allowance: ${money(t.allowance)}`,
+    `- Settled, provider-reported: ${money(t.settledReported)}`,
+    `- Settled, calculated from usage: ${money(t.settledCalculated)}`,
+    `- Settled, estimated: ${money(t.settledEstimated)}`,
+    `- Still reserved: ${money(t.reserved)}`,
+    `- Unknown charges: ${money(t.unknown)}`,
+    `- Remaining: ${money(t.remaining)}${t.overrun ? ' (over the allowance)' : ''}`,
+    '',
+    '## Unknown charges',
+    '',
+    ...(report.unknownLiabilities.length === 0
+      ? ['None.']
+      : report.unknownLiabilities.map((u) => `- ${u.stepKey} attempt ${u.attemptId} (${u.state}): up to ${money(u.liabilityMicrousd)} may have been charged`)),
+    '',
+    '## Artifacts',
+    '',
+    ...(['findings', 'plan', 'patch', 'review'] as const).map((k) => `- ${k}: ${report.artifacts[k] ?? 'none'}`),
+    '',
+    '## Limitations',
+    '',
+    ...report.limitations.map((l) => `- ${l.replace(/\r?\n/g, ' ')}`),
+    `- ${REPORT_UNTOUCHED_NOTE}`,
+    '',
+  ];
+  return lines.join('\n');
 }

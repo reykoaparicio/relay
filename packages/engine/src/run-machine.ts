@@ -127,7 +127,14 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
     BUDGET_OVERRUN: always(paused('budget_overrun')),
     APPROVAL_STALE: always(paused('approval_stale')),
   },
-  interrupted: { ...STOP_RULES, RECOVERY_DECIDED: always(to('queued')) }, // clarification 13
+  interrupted: {
+    ...STOP_RULES,
+    RECOVERY_DECIDED: always(to('queued')), // clarification 13
+    // Clarification 14 for interrupted runs: review_recovery applies a pause a reconciled outcome deferred (overrun,
+    // scope change) instead of RECOVERY_DECIDED — an overrun still needs acknowledge_overrun, exactly like a live run.
+    BUDGET_OVERRUN: always(paused('budget_overrun')),
+    APPROVAL_STALE: always(paused('approval_stale')),
+  },
   cancelling: { WORK_STOPPED: always(to('cancelled')), RUNNER_LOST: always(to('cancelled')) }, // clarification 7
   cancelled: {},
   completed: {},

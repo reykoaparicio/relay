@@ -24,7 +24,9 @@ export function finalEventFor(r: Repos, run: RunRow): RunMachineEvent {
 
 /** Runs the finalize step. Memory writes are best-effort: a failure is logged and never blocks completion. */
 export async function runFinalize(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Promise<void> {
-  for (const [name, r] of [['proposeFromRun', ctx.memory.proposeFromRun(runId)], ['recordRunSummary', ctx.memory.recordRunSummary(runId)]] as const) {
+  const proposed = await ctx.memory.proposeFromRun(runId);
+  const summary = await ctx.memory.recordRunSummary(runId);
+  for (const [name, r] of [['proposeFromRun', proposed], ['recordRunSummary', summary]] as const) {
     if (!r.ok) ctx.logger.warn('finalize.memory_failed', { runId, op: name, code: r.error.code });
   }
   await commitIfReady(ctx, runId, stepRunId, (r, cur, step, fx) => {

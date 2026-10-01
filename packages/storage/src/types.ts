@@ -804,6 +804,14 @@ export interface MemoryListQuery {
   readonly query?: string | undefined;
 }
 
+/** Attribute patch for {@link MemoryRepo.setAttributes}. */
+export interface MemoryAttributesPatch {
+  readonly scope?: MemoryRecordScope | undefined;
+  readonly pinned?: boolean | undefined;
+  readonly expiresAt?: EpochMs | null | undefined;
+  readonly reviewAt?: EpochMs | null | undefined;
+}
+
 export interface RunMemorySnapshotRow {
   readonly runId: RunId;
   readonly recordId: MemoryId;
@@ -827,6 +835,10 @@ export interface MemoryRepo {
   /** CAS on status. `deleted` also sets `deleted_at`. */
   setStatus(id: MemoryId, from: readonly MemoryStatus[], to: MemoryStatus, at: EpochMs): boolean;
   setSupersededBy(id: MemoryId, supersededById: MemoryId | null, at: EpochMs): void;
+  /** Updates the non-revisioned attributes (07 G5 `memory.update` / approve / keepBothWithScopes); absent keys are kept. */
+  setAttributes(id: MemoryId, patch: MemoryAttributesPatch, at: EpochMs): void;
+  /** Number of run snapshots that hold a copy of the record (`memory.delete` → `retainedInRunSnapshots`). */
+  countRunSnapshots(recordId: MemoryId): number;
   recordEvent(e: MemoryEventInsert): MemoryEventRow;
   snapshotForRun(runId: RunId, rows: readonly Omit<RunMemorySnapshotRow, 'runId'>[]): void;
   runSnapshot(runId: RunId): readonly RunMemorySnapshotRow[];

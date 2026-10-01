@@ -134,6 +134,31 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
     setSupersededBy(id, supersededById, at) {
       driver.prepare('UPDATE memory_records SET superseded_by_id = ?, updated_at = ? WHERE id = ?').run(supersededById, at, id);
     },
+    setAttributes(id, patch, at) {
+      // Each column is replaced only when its key is present (flag = 1), so `null` can clear expires/review dates.
+      const has = (k: keyof typeof patch) => bit(patch[k] !== undefined);
+      driver
+        .prepare(
+          `UPDATE memory_records SET
+             scope_json = CASE WHEN ?1 THEN ?2 ELSE scope_json END,
+             pinned = CASE WHEN ?3 THEN ?4 ELSE pinned END,
+             expires_at = CASE WHEN ?5 THEN ?6 ELSE expires_at END,
+             review_at = CASE WHEN ?7 THEN ?8 ELSE review_at END,
+             updated_at = ?9
+           WHERE id = ?10`,
+        )
+        .run(
+          has('scope'), patch.scope === undefined ? null : toJson(patch.scope),
+          has('pinned'), bit(patch.pinned ?? false),
+          has('expiresAt'), patch.expiresAt ?? null,
+          has('reviewAt'), patch.reviewAt ?? null,
+          at, id,
+        );
+    },
+    countRunSnapshots(recordId) {
+      const row = driver.prepare('SELECT COUNT(*) AS n FROM run_memory_snapshot WHERE record_id = ?').get(recordId);
+      return new RowReader('run_memory_snapshot', row).int('n');
+    },
     recordEvent(e) {
       const row = driver
         .prepare(

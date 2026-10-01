@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { err, errors } from '@relay/contracts';
 import type { StepKey } from '@relay/contracts';
-import { createMemoryService } from '../memory.js';
 import { tick } from '../runner.js';
 import { createHarness } from '../testing/harness.js';
 import type { Harness } from '../testing/harness.js';
@@ -32,7 +31,7 @@ describe('intake (R4-6)', () => {
     const runId = await h.startRun();
     await tick(h.ctx);
     const intake = h.db.repos.steps.latestFor(runId, 'intake' as StepKey);
-    const failing = { ...h.ctx, memory: { ...createMemoryService(), snapshotForRun: () => err(errors.validationFailed([])) } };
+    const failing = { ...h.ctx, memory: { ...h.ctx.memory, snapshotForRun: () => err(errors.validationFailed([])) } };
     h.db.tx('immediate', (r) => r.steps.transition(intake?.id ?? ('' as never), ['pending'], 'ready', {}));
 
     await runIntake(failing, runId, intake?.id ?? ('' as never));
@@ -72,7 +71,7 @@ describe('finalize', () => {
     h = await createHarness();
     const runId = await h.startRun();
     const fin = h.db.repos.steps.latestFor(runId, 'finalize' as StepKey);
-    const failing = { ...h.ctx, memory: { ...createMemoryService(), proposeFromRun: () => err(errors.validationFailed([])) } };
+    const failing = { ...h.ctx, memory: { ...h.ctx.memory, proposeFromRun: () => Promise.resolve(err(errors.validationFailed([]))) } };
 
     await runFinalize(failing, runId, fin?.id ?? ('' as never));
 
@@ -92,12 +91,5 @@ describe('finalize', () => {
 
     expect(await h.waitForStatus(runId, ['incomplete', 'completed', 'failed'])).toBe('incomplete');
     await h.waitFor(() => h?.db.repos.artifacts.listForRun(runId, ['report']).length === 1);
-  });
-});
-
-describe('memory service (Wave-1 stub)', () => {
-  it('snapshots, proposes, and summarizes nothing, always successfully', () => {
-    const m = createMemoryService();
-    expect([m.snapshotForRun('run_x' as never, 'prj_x' as never, {}), m.proposeFromRun('run_x' as never), m.recordRunSummary('run_x' as never)].every((r) => r.ok)).toBe(true);
   });
 });

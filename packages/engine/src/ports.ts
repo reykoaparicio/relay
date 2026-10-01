@@ -28,7 +28,17 @@ import type {
 } from '@relay/contracts';
 import type { AttemptRow, Db, RunRow, StepRow } from '@relay/storage';
 import type { ModelRequest, ProviderRegistry } from '@relay/providers';
-import type { ArtifactStore, LiveHash, ProjectRoot, ReadOptions, ScanOptions, ScanResult, SelectedFile } from '@relay/tools';
+import type {
+  ArtifactStore,
+  DiffCheckOptions,
+  ImportedDiff,
+  LiveHash,
+  ProjectRoot,
+  ReadOptions,
+  ScanOptions,
+  ScanResult,
+  SelectedFile,
+} from '@relay/tools';
 import type { TemplateRegistry } from '@relay/templates';
 
 /** Structured JSONL logger (00b §3). The providers `Logger` is a structural subset. */
@@ -141,11 +151,17 @@ export interface ContextAssemblerPort {
   assemble(input: AssembleInput): Promise<Result<AssembledContext>>;
 }
 
-/** Implemented by G (memory.ts). The memory.* IPC handlers are part of G5 (Wave 3). */
+/**
+ * Implemented by G (memory.ts); the memory.* IPC handlers live in memory-handlers.ts. The finalize operations are
+ * async because they read the run's validated output artifacts (plan.v1 / review.v1).
+ */
 export interface MemoryServicePort {
+  /** Intake: pinned user_rules always included; idempotent across a retried intake. */
   snapshotForRun(runId: RunId, projectId: ProjectId, o: { readonly includeIds?: readonly MemoryId[] }): Result<void>;
-  proposeFromRun(runId: RunId): Result<void>;
-  recordRunSummary(runId: RunId): Result<void>;
+  /** Finalize: ≤ 3 suggestions, never auto-approved. */
+  proposeFromRun(runId: RunId): Promise<Result<void>>;
+  /** Finalize: one approved run_summary, idempotent (R3-17). */
+  recordRunSummary(runId: RunId): Promise<Result<void>>;
 }
 
 /** Wraps @relay/tools file access (05): confinement, exclusions, and caps live there. */
@@ -154,11 +170,27 @@ export interface ProjectFsPort {
   readSelected(root: ProjectRoot, relPaths: readonly string[], opts?: ReadOptions): Promise<Result<{ files: SelectedFile[] }>>;
   hashFiles(root: ProjectRoot, relPaths: readonly string[]): Promise<Result<LiveHash[]>>;
   scan(root: ProjectRoot, opts?: ScanOptions): Promise<Result<ScanResult>>;
+  /** 05 E5 `parseImportedDiff` (pure: size cap + `normalizeRelPath` on every path). */
+  parseDiff(text: string): Result<ImportedDiff>;
+  /** 05 E5 `checkDiffPaths`: excluded / outside-root paths an imported diff references → PERMISSION_DENIED. */
+  checkDiffPaths(root: ProjectRoot, diff: ImportedDiff, opts?: DiffCheckOptions): Promise<Result<void>>;
+}
+
+/** 05 E7 export writes (FR-10), injected by runtime.ts. */
+export interface ExportPort {
+  /**
+   * Writes one export file, never overwriting (` (2)` suffixing) and refusing destinations inside or containing a
+   * project root. `destination` is a directory (the file is `defaultName` inside it) or a save-dialog file path (its
+   * directory + its base name). Returns the realpath written.
+   */
+  writeFile(destination: string, defaultName: string, bytes: Uint8Array, projectRoots: readonly string[]): Promise<Result<{ readonly writtenRealpath: string }>>;
 }
 
 /** Storage C8 retention sweep, injected by runtime.ts. */
 export interface MaintenancePort {
   sweepRawResponses(now: EpochMs, retentionDays: number): Promise<unknown>;
+  /** §10.4 project-history purge (`memory.purgeProjectHistory`). */
+  purgeProjectHistory(projectId: ProjectId): Promise<{ readonly purgedSnapshots: number }>;
 }
 
 /** Whether a request to `providerId` can be looked up after a crash (04 `supportsRequestLookupFor`). */
@@ -204,6 +236,8 @@ export interface EngineDeps {
   readonly connectionTestRequest?: ((providerId: ProviderId, modelId: string) => ModelRequest) | undefined;
   /** `app.createBackup` (storage `createBackup`, injected by runtime.ts). Absent → the op is unavailable. */
   readonly backup?: BackupPort | undefined;
+  /** `*.exportTo` writes (tools `writeExportFile`, injected by runtime.ts). Absent → the export ops are unavailable. */
+  readonly exports?: ExportPort | undefined;
   /** Idle wait of the loop when there is no work (default 1 s; commands wake it earlier). */
   readonly idleMs?: number | undefined;
 }
