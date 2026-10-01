@@ -1,5 +1,5 @@
 import type { Balances, CostCertainty, Microusd, Result, RunId, RunStatus } from '@relay/contracts';
-import { RelayError, errors, idSchema, invariant, isTerminalRunStatus, ok } from '@relay/contracts';
+import { RelayError, TERMINAL_RUN_STATUSES, errors, idSchema, invariant, isTerminalRunStatus, ok } from '@relay/contracts';
 import { decodeCursor, encodeCursor } from '../cursor.js';
 import type { SqlDriver, SqlParam } from '../driver.js';
 import { mapApproval, mapAttempt, mapInputFile, mapRun, mapStep, RowReader } from '../mappers.js';
@@ -165,6 +165,16 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
       return driver
         .prepare('SELECT * FROM runs WHERE status IN (SELECT value FROM json_each(?)) ORDER BY created_at, id')
         .all(JSON.stringify(ACTIVE_STATUSES))
+        .map(mapRun);
+    },
+    listTerminalWithoutReport() {
+      return driver
+        .prepare(
+          `SELECT * FROM runs WHERE status IN (SELECT value FROM json_each(?))
+             AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.run_id = runs.id AND a.kind = 'report')
+           ORDER BY created_at, id`,
+        )
+        .all(JSON.stringify(TERMINAL_RUN_STATUSES))
         .map(mapRun);
     },
     incrementAttemptCount(id) {

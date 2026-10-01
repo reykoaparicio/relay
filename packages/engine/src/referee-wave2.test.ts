@@ -211,8 +211,9 @@ describe('F2 invariant: every paused state has a non-stop action that leads to R
     const c = PAUSE_CASES[reason];
     const x = await harness({ monthlyAllowanceMicrousd: reason === 'budget_project' ? 1_000 : null });
     const runId = await x.startRun();
-    await tick(x.ctx); // CHECKS_PASSED → running
-    x.db.tx('immediate', (r) => applyRunEvent(r, r.runs.get(runId), c.event, x.clock.now(), []));
+    await tick(x.ctx); // CHECKS_PASSED → running (budget_project: the queued check already pauses it, before any reservation)
+    const cur = x.db.repos.runs.get(runId);
+    if (!(cur.status === 'paused' && cur.pauseReason === reason)) x.db.tx('immediate', (r) => applyRunEvent(r, r.runs.get(runId), c.event, x.clock.now(), []));
     c.setup?.(x, runId);
     expect(x.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: reason }));
     const offered = await actionsOf(x, runId);

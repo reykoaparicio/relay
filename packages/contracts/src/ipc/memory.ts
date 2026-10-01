@@ -190,7 +190,13 @@ export const memoryOps = {
     kind: 'command',
     route: 'runner',
     input: z.object({ projectId: idSchema('project'), confirmPhrase: z.literal('purge') }),
-    output: z.object({ purgedSnapshots: z.number().int().nonnegative() }),
+    output: z.object({
+      purgedSnapshots: z.number().int().nonnegative(),
+      /** Raw-response / context-manifest files purged (optional: additive in wave 4; the engine always sends it). */
+      purgedArtifacts: z.number().int().nonnegative().optional(),
+      /** Files whose purge failed; they stay unpurged and the next retention sweep retries them. */
+      failed: z.number().int().nonnegative().optional(),
+    }),
     errors: ['NOT_FOUND'],
     idempotent: false,
   }),

@@ -93,6 +93,11 @@ async function runJob(job: ChildJob): Promise<void> {
       exclusions: [], allowedProviderIds: ['anthropic', 'openai', 'gemini', 'fake'], monthlyAllowanceMicrousd: null, isDemo: false,
     });
     if (!project.ok) throw new Error(`createFromRoot: ${project.error.code}`);
+    // The queued-run checks read the credential-ref repo (never the key): record one per provider, like the app does on connect.
+    for (const providerId of ['anthropic', 'openai', 'gemini', 'fake'] as const) {
+      const ref = await engine.handle('relay/v1/providers.recordCredentialRef', { providerId, storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…test' });
+      if (!ref.ok) throw new Error(`recordCredentialRef: ${ref.error.code}`);
+    }
     const workflow = db.repos.workflows.listWorkflows()[0];
     if (workflow === undefined) throw new Error('no seeded workflow');
     const started = await engine.handle('relay/v1/runs.start', {

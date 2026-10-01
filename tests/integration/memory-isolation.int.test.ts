@@ -1,7 +1,6 @@
-// 11 §K5 "Memory suggestion generated" + §K6 memory-isolation (FR-06, @m3). The memory lifecycle and the memory.* runner
-// ops land in Wave 3 (07 G5): until then the engine answers every memory.* op with INTERNAL `not_implemented`. The
-// end-to-end cases below are written in full and SKIPPED while that is so (a probe decides at load time, so they
-// switch on by themselves when G5 lands). The storage-level guarantees they rely on run now.
+// 11 §K5 "Memory suggestion generated" + §K6 memory-isolation (FR-06, @m3): the memory lifecycle through the memory.*
+// runner ops (07 G5) end to end — suggestions never enter context until approved, a rule never crosses projects, and an
+// edit keeps the old run snapshot — plus the storage-level guarantees they rely on. Every case always runs.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -23,19 +22,6 @@ async function open(o: Parameters<typeof createHarness>[0] = {}): Promise<Harnes
   harnesses.push(x);
   return x;
 }
-
-/** Wave-3 probe: true while memory.* is still the not_implemented stub. */
-const MEMORY_PENDING = await (async () => {
-  const probe = await createHarness({ start: false });
-  try {
-    const res = await probe.call('relay/v1/memory.list', { projectId: probe.projectId });
-    return !res.ok && res.error.details?.['reason'] === 'not_implemented';
-  } finally {
-    await probe.dispose();
-    await cleanupTempDirs();
-  }
-})();
-const WAVE3 = 'memory.* is not_implemented until Wave 3 (07 G5)';
 
 async function manifestOf(x: Harness, runId: RunId, stepKey = 'review'): Promise<ContextManifest> {
   const [a] = x.attempts(runId, stepKey);
@@ -59,11 +45,13 @@ async function createRule(x: Harness, projectId: ProjectId, key: string, content
 }
 
 describe('memory isolation @m3', () => {
-  it('Wave-3 status: memory.* answers INTERNAL not_implemented (never a silent success) until G5 lands @m3', async () => {
+  it('memory.create stores an approved user rule (author user) that the project retrieves @m3', async () => {
     const x = await open({ start: false });
-    const res = await x.call('relay/v1/memory.create', { idempotencyKey: 'memory-probe-0001', projectId: x.projectId, type: 'user_rule', title: 'Rule', content: 'Never cast body fields.', scope: { roles: 'all' } });
-    if (MEMORY_PENDING) expect(res.ok ? null : [res.error.code, res.error.details?.['reason']]).toEqual(['INTERNAL', 'not_implemented']);
-    else expect(res.ok).toBe(true);
+    const res = await x.call('relay/v1/memory.create', { idempotencyKey: 'memory-create-0001', projectId: x.projectId, type: 'user_rule', title: 'Rule', content: 'Never cast body fields.', scope: { roles: 'all' } });
+    if (!res.ok) throw new Error(res.error.code);
+
+    expect([res.data.status, res.data.currentRevision]).toEqual(['approved', 1]);
+    expect(x.db.repos.memory.retrievable(x.projectId, 'reviewer', epochMs(Date.now())).map((m) => m.record.id)).toEqual([res.data.id]);
   });
 
   it('storage level: approved memory survives a DB reopen, is retrievable only in its own project, and a new revision keeps the old one @m3', async () => {
@@ -93,13 +81,14 @@ describe('memory isolation @m3', () => {
     expect(b.db.repos.memory.list({ projectId: other.data.id })).toEqual([]);
   });
 
-  it.skipIf(MEMORY_PENDING)(`#suggestion: run 1 suggests → run 2 manifest has no suggestion; approve → run 3 manifest includes it with its revision @m3 (${WAVE3})`, async () => {
+  it('#suggestion: run 1 suggests → run 2 manifest has no suggestion; approve → run 3 manifest includes it with its revision @m3', async () => {
     const x = await open();
     const run1 = await completeRun(x);
     const suggestions = await x.call('relay/v1/memory.list', { projectId: x.projectId, status: ['suggested'] });
     if (!suggestions.ok) throw new Error(suggestions.error.code);
     expect(suggestions.data.length).toBeGreaterThanOrEqual(1);
-    const s = suggestions.data[0]!;
+    const s = suggestions.data[0];
+    if (s === undefined) throw new Error('no suggestion');
     expect(s.source).toEqual(expect.objectContaining({ runId: run1 }));
 
     const run2 = await completeRun(x);
@@ -111,7 +100,7 @@ describe('memory isolation @m3', () => {
     expect((await manifestOf(x, run3)).memory).toEqual(expect.arrayContaining([expect.objectContaining({ recordId: s.id, revision: s.currentRevision, included: true })]));
   });
 
-  it.skipIf(MEMORY_PENDING)(`a project A rule never appears in a project B manifest @m3 (${WAVE3})`, async () => {
+  it('a project A rule never appears in a project B manifest @m3', async () => {
     const x = await open();
     const ruleA = await createRule(x, x.projectId, 'memory-rule-a-0001', 'Project A only: never cast body fields.');
     const b = await x.call('relay/v1/projects.createFromRoot', { idempotencyKey: 'memory-project-b-02', rootRealpath: await copyFixture('sample-api'), rootDisplayPath: '~/b',
@@ -125,7 +114,7 @@ describe('memory isolation @m3', () => {
     expect((await manifestOf(x, runB)).memory.map((m) => m.recordId)).not.toContain(ruleA);
   });
 
-  it.skipIf(MEMORY_PENDING)(`approved memory survives a close/open; an edit creates a new revision while the old run snapshot keeps the old text @m3 (${WAVE3})`, async () => {
+  it('approved memory survives a close/open; an edit creates a new revision while the old run snapshot keeps the old text @m3', async () => {
     const x = await open();
     const rule = await createRule(x, x.projectId, 'memory-rule-a-0002', 'Original rule text.');
     const run1 = await completeRun(x);

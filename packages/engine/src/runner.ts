@@ -6,17 +6,20 @@ import type { Repos, RunRow, StepRow } from '@relay/storage';
 import { logSafe, redactingLogger } from './log-safe.js';
 import { createCancellationRegistry, onWorkStopped } from './cancellation.js';
 import { executeModelAttempt } from './checkpoints.js';
-import { createWakeSignal } from './clock.js';
+import { admit } from './budget.js';
+import { createWakeSignal, monthWindow } from './clock.js';
 import { createDeadlineWatcher } from './deadline.js';
 import type { DeadlineWatcher, EngineApi, EngineCtx, EngineDeps, RunSnapshot } from './ports.js';
+import type { ReadinessIssue } from './policy.js';
+import { budgetReadiness, checkStepReadiness, minimumReservation } from './policy.js';
 import { reconcileUnknownAttempts, recoverOnStart } from './recovery.js';
-import { generateReport } from './report.js';
+import { generateReport, regenerateMissingReports } from './report.js';
 import { eventForFailure } from './retry.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
-import { applyRunEvent, runEffects } from './run-machine.js';
+import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import type { Handler, ParsedInputOf } from './services.js';
 import { createHandlers, readSettings } from './services.js';
-import { snapshotOf } from './snapshot.js';
+import { effectiveStepSnapshot, snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
 import { runFinalize } from './steps/finalize.js';
 import { openApproval } from './steps/approval.js';
@@ -24,6 +27,9 @@ import { runIntake } from './steps/intake.js';
 
 /** Default idle wait when there is no work (commands wake the loop earlier). */
 export const IDLE_MS = 1_000;
+
+/** F1 step 4 / 03 C8 (R3-16): the raw-response retention sweep runs at boot and then every 24 h (injected timers). */
+export const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 /** What the loop should do next for a running run (pure). */
 export type NextStep =
@@ -74,27 +80,58 @@ async function applyTx(ctx: EngineCtx, runId: RunId, ev: RunMachineEvent, from: 
   await runEffects(ctx, fx);
 }
 
-/** Dry-run checks before a queued run starts: providers permitted + structured output available (F13 runChecks). */
-export async function runChecks(ctx: EngineCtx, run: RunRow): Promise<void> {
-  const project = ctx.db.repos.projects.get(run.projectId);
+/**
+ * F13 `runChecks` readiness of a queued run (pure over the repos, read-only): for every model step still to run, its
+ * effective profile's provider is permitted, a credential ref exists (never the key), and the model is in the catalog
+ * and supported; then a read-only §9.3 admission of the next model step's minimum reservation (F6
+ * {@link minimumReservation}). Same checks as `runs.preflight` issues.
+ */
+export function queuedRunIssues(r: Repos, run: RunRow, now: EpochMs): ReadinessIssue[] {
+  const project = r.projects.get(run.projectId);
   const snapshot = snapshotOf(run);
-  for (const s of Object.values(snapshot.steps)) {
-    if (s.kind !== 'model') continue;
-    if (!project.providerPolicy.allowedProviderIds.includes(s.profile.providerId)) {
-      const error = errors.permissionDenied('provider_not_allowed', { details: { providerId: s.profile.providerId } });
-      return applyTx(ctx, run.id, { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error }, ['queued']);
-    }
-    if (!s.profile.capabilities.structuredOutput) {
-      const error = errors.modelUnsupported({ providerId: s.profile.providerId, modelId: s.profile.modelId, reason: 'structured_output' });
-      return applyTx(ctx, run.id, { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error }, ['queued']);
-    }
+  const open = r.steps.latestPerStepKey(run.id)
+    .filter((s) => snapshot.steps[s.stepKey]?.kind === 'model' && s.state !== 'succeeded' && s.state !== 'skipped')
+    .sort((a, b) => a.ordinal - b.ordinal);
+  const issues: ReadinessIssue[] = [];
+  for (const s of open) {
+    const snap = effectiveStepSnapshot(r, run, s.stepKey);
+    const { providerId, modelId } = snap.profile;
+    issues.push(...checkStepReadiness(project.providerPolicy.allowedProviderIds, { stepKey: s.stepKey, profile: snap.profile,
+      capabilities: snap.profile.capabilities, catalogEntry: r.catalog.get(providerId, modelId), hasCredential: r.credentials.get(providerId) !== undefined }));
   }
-  // B2 guard (in the tx): CHECKS_PASSED never moves a run to running while another run holds the slot.
+  const next = open.find((s) => s.state === 'ready' || s.state === 'pending');
+  if (next !== undefined) {
+    const { start, end } = monthWindow(now);
+    const budget = budgetReadiness(admit({
+      run: r.ledger.runBalances(run.id), N: minimumReservation(effectiveStepSnapshot(r, run, next.stepKey)),
+      project: project.monthlyAllowanceMicrousd === null ? null
+        : { L: project.monthlyAllowanceMicrousd, ...r.ledger.projectMonthBalances(run.projectId, start, end) },
+    }));
+    if (budget !== null) issues.push(budget);
+  }
+  return issues;
+}
+
+/**
+ * F13 `runChecks`: the dry-run checks before a queued run starts ({@link queuedRunIssues}). The first issue pauses the
+ * run (`SETUP_BLOCKED` with `setup_blocked` / `auth_required` / `budget_run` / `budget_project`, F2 clarification 9)
+ * BEFORE any reservation or provider call; otherwise `CHECKS_PASSED`. One tx, so the checks and the transition agree.
+ */
+export async function runChecks(ctx: EngineCtx, run: RunRow): Promise<void> {
   const fx: PostCommitEffect[] = [];
   ctx.db.tx('immediate', (r) => {
     const cur = r.runs.get(run.id);
-    if (cur.status !== 'queued' || r.runs.listActive().some((x) => x.id !== run.id && holdsSlot(x))) return;
-    applyRunEvent(r, cur, { type: 'CHECKS_PASSED' }, ctx.clock.now(), fx);
+    if (cur.status !== 'queued') return;
+    const now = ctx.clock.now();
+    const issue = queuedRunIssues(r, cur, now)[0];
+    if (issue !== undefined) {
+      if (issue.reason === 'budget_run' || issue.reason === 'budget_project') appendRunEvent(r, fx, cur.id, 'ledger.blocked', { ...issue.error.details, stepRunId: null });
+      applyRunEvent(r, cur, { type: 'SETUP_BLOCKED', reason: issue.reason, error: issue.error }, now, fx);
+      return;
+    }
+    // B2 guard: CHECKS_PASSED never moves a run to running while another run holds the slot.
+    if (r.runs.listActive().some((x) => x.id !== run.id && holdsSlot(x))) return;
+    applyRunEvent(r, cur, { type: 'CHECKS_PASSED' }, now, fx);
   });
   await runEffects(ctx, fx);
 }
@@ -251,10 +288,19 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
         if (!ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now())) ctx.lease.owned = false; // taken over: stop dispatching
       }, RUNNER_HEARTBEAT_MS));
       await recoverOnStart(ctx);
+      // F1 step 3: terminal runs whose post-commit report never ran (a crash after the terminal commit) get one now.
+      await regenerateMissingReports(ctx).catch((e: unknown) => {
+        ctx.logger.warn('report.regenerate_crashed', { err: logSafe(e) });
+      });
       for (const run of ctx.db.repos.runs.listActive().filter((x) => x.status === 'running')) ctx.deadlines.arm(run.id);
-      await sweep().catch((e: unknown) => {
+      const sweepSafely = (): Promise<void> => sweep().catch((e: unknown) => {
         ctx.logger.warn('retention.sweep_failed', { err: logSafe(e) });
       });
+      await sweepSafely();
+      // Cleared with the heartbeat in stop(): a stopped engine never sweeps.
+      intervals.push(ctx.timers.setInterval(() => {
+        if (!stopping) void sweepSafely();
+      }, RETENTION_SWEEP_INTERVAL_MS));
       loopDone = loop().catch((e: unknown) => {
         ctx.logger.error('loop.crashed', { err: logSafe(e) });
       });

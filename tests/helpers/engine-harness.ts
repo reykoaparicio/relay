@@ -70,6 +70,12 @@ export interface HarnessOptions {
   readonly credentials?: CredentialResolver;
   readonly hooks?: EngineTestHooks;
   readonly allowedProviderIds?: readonly ProviderId[];
+  /**
+   * Providers with a recorded credential ref (default: all four; idempotent on restart). The engine's queued-run
+   * checks and `runs.preflight` read the credential-ref repo (never the key): a provider without one pauses
+   * `auth_required` before any reservation.
+   */
+  readonly credentialRefs?: readonly ProviderId[];
   readonly monthlyAllowanceMicrousd?: number | null;
   /** Reuse an existing userData dir (restart). */
   readonly userDataDir?: string;
@@ -200,6 +206,10 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       exclusions: [], allowedProviderIds: [...(o.allowedProviderIds ?? ['anthropic', 'openai', 'gemini', 'fake'])],
       monthlyAllowanceMicrousd: o.monthlyAllowanceMicrousd ?? null, isDemo: false,
     }), 'projects.createFromRoot').id;
+    for (const providerId of o.credentialRefs ?? ['anthropic', 'openai', 'gemini', 'fake']) {
+      if (db.repos.credentials.get(providerId) !== undefined) continue;
+      unwrap(await call('relay/v1/providers.recordCredentialRef', { providerId, storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…test' }), 'providers.recordCredentialRef');
+    }
     const workflow = db.repos.workflows.listWorkflows()[0];
     if (workflow === undefined) throw new Error('harness: no seeded workflow');
     if (o.start ?? true) await engine.start();

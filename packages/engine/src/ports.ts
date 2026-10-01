@@ -194,7 +194,7 @@ export interface ExportPort {
 export interface MaintenancePort {
   sweepRawResponses(now: EpochMs, retentionDays: number): Promise<unknown>;
   /** §10.4 project-history purge (`memory.purgeProjectHistory`). */
-  purgeProjectHistory(projectId: ProjectId): Promise<{ readonly purgedSnapshots: number }>;
+  purgeProjectHistory(projectId: ProjectId): Promise<{ readonly purgedSnapshots: number; readonly purgedArtifacts: number; readonly failed: number }>;
 }
 
 /** Whether a request to `providerId` can be looked up after a crash (04 `supportsRequestLookupFor`). */

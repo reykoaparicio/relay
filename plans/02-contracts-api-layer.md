@@ -74,8 +74,10 @@ export const ID_PREFIX = {
 } as const;
 export type ProjectId = Brand<string, 'ProjectId'>;  // 'prj_01J9…'
 // … one alias per prefix (table below); IdOf<P> maps a prefix key to its alias …
+export const ULID_PATTERN = '[0-7][0-9A-HJKMNP-TV-Z]{25}';            // as implemented: a ULID's first char is 0-7 (48-bit time)
+export const idPattern = (p: IdPrefixKey) => new RegExp(`^${ID_PREFIX[p]}_${ULID_PATTERN}$`);
 export const idSchema = <P extends keyof typeof ID_PREFIX>(p: P) =>
-  z.string().regex(new RegExp(`^${ID_PREFIX[p]}_[0-9A-HJKMNP-TV-Z]{26}$`)).transform((s) => s as IdOf<P>);
+  z.string().regex(idPattern(p), `must be a ${ID_PREFIX[p]}_ id`).transform((s) => s as IdOf<P>);
 export interface IdGen { next<P extends keyof typeof ID_PREFIX>(p: P): IdOf<P> }
 export function createIdGen(clock: Clock, random: (n: number) => Uint8Array): IdGen;  // pure; injected random
 ```
@@ -578,7 +580,7 @@ export const memoryScopeSchema = z.object({                          // §5.3 "m
 export const stepSpecSchema = z.discriminatedUnion('kind', [
   z.object({ id: stepKeySchema, kind: z.literal('model'), role: roleSchema, profile: z.string(),
              dependsOn: z.array(stepKeySchema).default([]), outputSchema: z.enum(MODEL_OUTPUT_SCHEMA_IDS),
-             instructionVersion: z.string().regex(/^[a-z-]+\.v\d+$/),     // e.g. "reviewer.v1" → templates prompt module
+             instructionVersion: z.string().regex(/^[a-z-]+\.v\d+$/).optional(), // e.g. "reviewer.v1"; OPTIONAL (the §12.4 example omits it): the schema transform defaults it to `${role}.v1`, so parsed specs always carry it
              maxOutputTokens: z.number().int().positive().optional(),       // overrides profile.params (§5.3 "output allowance")
              retryPolicy: retryPolicySchema.default(RETRY_DEFAULTS_PER_STEP),  // engine reads limits from the step snapshot (06 R3-9)
              memoryScope: memoryScopeSchema.default({}),                     // engine/G1 filter memory by it
@@ -596,11 +598,12 @@ export const workflowSpecSchema = z.object({
 }).superRefine(validateWorkflowGraph);
 ```
 
-`validateWorkflowGraph` (pure, exported, unit-tested) reports **field-specific** issues (§5.3 validation):
+`validateWorkflowGraph` (pure, exported, unit-tested; the issue list itself is `collectWorkflowGraphIssues(spec)`, and the `superRefine` adapter turns each into a `custom` issue with its path) reports **field-specific** issues (§5.3 validation):
 - Every `dependsOn` references an existing earlier step. Cycles are rejected (§5.3, "circular dependencies in future editors").
-- At least one `approval` step precedes the first `implementer` step (FR-08, "absent required approval").
-- `revisionPolicy.triggerStep` and every `repeatSteps` entry exist, and the repeat steps don't include the approval step.
+- FR-08 **by dependency, not position**: every `implementer` model step depends (transitively) on an `approval` step, and every approval depends (transitively) on a `plan.v1` planner step ("absent required approval").
+- `revisionPolicy.triggerStep` exists **and is a `review.v1` model step** (only a review verdict carries `revise`, §7.6); `repeatSteps` **includes the trigger step**; every `repeatSteps` entry exists and none is an approval step.
 - Step ids are unique, and `intake` / `finalize` are reserved (the engine inserts these synthetic steps around the spec steps, 06 F15).
+- Objects are **strict** (`z.strictObject`): an unknown/misspelled key is an `unrecognized_keys` issue, never silently dropped (§12.4 "validate it before accepting").
 Capability checks (missing credential, unsupported structured output, impossible token budget, invalid model id) need catalog data and are therefore done in the engine's `workflows.validate` (06 §F10), which returns the same `ValidationIssue` shape plus `CapabilityWarning[]`.
 
 ## B11. Step output schemas & context manifest (`src/outputs/*.ts`, `src/domain/manifest.ts`)
@@ -959,7 +962,7 @@ Legend: **Q** = query, **C** = command, **Idem** = requires `idempotencyKey`, **
 | `memory.archive` | C | runner | `{ recordId }` | `MemoryRecordDetail` | — |
 | `memory.delete` | C | runner | `{ recordId, confirm: true }` | `{ deleted: true, retainedInRunSnapshots: number }` (§10.4 consequences) | — |
 | `memory.resolveConflict` | C Idem | runner | `{ idempotencyKey, recordIds: [MemoryId, MemoryId], resolution: { keep: MemoryId } \| { rewrite: { title, content, scope, pinned? } } \| { keepBothWithScopes: [{ recordId, scope }, { recordId, scope }] } }` — both records approved, **or one suggestion + one approved** (§5.5 conflict). See rules below | `MemoryRecordView[]` | `CONFLICT`, `VALIDATION_FAILED` |
-| `memory.purgeProjectHistory` | C | runner | `{ projectId, confirmPhrase: 'purge' }` | `{ purgedSnapshots: number }` (§10.4) | — |
+| `memory.purgeProjectHistory` | C | runner | `{ projectId, confirmPhrase: 'purge' }` | `{ purgedSnapshots: number, purgedArtifacts?: number, failed?: number }` (§10.4; the two optional counts are additive in wave 4 and always sent by the engine — `failed` files stay unpurged and are retried by the next sweep) | `NOT_FOUND` (unknown project) |
 
 `memory.resolveConflict` rules (the service never auto-merges; 07 G5 implements the transitions):
 - At most one of `recordIds` may be `suggested`; the other must be `approved`. Two suggestions → `VALIDATION_FAILED`.
@@ -1147,12 +1150,17 @@ B11 depends on B1/B2 only and must land in Wave 1 with the rest of contracts, be
 | `workflow-spec.test.ts` | The spec §12.4 JSON parses. Cycle → issue at `steps[1].dependsOn[0]`. Missing approval before implementer → issue. Duplicate id → issue. Reserved id `intake` → issue. repeatSteps containing approval → issue. Unknown outputSchema (incl. `report.v1`) → issue. `retryPolicy` above `MAX_RETRY_POLICY` → issue |
 | `errors.test.ts` | Every `ErrorCode` has a factory, a default `nextAction`, and `retryable`, checked by iterating the enum. `budgetBlocked` details parse with `budgetBreakdownSchema` (incl. `scope: 'setup'`) |
 | `redaction.test.ts` | Each pattern redacted, including `sk-ant-api03-…`, `sk-ant-admin01-…`, `sk-proj-…`, `sk-svcacct-…`. **`risk-assessment-module-x` is NOT redacted**, nor `task-management-service-v2`. `redactDeep` removes `apiKey` at any depth. `redactedLabel('sk-ant-api03-…a1F9') === 'sk-…a1F9'`. Idempotent (redacting twice changes nothing). No false positive on a 40-char git SHA |
-| `outputs.test.ts` | Each output schema accepts a minimal valid fixture and rejects a missing required key. `review.v1` with `outcome: 'revise'` and 0 requested changes → issue. `findings.v1` rejects a finding with 0 `sourceRefs` and > 20 findings. `plan.v1` enforces steps 1–12 and fileScope 1–20. `z.toJSONSchema` succeeds for every `MODEL_OUTPUT_SCHEMA_IDS` schema (no transforms). `OUTPUT_SCHEMAS` has one entry per `OUTPUT_SCHEMA_IDS` member. `reportV1Schema` parses a terminal-run fixture and rejects `status: 'running'` |
+| `outputs.test.ts` | Each output schema accepts a minimal valid fixture and rejects a missing required key. `reportV1Schema` accepts the optional wave-4 `approvals[]` / `revisions` and a report without them (additive). `review.v1` with `outcome: 'revise'` and 0 requested changes → issue. `findings.v1` rejects a finding with 0 `sourceRefs` and > 20 findings. `plan.v1` enforces steps 1–12 and fileScope 1–20. `z.toJSONSchema` succeeds for every `MODEL_OUTPUT_SCHEMA_IDS` schema (no transforms). `OUTPUT_SCHEMAS` has one entry per `OUTPUT_SCHEMA_IDS` member. `reportV1Schema` parses a terminal-run fixture and rejects `status: 'running'` |
 | `manifest.test.ts` | `contextManifestSchema` parses a G4-shaped fixture; rejects an unknown omitted reason and a non-sha `contextHash` |
 | `views.test.ts` | `stepDetailSchema` output union discriminates on `schemaId`. `recoveryDecisionSchema` rejects `raise_limits` with no fields and with `maxAttempts` > `RUN_LIMIT_MAXIMUMS.maxAttempts`. `workflowDraftPatchSchema` rejects an unknown top-level key. `runStartInputSchema` accepts `profileOverrides` keyed by step key. `profileSnapshotSchema` requires `prices` |
 | `catalog.test.ts` | Every channel is unique across `OPERATIONS` **and** `INTERNAL_RUNNER_OPS`, and matches `/^relay\/v1\/[a-z]+\.[a-zA-Z]+$/`. **No internal channel appears in `OPERATIONS`** (by key and by channel value). Every op with `idempotent: true` is a command and has `idempotencyKey` in its input schema (`idempotent` means "requires an idempotency key", in both op sets). Every op's `errors` ⊆ `ErrorCode`. `providers.test` errors include `BUDGET_BLOCKED`. `providers.connect`/`disconnect` route is `main+runner`. `FORWARDED_COMPOSITE_CHANNELS` ⊆ main+runner ops. `RUN_ACTION_OPS` covers every `RUN_ACTIONS` member and each value is a `Channel`, a non-empty `readonly Channel[]`, or `'navigate'`; `choose_profile` maps to exactly `runs.retryStep` and `runs.resume`. `z.toJSONSchema(input, { io: 'input' })` succeeds for every `OPERATIONS` op (no unrepresentable types) |
 | `runner-protocol.test.ts` | `op` requests accept an internal channel and reject a `main`-route channel (e.g. `app.getInfo`). `credential.request` requires `purpose` and accepts `attemptId: null` |
 | `events.test.ts` | Discriminated union parses every `RUN_EVENT_TYPES` member |
+| `pricing.test.ts` | `computeCost` sums the disjoint categories each at its own rate, never adds reasoning tokens on top of output, rounds every category up (`mulDivCeil`), rejects negative/fractional counts; `upperBound` prices all input at the highest input-side rate + the full output allowance + rounding slack and is ≥ `computeCost` for any split (property); `maxPrices` is component-wise |
+| `ipc/inputs.test.ts` | Op input schemas: `providers.connect` trims the key before the length checks; `approvals.decide` requires a note for `revision_requested`; `memory.create` needs `sourceFile` for `source_reference` and caps title/content; `memory.resolveConflict` record ids; pagination defaults/bounds; `app.openExternal` https only; `projects.previewFiles` takes a selection or a project, never a path; internal ops require absolute realpaths and well-formed vault files |
+| `time.test.ts` | `systemClock`; `epochMs` rejects negatives and floats; `assertNever` / `invariant` |
+| `validation.test.ts` | Issue paths format with dots and brackets; Zod issues convert to schema-valid `ValidationIssue`s; `unrecognized_keys` splits into one field-specific issue per key |
+| `scripts/render-api-doc.test.ts` | `renderApiDoc` emits the markdown table for every renderer op, never mentions internal runner ops or realpaths, and shows rate limits and idempotency requirements |
 
 ## Success Criteria (gate)
 - [ ] `pnpm typecheck` → exit 0

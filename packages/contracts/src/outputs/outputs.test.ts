@@ -120,4 +120,18 @@ describe('output schemas', () => {
     }
     expect(schema.safeParse({ ...reportFixture(), status: 'running' }).success).toBe(false);
   });
+
+  it('report.v1 approvals[] / revisions are optional and additive (06 F17 wave 4)', () => {
+    const schema = OUTPUT_SCHEMAS['report.v1'];
+    const approval = { approvalId: 'apr_01J9ZZZZZZZZZZZZZZZZZZZZZ0', stepKey: 'approve', planArtifactId: 'art_01J9ZZZZZZZZZZZZZZZZZZZZZ0', planHash: 'a'.repeat(64),
+      decision: 'revision_requested', decidedAt: 2, note: 'More tests.', invalidatedReason: null, createdAt: 1 };
+    const revisions = { cycles: 1, maxCycles: 2, planRevisions: 1, incompleteCause: null };
+
+    expect(schema.safeParse(reportFixture()).success).toBe(true); // a pre-wave-4 report
+    expect(schema.safeParse({ ...reportFixture(), approvals: [approval, { ...approval, decision: null, decidedAt: null, note: null, invalidatedReason: 'scope_changed' }], revisions }).success).toBe(true);
+    expect(schema.safeParse({ ...reportFixture(), approvals: [{ ...approval, decision: 'maybe' }] }).success).toBe(false);
+    expect(schema.safeParse({ ...reportFixture(), approvals: [{ ...approval, invalidatedReason: 'whim' }] }).success).toBe(false);
+    expect(schema.safeParse({ ...reportFixture(), revisions: { ...revisions, incompleteCause: 'tired' } }).success).toBe(false);
+    expect(schema.safeParse({ ...reportFixture(), revisions: { ...revisions, cycles: -1 } }).success).toBe(false);
+  });
 });

@@ -6,6 +6,7 @@ import type {
   AppError,
   EpochMs,
   Microusd,
+  ModelCapabilities,
   ModelProfile,
   ProfileId,
   ProfileSnapshot,
@@ -29,6 +30,8 @@ import { diffBlock, renderStepPrompt, renderStepRules, retrievableOf } from './c
 import { requestHash } from './hash.js';
 import { selectRunMemory } from './memory.js';
 import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './ports.js';
+import type { ReadinessIssue } from './policy.js';
+import { budgetReadiness, checkStepReadiness, toPreflightIssue } from './policy.js';
 import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
@@ -84,7 +87,11 @@ function limitsFor(spec: WorkflowSpec, overrides: StartInput['limitOverrides']):
   return parsed.success ? ok(parsed.data) : err(errors.validationFailed(toValidationIssues(parsed.error.issues)));
 }
 
-async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: WorkflowVersionRow, input: StartInput): Promise<Result<RunSnapshot>> {
+/**
+ * The run snapshot. `lenient` (preflight only): a model step whose profile cannot be resolved is left out instead of
+ * failing, so preflight can report it as an issue ({@link profileIssues}) next to everything else.
+ */
+async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: WorkflowVersionRow, input: StartInput, lenient = false): Promise<Result<RunSnapshot>> {
   const spec = version.spec;
   const overrides = input.profileOverrides ?? {};
   const modelKeys = new Set(spec.steps.filter((s) => s.kind === 'model').map((s) => s.id));
@@ -99,6 +106,7 @@ async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: Workf
       continue;
     }
     const profile = await resolveProfile(ctx, project, s.id, profileRef(ctx.db.repos, s.id, s.profile, overrides));
+    if (!profile.ok && lenient) continue;
     if (!profile.ok) return profile;
     const snap: ModelStepSnapshot = {
       kind: 'model', role: s.role, profile: profile.value, outputSchema: s.outputSchema, outputKind: outputKindOf(s.outputSchema),
@@ -125,7 +133,7 @@ function checkInput(r: Repos, input: StartInput): AppError | null {
 }
 
 /** Resolves and validates everything `runs.start` needs (shared with preflight; no writes). */
-export async function prepareRun(ctx: EngineCtx, input: StartInput): Promise<Result<PreparedRun>> {
+export async function prepareRun(ctx: EngineCtx, input: StartInput, o: { readonly lenient?: boolean } = {}): Promise<Result<PreparedRun>> {
   const r = ctx.db.repos;
   const project = r.projects.find(input.projectId);
   if (project === undefined) return err(errors.notFound('project'));
@@ -137,7 +145,7 @@ export async function prepareRun(ctx: EngineCtx, input: StartInput): Promise<Res
   if (inputError !== null) return err(inputError);
   const limits = limitsFor(version.spec, input.limitOverrides);
   if (!limits.ok) return limits;
-  const snapshot = await buildSnapshot(ctx, project, version, input);
+  const snapshot = await buildSnapshot(ctx, project, version, input, o.lenient ?? false);
   if (!snapshot.ok) return snapshot;
   const stepKeys = [INTAKE, ...version.spec.steps.map((s) => s.id), FINALIZE];
   return ok({ project, version, snapshot: snapshot.value, limits: limits.value, stepKeys });
@@ -226,7 +234,7 @@ async function estimateFirstReservation(
  * which renders those records' rules for the first model step.
  */
 export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<Result<RunPreflight>> {
-  const prepared = await prepareRun(ctx, input);
+  const prepared = await prepareRun(ctx, input, { lenient: true });
   if (!prepared.ok) return prepared;
   const p = prepared.value;
   const memory = selectRunMemory(ctx.db.repos, p.project.id, ctx.clock.now(), p.snapshot.memoryIncludeIds);
@@ -243,8 +251,11 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     if (!read.ok) return read;
     files = read.value.files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, content: f.content, size: f.size }));
   }
+  const issues = await profileIssues(ctx, p, input);
   const models = Object.entries(p.snapshot.steps).flatMap(([k, s]) => (s.kind === 'model' ? [{ key: k as StepKey, snap: s }] : []));
-  const first = models[0];
+  // The first reservation is the first model step of the SPEC; when its profile could not be resolved there is no N.
+  const firstKey = p.version.spec.steps.find((s) => s.kind === 'model')?.id;
+  const first = models.find((m) => m.key === firstKey);
   let N = 0 as Microusd;
   let estimatedInputTokens = 0;
   let basis: UsageEstimate['basis'] = 'local_estimate';
@@ -257,11 +268,14 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
   }
   const { start, end } = monthWindow(ctx.clock.now());
   const L = p.project.monthlyAllowanceMicrousd;
-  const budget = admit({
+  const admission = admit({
     run: { L: p.limits.budgetMicrousd, ...ZERO },
     project: L === null ? null : { L, ...ctx.db.repos.ledger.projectMonthBalances(p.project.id, start, end) },
     N,
-  }).breakdown;
+  });
+  const budget = admission.breakdown;
+  const budgetIssue = budgetReadiness(admission);
+  if (budgetIssue !== null) issues.push(budgetIssue);
   const providers: ProviderId[] = [...new Set(models.map((m) => m.snap.profile.providerId))];
   return ok({
     inputSummary: {
@@ -271,6 +285,34 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     },
     firstReservation: { N, basis },
     budget,
-    issues: [],
+    issues: issues.map(toPreflightIssue),
   });
+}
+
+/**
+ * F14 preflight issues per model step (the same {@link checkStepReadiness} as the loop's `runChecks`): unknown
+ * profile, provider not permitted by the project policy, missing credential ref (the credential-ref repo, never the
+ * key), model missing from the catalog or unsupported (live adapter capabilities when available).
+ */
+async function profileIssues(ctx: EngineCtx, p: PreparedRun, input: StartInput): Promise<ReadinessIssue[]> {
+  const r = ctx.db.repos;
+  const issues: ReadinessIssue[] = [];
+  for (const s of p.version.spec.steps) {
+    if (s.kind !== 'model') continue;
+    const ref = profileRef(r, s.id, s.profile, input.profileOverrides ?? {});
+    if (ref === undefined) {
+      issues.push({ stepKey: s.id, reason: 'setup_blocked', code: 'unknown_profile',
+        error: errors.notFound('profile', {}, { details: { stepKey: s.id }, userMessage: `No profile named "${s.profile.slice(0, 40)}".` }) });
+      continue;
+    }
+    let capabilities: ModelCapabilities | undefined;
+    try {
+      capabilities = await ctx.providers.get(ref.providerId).capabilities(ref.modelId);
+    } catch {
+      capabilities = undefined; // no adapter: the catalog snapshot decides
+    }
+    issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile: ref, capabilities,
+      catalogEntry: r.catalog.get(ref.providerId, ref.modelId), hasCredential: r.credentials.get(ref.providerId) !== undefined }));
+  }
+  return issues;
 }

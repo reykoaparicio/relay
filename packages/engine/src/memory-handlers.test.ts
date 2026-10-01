@@ -1,7 +1,9 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { memoryRecordDetailSchema, memoryRecordViewSchema } from '@relay/contracts';
+import { err, errors, getRunnerOperation, memoryRecordDetailSchema, memoryRecordViewSchema } from '@relay/contracts';
+import { createMaintenance } from '@relay/storage';
+import type { EngineCtx } from './ports.js';
 import type { MemoryId } from '@relay/contracts';
 import { tick } from './runner.js';
 import { createHarness } from './testing/harness.js';
@@ -17,6 +19,8 @@ async function harness(): Promise<Harness> {
   h = await createHarness();
   return h;
 }
+
+const memoryOutput = getRunnerOperation('relay/v1/memory.purgeProjectHistory')?.output;
 
 let keySeq = 0;
 async function create(x: Harness, o: Record<string, unknown> = {}) {
@@ -161,11 +165,32 @@ describe('memory.* handlers (07 G5 / 02 memory ops)', () => {
     const unknown = await x.engine.handle('relay/v1/memory.purgeProjectHistory', { projectId: 'prj_01J9ZZZZZZZZZZZZZZZZZZZZZ0', confirmPhrase: 'purge' });
     const missing = await x.engine.handle('relay/v1/memory.get', { recordId: x.ids.next('memory') });
 
-    expect(purged.ok && purged.data).toEqual({ purgedSnapshots: 1 });
+    expect(purged.ok && purged.data).toEqual({ purgedSnapshots: 1, purgedArtifacts: 0, failed: 0 }); // intake only: no responses yet
     expect(x.db.repos.memory.runSnapshot(runId)).toEqual([]);
     expect(created.ok && x.db.repos.memory.get(created.data.id)?.record.status).toBe('approved');
     expect(unknown.ok ? null : unknown.error.code).toBe('NOT_FOUND');
     expect(missing.ok ? null : missing.error.code).toBe('NOT_FOUND');
+  });
+
+  it('purgeProjectHistory returns purgedArtifacts and the failed count (a failed file purge is reported, then retried)', async () => {
+    const x = await harness();
+    await create(x); // one approved rule → one run snapshot copy
+    await x.engine.start();
+    const runId = await x.startRun();
+    await x.waitForStatus(runId, ['awaiting_approval']);
+    const history = x.db.repos.artifacts.listForRun(runId, ['raw_response', 'context_manifest']).length;
+    const real = x.ctx.maintenance;
+    (x.ctx as { maintenance: EngineCtx['maintenance'] }).maintenance = createMaintenance({ db: x.db, clock: x.clock,
+      artifacts: { purge: () => Promise.resolve(err(errors.artifactWriteFailed())) } });
+
+    const failing = await x.engine.handle('relay/v1/memory.purgeProjectHistory', { projectId: x.projectId, confirmPhrase: 'purge' });
+    (x.ctx as { maintenance: EngineCtx['maintenance'] }).maintenance = real;
+    const retried = await x.engine.handle('relay/v1/memory.purgeProjectHistory', { projectId: x.projectId, confirmPhrase: 'purge' });
+
+    expect(history).toBeGreaterThan(0);
+    expect(failing.ok && failing.data).toEqual({ purgedSnapshots: 1, purgedArtifacts: 0, failed: history });
+    expect(retried.ok && retried.data).toEqual({ purgedSnapshots: 0, purgedArtifacts: history, failed: 0 });
+    expect(memoryOutput?.parse(failing.ok ? failing.data : null)).toEqual({ purgedSnapshots: 1, purgedArtifacts: 0, failed: history });
   });
 
   it('a completed-run suggestion shows its run source and the run_summary is listed as approved', async () => {

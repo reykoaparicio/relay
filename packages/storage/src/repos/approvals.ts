@@ -38,6 +38,9 @@ export function createApprovalRepo(driver: SqlDriver): ApprovalRepo {
       return row;
     },
     get,
+    listForRun(runId) {
+      return driver.prepare('SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at, id').all(runId).map(mapApproval);
+    },
     pendingForRun(runId) {
       return latest('SELECT * FROM approvals WHERE run_id = ? AND decision IS NULL AND invalidated_at IS NULL', runId);
     },

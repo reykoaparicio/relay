@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 async function harness(): Promise<{ x: Harness; wf: WorkflowId }> {
-  const x = await createHarness();
+  const x = await createHarness({ credentialRefs: [] });
   h = x;
   const wf = x.db.repos.workflows.listWorkflows()[0]?.id;
   if (wf === undefined) throw new Error('no workflow');

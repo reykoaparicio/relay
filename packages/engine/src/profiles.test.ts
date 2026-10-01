@@ -32,7 +32,7 @@ describe('checkProfile (F14)', () => {
 
 describe('profilesWithWarnings', () => {
   it('returns [] warnings for a valid seeded profile once a credential exists, and the matching codes for a broken one', async () => {
-    h = await createHarness();
+    h = await createHarness({ credentialRefs: [] });
     h.db.tx('immediate', (r) => {
       r.credentials.upsert({ id: h!.ids.next('credentialRef'), providerId: 'anthropic', storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…' });
       const saved = r.profiles.upsert({ id: h!.ids.next('profile'), name: 'Broken', providerId: 'openai', modelId: 'gpt-none', params: { maxOutputTokens: 10, effort: 'max', refusalFallback: 'off' },

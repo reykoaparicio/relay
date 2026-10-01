@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { errors } from '@relay/contracts';
 import type { RunId, StepKey } from '@relay/contracts';
 import { applyRunEvent } from './run-machine.js';
+import { snapshotOf } from './snapshot.js';
 import type { RunMachineEvent } from './run-machine.js';
 import { estimateNextReservation } from './run-actions.js';
 import { tick } from './runner.js';
@@ -43,6 +44,7 @@ describe('runs.resume continue', () => {
 
   it('auth_required needs a credential ref for every provider still to be called (AUTH_REQUIRED otherwise)', async () => {
     const { x, runId } = await runWith({ type: 'AUTH_FAILED', error: errors.authRequired('anthropic') });
+    x.db.repos.credentials.delete('anthropic'); // the key was removed while the run was running
 
     const missing = await resume(x, runId, 'continue-auth-001', { kind: 'continue' });
     await x.engine.handle('relay/v1/providers.recordCredentialRef', { providerId: 'anthropic', storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…' });
@@ -50,6 +52,37 @@ describe('runs.resume continue', () => {
 
     expect(missing.ok ? null : [missing.error.code, missing.error.details?.['providerId']]).toEqual(['AUTH_REQUIRED', 'anthropic']);
     expect(ok.ok && ok.data.status).toBe('queued');
+  });
+
+  it('paused(unknown_outcome) with every unknown decided and no failed step offers resume → queued; refused while an unknown is open', async () => {
+    const { x, runId } = await runWith({ type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: errors.requestOutcomeUnknown('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never) });
+    const detail = await x.engine.handle('relay/v1/runs.get', { runId });
+    expect(detail.ok && detail.data.availableActions).toEqual(['resume', 'stop']); // zero unknown attempts, nothing failed
+
+    const res = await resume(x, runId, 'continue-unk-0001', { kind: 'continue' });
+
+    expect(res.ok && res.data.status).toBe('queued');
+    await tick(x.ctx);
+    expect(x.db.repos.runs.get(runId).status).toBe('running');
+  });
+
+  it('paused(unknown_outcome) with an open unknown attempt refuses continue (decide_unknown first)', async () => {
+    const { x, runId } = await runWith({ type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: errors.requestOutcomeUnknown('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never) });
+    x.db.tx('immediate', (r) => {
+      const run = r.runs.get(runId);
+      const s = r.steps.latestFor(runId, 'intake' as StepKey);
+      if (s === undefined) throw new Error('intake');
+      const snap = snapshotOf(run).steps['review'];
+      if (snap?.kind !== 'model') throw new Error('review');
+      r.attempts.insert({ id: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, runId, stepRunId: s.id, seq: 1, purpose: 'initial', providerId: snap.profile.providerId,
+        modelId: snap.profile.modelId, profileSnapshot: snap.profile, requestFingerprint: 'f'.repeat(64), state: 'reserved', reservationMicrousd: 10,
+        priceCatalogVersion: snap.profile.priceCatalogVersion, createdAt: x.clock.now() });
+      r.attempts.transition('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, ['reserved'], 'unknown', {});
+    });
+
+    const res = await resume(x, runId, 'continue-unk-0002', { kind: 'continue' });
+
+    expect(res.ok ? null : res.error.details?.['reason']).toBe('decision_not_applicable');
   });
 
   it('is CONFLICT for pause reasons that need another decision, and for a running run', async () => {

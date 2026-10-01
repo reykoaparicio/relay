@@ -42,8 +42,8 @@ describe('budget overrun @m3', () => {
     expectLedgerMatchesAttempts(h.db, runId);
   });
 
-  // PRODUCT BUG (reported): views.ts computes costSummary.overrun as `remaining < 0` (C+R+U > L), so an attempt overrun
-  // X > N with L ≫ X reports overrun=false. 11 §K5 requires `costSummary.overrun = true` for this row.
+  // 11 §K5: `costSummary.overrun` is true after an attempt overrun (X > N) even when L ≫ X — views.ts sets it from
+  // `remaining < 0 || attemptOverran` (the run's attempts' settled > reservation), not from the allowance alone.
   it('costSummary.overrun is true after an attempt overrun even when L ≫ X @m3', async () => {
     h = await createHarness({ scenario: 'overrun' });
     const runId = await h.startRun({ limits: { budgetMicrousd: 3_000_000 } });

@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { err, errors } from '@relay/contracts';
+import { err, errors, microusd, upperBound } from '@relay/contracts';
 import type { RunId, StepKey, StepRunId } from '@relay/contracts';
 import { FAKE_FIXTURES, createMemoryCallLog, createProviderRegistry } from '@relay/providers';
 import type { ProviderRegistry } from '@relay/providers';
@@ -10,6 +10,7 @@ import { onWorkStopped } from './cancellation.js';
 import { executeModelAttempt } from './checkpoints.js';
 import { fromUtf8 } from './hash.js';
 import type { CrashHookCtx, EngineCtx } from './ports.js';
+import { findProfileByName } from './profiles.js';
 import { applyRunEvent } from './run-machine.js';
 import { stepsToPromote, tick } from './runner.js';
 import { snapshotOf } from './snapshot.js';
@@ -26,10 +27,11 @@ afterEach(async () => {
 const REVIEW = 'review' as StepKey;
 
 /** Queued → running → intake done → review promoted to `ready`. */
-async function readyReview(o: HarnessOptions = {}, run: { budgetMicrousd?: number } = {}): Promise<{ harness: Harness; runId: RunId; stepRunId: StepRunId }> {
+async function readyReview(o: HarnessOptions = {}, run: { budgetMicrousd?: number | ((x: Harness) => number) } = {}): Promise<{ harness: Harness; runId: RunId; stepRunId: StepRunId }> {
   const harness = await createHarness(o);
   h = harness;
-  const runId = await harness.startRun(run);
+  const budget = typeof run.budgetMicrousd === 'function' ? run.budgetMicrousd(harness) : run.budgetMicrousd;
+  const runId = await harness.startRun(budget === undefined ? {} : { budgetMicrousd: budget });
   await tick(harness.ctx); // runChecks → running
   await tick(harness.ctx); // intake
   harness.db.tx('immediate', (r) => {
@@ -38,6 +40,17 @@ async function readyReview(o: HarnessOptions = {}, run: { budgetMicrousd?: numbe
   const step = harness.db.repos.steps.latestFor(runId, REVIEW);
   if (step?.state !== 'ready') throw new Error('review not ready');
   return { harness, runId, stepRunId: step.id };
+}
+
+/** The review step's minimum reservation (output allowance only): the loop's queued check admits any L ≥ this. */
+function reviewMinimum(x: Harness): number {
+  const r = x.db.repos;
+  const wf = r.workflows.listWorkflows()[0];
+  const step = wf === undefined ? undefined : r.workflows.getVersion(wf.id, 1)?.spec.steps.find((s) => s.id === REVIEW);
+  const profile = step?.kind === 'model' ? findProfileByName(r, step.profile) : undefined;
+  const entry = profile === undefined ? undefined : r.catalog.get(profile.providerId, profile.modelId);
+  if (step?.kind !== 'model' || profile === undefined || entry === undefined) throw new Error('review profile');
+  return upperBound(0, step.maxOutputTokens ?? profile.params.maxOutputTokens, entry.prices);
 }
 
 function ledgerOf(r: Repos, runId: RunId) {
@@ -314,7 +327,8 @@ describe('executeModelAttempt (§7.4)', () => {
   });
 
   it('pauses budget_run inside the reservation tx when C + R + U + N > L', async () => {
-    const { harness, runId, stepRunId } = await readyReview({}, { budgetMicrousd: 1_000 });
+    // L covers the queued check's minimum (output only) but not N (input + output): admission blocks at dispatch.
+    const { harness, runId, stepRunId } = await readyReview({}, { budgetMicrousd: (x) => reviewMinimum(x) + 1 });
 
     const out = await executeModelAttempt(harness.ctx, runId, stepRunId);
 
@@ -326,7 +340,9 @@ describe('executeModelAttempt (§7.4)', () => {
   });
 
   it('pauses on the project-month allowance with pauseReason budget_project', async () => {
-    const { harness, runId, stepRunId } = await readyReview({ monthlyAllowanceMicrousd: 1_000 });
+    const { harness, runId, stepRunId } = await readyReview();
+    const p = harness.db.repos.projects.get(harness.projectId);
+    harness.db.repos.projects.update(harness.projectId, { monthlyAllowanceMicrousd: microusd(1_000) }, p.updatedAt); // after the queued check
 
     await executeModelAttempt(harness.ctx, runId, stepRunId);
 
@@ -431,5 +447,85 @@ describe('retry outcomes through the checkpoint (F7)', () => {
 
     expect(harness.db.repos.steps.get(stepRunId).state).toBe('failed');
     expect(harness.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'output_invalid' }));
+  });
+});
+
+// ---------------------------------------------------------------- F4 putArtifact failures (06 F4 helpers)
+
+/** Replaces `ctx.artifacts.put`: the `n`-th put from now on fails (`fail`: an error result; `throw`: the store throws). */
+function failNthPut(x: Harness, n: number, how: 'fail' | 'throw'): { readonly calls: () => number } {
+  const base = x.ctx.artifacts;
+  let count = 0;
+  (x.ctx as { artifacts: EngineCtx['artifacts'] }).artifacts = {
+    ...base,
+    put: (req) => {
+      count += 1;
+      if (count !== n) return base.put(req);
+      if (how === 'throw') throw new Error('disk full');
+      return Promise.resolve(err(errors.artifactWriteFailed()));
+    },
+  };
+  return { calls: () => count };
+}
+
+const kindsOf = (x: Harness, runId: RunId) => x.db.repos.artifacts.listForRun(runId).map((a) => a.kind).filter((k) => k !== 'input_file').sort();
+const writeFailures = (x: Harness, runId: RunId) =>
+  x.db.repos.events.list(runId, 0, 500).filter((e) => e.type === 'artifact.write_failed').map((e) => e.payload['kind']);
+
+describe('executeModelAttempt: artifact write failures (F4 putArtifact)', () => {
+  it('a failed raw_response put is logged + artifact.write_failed; the step outcome is unaffected (succeeded, settled)', async () => {
+    const { harness, runId, stepRunId } = await readyReview();
+    const puts = failNthPut(harness, 1, 'fail'); // 1st put = raw_response
+
+    await executeModelAttempt(harness.ctx, runId, stepRunId);
+
+    const [attempt] = harness.db.repos.attempts.listForRun(runId);
+    expect(puts.calls()).toBe(3); // raw, manifest, canonical findings
+    expect([attempt?.state, harness.db.repos.steps.get(stepRunId).state, harness.db.repos.runs.get(runId).status]).toEqual(['succeeded', 'succeeded', 'running']);
+    expect(kindsOf(harness, runId)).toEqual(['context_manifest', 'findings']); // no raw_response row
+    expect(writeFailures(harness, runId)).toEqual(['raw_response']);
+    expect(harness.logger.entries.some((e) => e.event === 'artifact.write_failed' && e.fields?.['kind'] === 'raw_response')).toBe(true);
+    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0 }));
+    expect(harness.db.repos.ledger.runBalances(runId).C).toBeGreaterThan(0);
+  });
+
+  it('a manifest put that THROWS is caught (never escapes F4): logged + write_failed, the step still succeeds', async () => {
+    const { harness, runId, stepRunId } = await readyReview();
+    failNthPut(harness, 2, 'throw'); // 2nd put = context_manifest
+
+    const out = await executeModelAttempt(harness.ctx, runId, stepRunId);
+
+    expect(out.kind).not.toBe('blocked');
+    expect(harness.db.repos.steps.get(stepRunId).state).toBe('succeeded');
+    expect(kindsOf(harness, runId)).toEqual(['findings', 'raw_response']);
+    expect(writeFailures(harness, runId)).toEqual(['context_manifest']);
+    expect(harness.db.repos.attempts.listForRun(runId).map((a) => a.state)).toEqual(['succeeded']); // never left dispatching
+  });
+
+  it('a failed canonical-output put is a known failure: ARTIFACT_WRITE_FAILED, usage settled, step failed, paused(output_invalid) → retry_step recovers', async () => {
+    const { harness, runId, stepRunId } = await readyReview();
+    failNthPut(harness, 3, 'fail'); // 3rd put = the canonical findings.v1 output
+
+    await executeModelAttempt(harness.ctx, runId, stepRunId);
+
+    const [attempt] = harness.db.repos.attempts.listForRun(runId);
+    expect([attempt?.state, attempt?.error?.code]).toEqual(['failed', 'ARTIFACT_WRITE_FAILED']);
+    expect(harness.db.repos.ledger.attemptBalances(attempt?.id ?? ('' as never))).toEqual(expect.objectContaining({ reserved: 0, unknown: 0 }));
+    expect(harness.db.repos.ledger.attemptBalances(attempt?.id ?? ('' as never)).settled).toBeGreaterThan(0); // usage still settled
+    expect(harness.db.repos.steps.get(stepRunId)).toEqual(expect.objectContaining({ state: 'failed', outputArtifactId: null }));
+    expect(kindsOf(harness, runId)).toEqual(['context_manifest', 'raw_response']); // no findings row
+    expect(writeFailures(harness, runId)).toEqual(['findings']);
+    const run = harness.db.repos.runs.get(runId);
+    expect([run.status, run.pauseReason]).toEqual(['paused', 'output_invalid']);
+    const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
+    expect(detail.ok && detail.data.availableActions).toContain('retry_step');
+
+    const retried = await harness.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'artifact-retry-0001', runId, stepId: stepRunId });
+    expect(retried.ok && retried.data.status).toBe('queued');
+    await tick(harness.ctx); // CHECKS_PASSED
+    const next = harness.db.repos.steps.latestFor(runId, REVIEW);
+    if (next === undefined) throw new Error('retry row');
+    await executeModelAttempt(harness.ctx, runId, next.id);
+    expect([next.retryIndex, harness.db.repos.steps.get(next.id).state]).toEqual([1, 'succeeded']);
   });
 });

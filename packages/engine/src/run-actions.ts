@@ -196,7 +196,9 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
     applyRunEvent(r, run, { type: 'RECOVERY_DECIDED' }, now, fx);
     return ok(undefined);
   }
-  if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked'])) return err(notApplicable(run, 'continue'));
+  // `unknown_outcome`: only reachable once every unknown attempt is decided and no step failed — the `offered` gate
+  // (F2 truth table) refuses `resume` otherwise, before this runs.
+  if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked', 'unknown_outcome'])) return err(notApplicable(run, 'continue'));
   if (run.pauseReason === 'auth_required') {
     const missing = [...new Set(openModelSteps(r, run).map((s) => effectiveStepSnapshot(r, run, s.stepKey).profile.providerId))]
       .find((p) => r.credentials.get(p) === undefined);

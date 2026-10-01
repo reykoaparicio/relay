@@ -1,7 +1,7 @@
 // 11 §K5 / §17.1 "Artifact export fails" (@m4): a read-only destination → ARTIFACT_WRITE_FAILED with the run row
 // unchanged; the retry succeeds; a destination inside (or containing) the project root → PERMISSION_DENIED.
-// `artifacts.exportTo` is not implemented in the runner yet, so the export runs through @relay/tools `exportArtifacts`
-// (the function the op will call) over the REAL artifact store of a completed run; the IPC path is a todo.
+// Covered twice over the REAL artifact store of a completed run: through @relay/tools `exportArtifacts` directly, and
+// through the runner op `artifacts.exportTo` (06 export handlers), which calls it.
 import { chmod, mkdir, readFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';

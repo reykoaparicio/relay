@@ -2,12 +2,28 @@
 // capability checks"). Pure. Budget admission is NOT here: it happens inside the reservation tx (F4 step 2).
 // Check #8 binds an approval-bound step to the approved plan hash, the run context hash, the live input-file hashes
 // (skipped after `use_preserved_snapshot`), and the approved providers (R3-11).
-import { err, errors, ok } from '@relay/contracts';
-import type { AppError, AttemptPurpose, EpochMs, ProviderId, RelPath, Result, Sha256 } from '@relay/contracts';
+import { err, errors, ok, upperBound } from '@relay/contracts';
+import type {
+  AppError,
+  AttemptPurpose,
+  CatalogModel,
+  EpochMs,
+  Microusd,
+  ModelCapabilities,
+  ModelProfile,
+  ProviderId,
+  RelPath,
+  Result,
+  Sha256,
+  StepKey,
+  ValidationIssue,
+} from '@relay/contracts';
 import type { ModelRequest, UsageEstimate } from '@relay/providers';
 import type { ApprovalRow, ProjectRow, RunRow, StepRow } from '@relay/storage';
+import type { Admission } from './budget.js';
 import { deadlineReached } from './deadline.js';
 import type { ModelStepSnapshot } from './ports.js';
+import { checkProfile, profileWarningMessage } from './profiles.js';
 
 /** Inputs of check #8 (computed by the caller, `loadApprovalBinding`). */
 export interface ApprovalBinding {
@@ -130,4 +146,85 @@ export function checkDispatchAll(i: DispatchCheckInput): AppError[] {
 export function checkDispatch(i: DispatchCheckInput): Result<void> {
   const first = checkDispatchAll(i)[0];
   return first === undefined ? ok(undefined) : err(first);
+}
+
+// ---------------------------------------------------------------- readiness (F13 runChecks + F14 preflight)
+
+/** The pause a readiness issue maps to when a queued run cannot start (F2 `queued → paused`, clarification 9). */
+export type ReadinessReason = 'setup_blocked' | 'auth_required' | 'budget_run' | 'budget_project';
+
+/**
+ * One reason a run cannot start: shared by `runs.preflight` (listed as `issues`) and the loop's `runChecks` (the first
+ * one becomes `SETUP_BLOCKED` with its `reason`, before any reservation). `stepKey` is null for an allowance issue.
+ */
+export interface ReadinessIssue {
+  readonly stepKey: StepKey | null;
+  readonly reason: ReadinessReason;
+  /** Stable issue code: a capability warning code (`missing_credential`, `provider_not_allowed`, `model_unknown`, …), `unknown_profile`, `budget_run`, or `budget_project`. */
+  readonly code: string;
+  readonly error: AppError;
+}
+
+/** What the readiness check reads about one model step's (effective) profile. Credential presence comes from the credential-ref repo, never the key. */
+export interface StepReadinessInput {
+  readonly stepKey: StepKey;
+  readonly profile: Pick<ModelProfile, 'providerId' | 'modelId' | 'params'>;
+  /** Snapshot or live capabilities; absent → the catalog entry's. */
+  readonly capabilities?: ModelCapabilities | undefined;
+  readonly catalogEntry: CatalogModel | undefined;
+  readonly hasCredential: boolean;
+}
+
+/** Per-step readiness in F6 order: provider permitted (#2), credential ref present (#3), model in the catalog and supported (#4). Pure. */
+export function checkStepReadiness(allowedProviderIds: readonly ProviderId[], s: StepReadinessInput): ReadinessIssue[] {
+  const { providerId, modelId } = s.profile;
+  const issues: ReadinessIssue[] = [];
+  if (!allowedProviderIds.includes(providerId)) {
+    issues.push({ stepKey: s.stepKey, reason: 'setup_blocked', code: 'provider_not_allowed',
+      error: errors.permissionDenied('provider_not_allowed', { details: { stepKey: s.stepKey, providerId }, userMessage: profileWarningMessage('provider_not_allowed') }) });
+  }
+  if (!s.hasCredential) {
+    issues.push({ stepKey: s.stepKey, reason: 'auth_required', code: 'missing_credential',
+      error: errors.authRequired(providerId, { details: { stepKey: s.stepKey }, userMessage: profileWarningMessage('missing_credential') }) });
+  }
+  const checked = checkProfile(s.profile, s.catalogEntry, s.capabilities);
+  if (!checked.ok) {
+    const code = typeof checked.error.details?.['reason'] === 'string' ? checked.error.details['reason'] : 'model_unsupported';
+    issues.push({ stepKey: s.stepKey, reason: 'setup_blocked', code,
+      error: errors.modelUnsupported({ providerId, modelId, reason: code }, { details: { stepKey: s.stepKey }, userMessage: checked.error.userMessage }) });
+  }
+  return issues;
+}
+
+/**
+ * The smallest reservation a model step can ever need: its output allowance at the snapshot prices with no input
+ * (`upperBound(0, maxOutputTokens, prices)`). Every dispatch N (local or provider-counted, one or two hops) is at
+ * least this, so a run whose remaining allowance cannot cover it is blocked for certain — a queued run pauses before
+ * any reservation instead of at dispatch, and never on a guess.
+ */
+export function minimumReservation(stepSnap: Pick<ModelStepSnapshot, 'maxOutputTokens' | 'profile'>): Microusd {
+  return upperBound(0, stepSnap.maxOutputTokens, stepSnap.profile.prices);
+}
+
+/** The allowance issue of a read-only §9.3 admission (null when admitted). */
+export function budgetReadiness(decision: Admission): ReadinessIssue | null {
+  if (decision.ok) return null;
+  const scope = decision.breakdown.scope === 'project' ? 'budget_project' : 'budget_run';
+  return { stepKey: null, reason: scope, code: scope, error: errors.budgetBlocked(decision.breakdown) };
+}
+
+/** Preflight form path of an issue: the step's profile select, or the allowance it concerns. */
+export function readinessIssuePath(i: ReadinessIssue): string {
+  if (i.stepKey !== null) return `profileOverrides.${i.stepKey}`;
+  return i.reason === 'budget_project' ? 'project.monthlyAllowanceMicrousd' : 'limitOverrides.budgetMicrousd';
+}
+
+const BUDGET_MESSAGES: Readonly<Record<string, string>> = {
+  budget_run: 'The run allowance cannot cover the first reservation.',
+  budget_project: "The project's remaining monthly allowance cannot cover the first reservation.",
+};
+
+/** `runs.preflight` issue (02 ValidationIssue) of a readiness issue. */
+export function toPreflightIssue(i: ReadinessIssue): ValidationIssue {
+  return { path: readinessIssuePath(i), code: i.code, message: BUDGET_MESSAGES[i.code] ?? i.error.userMessage };
 }

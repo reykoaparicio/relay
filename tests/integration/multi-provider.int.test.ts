@@ -1,6 +1,6 @@
 // 11 §K6 multi-provider (@m2): reviewer on the fake anthropic adapter, planner on the fake openai adapter (the seeded
 // "Balanced · OpenAI" profile) → attempts and call log record both provider ids; a project policy that disallows
-// openai → preflight PERMISSION_DENIED.
+// openai → preflight lists a `provider_not_allowed` issue on that step, and start is PERMISSION_DENIED.
 import { afterEach, describe, expect, it } from 'vitest';
 import type { StepKey } from '@relay/contracts';
 import { DEFAULT_REL_PATHS, createHarness } from '../helpers/engine-harness.js';
@@ -34,7 +34,7 @@ describe('multi-provider @m2', () => {
     expect(detail.ok && detail.data.steps.find((s) => s.stepKey === ('plan' as StepKey))).toBeDefined();
   });
 
-  it('the project policy disallows openai → preflight (and start) PERMISSION_DENIED @m2', async () => {
+  it('the project policy disallows openai → preflight issue provider_not_allowed, start PERMISSION_DENIED @m2', async () => {
     h = await createHarness({ allowedProviderIds: ['anthropic', 'fake'], start: false });
     const openai = h.db.repos.profiles.getByName('Balanced · OpenAI')!.id;
 
@@ -42,7 +42,7 @@ describe('multi-provider @m2', () => {
       goal: 'Fix the defects in the handlers.', input: { kind: 'files', relPaths: [...DEFAULT_REL_PATHS] }, profileOverrides: { plan: openai } });
     const start = await h.startRunRaw({ profileOverrides: { plan: openai } });
 
-    expect(pre.ok ? null : [pre.error.code, pre.error.details]).toEqual(['PERMISSION_DENIED', expect.objectContaining({ stepKey: 'plan', providerId: 'openai', reason: 'provider_not_allowed' })]);
+    expect(pre.ok && pre.data.issues.map((i) => [i.path, i.code])).toEqual([['profileOverrides.plan', 'provider_not_allowed']]);
     expect(start.ok ? null : start.error.code).toBe('PERMISSION_DENIED');
   });
 });

@@ -3,7 +3,9 @@ import { costSummarySchema } from '../domain/ledger.js';
 import { idSchema } from '../ids.js';
 import { microusdSchema } from '../money.js';
 import { epochMsSchema, sha256Schema, stepKeySchema } from '../primitives.js';
+import { APPROVAL_STALE_REASONS } from '../errors.js';
 import {
+  approvalDecisionSchema,
   costCertaintySchema,
   providerIdSchema,
   stepStateSchema,
@@ -61,6 +63,37 @@ export const reportV1Schema = z.object({
   limitations: z.array(z.string().max(600)), // honesty text (07 constants)
   snapshotUsed: z.boolean(), // true when use_preserved_snapshot skipped the stale check
   generatedAt: epochMsSchema,
+  /**
+   * Every approval the run opened, oldest first: the user's decision (null = never decided) and, when it stopped
+   * binding, why (06 F17). Optional (additive): reports generated before wave 4 do not carry it.
+   */
+  approvals: z
+    .array(
+      z.object({
+        approvalId: idSchema('approval'),
+        stepKey: stepKeySchema,
+        planArtifactId: idSchema('artifact'),
+        planHash: sha256Schema,
+        decision: approvalDecisionSchema.nullable(),
+        decidedAt: epochMsSchema.nullable(),
+        note: z.string().max(2_000).nullable(),
+        invalidatedReason: z.enum(APPROVAL_STALE_REASONS).nullable(),
+        createdAt: epochMsSchema,
+      }),
+    )
+    .optional(),
+  /**
+   * Quality revision cycles (§12.4 revisionPolicy) under the current approval vs the run limit, how many times the
+   * plan was re-done (request_revision / replan), and why the run ended `incomplete` (null otherwise). Optional (additive).
+   */
+  revisions: z
+    .object({
+      cycles: z.number().int().nonnegative(),
+      maxCycles: z.number().int().nonnegative(),
+      planRevisions: z.number().int().nonnegative(),
+      incompleteCause: z.enum(['revision_limit', 'verifier_incomplete']).nullable(),
+    })
+    .optional(),
 });
 /** `report.v1` value. */
 export type ReportV1 = z.infer<typeof reportV1Schema>;

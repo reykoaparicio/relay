@@ -402,6 +402,8 @@ export interface RunRepo {
   updateStatus<To extends RunStatus>(id: RunId, from: readonly RunStatus[], to: To, fields: RunStatusFields<To>): boolean;
   nextQueued(): RunRow | undefined;
   listActive(): readonly RunRow[];
+  /** Terminal runs (completed / incomplete / cancelled / failed) with no `report` artifact row (06 F17 crash-safety), oldest first. */
+  listTerminalWithoutReport(): readonly RunRow[];
   incrementAttemptCount(id: RunId): void;
   setRevisionCycle(id: RunId, cycle: number): void;
   /** Sets (or clears with null) the durable deferred pause (06 F2 clarification 14). */
@@ -730,6 +732,8 @@ export interface ApprovalInsert {
 export interface ApprovalRepo {
   insert(a: ApprovalInsert): ApprovalRow;
   get(id: ApprovalId): ApprovalRow | undefined;
+  /** Every approval of the run, oldest first (06 F17 report). */
+  listForRun(runId: RunId): readonly ApprovalRow[];
   /** Latest undecided, not-invalidated approval of the run. */
   pendingForRun(runId: RunId): ApprovalRow | undefined;
   /** Latest approved, not-invalidated approval of the run. */

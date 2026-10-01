@@ -207,7 +207,7 @@ describe('allowedRunActions truth table', () => {
     provider_unavailable: ['retry_step', 'choose_profile', 'stop'],
     model_refused: ['retry_step', 'choose_profile', 'stop'],
     setup_blocked: ['resume', 'choose_profile', 'stop'],
-    unknown_outcome: ['stop'],
+    unknown_outcome: ['resume', 'stop'],
     auth_required: ['reconnect_provider', 'resume', 'stop'],
     user: ['resume', 'stop'],
     rate_limited: ['resume', 'stop'],
@@ -218,10 +218,11 @@ describe('allowedRunActions truth table', () => {
     expect(allowedRunActions(paused(reason), none)).toEqual(EXPECTED[reason]);
   });
 
-  it('offers at least one non-stop action for every pause reason except a settled unknown without a failed step', () => {
+  it('offers at least one non-stop action for every pause reason and every unknown/failed combination (no exception)', () => {
     for (const reason of PAUSE_REASONS) {
-      const facts = reason === 'unknown_outcome' ? { ...none, unknownAttempts: 1 } : none;
-      expect(allowedRunActions(paused(reason), facts).some((a) => a !== 'stop'), reason).toBe(true);
+      for (const facts of [none, { ...none, unknownAttempts: 1 }, { ...none, hasFailedStep: true }, { ...none, unknownAttempts: 1, hasFailedStep: true }]) {
+        expect(allowedRunActions(paused(reason), facts).some((a) => a !== 'stop'), `${reason} ${JSON.stringify(facts)}`).toBe(true);
+      }
     }
   });
 

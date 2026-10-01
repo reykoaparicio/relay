@@ -118,21 +118,23 @@ export interface InputFileRef { artifactId: ArtifactId; storeRelPath: string; sh
 export interface InputFileSnapshot extends InputFileRef { relPath: RelPath; sizeBytes: number; mediaType: 'text/plain; charset=utf-8' }
 export function createArtifactStore(opts: { userDataDir: string; clock: Clock }): ArtifactStore;
 ```
-- Write protocol (crash-safe):
-  1. Write `<final>.tmp-<rand>` with `O_CREAT|O_EXCL`.
-  2. Call `fsync(fd)`.
-  3. `rename` to the final path.
-  4. Call `fsync(dir)`.
-  5. `chmod 0o444`.
+- Write protocol (crash-safe; **link-based**, as implemented — a `rename` would silently replace an existing final file):
+  1. If a tombstone `<final>.purged` exists, fail (`purged`): a purged artifact is never re-created.
+  2. Write `<final>.tmp-<rand>` with `O_CREAT|O_EXCL`, `fsync(fd)`, then `chmod 0o444` on the temp file.
+  3. `link(tmp, final)`. `link` never replaces: on `EEXIST` the existing file's sha256 is compared — the same bytes are the idempotent case (§7.5), different bytes → `ARTIFACT_WRITE_FAILED` (an invariant breach, logged). So two concurrent puts with different bytes cannot both win.
+  4. Unlink the temp name (without chmod: it shares the committed `0o444` inode), then `fsync(dir)`.
+  5. Re-check the tombstone: if a purge published one meanwhile, unlink the file and fail `purged` (see Purge for why this closes the race).
 - If the final path already exists with the same sha256, return the existing file (idempotent, §7.5). If it exists with a **different** hash, return `ARTIFACT_WRITE_FAILED` (an invariant breach, logged).
 - The store may only write under `userDataDir/artifacts/`. `scopeDir` is validated by a regex, `^artifacts/(run|prj)_[0-9A-HJKMNP-TV-Z]{26}$`.
 - The DB row is inserted by the engine **after** `put` succeeds, in the step-commit transaction (§7.4 step 7). If the process dies after the file is written but before the row is committed, the file is an orphan. `sweepOrphans(knownRelPaths)` runs at runner boot and deletes files older than 1 h with no row. It never deletes `*.purged` tombstones.
 
-**Purge (§10.4, §12.3 retention; called by 03 C8).** `purge(relPath)`:
+**Purge (§10.4, §12.3 retention; called by 03 C8).** `purge(relPath)` — **tombstone first, then unlink**:
 1. Validates `relPath` is under `artifacts/` (same regex on its directory).
-2. `chmod 0o644` (store files are `0o444`), then `unlink`. A missing file is not an error.
-3. Writes a tombstone `<relPath>.purged` (`O_CREAT|O_EXCL`, content `{"purgedAt":<ms>}`, then `0o444`). If the tombstone already exists, returns its `purgedAt`, so `purge` is idempotent and a crash between unlink and the DB update is safe.
-4. Returns `{ purgedAt }`. Storage then sets `artifacts.purged_at` (03 C8).
+2. Publishes the tombstone `<relPath>.purged` (content `{"purgedAt":<ms>}`) the same crash-safe way as a put: temp file (`O_EXCL`, fsync, `0o444`) → `link` to the tombstone name → `fsync(dir)`. If a valid tombstone already exists, its `purgedAt` is kept and returned, so `purge` is idempotent; an empty/garbled one (a crash mid-write in an older build) is repaired by an atomic replace.
+3. **Then** `chmod 0o644` (store files are `0o444`) and `unlink` the file. A missing file is not an error.
+4. Returns `{ purgedAt }`. Storage then sets `artifacts.purged_at` (03 C8). A crash between any two steps is safe: the tombstone already marks the artifact purged for every reader, and the next sweep repeats the idempotent purge and sets the column.
+
+Because `purge` publishes the tombstone before unlinking and `put` links before re-checking the tombstone, a concurrent put/purge pair always ends purged: either `put`'s re-check sees the tombstone (and removes its file), or the tombstone was written after the link and `purge`'s unlink removes the file.
 
 `read`/`readSnapshot` of a path whose file is gone but whose tombstone exists returns `NOT_FOUND` with `details = { purged: true, purgedAt }`. Without a tombstone a missing file is a plain `NOT_FOUND`.
 

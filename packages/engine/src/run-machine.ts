@@ -178,7 +178,9 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
       return ['resume', 'choose_profile', 'stop'];
     case 'unknown_outcome':
       if (f.unknownAttempts > 0) return ['decide_unknown', 'stop'];
-      return f.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['stop'];
+      // Every unknown is decided: a failed step is retried / re-profiled; otherwise (e.g. a decision committed but the
+      // run was not re-queued) `resume` continues, so this pause, like every other, has a non-stop way out.
+      return f.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['resume', 'stop'];
     case 'auth_required':
       return ['reconnect_provider', 'resume', 'stop'];
     case 'user':

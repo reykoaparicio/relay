@@ -23,7 +23,7 @@ async function harness(o: HarnessOptions = {}): Promise<Harness> {
 
 describe('providers.test (F18)', () => {
   it('reserves N against the setup allowance, settles the known usage (calculated), and records the test', async () => {
-    const x = await harness();
+    const x = await harness({ credentialRefs: [] });
 
     const res = await x.engine.handle('relay/v1/providers.test', { providerId: 'anthropic' });
 

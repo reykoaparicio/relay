@@ -253,5 +253,6 @@ export async function purgeProjectHistory(ctx: EngineCtx, input: ParsedInputOf<'
   if (ctx.db.repos.projects.find(input.projectId) === undefined) return err(errors.notFound('project'));
   const res = await ctx.maintenance.purgeProjectHistory(input.projectId);
   changed(ctx, input.projectId);
-  return ok({ purgedSnapshots: res.purgedSnapshots });
+  // Every count is returned: `failed` artifacts stay unpurged (retried by the next sweep) and must not be hidden (03 C8).
+  return ok({ purgedSnapshots: res.purgedSnapshots, purgedArtifacts: res.purgedArtifacts, failed: res.failed });
 }

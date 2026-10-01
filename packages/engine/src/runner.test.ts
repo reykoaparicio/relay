@@ -4,7 +4,8 @@ import type { StepKey } from '@relay/contracts';
 import type { StepRow } from '@relay/storage';
 import { createWakeSignal } from './clock.js';
 import { applyRunEvent } from './run-machine.js';
-import { createEngine, createEngineFromContext, handlerKind, pickNext, selectNextStep, stepsToPromote, tick } from './runner.js';
+import type { EngineCtx } from './ports.js';
+import { RETENTION_SWEEP_INTERVAL_MS, createEngine, createEngineFromContext, handlerKind, pickNext, selectNextStep, stepsToPromote, tick } from './runner.js';
 import { snapshotOf } from './snapshot.js';
 import { applyStepEvent, skipOpenSteps } from './step-machine.js';
 import { createHarness } from './testing/harness.js';
@@ -151,6 +152,31 @@ describe('engine start/stop (F1)', () => {
 
     await other.start();
     await other.stop({ graceMs: 10 });
+  });
+
+  it('sweeps raw-response retention at boot and then every 24 h through the injected timers; stop clears the interval', async () => {
+    h = await createHarness();
+    const sweeps: number[] = [];
+    (h.ctx as { maintenance: EngineCtx['maintenance'] }).maintenance = { ...h.ctx.maintenance,
+      sweepRawResponses: (now) => { sweeps.push(now); return Promise.resolve(); } };
+    // 24 h of manual time fires ~43 000 2-s heartbeats: keep them in memory (the lease row itself is not under test).
+    const lease = h.db.repos.lease;
+    (h.ctx as { db: EngineCtx['db'] }).db = { ...h.db, repos: { ...h.db.repos, lease: { ...lease, heartbeat: () => true } } };
+
+    await h.engine.start();
+    expect(sweeps).toHaveLength(1); // boot
+    h.timers.advance(RETENTION_SWEEP_INTERVAL_MS - 1);
+    expect(sweeps).toHaveLength(1);
+    h.timers.advance(1);
+    expect(sweeps).toHaveLength(2);
+    h.timers.advance(RETENTION_SWEEP_INTERVAL_MS);
+    expect(sweeps).toHaveLength(3);
+    expect(sweeps.slice(1).map((t, i) => t - (sweeps[i] ?? 0))).toEqual([RETENTION_SWEEP_INTERVAL_MS, RETENTION_SWEEP_INTERVAL_MS]);
+
+    await h.engine.stop({ graceMs: 10 });
+    expect(h.timers.pending()).toBe(0); // the sweep interval (and the heartbeat) are cleared, not just ignored
+    h.timers.advance(2 * RETENTION_SWEEP_INTERVAL_MS);
+    expect(sweeps).toHaveLength(3);
   });
 
   it('createEngine builds its own context; handle() maps an unexpected throw to INTERNAL with a correlation id', async () => {

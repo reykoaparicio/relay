@@ -112,6 +112,27 @@ export function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repo
     limitations: limitationKeys(run.status, verdict !== null, entries).map((k) => texts[k]),
     snapshotUsed: hasSnapshotPreserved(r, run.id),
     generatedAt: ctx.clock.now(),
+    approvals: r.approvals.listForRun(run.id).map((a) => ({
+      approvalId: a.id, stepKey: all.find((s) => s.id === a.stepRunId)?.stepKey ?? ('approve' as StepKey), planArtifactId: a.planArtifactId,
+      planHash: a.planHash, decision: a.decision, decidedAt: a.decidedAt, note: a.decisionNote, invalidatedReason: a.invalidatedReason, createdAt: a.createdAt,
+    })),
+    revisions: revisionsOf(run, all),
+  };
+}
+
+/** F17 revision summary: quality cycles vs the limit, plan re-dos (request_revision / replan), and the incomplete cause. */
+function revisionsOf(run: RunRow, all: readonly StepRow[]): NonNullable<ReportV1['revisions']> {
+  const snapshot = snapshotOf(run);
+  const planRevisions = all.filter((s) => {
+    const snap = snapshot.steps[s.stepKey];
+    return snap?.kind === 'model' && snap.outputKind === 'plan' && s.revisionIndex > 0 && s.retryIndex === 0;
+  }).length;
+  const cause = run.status === 'incomplete' ? run.statusDetail?.details?.['incompleteCause'] : undefined;
+  return {
+    cycles: run.revisionCycle,
+    maxCycles: run.limits.maxRevisionCycles,
+    planRevisions,
+    incompleteCause: cause === 'revision_limit' || cause === 'verifier_incomplete' ? cause : null,
   };
 }
 
@@ -133,6 +154,8 @@ export async function generateReport(ctx: EngineCtx, runId: RunId): Promise<Resu
   if (!put.ok) return put;
   const fx: PostCommitEffect[] = [];
   const row = ctx.db.tx('immediate', (tx) => {
+    const raced = tx.artifacts.listForRun(runId, ['report'])[0]; // another caller (terminal effect / start sweep) won: keep one report
+    if (raced !== undefined) return raced;
     const art = tx.artifacts.insertIfAbsent({ id, runId, projectId: run.projectId, kind: 'report', relPath: put.value.relPath,
       sha256: put.value.sha256, sizeBytes: put.value.sizeBytes, mediaType: 'application/json', schemaId: 'report.v1', createdAt: ctx.clock.now() });
     appendRunEvent(tx, fx, runId, 'report.created', { artifactId: art.id });
@@ -140,6 +163,22 @@ export async function generateReport(ctx: EngineCtx, runId: RunId): Promise<Resu
   });
   await runEffects(ctx, fx);
   return ok(row.id);
+}
+
+/**
+ * F1 step 3 / F17 crash-safety: at `engine.start()` every terminal run without a `report` artifact gets one (a crash
+ * between the terminal commit and the post-commit report effect). Idempotent: a run that has a report is not listed,
+ * and {@link generateReport} keeps exactly one. Returns the runs that got a report now.
+ */
+export async function regenerateMissingReports(ctx: EngineCtx): Promise<RunId[]> {
+  const done: RunId[] = [];
+  for (const run of ctx.db.repos.runs.listTerminalWithoutReport()) {
+    const res = await generateReport(ctx, run.id);
+    if (res.ok) done.push(run.id);
+    else ctx.logger.warn('report.regenerate_failed', { runId: run.id, code: res.error.code });
+  }
+  if (done.length > 0) ctx.logger.info('report.regenerated', { runs: done.length });
+  return done;
 }
 
 // ---------------------------------------------------------------- Markdown (artifacts.exportTo)
@@ -165,6 +204,32 @@ function quote(text: string): string {
 
 /** Exported alongside every report: Relay never writes to the project (FR-10). */
 export const REPORT_UNTOUCHED_NOTE = 'Original project files were not modified.';
+
+const DECISION_TEXT: Readonly<Record<string, string>> = { approved: 'approved', rejected: 'rejected', revision_requested: 'revision requested' };
+
+/** Approval decisions as a table (absent in a pre-wave-4 report → "Not recorded."). */
+function approvalLines(approvals: ReportV1['approvals']): string[] {
+  if (approvals === undefined) return ['Not recorded in this report.'];
+  if (approvals.length === 0) return ['No approval was requested.'];
+  return [
+    '| Step | Approval | Plan hash | Decision | Decided | Invalidated | Note |',
+    '|---|---|---|---|---|---|---|',
+    ...approvals.map((a) => `| ${[a.stepKey, a.approvalId, a.planHash.slice(0, 12), a.decision === null ? 'not decided' : DECISION_TEXT[a.decision] ?? a.decision,
+      a.decidedAt === null ? null : new Date(a.decidedAt).toISOString(), a.invalidatedReason, a.note].map(cell).join(' | ')} |`),
+  ];
+}
+
+/** Revision cycles (absent in a pre-wave-4 report → "Not recorded."). */
+function revisionLines(rv: ReportV1['revisions']): string[] {
+  if (rv === undefined) return ['Not recorded in this report.'];
+  const cause = rv.incompleteCause === 'revision_limit' ? 'the revision limit was reached'
+    : rv.incompleteCause === 'verifier_incomplete' ? 'the verifier reported the work incomplete' : null;
+  return [
+    `- Quality revision cycles: ${String(rv.cycles)} of ${String(rv.maxCycles)}`,
+    `- Plan revisions (requested changes or re-plans): ${String(rv.planRevisions)}`,
+    ...(cause === null ? [] : [`- Ended incomplete because ${cause}`]),
+  ];
+}
 
 /** F17: the pure Markdown rendering of a `report.v1` value (limitations, unknown charges, certainty breakdown). */
 export function renderReportMarkdown(report: ReportV1): string {
@@ -200,6 +265,14 @@ export function renderReportMarkdown(report: ReportV1): string {
     `- Still reserved: ${money(t.reserved)}`,
     `- Unknown charges: ${money(t.unknown)}`,
     `- Remaining: ${money(t.remaining)}${t.overrun ? ' (over the allowance)' : ''}`,
+    '',
+    '## Approvals',
+    '',
+    ...approvalLines(report.approvals),
+    '',
+    '## Revisions',
+    '',
+    ...revisionLines(report.revisions),
     '',
     '## Unknown charges',
     '',

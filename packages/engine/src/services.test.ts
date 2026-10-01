@@ -6,7 +6,7 @@ import type { RunnerChannel, StepKey } from '@relay/contracts';
 import { tick } from './runner.js';
 import { createHandlers } from './services.js';
 import { SAMPLE_FILES, createHarness } from './testing/harness.js';
-import type { Harness } from './testing/harness.js';
+import type { Harness, HarnessOptions } from './testing/harness.js';
 
 let h: Harness | undefined;
 afterEach(async () => {
@@ -14,8 +14,8 @@ afterEach(async () => {
   h = undefined;
 });
 
-async function harness(): Promise<Harness> {
-  h = await createHarness();
+async function harness(o: HarnessOptions = {}): Promise<Harness> {
+  h = await createHarness(o);
   return h;
 }
 
@@ -92,7 +92,7 @@ describe('projects', () => {
 
 describe('providers, profiles, workflows, settings, diagnostics', () => {
   it('records, lists, and deletes credential refs; providers.list shows redacted status only', async () => {
-    const x = await harness();
+    const x = await harness({ credentialRefs: [] });
 
     const rec = await x.engine.handle('relay/v1/providers.recordCredentialRef', { providerId: 'anthropic', storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…a1F9' });
     x.db.repos.credentials.recordTest('anthropic', false, 'AUTH_REQUIRED', x.clock.now());
@@ -110,7 +110,7 @@ describe('providers, profiles, workflows, settings, diagnostics', () => {
   });
 
   it('lists the catalog and profiles with warnings (missing credential until a ref exists)', async () => {
-    const x = await harness();
+    const x = await harness({ credentialRefs: [] });
 
     const catalog = await x.engine.handle('relay/v1/providers.catalog', { providerId: 'anthropic' });
     const before = await x.engine.handle('relay/v1/profiles.list', {});

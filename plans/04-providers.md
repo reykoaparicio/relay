@@ -398,13 +398,13 @@ Scheduled for the end of Wave 2, **after** D4 and D5 pass their gates. It is not
 - **Errors:** map the SDK's API error by HTTP status using the same D3 table (401/403 → `AUTH_REQUIRED`, 404 → `MODEL_UNSUPPORTED`, 429 → `RATE_LIMITED`, 500/503 before body → `PROVIDER_UNAVAILABLE`, 502/504 → `REQUEST_OUTCOME_UNKNOWN` (gateway: may have executed), mid-stream → `REQUEST_OUTCOME_UNKNOWN`).
 - **Estimate:** use `ai.models.countTokens` when an apiKey is present, otherwise the local heuristic.
 - **Catalog:** add one Gemini model with streaming + JSON-schema output to the catalog, with official pricing `source` + `sourceRetrievedAt`. The tiered long-context prices must be handled: store the **higher** tier as the admission price unless the request's input is provably below the tier threshold, so admission stays conservative (§9.3).
-- **Tests:** `gemini.test.ts` (mock fetch or mock client with recorded chunks under `src/__fixtures__/gemini/`), plus the `usage.test.ts` Gemini fixture, plus `tests/live/gemini.live.test.ts` (same $0.10 cap).
+- **Tests:** `gemini.test.ts` (mock fetch or mock client with recorded chunks under `src/__fixtures__/gemini/`), plus the `usage.test.ts` Gemini fixture. The **live** Gemini smoke is not a separate file: it is the third `defineProviderSmoke('gemini', …)` in `tests/live/providers.live.test.ts`, sharing that file's single `LiveBudget` (the same $0.10 cap for all providers together, D9); its key comes from `GEMINI_API_KEY` in the test env and is passed explicitly (the adapter never reads env vars).
 - **Fake mode:** the registry resolves `'gemini'` to a fake adapter reporting `providerId: 'gemini'`, like the others.
 
 ## D9: Live smoke tests (`tests/live/` — **owned by D** as an exception, listed here: `tests/live/providers.live.test.ts`, `tests/live/provider-smoke.ts`, `tests/live/live-budget.ts` + its offline `live-budget.test.ts`)
 - They run only with `RELAY_LIVE_TESTS=1` and keys from env (the test runner's env only, never the app's).
 - Each test does one `testConnection`, one `estimate` with the key (provider count where supported), and one tiny `generate` against the `findings.v1` schema with a 20-line fixture input.
-- A cumulative cap is enforced: `RELAY_LIVE_TEST_CAP_MICROUSD` (default 100 000 = $0.10) for **all providers together** — both providers run in the single file `providers.live.test.ts`, sharing one `LiveBudget` (separate files would run in separate workers with separate totals). §20.4 says not to spend without authorization.
+- A cumulative cap is enforced: `RELAY_LIVE_TEST_CAP_MICROUSD` (default 100 000 = $0.10) for **all providers together** — every provider (Anthropic, OpenAI, and Gemini, D10) runs in the single file `providers.live.test.ts`, sharing one `LiveBudget` (separate files would run in separate workers with separate totals). §20.4 says not to spend without authorization.
   - **Pre-check before every billable call** (including `testConnection`, using the estimate of `connectionTestRequest(providerId, modelId)`): `spent + upperAllowance > cap` fails the test without dispatching.
   - **Charging** (`liveChargeMicrousd`): known usage → `computeCost`; `usageKnown: false` → the upper allowance N; `priceTierMismatch` → max(cost, N); an `error` with phase `not_sent` → 0; any other `error` (outcome possibly billed) → max(N, cost of `partialUsage`).
 - The tests assert the id capture (`providerResponseId` is set before completion; `providerRequestId` comes from the response header), the usage mapping with no negative values, and the redaction of the error body on a deliberately invalid model id.
@@ -450,6 +450,6 @@ SSE fixtures live in D-owned `packages/providers/src/__fixtures__/{anthropic,ope
 - [ ] Every hook invocation goes through `safeHook`
 - [ ] Real adapters send only `attemptId` / `runId` metadata
 - [ ] No API key in any log statement, error detail, or thrown message (grep `apiKey` usages)
-- [ ] Every non-fake catalog entry has an official `https://` source and a retrieval date; Anthropic prices were re-verified at D2; none are invented
+- [ ] Every non-fake catalog entry has an official `https://` source and a retrieval date; none are invented. **Anthropic prices are still pending official verification:** the official pricing page could not be fetched at D2, so the three Anthropic entries of `catalog/2026-09-25.json` carry `priceVerification: "pending-official-page"` (values from the claude-api model table, see the file's note) and must be re-checked against the source before M2 sign-off — a differing number goes into a new catalog version file, never an edit of this one
 - [ ] Fake mode cannot activate in packaged builds without `RELAY_E2E=1`
 - [ ] Crash step writes the call-log line synchronously before exiting
