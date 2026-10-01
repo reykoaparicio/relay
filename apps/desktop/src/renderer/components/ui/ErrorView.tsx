@@ -2,6 +2,7 @@ import type { AppError, NextAction } from '@relay/contracts';
 import { NEXT_ACTION_LABELS } from '../../lib/format/actions';
 import { Button } from './Button';
 import { InlineAlert } from './InlineAlert';
+import type { InlineAlertLive } from './InlineAlert';
 
 export interface ErrorViewProps {
   readonly error: AppError;
@@ -9,16 +10,19 @@ export interface ErrorViewProps {
   readonly onAction: (action: NextAction) => void;
   readonly title?: string;
   readonly pendingAction?: NextAction | null;
+  /** `'assertive'` when the error answers the user's own submit (a failed command); default `'off'` (load errors). */
+  readonly live?: InlineAlertLive;
 }
 
 /** Renders an AppError: plain message, stable code, and one button per next action (09 I3 `.banner.danger`). */
-export function ErrorView({ error, onAction, title, pendingAction = null }: ErrorViewProps) {
+export function ErrorView({ error, onAction, title, pendingAction = null, live = 'off' }: ErrorViewProps) {
   const actions = [error.nextAction, ...error.alternatives].filter(
     (a, i, all): a is NextAction => a !== 'none' && all.indexOf(a) === i,
   );
   return (
     <InlineAlert
       tone="danger"
+      live={live}
       title={title ?? error.userMessage}
       actions={
         actions.length > 0

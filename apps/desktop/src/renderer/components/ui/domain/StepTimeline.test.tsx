@@ -21,8 +21,8 @@ describe('StepTimeline', () => {
     render(<Harness />);
 
     expect(screen.getByRole('list', { name: 'Run steps' }).tagName).toBe('OL');
-    expect(screen.getByRole('button', { name: /Plan.*Awaiting your approval/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Patch.*Failed/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Plan', description: /Awaiting your approval/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Patch', description: /Failed/ })).toBeInTheDocument();
   });
 
   it('marks the selected step with aria-current="step" and moves it with arrow keys', async () => {

@@ -1,8 +1,9 @@
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { StepView } from '@relay/contracts';
 import { statusPresentation } from '../../../lib/format/status-presentation';
 import { stepKeyLabel } from '../../../lib/format/labels';
+import { ListItemButton } from '../ListItemButton';
 
 export interface StepTimelineProps {
   readonly steps: readonly StepView[];
@@ -22,7 +23,7 @@ function metaLine(step: StepView): string {
 }
 
 /** Ordered run steps with a state dot and text state; ArrowUp/ArrowDown/Home/End move the selection. */
-export function StepTimeline({ steps, selectedId, onSelect, titleFor, label = 'Run steps' }: StepTimelineProps) {
+function StepTimelineView({ steps, selectedId, onSelect, titleFor, label = 'Run steps' }: StepTimelineProps) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -49,8 +50,8 @@ export function StepTimeline({ steps, selectedId, onSelect, titleFor, label = 'R
             <span className="dot" aria-hidden="true">
               <Icon />
             </span>
-            <button
-              type="button"
+            <ListItemButton
+              className=""
               ref={(el) => {
                 if (el) buttons.current.set(step.id, el);
                 else buttons.current.delete(step.id);
@@ -58,16 +59,15 @@ export function StepTimeline({ steps, selectedId, onSelect, titleFor, label = 'R
               aria-current={step.id === selectedId ? 'step' : undefined}
               onClick={() => { onSelect(step.id); }}
               onKeyDown={(e) => { onKeyDown(e, index); }}
-            >
-              <span className="title">{titleFor ? titleFor(step) : stepKeyLabel(step.stepKey)}</span>
-              <span className="meta">
-                {p.label}
-                {meta ? ` · ${meta}` : ''}
-              </span>
-            </button>
+              title={titleFor ? titleFor(step) : stepKeyLabel(step.stepKey)}
+              meta={`${p.label}${meta ? ` · ${meta}` : ''}`}
+            />
           </li>
         );
       })}
     </ol>
   );
 }
+
+/** Memoized (PERF-02): re-renders only when its props change, not on every parent tick. */
+export const StepTimeline = memo(StepTimelineView);

@@ -58,7 +58,7 @@ export function TestOutcomeView({
             : 'The key was not reported as rejected. See the reason below; you can test again later in Settings.'}
         </p>
       </InlineAlert>
-      {appErr === null ? null : <ErrorView error={appErr} onAction={onErrorAction} />}
+      {appErr === null ? null : <ErrorView live="assertive" error={appErr} onAction={onErrorAction} />}
     </div>
   );
 }

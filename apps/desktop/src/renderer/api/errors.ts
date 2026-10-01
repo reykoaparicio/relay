@@ -1,5 +1,5 @@
 // Error mapping (10 J2): AppError → ErrorView props, and `nextAction` → a route or a page handler.
-import { appError } from '@relay/contracts';
+import { errors } from '@relay/contracts';
 import type { AppError, ErrorCode, NextAction } from '@relay/contracts';
 import { paths } from '../features/shell/paths';
 import { isAppErrorException } from './client';
@@ -61,7 +61,7 @@ export function nextActionTarget(action: NextAction, ctx: NextActionContext = {}
  */
 export function toViewError(e: unknown): AppError {
   if (isAppErrorException(e)) return e.appError;
-  return appError('INTERNAL');
+  return errors.internal(undefined);
 }
 
 const ERROR_TITLES: Partial<Readonly<Record<ErrorCode, string>>> = {

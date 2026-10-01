@@ -11,10 +11,13 @@ function focusIsLost(): boolean {
 }
 
 /**
- * Page-level focus rescue (run inspector, B5): when the control that last had keyboard focus is removed or disabled
+ * Page-level focus rescue (run inspector B5, A11Y-02): when the control that last had keyboard focus is removed or disabled
  * by a re-render (a banner button that disappears once its action changes the run status, an opener that is gone
  * when its dialog closes), focus would drop to `<body>`. This moves it to `fallback` (a heading with
  * `tabIndex={-1}`) instead. It never steals focus that is somewhere meaningful.
+ *
+ * The shell installs one with `<main tabIndex={-1}>` as the app-wide fallback; a page may add its own with a closer
+ * target (its observer is created first, since child effects run before the shell's, so the page's target wins).
  */
 export function usePageFocusRescue(fallback: RefObject<HTMLElement | null>): void {
   useEffect(() => {

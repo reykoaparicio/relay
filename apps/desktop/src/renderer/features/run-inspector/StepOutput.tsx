@@ -15,7 +15,9 @@ import {
 import type { ApprovalDecisionInput } from '../../components/ui';
 import { formatDuration, formatTokens, PROVIDER_LABELS } from '../../lib/format';
 import { useArtifact } from '../../hooks/useArtifact';
+import { NOW_RUNNING_INTERVAL_MS, useNow } from '../../hooks/useNow';
 import { useStep } from '../../hooks/useStep';
+import { useStreamProgress } from '../../hooks/useStreamProgress';
 import { PlanView, StepOutputView } from '../outputs/OutputViews';
 import { paths } from '../shell/paths';
 import { ActionErrorNotice } from './ActionErrorNotice';
@@ -24,15 +26,6 @@ import { RawResponseToggle, repairsText, ValidationIssueList } from './StepIssue
 
 // ---------------------------------------------------------------------------------------------------------------
 // Streaming attempt (running-streaming)
-
-function progressFor(progress: ReadonlyMap<string, RunEvent>, attempt: AttemptView | undefined, step: StepView): RunEvent | undefined {
-  // Progress is keyed by attempt id when the event names one, else by step: use the newest of the two.
-  const byAttempt = attempt === undefined ? undefined : progress.get(attempt.id);
-  const byStep = progress.get(`step:${step.stepKey}`);
-  if (byAttempt === undefined) return byStep;
-  if (byStep === undefined) return byAttempt;
-  return byStep.seq > byAttempt.seq ? byStep : byAttempt;
-}
 
 function num(e: RunEvent | undefined, key: string): number | null {
   const v = e?.payload[key];
@@ -43,15 +36,16 @@ export interface StreamingAttemptCardProps {
   readonly run: RunDetail;
   readonly step: StepView;
   readonly attempt: AttemptView | undefined;
-  readonly progress: RunEvent | undefined;
-  readonly now: number;
 }
 
 /**
  * An executing attempt: elapsed time, provider latency vs app time (shown separately, R3-20), and the output token
  * count from `attempt.stream_progress` — never the content (§5.7). No per-token announcements.
  */
-export function StreamingAttemptCard({ run, step, attempt, progress, now }: StreamingAttemptCardProps) {
+export function StreamingAttemptCard({ run, step, attempt }: StreamingAttemptCardProps) {
+  // PERF-02: the 1 s clock and the progress subscription live here, so only this card re-renders on each tick/push.
+  const now = useNow(NOW_RUNNING_INTERVAL_MS);
+  const progress = useStreamProgress(run.id, attempt?.id, step.stepKey);
   const elapsed = attempt === undefined ? null : Math.max(0, now - attempt.startedAt);
   // Provider time (first byte → now, as of the latest progress event) and app time (reserve → dispatch overhead),
   // shown separately (R3-20). Settled attempts carry both measured values.
@@ -105,7 +99,7 @@ export function StreamingAttemptCard({ run, step, attempt, progress, now }: Stre
 // ---------------------------------------------------------------------------------------------------------------
 // Schema-invalid step (repairing, or failed validation while the run is not yet paused)
 
-export function isSchemaInvalidStep(run: RunDetail, step: StepView): boolean {
+function isSchemaInvalidStep(run: RunDetail, step: StepView): boolean {
   const invalid = step.state === 'validating' || (step.state === 'failed' && step.error?.code === 'OUTPUT_INVALID');
   return invalid && step.error?.code === 'OUTPUT_INVALID' && !(run.status === 'paused' && run.pauseReason === 'output_invalid');
 }
@@ -168,12 +162,12 @@ const DECISION_ACTIONS: ReadonlyArray<readonly [ApprovalDecision, RunAction]> = 
 ];
 
 /** The approval decisions the server allows right now (`availableActions`), e.g. no revision past the limit. */
-export function allowedApprovalDecisions(run: RunDetail): ApprovalDecision[] {
+function allowedApprovalDecisions(run: RunDetail): ApprovalDecision[] {
   return DECISION_ACTIONS.filter(([, a]) => run.availableActions.includes(a)).map(([d]) => d);
 }
 
 /** Shown in the revision form: which revision this would be, and that re-planning spends more of the allowance. */
-export function revisionNoteText(run: RunDetail): string {
+function revisionNoteText(run: RunDetail): string {
   const next = run.revisionCycle + 1;
   return `This is revision ${String(next)} of ${String(run.limits.maxRevisionCycles)}. Re-planning sends another request and uses more of the run allowance.`;
 }
@@ -242,12 +236,10 @@ export interface StepOutputTabProps {
   readonly step: StepView;
   readonly detail: StepDetail | undefined;
   readonly detailError: unknown;
-  readonly progress: ReadonlyMap<string, RunEvent>;
-  readonly now: number;
   readonly approval: Omit<ApprovalOutputProps, 'run'>;
 }
 
-export function StepOutputTab({ run, projectId, step, detail, detailError, progress, now, approval }: StepOutputTabProps) {
+export function StepOutputTab({ run, projectId, step, detail, detailError, approval }: StepOutputTabProps) {
   const isApprovalStep = step.state === 'awaiting_approval' || (step.stepKey === 'approve' && run.pendingApproval !== null);
   if (isApprovalStep && run.pendingApproval !== null) return <ApprovalOutput run={run} {...approval} />;
   if (step.stepKey === 'approve' && run.status === 'paused' && run.pauseReason === 'approval_stale') {
@@ -257,7 +249,7 @@ export function StepOutputTab({ run, projectId, step, detail, detailError, progr
   if (detail === undefined) return <Skeleton lines={5} />;
   if (step.state === 'executing' || step.state === 'reserved') {
     const attempt = detail.attempts.at(-1);
-    return <StreamingAttemptCard run={run} step={step} attempt={attempt} progress={progressFor(progress, attempt, step)} now={now} />;
+    return <StreamingAttemptCard run={run} step={step} attempt={attempt} />;
   }
   if (isSchemaInvalidStep(run, step)) return <SchemaInvalidCard step={step} attempts={detail.attempts} />;
   if (detail.output !== null) {

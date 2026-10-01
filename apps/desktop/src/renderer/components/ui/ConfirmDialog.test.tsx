@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConfirmDialog } from './Dialog';
 
@@ -60,5 +60,56 @@ describe('ConfirmDialog', () => {
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(confirm).toHaveClass('danger');
+  });
+
+  it('offers a secondary action in the footer and keeps body children out of the description', async () => {
+    const user = userEvent.setup();
+    const onArchive = vi.fn();
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        title="Delete this record?"
+        consequences="Future runs no longer include it."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={vi.fn()}
+        secondaryAction={{ label: 'Archive instead', onClick: onArchive }}
+      >
+        <p>Relay could not delete it.</p>
+      </ConfirmDialog>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Delete this record?' });
+
+    await user.click(within(dialog).getByRole('button', { name: 'Archive instead' }));
+
+    expect(onArchive).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByText('Relay could not delete it.')).toBeVisible();
+    expect(dialog).toHaveAccessibleDescription('Future runs no longer include it.');
+    const footer = dialog.querySelector('footer');
+    expect(footer).not.toBeNull();
+    expect(within(footer as HTMLElement).getAllByRole('button').map((b) => b.textContent)).toEqual(['Cancel', 'Archive instead', 'Delete']);
+  });
+
+  it.each([
+    ['the secondary action', { pending: false, secondaryPending: true }],
+    ['the confirm', { pending: true, secondaryPending: false }],
+  ])('disables every footer button while %s is pending', async (_name, { pending, secondaryPending }) => {
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        title="Delete this record?"
+        consequences="Future runs no longer include it."
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        pending={pending}
+        onConfirm={vi.fn()}
+        secondaryAction={{ label: 'Archive instead', onClick: vi.fn(), pending: secondaryPending }}
+      />,
+    );
+    const footer = (await screen.findByRole('dialog')).querySelector('footer') as HTMLElement;
+
+    for (const button of within(footer).getAllByRole('button')) expect(button).toBeDisabled();
   });
 });

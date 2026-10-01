@@ -5,12 +5,12 @@ import { Archive, ArchiveRestore, Pencil, Pin, Trash2, TriangleAlert } from 'luc
 import type { MemoryRecordDetail } from '@relay/contracts';
 import { Button, ButtonLink, Checkbox, Hash, InlineAlert, KeyValueList, StatusBadge } from '../../components/ui';
 import type { KeyValueItem } from '../../components/ui';
-import { formatAbsoluteTime, MEMORY_TYPE_LABELS } from '../../lib/format';
+import { formatAbsoluteTime, formatDate, MEMORY_TYPE_LABELS } from '../../lib/format';
 import { useMemoryRecord } from '../../hooks/useMemoryRecord';
 import { runLabel } from '../runs/run-display';
 import { paths } from '../shell/paths';
 import { MutationError } from '../common/MutationError';
-import { actorText, formatDate, isReviewDue, latestFileRef, scopeText, tabOfStatus } from './memory-model';
+import { actorText, isReviewDue, latestFileRef, scopeText, tabOfStatus } from './memory-model';
 
 export interface MemoryDetailProps {
   readonly projectId: string;

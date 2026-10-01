@@ -364,14 +364,16 @@ describe('useRunEvents (gapless contract, 02 §B5)', () => {
       }
     });
     const state = hook.result.current;
-    expect(state.lastSeq).toBe(start + total);
+    // The last pushed event is progress: it is applied (and in the progress store) but publishes nothing (PERF-02).
+    expect(state.lastSeq).toBe(start + total - 1);
     expect(state.events.length).toBe(MAX_STORED_EVENTS);
     expect(state.events.some((e) => e.type === 'attempt.stream_progress')).toBe(false);
     expect(state.events.at(-1)?.seq).toBe(start + total - 1); // the last one is progress
     expect(state.droppedCount).toBeGreaterThan(0);
-    expect([...state.progress.keys()].filter((k) => k.startsWith('att_')).sort()).toEqual(['att_0', 'att_1']);
-    expect(state.progress.get('att_0')?.payload['outputTokensSoFar']).toBe(total);
-    expect(state.progress.get('att_1')?.payload['outputTokensSoFar']).toBe(total - 3);
+    const progress = state.progress.snapshot();
+    expect([...progress.keys()].filter((k) => k.startsWith('att_')).sort()).toEqual(['att_0', 'att_1']);
+    expect(progress.get('att_0')?.payload['outputTokensSoFar']).toBe(total);
+    expect(progress.get('att_1')?.payload['outputTokensSoFar']).toBe(total - 3);
   });
 
   it('statusAnnouncement covers the announced statuses and nothing else', () => {
@@ -381,5 +383,35 @@ describe('useRunEvents (gapless contract, 02 §B5)', () => {
     expect(statusAnnouncement(e('completed'))).toBe('Run status: Completed.');
     expect(statusAnnouncement(e('running'))).toBeNull();
     expect(statusAnnouncement(e('cancelling'))).toBeNull();
+  });
+
+  it('PERF-02: a progress-only push notifies the progress store without re-rendering the owner', async () => {
+    const { bridge, run } = setup();
+    let renders = 0;
+    const queryClient = createTestQueryClient();
+    const wrapper = ({ children }: { readonly children: ReactNode }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    const hook = renderHook(
+      () => {
+        renders += 1;
+        return useRunEvents(run.id);
+      },
+      { wrapper },
+    );
+    await waitFor(() => {
+      expect(hook.result.current.loaded).toBe(true);
+    });
+    const notified = vi.fn();
+    const unsubscribe = hook.result.current.progress.subscribe(notified);
+    const before = renders;
+    const last = storedLast(bridge, run.id);
+
+    act(() => {
+      bridge.emit({ type: 'run.event', event: event(bridge, run.id, last + 1, 'attempt.stream_progress', { attemptId: 'att_9', outputTokensSoFar: 12 }) });
+    });
+
+    expect(renders).toBe(before);
+    expect(notified).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.progress.snapshot().get('att_9')?.payload['outputTokensSoFar']).toBe(12);
+    unsubscribe();
   });
 });

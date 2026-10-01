@@ -4,8 +4,7 @@ import type { PreviewResult } from '@relay/contracts';
 import { Button, ErrorView, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { useRetryAction } from '../common/useNextAction';
-import { EXCLUSION_REASON_LABELS } from '../../lib/format';
-import { formatBytes } from '../run-setup/PreviewPanel';
+import { EXCLUSION_REASON_LABELS, formatBytes } from '../../lib/format';
 import { FIELD } from './new-run-model';
 
 export interface FilePickerProps {

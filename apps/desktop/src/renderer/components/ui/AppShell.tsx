@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode } from 'react';
+import type { MouseEvent, ReactNode, Ref } from 'react';
 
 export interface AppShellProps {
   /** Primary navigation (usually a SideNav). Wrapped in `<nav aria-label="Primary">`. */
@@ -7,6 +7,8 @@ export interface AppShellProps {
   readonly workspace?: ReactNode;
   readonly brand?: ReactNode;
   readonly children: ReactNode;
+  /** The `<main tabIndex={-1}>` element (e.g. the focus-rescue fallback). */
+  readonly mainRef?: Ref<HTMLElement>;
 }
 
 export const MAIN_ID = 'main';
@@ -17,7 +19,7 @@ function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
   document.getElementById(MAIN_ID)?.focus();
 }
 
-export function AppShell({ nav, workspace, brand, children }: AppShellProps) {
+export function AppShell({ nav, workspace, brand, children, mainRef }: AppShellProps) {
   return (
     <div className="shell">
       <a className="skip-link" href={`#${MAIN_ID}`} onClick={skipToMain}>
@@ -34,7 +36,7 @@ export function AppShell({ nav, workspace, brand, children }: AppShellProps) {
         <nav aria-label="Primary">{nav}</nav>
         {workspace === undefined ? null : <div className="workspace">{workspace}</div>}
       </aside>
-      <main id={MAIN_ID} className="main" tabIndex={-1}>
+      <main ref={mainRef} id={MAIN_ID} className="main" tabIndex={-1}>
         <div className="main-inner">{children}</div>
       </main>
     </div>

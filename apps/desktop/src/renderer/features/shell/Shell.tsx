@@ -1,5 +1,5 @@
-import { Suspense } from 'react';
-import type { MouseEvent, ReactNode } from 'react';
+import { Suspense, useRef } from 'react';
+import type { MouseEvent, ReactNode, RefObject } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, BookOpen, CircleCheck, LayoutDashboard, Settings, TriangleAlert, Workflow } from 'lucide-react';
 import { Outlet, useMatches, useNavigate, useParams } from 'react-router';
@@ -12,6 +12,7 @@ import {
   ProjectSwitcher,
   SideNav,
   Skeleton,
+  usePageFocusRescue,
 } from '../../components/ui';
 import type { NavItemData } from '../../components/ui';
 import { call } from '../../api/client';
@@ -37,7 +38,7 @@ const NAV_KEY_BY_ROUTE: Readonly<Record<string, string>> = {
 };
 
 /** "2 providers connected" / warning (§5.1). Status is text + icon, never color alone. */
-export function providerStatusText(providers: readonly ProviderStatus[]): { readonly text: string; readonly ok: boolean } {
+function providerStatusText(providers: readonly ProviderStatus[]): { readonly text: string; readonly ok: boolean } {
   const connected = providers.filter((p) => p.connected);
   const healthy = connected.filter((p) => p.lastTest?.ok !== false);
   if (connected.length === 0) return { text: 'No providers connected', ok: false };
@@ -64,12 +65,13 @@ function RunnerBanner() {
   const state = useRunnerState();
   const navigate = useNavigate();
   if (state === 'restarting') {
-    return <InlineAlert tone="info" title="Background runner restarting…">Runs continue from their last checkpoint when it is back.</InlineAlert>;
+    return <InlineAlert tone="info" live="polite" title="Background runner restarting…">Runs continue from their last checkpoint when it is back.</InlineAlert>;
   }
   if (state === 'unavailable') {
     return (
       <InlineAlert
         tone="danger"
+        live="polite"
         title="The background runner is unavailable"
         actions={
           <Button
@@ -102,10 +104,11 @@ export interface ShellProps {
   readonly projectId: string | undefined;
   readonly activeRouteId: string | undefined;
   readonly children: ReactNode;
+  readonly mainRef?: RefObject<HTMLElement | null>;
 }
 
 /** App frame (10 J4): AppShell + SideNav + ProjectSwitcher + provider status + FakeProviderBadge + runner banner. */
-export function Shell({ projectId, activeRouteId, children }: ShellProps) {
+export function Shell({ projectId, activeRouteId, children, mainRef }: ShellProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const projects = useProjects();
@@ -151,6 +154,7 @@ export function Shell({ projectId, activeRouteId, children }: ShellProps) {
 
   return (
     <AppShell
+      {...(mainRef === undefined ? {} : { mainRef })}
       brand={
         <>
           RELAY<small>Developer preview</small>
@@ -189,8 +193,11 @@ export function ShellLayout() {
   const settings = useSettings();
   const projectId = params['projectId'] ?? settings.data?.activeProjectId ?? undefined;
   const activeRouteId = matches[matches.length - 1]?.id;
+  // A11Y-02: when a mutation removes or disables the focused control, focus lands on <main>, never on <body>.
+  const mainRef = useRef<HTMLElement>(null);
+  usePageFocusRescue(mainRef);
   return (
-    <Shell projectId={projectId} activeRouteId={activeRouteId}>
+    <Shell projectId={projectId} activeRouteId={activeRouteId} mainRef={mainRef}>
       <Suspense
         fallback={
           <div aria-busy="true">

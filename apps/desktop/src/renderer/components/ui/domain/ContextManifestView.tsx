@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { ContextManifest } from '@relay/contracts';
 import { MEMORY_TYPE_LABELS, PROVIDER_LABELS, stepKeyLabel } from '../../../lib/format/labels';
 import { formatTokens } from '../../../lib/format/tokens';
@@ -25,7 +26,7 @@ const OMIT_REASON: Readonly<Record<ContextManifest['omitted'][number]['reason'],
 };
 
 /** §5.4 "Context used": exactly what a request carried, and where it went (§6.2 honesty). */
-export function ContextManifestView({ manifest: m }: ContextManifestViewProps) {
+function ContextManifestViewView({ manifest: m }: ContextManifestViewProps) {
   return (
     <div className="stack">
       <KeyValueList
@@ -104,3 +105,6 @@ export function ContextManifestView({ manifest: m }: ContextManifestViewProps) {
     </div>
   );
 }
+
+/** Memoized (PERF-02): re-renders only when its props change, not on every parent tick. */
+export const ContextManifestView = memo(ContextManifestViewView);

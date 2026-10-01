@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { appError } from '@relay/contracts';
 import type { Channel, InputOf, OutputOf } from '@relay/contracts';
@@ -6,7 +6,7 @@ import { AppErrorException, call } from '../api/client';
 import { newIdempotencyKey } from '../api/idempotency';
 
 /** User-facing text when a different request is submitted while another is still in flight. */
-export const INTENT_IN_FLIGHT_MESSAGE = 'Another request is still in progress. Wait for it to finish, then try again.';
+const INTENT_IN_FLIGHT_MESSAGE = 'Another request is still in progress. Wait for it to finish, then try again.';
 
 /**
  * Rejection for a submit whose input differs from the request in flight on the same channel. It is never resolved
@@ -24,11 +24,6 @@ export class IntentInFlightError extends AppErrorException {
   }
 }
 
-/** True for {@link IntentInFlightError}. */
-export function isIntentInFlightError(e: unknown): e is IntentInFlightError {
-  return e instanceof IntentInFlightError;
-}
-
 /** Stable JSON of a value with object keys sorted (the intent fingerprint; `undefined` fields are dropped). */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(value, (_k, v: unknown) => {
@@ -40,7 +35,7 @@ export function canonicalJson(value: unknown): string {
 }
 
 /** The intent a submit belongs to: (channel, canonical input). */
-export function intentFingerprint(channel: Channel, input: unknown): string {
+function intentFingerprint(channel: Channel, input: unknown): string {
   return `${channel}\u0000${canonicalJson(input)}`;
 }
 
@@ -147,14 +142,10 @@ export function useIdempotentMutation<C extends IdemChannel>(
     rawReset();
   }, [newIntent, rawReset]);
 
-  return {
-    mutate,
-    mutateAsync,
-    isPending: mutation.isPending,
-    error: mutation.error,
-    data: mutation.data,
-    newIntent,
-    currentKey,
-    reset,
-  };
+  const { isPending, error, data } = mutation;
+  // A stable object (PERF-02): consumers can list it as a dependency without re-running every render.
+  return useMemo(
+    () => ({ mutate, mutateAsync, isPending, error, data, newIntent, currentKey, reset }),
+    [mutate, mutateAsync, isPending, error, data, newIntent, currentKey, reset],
+  );
 }

@@ -6,6 +6,7 @@ import {
   Button,
   Checkbox,
   Field,
+  ListItemButton,
   MoneyInput,
   NumberInput,
   RadioGroup,
@@ -67,33 +68,23 @@ export function StepList({ view, form, profiles, selected, errorCounts, structur
           const errors = errorCounts[s.id] ?? 0;
           return (
             <li key={s.id}>
-              <button
-                type="button"
+              <ListItemButton
                 id={WF_FIELD.step(s.id)}
-                className="list-item"
-                aria-label={`Step ${String(i + 1)}: ${stepKeyLabel(s.id)}, ${stepMeta(s, form, profiles)}${errors === 0 ? '' : `, ${errors === 1 ? '1 error' : `${String(errors)} errors`}`}`}
                 aria-current={s.id === selected ? 'true' : undefined}
                 onClick={() => {
                   onSelect(s.id);
                 }}
-              >
-                <span className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
-                  <span className="num muted" aria-hidden="true">
-                    {String(i + 1)}
-                  </span>
-                  <span className="stack" style={{ gap: 2 }}>
-                    <span className="title">
-                      {stepKeyLabel(s.id)}
-                    </span>
-                    <span className="meta">{stepMeta(s, form, profiles)}</span>
-                    {errors === 0 ? null : (
-                      <span>
-                        <span className="badge danger">{errors === 1 ? '1 error' : `${String(errors)} errors`}</span>
-                      </span>
-                    )}
-                  </span>
-                </span>
-              </button>
+                leading={<span className="num muted">{String(i + 1)}</span>}
+                title={
+                  <>
+                    <span className="sr-only">Step {String(i + 1)}:</span> {stepKeyLabel(s.id)}
+                  </>
+                }
+                meta={stepMeta(s, form, profiles)}
+                {...(errors === 0
+                  ? {}
+                  : { badges: <span className="badge danger">{errors === 1 ? '1 error' : `${String(errors)} errors`}</span> })}
+              />
             </li>
           );
         })}

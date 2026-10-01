@@ -8,12 +8,12 @@ import { PROVIDER_LABELS } from '../../lib/format';
 import type { ModelStepRow } from './model-steps';
 
 /** Issue codes that restate `budget.allowed = false` (shown by the budget card, not as a separate problem). */
-export const BUDGET_ISSUE_CODES: ReadonlySet<string> = new Set(['budget_run', 'budget_project']);
+const BUDGET_ISSUE_CODES: ReadonlySet<string> = new Set(['budget_run', 'budget_project']);
 
 /** The issue a connected provider fixes (Settings → Providers). */
 export const MISSING_CREDENTIAL = 'missing_credential';
 
-export function isBudgetIssue(i: Pick<ValidationIssue, 'code'>): boolean {
+function isBudgetIssue(i: Pick<ValidationIssue, 'code'>): boolean {
   return BUDGET_ISSUE_CODES.has(i.code);
 }
 
@@ -43,7 +43,7 @@ export function stepProviderId(
   return profiles?.find((p) => p.profile.id === profileId)?.profile.providerId ?? null;
 }
 
-export function providerLabel(id: ProviderId | null): string {
+function providerLabel(id: ProviderId | null): string {
   return id === null ? 'this provider' : PROVIDER_LABELS[id];
 }
 

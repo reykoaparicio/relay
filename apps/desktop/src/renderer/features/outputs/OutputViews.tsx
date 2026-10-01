@@ -3,15 +3,8 @@
 import { useId } from 'react';
 import type { ReactNode } from 'react';
 import { CircleCheck, CircleX } from 'lucide-react';
-import type { FindingsV1, PatchV1, PlanV1, ReviewV1, SourceRef, StepOutput } from '@relay/contracts';
-import { LazyDiffViewer } from '../../components/ui';
-
-/** "src/a.ts:12–40" (plain text; paths are project-relative, never absolute). */
-export function sourceRefText(ref: SourceRef): string {
-  if (ref.startLine === null) return ref.relPath;
-  const end = ref.endLine !== null && ref.endLine !== ref.startLine ? `–${String(ref.endLine)}` : '';
-  return `${ref.relPath}:${String(ref.startLine)}${end}`;
-}
+import type { FindingsV1, PatchV1, PlanV1, ReviewV1, StepOutput } from '@relay/contracts';
+import { LazyDiffViewer, OpenQuestions, PlanBody, SourceRefs } from '../../components/ui';
 
 const SEVERITY_LABEL: Readonly<Record<FindingsV1['findings'][number]['severity'], string>> = {
   high: 'High',
@@ -36,33 +29,6 @@ const CATEGORY_LABEL: Readonly<Record<FindingsV1['findings'][number]['category']
   security: 'Security',
 };
 
-function SourceRefs({ refs }: { readonly refs: readonly SourceRef[] }) {
-  if (refs.length === 0) return null;
-  return (
-    <ul className="chip-list" aria-label="Sources">
-      {refs.map((r, i) => (
-        <li key={`${sourceRefText(r)}-${String(i)}`} className="chip mono">
-          {sourceRefText(r)}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function Questions({ questions }: { readonly questions: readonly string[] }) {
-  if (questions.length === 0) return null;
-  return (
-    <div className="stack">
-      <h3 className="section-label">Open questions</h3>
-      <ul className="small">
-        {questions.map((q) => (
-          <li key={q}>{q}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 export interface FindingsViewProps {
   readonly value: FindingsV1;
   /** Heading level of each finding title (2 on the report page, 3 inside a step panel). */
@@ -80,7 +46,7 @@ export function FindingsView({ value, headingLevel = 3 }: FindingsViewProps) {
       ) : (
         <ol className="list">
           {value.findings.map((f) => (
-            <li key={f.id} className="list-item" style={{ cursor: 'default' }}>
+            <li key={f.id} className="list-item static">
               <span className="row">
                 <span className={`badge ${SEVERITY_TONE[f.severity]}`}>{SEVERITY_LABEL[f.severity]}</span>
                 <Heading className="title">
@@ -94,64 +60,14 @@ export function FindingsView({ value, headingLevel = 3 }: FindingsViewProps) {
           ))}
         </ol>
       )}
-      <Questions questions={value.unresolvedQuestions} />
+      <OpenQuestions questions={value.unresolvedQuestions} />
     </div>
   );
 }
 
-/** `plan.v1`: the proposed plan (read-only; the approval card adds the decision controls). */
+/** `plan.v1`: the proposed plan (read-only; the approval card adds the decision controls around the same body). */
 export function PlanView({ value }: { readonly value: PlanV1 }) {
-  return (
-    <div className="stack">
-      <p>
-        <strong>Goal:</strong> {value.goalRestatement}
-      </p>
-      <ol className="list">
-        {value.steps.map((s) => (
-          <li key={s.n} className="list-item" style={{ cursor: 'default' }}>
-            <span className="title">
-              <span className="num">{s.n}.</span> {s.action}
-            </span>
-            <span className="meta">
-              {s.rationale}
-              {s.findingIds.length > 0 ? ` · addresses ${s.findingIds.join(', ')}` : ''}
-            </span>
-          </li>
-        ))}
-      </ol>
-      <div className="stack">
-        <h3 className="section-label">Files the plan may change</h3>
-        <ul className="chip-list">
-          {value.fileScope.map((f) => (
-            <li key={f} className="chip mono">
-              {f}
-            </li>
-          ))}
-        </ul>
-      </div>
-      {value.testSuggestions.length > 0 ? (
-        <div className="stack">
-          <h3 className="section-label">Suggested tests (proposed, not executed)</h3>
-          <ul className="small">
-            {value.testSuggestions.map((t) => (
-              <li key={t}>{t}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {value.risks.length > 0 ? (
-        <div className="stack">
-          <h3 className="section-label">Risks</h3>
-          <ul className="small">
-            {value.risks.map((r) => (
-              <li key={r}>{r}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      <Questions questions={value.unresolvedQuestions} />
-    </div>
-  );
+  return <PlanBody plan={value} />;
 }
 
 /** Added / removed line counts of a unified diff (file headers excluded). */
@@ -215,7 +131,7 @@ export function ReviewView({ value }: { readonly value: ReviewV1 }) {
           </h3>
           <ul className="list" aria-labelledby={checksId}>
             {value.checks.map((c) => (
-              <li key={c.name} className="list-item" style={{ cursor: 'default' }}>
+              <li key={c.name} className="list-item static">
                 <span className="row">
                   {c.passed ? (
                     <CircleCheck aria-hidden="true" width={16} height={16} />

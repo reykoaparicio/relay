@@ -1,13 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError, providerStatusSchema } from '@relay/contracts';
+import { appError, errors, providerStatusSchema } from '@relay/contracts';
 import { renderApp } from '../features/testing/render-app';
 
-const NOT_IMPLEMENTED = appError('INTERNAL', {
-  userMessage: 'This feature is not available in this build yet.',
-  details: { reason: 'not_implemented', channel: 'relay/v1/providers.test' },
-});
+const NOT_IMPLEMENTED = errors.internal(undefined, 'not_implemented');
 
 async function providersReady() {
   await screen.findByRole('heading', { level: 1, name: 'Settings' });
@@ -76,7 +73,7 @@ describe('SettingsPage (J10 M1 sections)', () => {
     const anthropic = await providersReady();
     bridge.failNext('relay/v1/providers.test', NOT_IMPLEMENTED);
     await user.click(within(anthropic).getByRole('button', { name: 'Test connection' }));
-    const alert = (await within(anthropic).findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await within(anthropic).findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(within(anthropic).getByText(/the connection test failed/)).toBeInTheDocument();
     expect(within(anthropic).queryByText(/Not available yet/)).not.toBeInTheDocument();
@@ -131,7 +128,7 @@ describe('SettingsPage (J10 M1 sections)', () => {
     await user.click(within(anthropic).getByRole('button', { name: 'Remove key' }));
     const dialog = await screen.findByRole('dialog', { name: 'Remove the Anthropic key?' });
     await user.click(within(dialog).getByRole('button', { name: 'Remove key' }));
-    await user.click(await within(anthropic).findByRole('button', { name: 'Restart runner' }));
+    await user.click(await within(dialog).findByRole('button', { name: 'Restart runner' }));
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/settings/diagnostics');
     });

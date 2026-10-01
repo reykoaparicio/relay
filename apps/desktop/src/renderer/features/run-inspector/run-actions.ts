@@ -2,7 +2,7 @@
 // UI control and an IPC call, following the 02 action→op table (`RUN_ACTION_OPS`). Exhaustive over RUN_ACTIONS:
 // adding an action to contracts is a compile error here.
 import { RUN_ACTION_OPS } from '@relay/contracts';
-import type { Channel, InputOf, RunAction, RunActionTarget, StepState } from '@relay/contracts';
+import type { InputOf, RunAction, RunActionTarget, StepState } from '@relay/contracts';
 import type { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import type { IdemChannel, IntentInput } from '../../hooks/useIdempotentMutation';
 import { paths } from '../shell/paths';
@@ -94,19 +94,48 @@ export type RunActionRequest =
     }
   | { readonly action: 'export_report' | 'export_patch'; readonly runId: string };
 
-type CallPlan<C extends Channel> = C extends IdemChannel
-  ? { readonly kind: 'call'; readonly channel: C; readonly idempotent: true; readonly input: IntentInput<C> }
-  : { readonly kind: 'call'; readonly channel: C; readonly idempotent: false; readonly input: InputOf<C> };
+type OpChannels<T> = T extends readonly (infer U)[] ? U : T;
+/** Every IPC channel a run action calls (from the contracts action→op table). */
+export type RunActionChannel = Exclude<OpChannels<(typeof RUN_ACTION_OPS)[RunAction]>, 'navigate'>;
+/** Run-action channels whose input carries an idempotency key (sent through `useIdempotentMutation`). */
+export type RunIdemChannel = Extract<RunActionChannel, IdemChannel>;
+/** Run-action channels without a key (pause, cancel, export, project update). */
+export type RunPlainChannel = Exclude<RunActionChannel, IdemChannel>;
 
-/** What executing a request means: one IPC call (idempotent ones get their key from the caller), or navigation. */
-export type PlannedRunAction = { readonly kind: 'navigate'; readonly to: string } | { [C in Channel]: CallPlan<C> }[Channel];
-
-function idem<C extends IdemChannel>(channel: C, input: IntentInput<C>): PlannedRunAction {
-  return { kind: 'call', channel, idempotent: true, input } as unknown as PlannedRunAction;
+/** An idempotent call: the caller adds the key per intent. */
+export interface IdemCallPlan<C extends RunIdemChannel> {
+  readonly kind: 'call';
+  readonly channel: C;
+  readonly idempotent: true;
+  readonly input: IntentInput<C>;
 }
 
-function plain<C extends Exclude<Channel, IdemChannel>>(channel: C, input: InputOf<C>): PlannedRunAction {
-  return { kind: 'call', channel, idempotent: false, input } as unknown as PlannedRunAction;
+/** A call without an idempotency key. */
+export interface PlainCallPlan<C extends RunPlainChannel> {
+  readonly kind: 'call';
+  readonly channel: C;
+  readonly idempotent: false;
+  readonly input: InputOf<C>;
+}
+
+/** The call plan of one channel: idempotent channels carry the input without the key. */
+export type CallPlan<C extends RunActionChannel> = C extends RunIdemChannel
+  ? IdemCallPlan<C>
+  : C extends RunPlainChannel
+    ? PlainCallPlan<C>
+    : never;
+
+/** What executing a request means: one IPC call (idempotent ones get their key from the caller), or navigation. */
+export type PlannedRunAction =
+  | { readonly kind: 'navigate'; readonly to: string }
+  | { [C in RunActionChannel]: CallPlan<C> }[RunActionChannel];
+
+function idem<C extends RunIdemChannel>(channel: C, input: IntentInput<C>): IdemCallPlan<C> {
+  return { kind: 'call', channel, idempotent: true, input } satisfies IdemCallPlan<C>;
+}
+
+function plain<C extends RunPlainChannel>(channel: C, input: InputOf<C>): PlainCallPlan<C> {
+  return { kind: 'call', channel, idempotent: false, input } satisfies PlainCallPlan<C>;
 }
 
 const APPROVAL_DECISION = { approve: 'approved', request_revision: 'revision_requested', reject: 'rejected' } as const;

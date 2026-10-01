@@ -14,27 +14,28 @@ import {
   parseDollarInput,
   Skeleton,
   Textarea,
+  ServerChangesNotice,
   TextInput,
   useToast,
 } from '../../components/ui';
 import { call } from '../../api/client';
 import { toViewError, validationIssuesOf } from '../../api/errors';
 import { qk } from '../../api/keys';
-import { EXCLUSION_REASON_LABELS, PROVIDER_LABELS } from '../../lib/format';
+import { EXCLUSION_REASON_LABELS, formatBytes, PROVIDER_LABELS } from '../../lib/format';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { takeFields, useRebasableForm } from '../../hooks/useRebasableForm';
 import { usePreview } from '../../hooks/usePreview';
 import { isStaleConflict } from '../common/conflict';
 import { MutationError } from '../common/MutationError';
 import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
-import { formatBytes } from '../run-setup/PreviewPanel';
 import { SettingsProjectPicker, useSettingsProject } from './useSettingsProject';
 
 /** Providers a project may allow (the fake provider is a dev tool, never a policy choice). */
 const POLICY_PROVIDERS = PROVIDER_IDS.filter((p): p is Exclude<ProviderId, 'fake'> => p !== 'fake');
 
 /** Live exclusion preview delay (same cadence as the new-run preflight). */
-export const EXCLUSION_PREVIEW_DEBOUNCE_MS = 400;
+const EXCLUSION_PREVIEW_DEBOUNCE_MS = 400;
 
 const FIELD = {
   name: 'project-field-name',
@@ -104,7 +105,9 @@ const PROJECT_FIELD_LABELS: Readonly<Record<ProjectField, string>> = {
   storeResponses: 'Store responses at OpenAI',
 };
 
-const PROJECT_FIELDS = Object.keys(PROJECT_FIELD_LABELS) as ProjectField[];
+const PROJECT_FIELDS: readonly ProjectField[] = ['name', 'exclusionsText', 'allowed', 'allowanceText', 'storeResponses'];
+
+const changedFieldsOf = (a: ProjectValues, b: ProjectValues) => PROJECT_FIELDS.filter((f) => !sameValue(f, a, b));
 
 function valuesOf(p: Project): ProjectValues {
   return {
@@ -149,8 +152,15 @@ function ProjectForm({ project }: { readonly project: Project }) {
   const queryClient = useQueryClient();
   const toast = useToast();
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const [base, setBase] = useState(project);
-  const [values, setValues] = useState<ProjectValues>(() => valuesOf(project));
+  const form = useRebasableForm({
+    server: project,
+    valuesOf,
+    // Only a newer project: the list may still hold the pre-save project for a moment after a save.
+    isNewer: (server, b) => server.updatedAt > b.updatedAt,
+    isDirty: (v, bv) => changedFieldsOf(v, bv).length > 0,
+    merge: (bv, mine, theirs) => takeFields(theirs, mine, changedFieldsOf(mine, bv)),
+  });
+  const { base, values, setValues, baseValues, serverAhead, serverValues } = form;
   const [submitted, setSubmitted] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const { name, exclusionsText, allowanceText, storeResponses } = values;
@@ -161,23 +171,8 @@ function ProjectForm({ project }: { readonly project: Project }) {
   const parsedAllowance = parseDollarInput(allowanceText);
   const allowance: Microusd | null = parsedAllowance.ok ? parsedAllowance.value : null;
 
-  const baseValues = valuesOf(base);
-  const changedByMe = PROJECT_FIELDS.filter((f) => !sameValue(f, values, baseValues));
-  // A newer project replaces an untouched form silently; with edits it is shown, never applied behind the user's back.
-  // (Only a newer project: the list may still hold the pre-save project for a moment after a save.)
-  if (project.updatedAt > base.updatedAt && changedByMe.length === 0) {
-    setBase(project);
-    setValues(valuesOf(project));
-  }
-  const serverAhead = project.updatedAt > base.updatedAt && changedByMe.length > 0;
-  const serverValues = valuesOf(project);
-  const changedOnServer = serverAhead ? PROJECT_FIELDS.filter((f) => !sameValue(f, serverValues, baseValues)) : [];
-  const rebase = () => {
-    const next: Record<string, unknown> = {};
-    for (const f of PROJECT_FIELDS) next[f] = changedByMe.includes(f) ? values[f] : serverValues[f];
-    setValues(next as unknown as ProjectValues);
-    setBase(project);
-  };
+  const changedByMe = changedFieldsOf(values, baseValues);
+  const changedOnServer = serverAhead ? changedFieldsOf(serverValues, baseValues) : [];
 
   const exclusions = parseGlobs(exclusionsText);
   // The runner previews saved exclusions + `extraExclusions`, so only the new patterns are sent (removals apply on save).
@@ -220,12 +215,8 @@ function ProjectForm({ project }: { readonly project: Project }) {
     mutationFn: (input: { readonly expectedUpdatedAt: number; readonly patch: InputOf<'relay/v1/projects.update'>['patch'] }) =>
       call('relay/v1/projects.update', { projectId: project.id, expectedUpdatedAt: input.expectedUpdatedAt, patch: input.patch }),
     onSuccess: (p) => {
-      setBase(p);
       // Edits typed while the save was in flight stay; every other field shows the saved value.
-      setValues((v) => {
-        const saved = valuesOf(p);
-        return Object.fromEntries(PROJECT_FIELDS.map((f) => [f, sameValue(f, v, saved) ? saved[f] : v[f]])) as unknown as ProjectValues;
-      });
+      form.markSaved(p, (v, saved) => takeFields(saved, v, changedFieldsOf(v, saved)));
       refresh();
       toast.show({ key: `project:saved:${p.id}`, title: `Saved “${p.name}”`, body: 'New runs use these settings.', tone: 'success' });
     },
@@ -259,16 +250,12 @@ function ProjectForm({ project }: { readonly project: Project }) {
         </InlineAlert>
       )}
       {serverAhead ? (
-        <InlineAlert
-          tone="warning"
+        <ServerChangesNotice
           title="This project changed since you started editing"
-          actions={
-            <Button size="sm" variant="primary" onClick={rebase}>
-              Keep my changes on top of the saved settings
-            </Button>
-          }
+          intro="Nothing was overwritten. Your edits are kept in the form; compare them with the saved settings:"
+          keepLabel="Keep my changes on top of the saved settings"
+          onKeep={form.rebase}
         >
-          <p>Nothing was overwritten. Your edits are kept in the form; compare them with the saved settings:</p>
           <div className="table-wrap" style={{ overflowX: 'auto' }}>
             <table className="table">
               <caption className="sr-only">Saved project settings compared with your edits</caption>
@@ -297,7 +284,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
             Keeping your changes sends only the settings you changed, based on the latest saved version; every other
             setting keeps the saved value.
           </p>
-        </InlineAlert>
+        </ServerChangesNotice>
       ) : null}
       <form
         className="stack"
@@ -424,7 +411,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
           </p>
         </div>
         {serverIssues.length > 0 ? (
-          <InlineAlert tone="danger" title="Relay could not save these settings">
+          <InlineAlert tone="danger" live="assertive" title="Relay could not save these settings">
             <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
               {serverIssues.map((i) => (
                 <li key={`${i.path}:${i.message}`}>{i.message}</li>
@@ -474,7 +461,6 @@ function ProjectForm({ project }: { readonly project: Project }) {
                 usage ledger stay on this computer. Project files are never touched.
               </p>
               <p className="subtle">A project with an active run cannot be archived until that run ends.</p>
-              <MutationError error={archive.error} projectId={project.id} />
             </div>
           }
           confirmLabel="Archive project"
@@ -483,7 +469,9 @@ function ProjectForm({ project }: { readonly project: Project }) {
           onConfirm={() => {
             archive.mutate();
           }}
-        />
+        >
+          <MutationError error={archive.error} projectId={project.id} />
+        </ConfirmDialog>
       ) : null}
     </section>
   );

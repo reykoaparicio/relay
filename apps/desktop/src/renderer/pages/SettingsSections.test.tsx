@@ -1,17 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID, FAKE_WORKFLOW_ID } from '../api/fake-bridge';
 import { recentMonths } from '../features/settings/DataSection';
 import { sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 
-const NOT_IMPLEMENTED = (channel: string) =>
-  appError('INTERNAL', {
-    userMessage: 'This feature is not available in this build yet.',
-    details: { reason: 'not_implemented', channel },
-  });
+// The channel is not part of an INTERNAL error (02 §B0): the reason alone selects the static message.
+const NOT_IMPLEMENTED = errors.internal(undefined, 'not_implemented');
 
 async function section(name: string) {
   await screen.findByRole('heading', { level: 1, name: 'Settings' });
@@ -150,7 +147,7 @@ describe('Settings → Model profiles (J10)', () => {
     bridge.world.notImplemented.add('profiles.upsert');
     await user.click(await screen.findByRole('button', { name: 'Edit Economy' }));
     await user.click(screen.getByRole('button', { name: 'Save revision 2' }));
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
@@ -369,7 +366,7 @@ describe('Settings → Storage & data (J10)', () => {
     const { bridge } = renderApp('/settings/data', { scenario: 'awaiting-approval' });
     await section('Data folder and backup');
     expect(screen.getByText(/does not claim the full database is encrypted/)).toBeInTheDocument();
-    bridge.failNext('relay/v1/app.createBackup', NOT_IMPLEMENTED('relay/v1/app.createBackup'));
+    bridge.failNext('relay/v1/app.createBackup', NOT_IMPLEMENTED);
     await user.click(screen.getByRole('button', { name: 'Create backup' }));
     expect(await screen.findByText('This feature is not available in this build yet.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Create backup' }));

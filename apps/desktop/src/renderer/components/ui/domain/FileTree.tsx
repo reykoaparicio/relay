@@ -1,5 +1,6 @@
 import { File, FileX } from 'lucide-react';
 import type { ExclusionReason } from '@relay/contracts';
+import { formatBytes } from '../../../lib/format/bytes';
 import { EXCLUSION_REASON_LABELS } from '../../../lib/format/labels';
 
 export interface FileTreeIncluded {
@@ -18,13 +19,6 @@ export interface FileTreeProps {
   readonly label?: string;
 }
 
-const KIB = 1024;
-
-function formatBytes(n: number): string {
-  if (n < KIB) return `${String(n)} B`;
-  if (n < KIB * KIB) return `${(n / KIB).toFixed(1)} KB`;
-  return `${(n / (KIB * KIB)).toFixed(1)} MB`;
-}
 
 type Row = { readonly kind: 'in'; readonly entry: FileTreeIncluded } | { readonly kind: 'out'; readonly entry: FileTreeExcluded };
 

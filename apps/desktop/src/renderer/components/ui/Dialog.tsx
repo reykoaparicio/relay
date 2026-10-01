@@ -22,7 +22,7 @@ export interface DialogProps {
 }
 
 /** True when `el` is still in the document and can take focus (not disabled, not inside `inert`). */
-export function canReceiveFocus(el: HTMLElement | null | undefined): el is HTMLElement {
+function canReceiveFocus(el: HTMLElement | null | undefined): el is HTMLElement {
   return el?.isConnected === true && !el.matches(':disabled') && el.closest('[inert]') === null;
 }
 
@@ -88,6 +88,22 @@ export interface ConfirmDialogProps {
   readonly trigger?: ReactNode;
   /** See {@link DialogProps.returnFocusFallback}. */
   readonly returnFocusFallback?: RefObject<HTMLElement | null>;
+  /**
+   * A safer alternative offered beside the confirm button (e.g. "Archive instead"). While it or the confirm is
+   * pending, every footer button is disabled.
+   */
+  readonly secondaryAction?: ConfirmSecondaryAction;
+  /**
+   * Body content that is not part of the dialog's accessible description (warnings, the mutation error), so the
+   * description stays the plain consequences sentence.
+   */
+  readonly children?: ReactNode;
+}
+
+export interface ConfirmSecondaryAction {
+  readonly label: string;
+  readonly onClick: () => void;
+  readonly pending?: boolean;
 }
 
 export interface DialogCloseProps {
@@ -182,7 +198,10 @@ export function ConfirmDialog({
   onConfirm,
   trigger,
   returnFocusFallback,
+  secondaryAction,
+  children,
 }: ConfirmDialogProps) {
+  const anyPending = pending || secondaryAction?.pending === true;
   return (
     <Dialog
       open={open}
@@ -192,14 +211,28 @@ export function ConfirmDialog({
       {...(trigger === undefined ? {} : { trigger })}
       {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
       footer={
-        <DialogFooter
-          primaryLabel={confirmLabel}
-          primaryVariant={destructive ? 'danger' : 'primary'}
-          secondaryLabel={cancelLabel}
-          pending={pending}
-          onPrimary={onConfirm}
-        />
+        secondaryAction === undefined ? (
+          <DialogFooter
+            primaryLabel={confirmLabel}
+            primaryVariant={destructive ? 'danger' : 'primary'}
+            secondaryLabel={cancelLabel}
+            pending={pending}
+            onPrimary={onConfirm}
+          />
+        ) : (
+          <>
+            <DialogClose label={cancelLabel} disabled={anyPending} />
+            <Button variant="secondary" pending={secondaryAction.pending === true} disabled={anyPending} onClick={secondaryAction.onClick}>
+              {secondaryAction.label}
+            </Button>
+            <Button variant={destructive ? 'danger' : 'primary'} pending={pending} disabled={anyPending} onClick={onConfirm}>
+              {confirmLabel}
+            </Button>
+          </>
+        )
       }
-    />
+    >
+      {children}
+    </Dialog>
   );
 }

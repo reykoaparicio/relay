@@ -4,12 +4,8 @@ import { Link, useParams, useSearchParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ApprovalDecision, ExportWhat, RunAction, RunDetail } from '@relay/contracts';
 import {
-  AttemptsTable,
-  BudgetLedger,
   Button,
   ButtonLink,
-  ConfirmDialog,
-  ContextManifestView,
   EmptyState,
   ErrorView,
   PageHeader,
@@ -18,16 +14,16 @@ import {
   StatusBadge,
   StepTimeline,
   useToast,
+  usePageFocusRescue,
 } from '../components/ui';
-import type { ApprovalDecisionInput, Panel, RecoveryDecisionDetail } from '../components/ui';
+import type { ApprovalDecisionInput, RecoveryDecisionDetail } from '../components/ui';
 import { isAppErrorException } from '../api/client';
 import { toViewError } from '../api/errors';
-import { RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_HINTS, UNKNOWN_OUTCOME_DECISION_LABELS } from '../lib/format';
-import type { UnknownOutcomeDecision } from '../lib/format';
+import { RUN_ACTION_LABELS } from '../lib/format';
 import { runLabel } from '../features/runs/run-display';
 import { href, paths } from '../features/shell/paths';
 import { ActionErrorNotice } from '../features/run-inspector/ActionErrorNotice';
-import { ContextSummary, EventsList, LedgerPanel } from '../features/run-inspector/InspectorPanels';
+import { InspectorDialogs, useInspectorDialogs } from '../features/run-inspector/InspectorDialogs';
 import {
   APPROVAL_ACTIONS,
   blockedStep,
@@ -39,29 +35,19 @@ import {
   stepEventsOf,
   stepTitle,
 } from '../features/run-inspector/inspector-model';
-import {
-  ChooseProfileDialog,
-  DecideUnknownDialog,
-  IncreaseAllowanceDialog,
-  ProjectAllowanceDialog,
-  RaiseLimitsDialog,
-} from '../features/run-inspector/RunActionDialogs';
 import type { RunActionRequest } from '../features/run-inspector/run-actions';
 import { StatusBanner } from '../features/run-inspector/StatusBanner';
-import { StepOutputTab } from '../features/run-inspector/StepOutput';
+import { useInspectorPanels } from '../features/run-inspector/useInspectorPanels';
 import { useRunActions } from '../features/run-inspector/useRunActions';
 import { useArtifactExport, useLedgerExport } from '../features/run-inspector/useRunExports';
-import { usePageFocusRescue } from '../features/run-inspector/usePageFocusRescue';
 import { useLedger } from '../hooks/useLedger';
 import { useNavPerf } from '../hooks/useNavPerf';
-import { NOW_RUNNING_INTERVAL_MS, useNow } from '../hooks/useNow';
 import { useProfiles } from '../hooks/useProfiles';
 import { useProject } from '../hooks/useProject';
 import { useRun } from '../hooks/useRun';
 import { useRunEvents } from '../hooks/useRunEvents';
+import { StreamProgressContext } from '../hooks/useStreamProgress';
 import { useStep } from '../hooks/useStep';
-
-type DialogKind = 'allowance' | 'project_allowance' | 'profile' | 'limits' | 'unknown';
 
 const DECISION_ACTION: Readonly<Record<ApprovalDecision, 'approve' | 'request_revision' | 'reject'>> = {
   approved: 'approve',
@@ -75,39 +61,10 @@ const ACTION_DECISION: Partial<Readonly<Record<RunAction, ApprovalDecision>>> = 
   reject: 'rejected',
 };
 
-/** FR-11: cancellation of the in-flight request is best effort; charges may be unknown. */
-const CONFIRM_COPY: Readonly<Record<'cancel' | 'stop', { title: string; consequences: string }>> = {
-  cancel: {
-    title: 'Cancel this run?',
-    consequences:
-      'No new steps will start. Stopping the in-flight request is best effort: the provider may still finish it, and its charge may stay unknown. Finished steps, artifacts, and costs are kept.',
-  },
-  stop: {
-    title: 'Stop this run?',
-    consequences:
-      'The run ends as cancelled. Finished steps, artifacts, and costs are kept; any possible charge stays recorded as unknown liability.',
-  },
-};
-
 const STALE_CODES = new Set(['APPROVAL_STALE', 'PROJECT_CHANGED']);
 
 /** Actions that create a newer `(revision, retry)` row of a step: the selection follows it (B3). */
 const ROW_CREATING_ACTIONS: ReadonlySet<RunAction> = new Set<RunAction>(['retry_step', 'choose_profile', 'request_revision']);
-
-/** Confirmation copy of a per-attempt unknown-outcome decision (§4.4: a retry may incur another charge). */
-function unknownDecisionCopy(decision: UnknownOutcomeDecision): { title: string; consequences: string } {
-  switch (decision) {
-    case 'retry_acknowledging_charge':
-      return {
-        title: 'Retry this request?',
-        consequences: `The retry may incur another charge: the provider may already have processed the earlier request. ${UNKNOWN_OUTCOME_DECISION_HINTS[decision]}`,
-      };
-    case 'mark_failed_keep_liability':
-      return { title: 'Mark this request as failed?', consequences: UNKNOWN_OUTCOME_DECISION_HINTS[decision] };
-    case 'accept_estimated_charge':
-      return { title: 'Accept the estimated charge?', consequences: UNKNOWN_OUTCOME_DECISION_HINTS[decision] };
-  }
-}
 
 /** Run inspector (10 J8, §5.4): timeline | selected step panel | budget + context. */
 export function RunInspectorPage() {
@@ -123,15 +80,12 @@ export function RunInspectorPage() {
   const ledger = useLedger(runId);
   const project = useProject(projectId);
   const profiles = useProfiles();
-  const now = useNow(NOW_RUNNING_INTERVAL_MS, runQ.dataUpdatedAt);
   const actions = useRunActions({ runId, projectId });
   const artifactExport = useArtifactExport(runId);
   const ledgerExport = useLedgerExport(runId);
-  const [dialog, setDialog] = useState<DialogKind | null>(null);
-  const [confirm, setConfirm] = useState<'cancel' | 'stop' | null>(null);
+  const dialogs = useInspectorDialogs();
+  const { openDialog, askConfirm, chooseUnknown } = dialogs;
   const [lastAction, setLastAction] = useState<RunAction | null>(null);
-  /** A per-attempt unknown-outcome decision from the RecoveryPanel, waiting for confirmation. */
-  const [unknownChoice, setUnknownChoice] = useState<{ readonly attemptId: string; readonly decision: UnknownOutcomeDecision } | null>(null);
   const tab = parseInspectorTab(search.get('tab'));
   // B1: permitted profiles come from the LOADED project's provider allowlist; until it loads, nothing is offered.
   const allowedProviderIds = project.data?.providerPolicy.allowedProviderIds;
@@ -233,7 +187,7 @@ export function RunInspectorPage() {
         case 'cancel':
         case 'stop':
           if (confirmed) void dispatch({ action, runId: run.id });
-          else setConfirm(action);
+          else askConfirm(action);
           return;
         case 'retry_step': {
           const step = blockedStep(run);
@@ -244,23 +198,23 @@ export function RunInspectorPage() {
           void dispatch({ action });
           return;
         case 'increase_allowance':
-          setDialog('allowance');
+          openDialog('allowance');
           return;
         case 'edit_project_allowance':
-          setDialog('project_allowance');
+          openDialog('project_allowance');
           return;
         case 'choose_profile':
-          if (chooseProfileBlocked === null) setDialog('profile');
+          if (chooseProfileBlocked === null) openDialog('profile');
           return;
         case 'raise_limits':
-          setDialog('limits');
+          openDialog('limits');
           return;
         case 'decide_unknown':
           // A RecoveryPanel row names the attempt and decision: confirm it, then decide exactly that attempt.
           if (detail?.attemptId !== undefined && detail.decision !== undefined) {
-            setUnknownChoice({ attemptId: detail.attemptId, decision: detail.decision });
+            chooseUnknown({ attemptId: detail.attemptId, decision: detail.decision });
           } else {
-            setDialog('unknown');
+            openDialog('unknown');
           }
           return;
         case 'export_report':
@@ -278,7 +232,19 @@ export function RunInspectorPage() {
         }
       }
     },
-    [actions, chooseProfileBlocked, dispatch, run, runExport, selectStep],
+    [actions, askConfirm, chooseProfileBlocked, chooseUnknown, dispatch, openDialog, run, runExport, selectStep],
+  );
+
+  /** The RecoveryPanel confirmed the decision itself. */
+  const onRecoveryAction = useCallback(
+    (action: RunAction, detail?: RecoveryDecisionDetail) => {
+      trigger(action, true, detail);
+    },
+    [trigger],
+  );
+  const disabledReasons = useMemo(
+    () => (chooseProfileBlocked === null ? undefined : { choose_profile: chooseProfileBlocked }),
+    [chooseProfileBlocked],
   );
 
   const onDecide = useCallback(
@@ -301,9 +267,9 @@ export function RunInspectorPage() {
 
   const submitDialog = useCallback(
     async (req: RunActionRequest) => {
-      if (await dispatch(req)) setDialog(null);
+      if (await dispatch(req)) openDialog(null);
     },
-    [dispatch],
+    [dispatch, openDialog],
   );
 
   const liveEvents = stream.events;
@@ -323,6 +289,31 @@ export function RunInspectorPage() {
       actions={r === undefined ? undefined : <HeaderActions run={r} projectId={projectId} onAction={trigger} pending={actions.pending} busy={actions.busy} exporting={artifactExport.isPending ? lastAction : null} />}
     />
   );
+
+  const errorCode = isAppErrorException(actions.error) ? actions.error.appError.code : null;
+  const approvalError = lastAction !== null && APPROVAL_ACTIONS.has(lastAction) ? actions.error : null;
+  const generalError = dialogs.dialog === null && approvalError === null ? (actions.error ?? artifactExport.error) : null;
+  const pendingDecision = actions.pending === null ? null : (ACTION_DECISION[actions.pending] ?? null);
+  const panels = useInspectorPanels({
+    run,
+    projectId,
+    selected,
+    detail: stepQ.data,
+    detailError: stepQ.error,
+    selectedEvents,
+    eventsLoaded: stream.loaded || stepQ.data !== undefined,
+    ledger,
+    ledgerExport,
+    approval: {
+      onDecide: (input) => {
+        void onDecide(input);
+      },
+      pendingDecision,
+      error: approvalError,
+      staleNotice: errorCode !== null && STALE_CODES.has(errorCode) && approvalError !== null,
+    },
+    setTab,
+  });
 
   if (runQ.error !== null) {
     return (
@@ -352,140 +343,16 @@ export function RunInspectorPage() {
     );
   }
 
-  const errorCode = isAppErrorException(actions.error) ? actions.error.appError.code : null;
-  const approvalError = lastAction !== null && APPROVAL_ACTIONS.has(lastAction) ? actions.error : null;
-  const dialogError = dialog === null ? null : actions.error;
-  const generalError = dialog === null && approvalError === null ? (actions.error ?? artifactExport.error) : null;
-  const pendingDecision = actions.pending === null ? null : (ACTION_DECISION[actions.pending] ?? null);
   const blocked = blockedStep(run);
   const allowedProviders = new Set<string>(allowedProviderIds ?? []);
   // An empty allowlist permits no provider (never "everything").
   const permittedProfiles = (profiles.data ?? []).filter((p) => allowedProviders.has(p.profile.providerId));
   const newerRow =
     search.get('step') === selected.id && !isLatestRow(selected, run.steps) ? latestRowOf(run.steps, selected.stepKey) : undefined;
-  const entries = ledger.entries.data?.pages.flatMap((p) => p.items);
-
-  const tabs: Panel[] = [
-    {
-      id: 'output',
-      label: 'Output',
-      content: (
-        <StepOutputTab
-          run={run}
-          projectId={projectId}
-          step={selected}
-          detail={stepQ.data}
-          detailError={stepQ.error}
-          progress={stream.progress}
-          now={now}
-          approval={{
-            onDecide: (input) => {
-              void onDecide(input);
-            },
-            pendingDecision,
-            error: approvalError,
-            staleNotice: errorCode !== null && STALE_CODES.has(errorCode) && approvalError !== null,
-          }}
-        />
-      ),
-    },
-    {
-      id: 'context',
-      label: 'Context',
-      content:
-        stepQ.data === undefined ? (
-          <Skeleton lines={4} />
-        ) : stepQ.data.manifest === null ? (
-          <p className="subtle">No context was sent for this step. Only the items in a manifest are ever sent to a provider.</p>
-        ) : (
-          <div className="stack">
-            <p className="subtle">Immutable manifest for this request. Only these items were sent to providers.</p>
-            <ContextManifestView manifest={stepQ.data.manifest} />
-          </div>
-        ),
-    },
-    {
-      id: 'attempts',
-      label: 'Attempts',
-      content:
-        stepQ.data === undefined ? (
-          <Skeleton lines={4} />
-        ) : (
-          <AttemptsTable attempts={stepQ.data.attempts} caption={`Attempts for ${stepTitle(selected)}`} />
-        ),
-    },
-    {
-      id: 'events',
-      label: 'Events',
-      content: (
-        <EventsList
-          events={selectedEvents.events}
-          runLevel={selectedEvents.runLevel}
-          loaded={stream.loaded || stepQ.data !== undefined}
-        />
-      ),
-    },
-    {
-      id: 'ledger',
-      label: 'Ledger',
-      content: (
-        <LedgerPanel
-          runLabel={runLabel(run.id)}
-          entries={entries}
-          error={ledger.entries.error}
-          hasMore={ledger.entries.hasNextPage}
-          loadingMore={ledger.entries.isFetchingNextPage}
-          onLoadMore={() => {
-            void ledger.entries.fetchNextPage();
-          }}
-          onExport={() => {
-            ledgerExport.mutate();
-          }}
-          exporting={ledgerExport.isPending}
-          exportError={ledgerExport.error}
-          exportedTo={ledgerExport.data?.exported === true ? (ledgerExport.data.displayPath ?? 'the chosen file') : null}
-        />
-      ),
-    },
-  ];
-  const secondary: Panel[] = [
-    {
-      id: 'budget',
-      label: 'Budget',
-      content: (
-        <div className="stack">
-          <BudgetLedger cost={run.cost} byStep={ledger.summary.data?.byStep ?? []} caption={`${runLabel(run.id)} tracked usage`} />
-          <div className="actions">
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setTab('ledger');
-              }}
-            >
-              Per-attempt ledger entries
-            </Button>
-          </div>
-        </div>
-      ),
-    },
-    {
-      id: 'summary',
-      label: 'Context summary',
-      content: (
-        <ContextSummary
-          run={run}
-          manifest={stepQ.data === undefined ? undefined : stepQ.data.manifest}
-          onInspect={() => {
-            setTab('context');
-          }}
-        />
-      ),
-    },
-  ];
+  if (panels === null) return null;
 
   return (
-    <>
+    <StreamProgressContext.Provider value={stream.progress}>
       {header(run)}
       <div className="grid grid-cols-[minmax(220px,280px)_minmax(0,1fr)] items-start gap-5 max-[900px]:grid-cols-1">
         <section className="card" aria-labelledby="inspector-timeline-heading">
@@ -497,15 +364,11 @@ export function RunInspectorPage() {
             run={run}
             projectId={projectId}
             events={liveEvents}
-            onAction={(a) => {
-              trigger(a);
-            }}
-            onRecoveryAction={(a, detail) => {
-              trigger(a, true, detail);
-            }}
+            onAction={trigger}
+            onRecoveryAction={onRecoveryAction}
             pending={actions.pending}
             busy={actions.busy}
-            {...(chooseProfileBlocked === null ? {} : { disabledReasons: { choose_profile: chooseProfileBlocked } })}
+            {...(disabledReasons === undefined ? {} : { disabledReasons })}
           />
           <ActionErrorNotice error={generalError} />
           <section className="stack" aria-labelledby="inspector-step-heading">
@@ -528,138 +391,29 @@ export function RunInspectorPage() {
             )}
             <ResponsivePanels
               label="Step details"
-              tabs={tabs}
-              secondary={secondary}
+              tabs={panels.tabs}
+              secondary={panels.secondary}
               value={tab}
               onValueChange={setTab}
             />
           </section>
         </div>
       </div>
-      <ConfirmDialog
-        open={confirm !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirm(null);
-        }}
-        title={confirm === null ? '' : CONFIRM_COPY[confirm].title}
-        consequences={confirm === null ? '' : CONFIRM_COPY[confirm].consequences}
-        confirmLabel={confirm === null ? 'Confirm' : RUN_ACTION_LABELS[confirm]}
-        cancelLabel="Keep the run"
+      <InspectorDialogs
+        state={dialogs}
+        run={run}
+        projectId={projectId}
+        project={project.data}
+        blocked={blocked}
+        permittedProfiles={permittedProfiles}
+        allowedProviderIds={allowedProviderIds}
+        pending={actions.pending}
+        error={actions.error}
         returnFocusFallback={stepHeadingRef}
-        pending={confirm !== null && actions.pending === confirm}
-        onConfirm={() => {
-          const action = confirm;
-          setConfirm(null);
-          if (action !== null) void dispatch({ action, runId: run.id });
-        }}
+        dispatch={dispatch}
+        submitDialog={submitDialog}
       />
-      {dialog === 'allowance' ? (
-        <IncreaseAllowanceDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setDialog(null);
-          }}
-          returnFocusFallback={stepHeadingRef}
-          pending={actions.pending === 'increase_allowance'}
-          error={dialogError}
-          run={run}
-          onSubmit={(value) => {
-            void submitDialog({ action: 'increase_allowance', runId: run.id, newAllowanceMicrousd: value });
-          }}
-        />
-      ) : null}
-      {dialog === 'project_allowance' ? (
-        <ProjectAllowanceDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setDialog(null);
-          }}
-          returnFocusFallback={stepHeadingRef}
-          pending={actions.pending === 'edit_project_allowance'}
-          error={dialogError}
-          project={project.data}
-          onSubmit={(value, expectedUpdatedAt) => {
-            void submitDialog({ action: 'edit_project_allowance', projectId, expectedUpdatedAt, monthlyAllowanceMicrousd: value });
-          }}
-        />
-      ) : null}
-      {dialog === 'profile' ? (
-        <ChooseProfileDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setDialog(null);
-          }}
-          returnFocusFallback={stepHeadingRef}
-          pending={actions.pending === 'choose_profile'}
-          error={dialogError}
-          step={blocked}
-          profiles={permittedProfiles}
-          {...(allowedProviderIds?.length === 0
-            ? { emptyMessage: 'This project allows no provider, so no profile can be used. Allow a provider in Settings → Projects.' }
-            : {})}
-          onSubmit={(profileId) => {
-            if (blocked !== undefined) {
-              void submitDialog({
-                action: 'choose_profile',
-                runId: run.id,
-                profileId,
-                step: { id: blocked.id, stepKey: blocked.stepKey, state: blocked.state },
-              });
-            }
-          }}
-        />
-      ) : null}
-      {dialog === 'limits' ? (
-        <RaiseLimitsDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setDialog(null);
-          }}
-          returnFocusFallback={stepHeadingRef}
-          pending={actions.pending === 'raise_limits'}
-          error={dialogError}
-          run={run}
-          onSubmit={(limits) => {
-            void submitDialog({ action: 'raise_limits', runId: run.id, ...limits });
-          }}
-        />
-      ) : null}
-      {dialog === 'unknown' ? (
-        <DecideUnknownDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setDialog(null);
-          }}
-          returnFocusFallback={stepHeadingRef}
-          pending={actions.pending === 'decide_unknown'}
-          error={dialogError}
-          run={run}
-          onSubmit={(attemptId, decision) => {
-            void submitDialog({ action: 'decide_unknown', runId: run.id, attemptId, decision });
-          }}
-        />
-      ) : null}
-      <ConfirmDialog
-        open={unknownChoice !== null}
-        onOpenChange={(open) => {
-          if (!open) setUnknownChoice(null);
-        }}
-        title={unknownChoice === null ? '' : unknownDecisionCopy(unknownChoice.decision).title}
-        consequences={unknownChoice === null ? '' : unknownDecisionCopy(unknownChoice.decision).consequences}
-        confirmLabel={unknownChoice === null ? 'Confirm' : UNKNOWN_OUTCOME_DECISION_LABELS[unknownChoice.decision]}
-        cancelLabel="Not now"
-        destructive={false}
-        returnFocusFallback={stepHeadingRef}
-        pending={unknownChoice !== null && actions.pending === 'decide_unknown'}
-        onConfirm={() => {
-          const choice = unknownChoice;
-          setUnknownChoice(null);
-          if (choice !== null) {
-            void dispatch({ action: 'decide_unknown', runId: run.id, attemptId: choice.attemptId, decision: choice.decision });
-          }
-        }}
-      />
-    </>
+    </StreamProgressContext.Provider>
   );
 }
 

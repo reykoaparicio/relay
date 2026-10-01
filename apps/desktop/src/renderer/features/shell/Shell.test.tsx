@@ -49,7 +49,7 @@ describe('Shell ProjectSwitcher (J4)', () => {
 });
 
 describe('Shell runner banner (08 H6 → J4)', () => {
-  it('follows runner.state pushes: restarting (info), unavailable (alert + diagnostics), back to ready (gone)', async () => {
+  it('follows runner.state pushes: restarting (info), unavailable (polite status + diagnostics), back to ready (gone)', async () => {
     const user = userEvent.setup();
     const { bridge, router } = renderApp(`/p/${FAKE_PROJECT_ID}`, { scenario: 'awaiting-approval' });
     await screen.findByRole('button', { name: /switch project/ });
@@ -65,7 +65,7 @@ describe('Shell runner banner (08 H6 → J4)', () => {
     act(() => {
       bridge.emit({ type: 'runner.state', state: 'unavailable' });
     });
-    const alert = (await screen.findByText('The background runner is unavailable')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('The background runner is unavailable')).closest('[role="status"]') as HTMLElement;
     expect(alert).toHaveTextContent('Runs are paused safely. Relay could not restart the runner automatically.');
     expect(screen.queryByText('Background runner restarting…')).not.toBeInTheDocument();
     await user.click(within(alert).getByRole('button', { name: 'Open diagnostics' }));

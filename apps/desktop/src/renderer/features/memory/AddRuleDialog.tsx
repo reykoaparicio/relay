@@ -1,9 +1,9 @@
 import { useId, useState } from 'react';
-import { Checkbox, Dialog, DialogFooter, Field, Select, TextInput, Textarea } from '../../components/ui';
+import { Checkbox, DateInput, Dialog, DialogFooter, Field, Select, TextInput, Textarea } from '../../components/ui';
 import { validationIssuesOf } from '../../api/errors';
-import { MEMORY_TYPE_LABELS } from '../../lib/format';
+import { MEMORY_TYPE_LABELS, parseDateInput } from '../../lib/format';
 import { MutationError } from '../common/MutationError';
-import { MEMORY_FIELD, memoryFieldOfPath, parseDateInput, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
+import { MEMORY_FIELD, memoryFieldOfPath, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
 import type { ScopeChoice } from './memory-model';
 import { useCreateMemory } from './useMemoryMutations';
 
@@ -165,17 +165,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
           hint="Relay asks you to confirm the rule is still accurate on this date."
           error={errorOf(MEMORY_FIELD.reviewAt)}
         >
-          {(control) => (
-            <input
-              {...control}
-              className="input mono"
-              type="date"
-              value={review}
-              onChange={(e) => {
-                setReview(e.target.value);
-              }}
-            />
-          )}
+          {(control) => <DateInput {...control} value={review} onValueChange={setReview} />}
         </Field>
         <Checkbox label="Pin: always include this rule in runs within its scope" checked={pinned} onCheckedChange={setPinned} />
         {unmappedError === null ? null : (

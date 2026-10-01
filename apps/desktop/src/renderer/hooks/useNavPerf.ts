@@ -18,12 +18,12 @@ export const NAV_ROUTES = [
 ] as const;
 export type NavRoute = (typeof NAV_ROUTES)[number];
 
-export function isNavRoute(id: unknown): id is NavRoute {
+function isNavRoute(id: unknown): id is NavRoute {
   return typeof id === 'string' && (NAV_ROUTES as readonly string[]).includes(id);
 }
 
 export const startMarkName = (route: NavRoute): string => `relay:nav:${route}:start`;
-export const measureName = (route: NavRoute): string => `relay:nav:${route}`;
+const measureName = (route: NavRoute): string => `relay:nav:${route}`;
 export const HISTORY_LOADED = 'relay:history-loaded';
 
 interface NavState {

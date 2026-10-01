@@ -205,7 +205,7 @@ export interface FormField {
 }
 
 /** Every P0-editable field of a form, in display order. */
-export function formFields(view: WorkflowVersionView, form: WorkflowForm): FormField[] {
+function formFields(view: WorkflowVersionView, form: WorkflowForm): FormField[] {
   const out: FormField[] = [];
   for (const k of Object.keys(LIMIT_FIELD_LABELS) as Array<keyof typeof LIMIT_FIELD_LABELS>) {
     out.push({ key: `limits.${k}`, label: LIMIT_FIELD_LABELS[k], value: form[k] });

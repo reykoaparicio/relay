@@ -9,12 +9,12 @@ export function runLabel(runId: string): string {
 }
 
 /** Settled total (reported + calculated + estimated). */
-export function settledTotal(cost: CostSummary): Microusd {
+function settledTotal(cost: CostSummary): Microusd {
   return addMicrousd(cost.settledReported, cost.settledCalculated, cost.settledEstimated);
 }
 
 /** The weakest certainty present in the settled total (FR-09): any estimate makes the total an estimate. */
-export function settledCertainty(cost: CostSummary): CostCertainty {
+function settledCertainty(cost: CostSummary): CostCertainty {
   if (cost.settledEstimated > 0) return 'estimated';
   if (cost.settledCalculated > 0) return 'calculated';
   return 'reported';
@@ -26,6 +26,11 @@ export interface RunCostProps {
   readonly ledgerPath?: string;
   /** Show reserved/unknown sub-lines. */
   readonly detailed?: boolean;
+}
+
+/** The certainty tag's class: one tone per certainty, so an unknown charge gets the unknown tone (never a default). */
+export function certaintyTagClass(certainty: CostCertainty): string {
+  return `tag certainty-${certainty}`;
 }
 
 /** Tracked run cost with its certainty as visible text (never color alone). */
@@ -45,7 +50,7 @@ export function RunCost({ cost, ledgerPath, detailed = false }: RunCostProps) {
           </Link>
         )}
         {total > 0 && certainty !== 'estimated' ? (
-          <span className={certainty === 'reported' ? 'tag certainty-reported' : 'tag font-sans'}>{certainty}</span>
+          <span className={certaintyTagClass(certainty)}>{certainty}</span>
         ) : null}
       </span>
       {detailed && cost.reserved > 0 ? (

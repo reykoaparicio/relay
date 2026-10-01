@@ -1,6 +1,7 @@
-import { useId, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { CircleCheck, CircleX, KeyRound, PlugZap, Trash2, TriangleAlert } from 'lucide-react';
+import type { RefObject } from 'react';
 import type { CredentialStorageMode, ProviderStatus } from '@relay/contracts';
 import { Button, ConfirmDialog, ErrorView, KeyValueList, RelativeTime } from '../../components/ui';
 import { toViewError } from '../../api/errors';
@@ -39,6 +40,21 @@ const STORAGE_TEXT: Readonly<Record<ProviderStatus['storage'], string>> = {
   none: 'No key stored',
 };
 
+/**
+ * A11Y-02: removing the key removes the Remove / Replace / Test buttons with the connected state, so whichever had
+ * focus (the dialog returns it to the Remove trigger) is gone. Focus moves to the card heading instead of <body>.
+ */
+function useHeadingFocusOnDisconnect(connected: boolean, heading: RefObject<HTMLHeadingElement | null>): void {
+  const wasConnected = useRef(connected);
+  useLayoutEffect(() => {
+    const disconnected = wasConnected.current && !connected;
+    wasConnected.current = connected;
+    if (!disconnected) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body || active === document.documentElement) heading.current?.focus();
+  }, [connected, heading]);
+}
+
 export interface ProviderCardProps {
   readonly provider: ProviderStatus;
   readonly secureStorageAvailable: boolean;
@@ -69,6 +85,8 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
   const test = useTestProvider();
   const disconnect = useDisconnectProvider();
   const showForm = state === 'not-connected' || replacing || needsRepaste;
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useHeadingFocusOnDisconnect(p.connected, headingRef);
   const secure = secureStorageAvailable && !sessionOnly;
 
   const focusKey = () => {
@@ -122,7 +140,9 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
   return (
     <section className="card stack" aria-labelledby={titleId}>
       <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <h3 id={titleId}>{p.displayName}</h3>
+        <h3 id={titleId} ref={headingRef} tabIndex={-1}>
+          {p.displayName}
+        </h3>
         <span className={`badge ${badge.tone}`}>
           <BadgeIcon aria-hidden="true" />
           {badge.label}
@@ -189,15 +209,20 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
           </Button>
           <ConfirmDialog
             open={confirmRemove}
-            onOpenChange={setConfirmRemove}
+            onOpenChange={(open) => {
+              setConfirmRemove(open);
+              if (!open) disconnect.reset();
+            }}
+            returnFocusFallback={headingRef}
             title={`Remove the ${p.displayName} key?`}
             consequences="Relay deletes the stored key. Runs whose profiles use this provider pause before their next call until you connect it again. Finished runs are not affected."
             confirmLabel="Remove key"
             cancelLabel="Keep the key"
             pending={disconnect.isPending}
             onConfirm={() => {
+              // The dialog closes only on success; a failure stays in the dialog next to the action that caused it.
               disconnect.mutate(p.providerId, {
-                onSettled: () => {
+                onSuccess: () => {
                   setConfirmRemove(false);
                   setOutcome(null);
                 },
@@ -208,7 +233,11 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
                 Remove key
               </Button>
             }
-          />
+          >
+            {disconnect.error === null ? null : (
+              <ErrorView live="assertive" error={toViewError(disconnect.error)} onAction={onErrorAction} />
+            )}
+          </ConfirmDialog>
         </div>
       ) : null}
       {showForm ? (
@@ -277,10 +306,7 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
         </div>
       ) : null}
       {connect.error === null ? null : (
-        <ErrorView error={toViewError(connect.error)} onAction={onErrorAction} />
-      )}
-      {disconnect.error === null ? null : (
-        <ErrorView error={toViewError(disconnect.error)} onAction={onErrorAction} />
+        <ErrorView live="assertive" error={toViewError(connect.error)} onAction={onErrorAction} />
       )}
       {outcome === null ? null : (
         <TestOutcomeView

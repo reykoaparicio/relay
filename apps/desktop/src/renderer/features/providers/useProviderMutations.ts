@@ -25,7 +25,7 @@ export interface ConnectOutcome {
 }
 
 /** Runs `providers.test` and folds every answer (including a failed call) into a {@link TestOutcome}. */
-export async function runProviderTest(providerId: ProviderId): Promise<TestOutcome> {
+async function runProviderTest(providerId: ProviderId): Promise<TestOutcome> {
   try {
     const result = await call('relay/v1/providers.test', { providerId });
     return result.ok ? { kind: 'passed', result } : { kind: 'failed', result, error: null };

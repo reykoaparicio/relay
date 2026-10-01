@@ -328,7 +328,7 @@ describe('WorkflowEditorPage (J10)', () => {
     await user.clear(tokens);
     await user.type(tokens, '7000');
     await user.click(screen.getByRole('button', { name: 'Save draft' }));
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
     expect(tokens).toHaveValue(7000);

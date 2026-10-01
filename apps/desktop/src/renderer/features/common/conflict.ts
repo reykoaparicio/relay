@@ -100,12 +100,6 @@ export function isStaleConflict(e: unknown): boolean {
   return c !== null && c.stale;
 }
 
-/** True for a memory CONFLICT with another approved record (`memory_conflict` / `memory_superseded`). */
-export function isMemoryConflict(e: unknown): boolean {
-  const c = conflictCopy(e);
-  return c !== null && (c.kind === 'memory_conflict' || c.kind === 'memory_superseded');
-}
-
 const STALE_REASONS: ReadonlySet<string> = new Set(['draft_changed', 'draft_exists']);
 
 const OTHER_COPY: Readonly<Record<string, { readonly title: string; readonly message: string }>> = {

@@ -8,7 +8,10 @@ export interface Breadcrumb {
 export interface PageHeaderProps {
   readonly title: ReactNode;
   readonly breadcrumbs?: readonly Breadcrumb[];
-  /** Live status (e.g. a StatusBadge); announced politely when it changes. */
+  /**
+   * Current status (e.g. a StatusBadge). Not a live region: run status changes are announced once by `useRunEvents`
+   * through the app live region.
+   */
   readonly status?: ReactNode;
   readonly actions?: ReactNode;
 }
@@ -34,7 +37,7 @@ export function PageHeader({ title, breadcrumbs = [], status, actions }: PageHea
         ) : null}
         <h1>{title}</h1>
         {status === undefined ? null : (
-          <div className="status-line" role="status" aria-live="polite">
+          <div className="status-line">
             {status}
           </div>
         )}

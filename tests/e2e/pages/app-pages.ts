@@ -244,7 +244,7 @@ export class Settings {
 
   /** "Acts on project …" note shown when Settings fell back to the active project (no `?project=`). */
   fallbackProjectNote(): Locator {
-    return this.page.getByRole('status').filter({ hasText: /^Acts on project “/ });
+    return this.page.getByRole('main').locator('.banner').filter({ hasText: /^Acts on project “/ });
   }
 
   // ---- Projects ----------------------------------------------------------------------------------------------------

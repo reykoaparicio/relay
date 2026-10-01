@@ -17,6 +17,7 @@ import {
   Hash,
   InlineAlert,
   PageHeader,
+  ServerChangesNotice,
   Skeleton,
   useToast,
 } from '../components/ui';
@@ -34,6 +35,7 @@ import { buildPatch, changedFields, initialForm, issueTarget, rebaseForm } from 
 import type { WorkflowForm } from '../features/workflow-editor/workflow-form';
 import { useIdempotentMutation } from '../hooks/useIdempotentMutation';
 import { useNavPerf } from '../hooks/useNavPerf';
+import { useRebasableForm } from '../hooks/useRebasableForm';
 import { useProfiles } from '../hooks/useProfiles';
 import { useWorkflow, useWorkflows } from '../hooks/useWorkflow';
 
@@ -104,8 +106,17 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
    * The version the user started editing. The patch is the form diffed against this base (never against a version
    * saved elsewhere since), and a save expects the base's draft revision; re-basing onto a newer version is explicit.
    */
-  const [base, setBase] = useState(view);
-  const [form, setForm] = useState<WorkflowForm>(() => initialForm(view));
+  const editing = useRebasableForm<WorkflowVersionView, WorkflowForm>({
+    server: view,
+    valuesOf: initialForm,
+    isNewer: (server, b) => viewKeyOf(server) !== viewKeyOf(b),
+    isDirty: (values, _baseValues, b) => {
+      const built = buildPatch(b, values);
+      return built.patch !== null || Object.keys(built.errors).length > 0;
+    },
+    merge: rebaseForm,
+  });
+  const { base, values: form, setValues: setForm, dirty, serverAhead, baseValues: baseForm } = editing;
   const [selected, setSelected] = useState<string>(() => view.spec.steps.find((s) => s.kind === 'model')?.id ?? view.spec.steps[0]?.id ?? '');
   const [showPrompt, setShowPrompt] = useState(false);
   const pendingFocus = useRef<string | null>(null);
@@ -114,21 +125,11 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
   const [published, setPublished] = useState<{ readonly view: WorkflowVersionView; readonly warnings: readonly CapabilityWarning[] } | null>(null);
 
   const { patch, errors: localErrors } = buildPatch(base, form);
-  const dirty = patch !== null || Object.keys(localErrors).length > 0;
-  const baseKey = viewKeyOf(base);
   // A newer version (saved elsewhere, or published) replaces an untouched form; edits are never discarded.
-  if (baseKey !== viewKey && !dirty) {
-    setBase(view);
-    setForm(initialForm(view));
-  }
-  /** The loaded version is newer than the one the user is editing (and the user has edits). */
-  const serverAhead = baseKey !== viewKey && dirty;
-  const baseForm = initialForm(base);
-  const changedElsewhere = serverAhead ? changedFields(view, initialForm(view), baseForm) : [];
+  const changedElsewhere = serverAhead ? changedFields(view, editing.serverValues, baseForm) : [];
   const changedByMe = serverAhead ? changedFields(view, form, baseForm) : [];
   const rebase = () => {
-    setForm(rebaseForm(baseForm, form, initialForm(view)));
-    setBase(view);
+    editing.rebase();
     setTriedSave(false);
   };
 
@@ -148,7 +149,7 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
       queryClient.setQueryData(qk.workflow(summary.id, 'draft'), saved);
       void queryClient.invalidateQueries({ queryKey: qk.workflows() });
       // The form holds the saved values: the saved draft is the new base.
-      setBase(saved);
+      editing.markSaved(saved);
       setTriedSave(false);
     },
     onError: (e) => {
@@ -297,16 +298,11 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
         <p>Active runs keep the version they snapshotted. Saving creates a draft revision; publishing makes a validated version for new runs.</p>
       </InlineAlert>
       {serverAhead ? (
-        <InlineAlert
-          tone="warning"
+        <ServerChangesNotice
           title={`The draft changed in another session (now ${view.status === 'draft' ? `draft revision ${String(view.draftRevision ?? 0)}` : `version ${String(view.version)}`})`}
-          actions={
-            <Button size="sm" variant="primary" onClick={rebase}>
-              {`Apply my edits on top of ${view.status === 'draft' ? `draft revision ${String(view.draftRevision ?? 0)}` : `version ${String(view.version)}`}`}
-            </Button>
-          }
+          keepLabel={`Apply my edits on top of ${view.status === 'draft' ? `draft revision ${String(view.draftRevision ?? 0)}` : `version ${String(view.version)}`}`}
+          onKeep={rebase}
         >
-          <p>Nothing was overwritten. Your edits are kept in the form.</p>
           <div className="grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
             <div className="stack" style={{ gap: 4 }}>
               <span className="section-label">Changed in the other session</span>
@@ -333,11 +329,12 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
             </div>
           </div>
           <p className="subtle">Applying keeps your changes and takes every other field from the newer version. Then save again.</p>
-        </InlineAlert>
+        </ServerChangesNotice>
       ) : null}
       {published !== null ? (
         <InlineAlert
           tone={published.warnings.length === 0 ? 'success' : 'warning'}
+          live="polite"
           title={`v${String(published.view.version)} validated — new runs will snapshot v${String(published.view.version)}; active runs keep their version.`}
           actions={
             <ButtonLink as={Link} size="sm" to={paths.newRun(projectId)}>
@@ -401,6 +398,7 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
         view.status === 'draft' ? (
           <InlineAlert
             tone="success"
+            live="polite"
             title={`Draft revision ${String(view.draftRevision ?? 0)} is valid`}
             actions={
               <Button
@@ -429,7 +427,7 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
             ) : null}
           </InlineAlert>
         ) : (
-          <InlineAlert tone="success" title={`Version ${String(view.version)} is valid`}>
+          <InlineAlert tone="success" live="polite" title={`Version ${String(view.version)} is valid`}>
             <p>There is no draft to publish. Edit a field and save to start a new draft.</p>
           </InlineAlert>
         )

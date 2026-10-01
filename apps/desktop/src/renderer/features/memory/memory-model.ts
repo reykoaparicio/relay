@@ -42,6 +42,11 @@ export function scopeText(scope: MemoryRecordScope): string {
 /** Scope picker values: every role, or exactly one role. */
 export type ScopeChoice = 'all' | Role;
 
+/** The typed option whose value is `v` (a native select reports a plain string), or undefined. */
+export function optionValue<T extends string>(options: ReadonlyArray<{ readonly value: T }>, v: string): T | undefined {
+  return options.find((o) => o.value === v)?.value;
+}
+
 export const SCOPE_CHOICES: ReadonlyArray<{ readonly value: ScopeChoice; readonly label: string }> = [
   { value: 'all', label: 'This project / All workflow roles' },
   ...ROLES.map((r) => ({ value: r, label: `This project / ${ROLE_LABELS[r]} only` })),
@@ -74,35 +79,6 @@ export function rolesOfScope(scope: MemoryRecordScope): Set<Role> {
  */
 export function isReviewDue(record: Pick<MemoryRecordView, 'reviewAt' | 'updatedAt'>, now: number): boolean {
   return record.reviewAt !== null && record.reviewAt <= now && record.updatedAt < record.reviewAt;
-}
-
-/** True when the record needs a "still accurate?" decision: a changed source or a due review. */
-export function needsReview(record: Pick<MemoryRecordView, 'reviewAt' | 'updatedAt' | 'stale'>, now: number): boolean {
-  return record.stale || isReviewDue(record, now);
-}
-
-const pad = (n: number) => String(n).padStart(2, '0');
-
-/** Local calendar date `YYYY-MM-DD` (the `<input type="date">` value). */
-export function dateInputValue(epochMs: number | null): string {
-  if (epochMs === null) return '';
-  const d = new Date(epochMs);
-  return `${String(d.getFullYear())}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/** `YYYY-MM-DD` → local noon of that day (epoch ms), '' → null, anything else → undefined (invalid). */
-export function parseDateInput(text: string): number | null | undefined {
-  const t = text.trim();
-  if (t === '') return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
-  if (m === null) return undefined;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
-  return Number.isNaN(d.getTime()) || d.getDate() !== Number(m[3]) ? undefined : d.getTime();
-}
-
-/** "Sep 27, 2026" (locale date only). */
-export function formatDate(epochMs: number): string {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(epochMs));
 }
 
 /** "you" / "run 0023": the author of a revision or event. */

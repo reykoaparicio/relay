@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Navigate, useNavigate, useParams } from 'react-router';
-import { Button, ErrorView, PageHeader, Stepper, useLiveRegion } from '../components/ui';
+import { Button, ErrorView, PageHeader, Stepper } from '../components/ui';
 import { call } from '../api/client';
 import { toViewError } from '../api/errors';
 import { qk } from '../api/keys';
@@ -66,28 +66,23 @@ function SkipSetup() {
       >
         Skip setup
       </Button>
-      {skip.error === null ? null : <ErrorView error={toViewError(skip.error)} onAction={onSkipErrorAction} />}
+      {skip.error === null ? null : <ErrorView live="assertive" error={toViewError(skip.error)} onAction={onSkipErrorAction} />}
     </div>
   );
 }
 
 /**
- * On a step change (not the first render), focus moves to the new step's heading and the live region announces
- * "Step N of 8: <heading>" (keyboard and screen-reader users otherwise stay on a button that no longer exists).
+ * On a step change (not the first render), focus moves to the new step's heading (keyboard and screen-reader users
+ * otherwise stay on a button that no longer exists). Focusing the heading is what reads it out, so the live region
+ * does not announce it again; "Step N of 8" stays visible in the page header.
  */
 function useStepFocus(current: OnboardingStep | null) {
-  const { announce } = useLiveRegion();
   const previous = useRef(current);
   useEffect(() => {
     if (current === null || previous.current === current) return;
     previous.current = current;
-    const heading = document.querySelector<HTMLElement>('[data-step-heading]');
-    heading?.focus();
-    const title = heading?.textContent.trim() ?? '';
-    const n = stepIndex(current) + 1;
-    const label = title === '' ? (ONBOARDING_STEPS[n - 1]?.label ?? '') : title;
-    announce(`Step ${String(n)} of ${String(ONBOARDING_STEPS.length)}: ${label}`);
-  }, [current, announce]);
+    document.querySelector<HTMLElement>('[data-step-heading]')?.focus();
+  }, [current]);
 }
 
 /**

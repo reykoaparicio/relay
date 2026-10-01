@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import type { AppError } from '@relay/contracts';
 import { AppErrorException } from '../../api/client';
-import { conflictCopy, isMemoryConflict, isStaleConflict } from './conflict';
+import { conflictCopy, isStaleConflict } from './conflict';
 import { MutationError } from './MutationError';
 import type { MutationErrorProps } from './MutationError';
 
@@ -29,7 +29,6 @@ describe('conflictCopy', () => {
     const e = conflict({ reason: 'memory_conflict', conflictsWith: ['mem_1'] });
     const c = conflictCopy(e, { recordTitle: (id) => (id === 'mem_1' ? 'Use zod' : undefined) });
     expect(c).toMatchObject({ kind: 'memory_conflict', stale: false, conflictsWith: ['mem_1'], title: 'Conflicts with “Use zod”' });
-    expect(isMemoryConflict(e)).toBe(true);
     expect(isStaleConflict(e)).toBe(false);
   });
 
@@ -76,7 +75,7 @@ describe('MutationError (CONFLICT)', () => {
   });
 
   it('a non-CONFLICT error whose next action is reload drops the button without a handler', () => {
-    const e: AppError = { ...appError('INTERNAL'), nextAction: 'reload' };
+    const e: AppError = { ...errors.internal(undefined), nextAction: 'reload' };
     renderError({ error: new AppErrorException(e) });
     expect(screen.queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument();
   });

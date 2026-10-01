@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { Check, MessageSquareText, ShieldCheck, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalView, PlanV1 } from '@relay/contracts';
 import { RUN_ACTION_LABELS } from '../../../lib/format/actions';
-import { PROVIDER_LABELS } from '../../../lib/format/labels';
+import { APPROVAL_DECISION_LABELS, PROVIDER_LABELS } from '../../../lib/format/labels';
 import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
 import { Field } from '../Field';
@@ -11,6 +11,7 @@ import { Hash } from '../Hash';
 import { InlineAlert } from '../InlineAlert';
 import { Textarea } from '../Textarea';
 import { useFocusRescue } from '../useFocusRescue';
+import { PlanBody } from './PlanBody';
 
 /** approvals.decide input minus the idempotency key (02 B5): the hashes the user saw are echoed back. */
 export interface ApprovalDecisionInput {
@@ -42,18 +43,6 @@ export interface ApprovalCardProps {
 const ALL_DECISIONS: readonly ApprovalDecision[] = ['approved', 'revision_requested', 'rejected'];
 
 const NOTE_MAX = 2000;
-
-const DECISION_LABEL: Readonly<Record<ApprovalDecision, string>> = {
-  approved: 'approved',
-  revision_requested: 'revision requested',
-  rejected: 'rejected',
-};
-
-function sourceRefText(ref: PlanV1['sourceRefs'][number]): string {
-  if (ref.startLine === null) return ref.relPath;
-  const end = ref.endLine !== null && ref.endLine !== ref.startLine ? `–${String(ref.endLine)}` : '';
-  return `${ref.relPath}:${String(ref.startLine)}${end}`;
-}
 
 /** §11.3 bound approval: plan, file scope, providers, and exactly which hashes the approval covers. */
 export function ApprovalCard({
@@ -93,45 +82,7 @@ export function ApprovalCard({
       <div className="card-header">
         <h2 id={headingId} ref={headingRef} tabIndex={-1}>Proposed plan</h2>
       </div>
-      <p>{plan.goalRestatement}</p>
-      <ol className="list">
-        {plan.steps.map((s) => (
-          <li key={s.n} className="list-item" style={{ cursor: 'default' }}>
-            <span className="title">
-              <span className="num">{s.n}.</span> {s.action}
-            </span>
-            <span className="meta">{s.rationale}</span>
-          </li>
-        ))}
-      </ol>
-      <div className="stack">
-        <h3 className="section-label">Files the plan may change</h3>
-        <ul className="chip-list">
-          {approval.fileScope.map((f) => (
-            <li key={f} className="chip mono">{f}</li>
-          ))}
-        </ul>
-      </div>
-      {plan.sourceRefs.length > 0 ? (
-        <div className="stack">
-          <h3 className="section-label">Sources</h3>
-          <ul className="chip-list">
-            {plan.sourceRefs.map((r) => (
-              <li key={sourceRefText(r)} className="chip mono">{sourceRefText(r)}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {plan.risks.length > 0 ? (
-        <div className="stack">
-          <h3 className="section-label">Risks</h3>
-          <ul className="small">
-            {plan.risks.map((r) => (
-              <li key={r}>{r}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+      <PlanBody plan={plan} fileScope={approval.fileScope} />
       <InlineAlert tone="info" title="What this approval covers">
         <p>
           Covers plan hash <Hash value={approval.planHash} label="plan hash" /> and context snapshot{' '}
@@ -145,7 +96,7 @@ export function ApprovalCard({
       {recorded !== null ? (
         <p className="row">
           <ShieldCheck aria-hidden="true" width={16} height={16} />
-          Decision recorded: {DECISION_LABEL[recorded]}
+          Decision recorded: {APPROVAL_DECISION_LABELS[recorded]}
         </p>
       ) : (
         <>

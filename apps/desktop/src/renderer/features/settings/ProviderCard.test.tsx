@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import { renderApp } from '../testing/render-app';
 
 describe('ProviderCard error actions', () => {
@@ -13,12 +13,49 @@ describe('ProviderCard error actions', () => {
 
     await user.click(within(anthropic).getByRole('button', { name: 'Test connection' }));
     const action = await within(anthropic).findByRole('button', { name: 'Increase allowance' });
-    expect(action.closest('[role="alert"]')).toHaveTextContent('Error code BUDGET_BLOCKED');
+    expect(action.closest('.banner')).toHaveTextContent('Error code BUDGET_BLOCKED');
     expect(router.state.location.pathname).toBe('/settings/providers');
     await user.click(action);
 
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/settings/data');
     });
+  });
+});
+
+describe('ProviderCard Remove key (A11Y-02)', () => {
+  it('on success closes the dialog and moves focus to the provider heading, not <body>', async () => {
+    const user = userEvent.setup();
+    renderApp('/settings/providers', { scenario: 'awaiting-approval' });
+    const anthropic = await screen.findByRole('region', { name: 'Anthropic' });
+
+    await user.click(within(anthropic).getByRole('button', { name: 'Remove key' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove the Anthropic key?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Remove key' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(within(anthropic).queryByRole('button', { name: 'Remove key' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(anthropic).getByRole('heading', { name: 'Anthropic' }));
+    });
+  });
+
+  it('on failure keeps the dialog open with the error inside it', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp('/settings/providers', { scenario: 'awaiting-approval' });
+    const anthropic = await screen.findByRole('region', { name: 'Anthropic' });
+    bridge.failNext('relay/v1/providers.disconnect', errors.internal(undefined));
+
+    await user.click(within(anthropic).getByRole('button', { name: 'Remove key' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remove the Anthropic key?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Remove key' }));
+
+    expect(await within(dialog).findByText(/Error code/)).toHaveTextContent('INTERNAL');
+    expect(screen.getByRole('dialog', { name: 'Remove the Anthropic key?' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Remove key' })).toBeEnabled();
   });
 });

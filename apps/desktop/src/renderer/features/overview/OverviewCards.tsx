@@ -22,7 +22,7 @@ import {
   StatusBadge,
   StatTile,
 } from '../../components/ui';
-import { stepKeyLabel } from '../../lib/format';
+import { formatMonth, stepKeyLabel } from '../../lib/format';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
@@ -39,10 +39,6 @@ function SafeNote() {
       No project files have been modified.
     </p>
   );
-}
-
-function monthName(now: number): string {
-  return new Date(now).toLocaleString('en-US', { month: 'long' });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -72,7 +68,7 @@ export function OverviewStats({ project, activeCount, activeCapped = false, acti
       />
       <StatTile
         label="Usage tracked by Relay"
-        labelAside={monthName(now)}
+        labelAside={formatMonth(now)}
         value={tracked === undefined ? '…' : <Money value={tracked.trackedMicrousd} />}
         hint={
           <>
@@ -258,7 +254,7 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
         <SafeNote />
       </div>
       {actions.error === null ? null : (
-        <ErrorView error={toViewError(actions.error)} onAction={actions.clearError} />
+        <ErrorView live="assertive" error={toViewError(actions.error)} onAction={actions.clearError} />
       )}
       <div className="row">
         <ButtonLink as={Link} variant="primary" to={paths.run(projectId, run.id, current === undefined ? {} : { step: current.id })}>
@@ -296,7 +292,7 @@ export function RecoveryAttention({ projectId, run }: { readonly projectId: stri
   return (
     <div className="stack">
       <RecoveryPanel run={run} onDecide={onDecide} pendingAction={actions.pending} />
-      {actions.error === null ? null : <ErrorView error={toViewError(actions.error)} onAction={actions.clearError} />}
+      {actions.error === null ? null : <ErrorView live="assertive" error={toViewError(actions.error)} onAction={actions.clearError} />}
       <SafeNote />
     </div>
   );
@@ -337,7 +333,7 @@ export function StartCard({ project, templateVersion }: { readonly project: Proj
             </Button>
           </div>
           {sample.error === undefined || sample.error === null ? null : (
-            <ErrorView error={toViewError(sample.error)} onAction={() => { sample.mutate({}); }} />
+            <ErrorView live="assertive" error={toViewError(sample.error)} onAction={() => { sample.mutate({}); }} />
           )}
         </div>
         <div className="stack rounded-md border border-border bg-surface-raised p-4">

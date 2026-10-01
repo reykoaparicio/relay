@@ -70,7 +70,7 @@ export function latestRowOf(steps: readonly StepView[], stepKey: string): StepVi
 // Events of one step row
 
 /** The step rows an event names: `payload.stepRunId`, `payload.stepRunIds[]` (revision events), or legacy `stepId`. */
-export function eventStepRunIds(e: RunEvent): readonly string[] | null {
+function eventStepRunIds(e: RunEvent): readonly string[] | null {
   const p = e.payload;
   const ids: string[] = [];
   if (typeof p['stepRunId'] === 'string') ids.push(p['stepRunId']);
@@ -128,7 +128,7 @@ export function incompleteCauseOf(run: Pick<RunDetail, 'statusDetail'>): Incompl
 }
 
 /** "n of m" revision cycles for the revision-limit case: from the detail when present, else the run. */
-export function revisionCounts(run: Pick<RunDetail, 'statusDetail' | 'revisionCycle' | 'limits'>): { readonly used: number; readonly max: number } {
+function revisionCounts(run: Pick<RunDetail, 'statusDetail' | 'revisionCycle' | 'limits'>): { readonly used: number; readonly max: number } {
   return {
     used: numberDetail(run.statusDetail, 'revisionCycle') ?? run.revisionCycle,
     max: numberDetail(run.statusDetail, 'maxRevisionCycles') ?? run.limits.maxRevisionCycles,

@@ -189,7 +189,7 @@ export function AddRuleStep({ state, dispatch, go }: StepProps) {
         )}
       </Field>
       {save.error === null || save.error === undefined ? null : (
-        <ErrorView error={toViewError(save.error)} onAction={onSaveErrorAction} />
+        <ErrorView live="assertive" error={toViewError(save.error)} onAction={onSaveErrorAction} />
       )}
     </StepFrame>
   );

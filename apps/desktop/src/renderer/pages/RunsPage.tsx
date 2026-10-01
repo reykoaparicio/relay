@@ -57,7 +57,7 @@ function isAccruing(r: RunSummary): boolean {
 }
 
 /** Wall time of a finished run, or elapsed time of one in progress. Paused/interrupted runs show "—" (not accruing). */
-export function durationOf(r: RunSummary, now: number): string {
+function durationOf(r: RunSummary, now: number): string {
   if (r.startedAt === null) return '—';
   if (r.endedAt !== null) return formatDuration(r.endedAt - r.startedAt);
   return r.status === 'running' || r.status === 'cancelling' ? formatDuration(now - r.startedAt) : '—';

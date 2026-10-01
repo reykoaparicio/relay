@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { CostSummary } from '@relay/contracts';
 import { Money } from '../Money';
 import { stepKeyLabel } from '../../../lib/format/labels';
@@ -15,7 +16,7 @@ export interface BudgetLedgerProps {
 }
 
 /** Tracked usage by certainty (FR-09) plus allowance and remaining. "Tracked by Relay" (§9.1). */
-export function BudgetLedger({ cost, byStep, caption = 'Run usage' }: BudgetLedgerProps) {
+function BudgetLedgerView({ cost, byStep, caption = 'Run usage' }: BudgetLedgerProps) {
   return (
     <div className="stack">
       <table className="ledger">
@@ -93,3 +94,6 @@ export function BudgetLedger({ cost, byStep, caption = 'Run usage' }: BudgetLedg
     </div>
   );
 }
+
+/** Memoized (PERF-02): re-renders only when its props change, not on every parent tick. */
+export const BudgetLedger = memo(BudgetLedgerView);

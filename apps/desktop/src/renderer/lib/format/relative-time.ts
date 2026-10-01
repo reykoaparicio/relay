@@ -27,7 +27,20 @@ export function formatRelativeTime(epochMs: number, now: number): string {
 
 /** Absolute local time with the user's locale and timezone (00b §4: stored as UTC epoch ms). */
 export function formatAbsoluteTime(epochMs: number, locale?: string): string {
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(epochMs));
+  return absoluteFormatter(locale).format(new Date(epochMs));
+}
+
+// Intl formatters are expensive to build; lists render many timestamps per frame. Keyed by locale ('' = default).
+const ABSOLUTE_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function absoluteFormatter(locale: string | undefined): Intl.DateTimeFormat {
+  const key = locale ?? '';
+  let f = ABSOLUTE_FORMATTERS.get(key);
+  if (f === undefined) {
+    f = new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' });
+    ABSOLUTE_FORMATTERS.set(key, f);
+  }
+  return f;
 }
 
 /** ISO string for `<time dateTime>`. */

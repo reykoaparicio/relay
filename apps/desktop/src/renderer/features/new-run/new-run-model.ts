@@ -1,12 +1,15 @@
 // New-run form model (10 J7): controlled state, client validation bounded by RUN_LIMIT_MAXIMUMS, the mapping of
 // server issue paths to field ids (error summary anchors), and the RunStartInput builder.
+import type { ReactNode } from 'react';
 import { budgetBreakdownSchema, DEFAULT_LIMITS } from '@relay/contracts';
-import type { AppError, BudgetBreakdown, InputOf, Microusd, WorkflowLimits } from '@relay/contracts';
+import type { AppError, BudgetBreakdown, InputOf, Microusd, ProfileWithWarnings, RunPreflight, WorkflowLimits } from '@relay/contracts';
 import { isAppErrorException } from '../../api/client';
+import { toViewError, validationIssuesOf } from '../../api/errors';
 import type { FormProblem } from '../common/ErrorSummary';
 import { checkAllowance, checkWhole, dollarsText, LIMIT_BOUNDS } from '../run-setup/limits';
-import { profileOverridesFor } from '../run-setup/model-steps';
+import { profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
 import type { ModelStepRow } from '../run-setup/model-steps';
+import { issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
 
 export type InputSource = 'files' | 'diff';
 
@@ -268,4 +271,176 @@ export function problemsFromError(
         ? inputField(source)
         : null;
   return [{ fieldId, message: error.userMessage, code: error.code }];
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Derived page state (SPLIT-01): everything the new-run page shows about problems, budget and readiness, as a pure
+// function of the form, the preflight query and the last start error.
+
+/** The parts of the `runs.preflight` query the page state depends on. */
+export interface PreflightSnapshot {
+  readonly data: RunPreflight | undefined;
+  readonly error: unknown;
+  readonly isFetching: boolean;
+  readonly isPlaceholderData: boolean;
+  readonly isSuccess: boolean;
+}
+
+export interface NewRunStateInput {
+  readonly form: NewRunForm;
+  readonly rows: readonly ModelStepRow[];
+  readonly check: ClientCheck;
+  readonly profiles: readonly ProfileWithWarnings[] | undefined;
+  readonly goal: string;
+  /** `canonicalJson` of the input the preflight checks (placeholder goal while none is typed), or null. */
+  readonly draftKey: string | null;
+  /** The debounced `draftKey` the preflight query ran for ('' = none yet). */
+  readonly settledKey: string;
+  /** `canonicalJson` of the input Start would send, or null while the form cannot produce one. */
+  readonly submitKey: string | null;
+  readonly preflight: PreflightSnapshot;
+  /** The last `runs.start` error, and the key of the input it failed for. */
+  readonly startError: unknown;
+  readonly failedKey: string | null;
+  /** The action shown next to a missing-credential problem (a link to Settings → Providers). */
+  readonly connectProviderAction?: ReactNode;
+}
+
+/** Which sentence the page header shows. */
+export type NewRunStatus = 'system_error' | 'budget' | 'problems' | 'ready' | 'checking' | null;
+
+export interface NewRunState {
+  readonly budget: BudgetBreakdown | null;
+  /** Client and server problems, deduplicated, each anchored to a rendered field or to none. */
+  readonly problems: readonly FormProblem[];
+  readonly fieldErrors: Readonly<Record<string, string>>;
+  /** step key → message, for the profile table. */
+  readonly profileErrors: Readonly<Record<string, string>>;
+  /** A preflight failure that is not about the form (runner down, internal, conflict): an ErrorView. */
+  readonly preflightSystemError: unknown;
+  /** A start failure that is neither a form problem nor a budget block. */
+  readonly otherStartError: unknown;
+  /** A fresh, clean preflight of exactly the submitted input. */
+  readonly checked: boolean;
+  /** The debounced check has not caught up with the form yet. */
+  readonly checking: boolean;
+  readonly allPassed: boolean;
+  readonly status: NewRunStatus;
+  readonly startDisabled: boolean;
+  readonly startDisabledReason: string | null;
+}
+
+/** System errors (runner down, internal, conflict) are not form problems: they render as an ErrorView. */
+function isSystemError(e: unknown): boolean {
+  const code = toViewError(e).code;
+  return code === 'INTERNAL' || code === 'CONFLICT' || code === 'RUNNER_UNAVAILABLE';
+}
+
+function preflightProblems(input: NewRunStateInput, budgetShown: boolean): FormProblem[] {
+  const { preflight, rows, form, profiles, connectProviderAction } = input;
+  const pf = preflight.data;
+  if (pf === undefined || preflight.error !== null) return [];
+  // budget_run / budget_project restate `budget.allowed = false`: the budget card already shows that block.
+  return problemIssues(pf.issues, budgetShown).map((i) => {
+    const stepKey = stepKeyOfPath(i.path);
+    const row = stepKey === null ? undefined : rows.find((r) => r.stepKey === stepKey);
+    const providerId = stepKey === null ? null : stepProviderId(stepKey, rows, form.profileSelection, profiles);
+    return {
+      fieldId: fieldForPath(i.path, form.source),
+      message: issueMessage(i, providerId, row === undefined ? null : ROLE_LABELS[row.role]),
+      code: i.code,
+      ...(i.code === MISSING_CREDENTIAL && connectProviderAction !== undefined ? { action: connectProviderAction } : {}),
+    };
+  });
+}
+
+/** Summary links must reach a rendered control: a profile issue for a step not in the table has no anchor. */
+function anchorProblems(problems: readonly FormProblem[], form: NewRunForm, rows: readonly ModelStepRow[]): FormProblem[] {
+  const knownFields = new Set<string>([
+    FIELD.goal,
+    form.source === 'files' ? FIELD.files : FIELD.diff,
+    FIELD.allowance,
+    FIELD.revisions,
+    FIELD.attempts,
+    FIELD.timeout,
+    FIELD.memory,
+    ...rows.map((r) => FIELD.profile(r.stepKey)),
+  ]);
+  return problems.map((p) => (p.fieldId !== null && !knownFields.has(p.fieldId) ? { ...p, fieldId: null } : p));
+}
+
+function statusOf(s: Pick<NewRunState, 'preflightSystemError' | 'budget' | 'problems' | 'allPassed' | 'checking'>): NewRunStatus {
+  if (s.preflightSystemError !== null) return 'system_error';
+  if (s.budget !== null) return 'budget';
+  if (s.problems.length > 0) return 'problems';
+  if (s.allPassed) return 'ready';
+  return s.checking ? 'checking' : null;
+}
+
+/** The new-run page state (problems, budget block, readiness, Start) for one render. Pure. */
+export function deriveNewRunState(input: NewRunStateInput): NewRunState {
+  const { form, rows, check, goal, draftKey, settledKey, submitKey, preflight } = input;
+  const pf = preflight.data;
+  const preflightError = preflight.error ?? null;
+  /** The preflight answer belongs to the settled input, and is not a kept-previous placeholder. */
+  const preflightSettled = settledKey !== '' && !preflight.isFetching && !preflight.isPlaceholderData;
+  /** A settled preflight for exactly the input Start would send (B3: never start unpreflighted inputs). */
+  const freshPreflight = preflightSettled && submitKey === settledKey && preflight.isSuccess ? pf : undefined;
+  // The start error belongs to the input that failed; once the form changes, it no longer applies.
+  const startError =
+    input.startError === null || input.startError === undefined || submitKey === null || input.failedKey !== submitKey
+      ? null
+      : input.startError;
+  const budget =
+    (startError === null ? null : budgetFromError(startError)) ??
+    (pf !== undefined && !pf.budget.allowed ? pf.budget : null) ??
+    budgetFromError(preflightError);
+
+  const server = preflightProblems(input, budget !== null);
+  for (const e of [preflightError, startError]) {
+    if (e === null || budgetFromError(e) !== null || isSystemError(e)) continue;
+    server.push(...problemsFromError(toViewError(e), validationIssuesOf(e), form.source));
+  }
+  const serverProblems = anchorProblems(server, form, rows);
+  const preflightSystemError =
+    preflightError !== null && budgetFromError(preflightError) === null && isSystemError(preflightError) ? preflightError : null;
+  const problems = [...check.problems, ...serverProblems].filter(
+    (p, i, all) => all.findIndex((q) => q.fieldId === p.fieldId && q.message === p.message) === i,
+  );
+  const fieldErrors: Record<string, string> = { ...check.fieldErrors };
+  for (const p of serverProblems) if (p.fieldId !== null && fieldErrors[p.fieldId] === undefined) fieldErrors[p.fieldId] = p.message;
+  const profileErrors: Record<string, string> = {};
+  for (const r of rows) {
+    const msg = fieldErrors[FIELD.profile(r.stepKey)];
+    if (msg !== undefined) profileErrors[r.stepKey] = msg;
+  }
+  const otherStartError = startError !== null && serverProblems.length === 0 && budgetFromError(startError) === null ? startError : null;
+
+  const checked = freshPreflight !== undefined && freshPreflight.issues.length === 0 && freshPreflight.budget.allowed;
+  const checking =
+    draftKey !== null &&
+    (settledKey !== draftKey || !preflightSettled) &&
+    preflightSystemError === null &&
+    budget === null &&
+    problems.length === 0;
+  const draftClean = !checking && draftKey !== null && preflight.isSuccess && pf !== undefined && pf.issues.length === 0 && pf.budget.allowed;
+  // With no goal yet the check uses a placeholder goal; Start then only reveals what is missing.
+  const allPassed = submitKey === null ? goal === '' && draftClean : checked;
+
+  const blocked = budget !== null;
+  const startDisabledReason = blocked
+    ? `Blocked by the ${budget.scope === 'project' ? 'monthly' : 'run'} allowance. Choose an option above.`
+    : preflightSystemError !== null
+      ? 'The run check failed. Retry it in Input summary.'
+      : submitKey !== null && !checked && problems.length === 0
+        ? 'Checking…'
+        : null;
+  const base = { budget, problems, fieldErrors, profileErrors, preflightSystemError, otherStartError, checked, checking, allPassed };
+  return {
+    ...base,
+    status: statusOf(base),
+    // Disabled while blocked, checking, or with problems; with no input yet a submit shows what is missing.
+    startDisabled: blocked || preflightSystemError !== null || (submitKey !== null && !checked),
+    startDisabledReason,
+  };
 }

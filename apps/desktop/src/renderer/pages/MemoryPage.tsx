@@ -1,31 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 import { BookOpenCheck, Inbox, Plus } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
 import {
   Button,
   ButtonLink,
-  ConfirmDialog,
   EmptyState,
   ErrorView,
   InlineAlert,
-  MemoryRecordCard,
   PageHeader,
   Skeleton,
   Tabs,
   useToast,
 } from '../components/ui';
 import { toViewError } from '../api/errors';
-import { MutationError } from '../features/common/MutationError';
 import { useRetryAction } from '../features/common/useNextAction';
 import { AddRuleDialog } from '../features/memory/AddRuleDialog';
 import { ConflictResolver } from '../features/memory/ConflictResolver';
+import { MemoryDeleteDialog } from '../features/memory/MemoryDeleteDialog';
+import type { DeleteTarget } from '../features/memory/MemoryDeleteDialog';
 import { MemoryDetail } from '../features/memory/MemoryDetail';
 import { MemoryEditForm } from '../features/memory/MemoryEditForm';
-import { SuggestionCard } from '../features/memory/SuggestionCard';
+import { MemoryList } from '../features/memory/MemoryList';
+import { SuggestionQueue } from '../features/memory/SuggestionQueue';
 import { conflictPairs, MEMORY_TAB_LABELS, MEMORY_TABS, parseMemoryTab } from '../features/memory/memory-model';
 import { useMemoryMutations } from '../features/memory/useMemoryMutations';
+import { useMemorySelection } from '../features/memory/useMemorySelection';
 import { paths } from '../features/shell/paths';
 import type { MemoryTab } from '../features/shell/paths';
 import { useMemoryList } from '../hooks/useMemoryList';
@@ -65,21 +66,23 @@ const EMPTY: Readonly<Record<MemoryTab, { readonly title: string; readonly body:
  */
 export function MemoryPage() {
   const { projectId = '' } = useParams();
-  const [search, setSearch] = useSearchParams();
-  const tab = parseMemoryTab(search.get('tab'));
-  const recordParam = search.get('record');
+  const { tab, recordParam, select } = useMemorySelection();
   const toast = useToast();
   const project = useProject(projectId);
   const approvedQ = useMemoryList(projectId, 'approved');
   const suggestedQ = useMemoryList(projectId, 'suggested');
-  const archivedQ = useMemoryList(projectId, 'archived');
+  const mutations = useMemoryMutations(projectId);
+  // PERF-05: the archived list is fetched once it is needed: its tab was opened, or something was archived here (its
+  // count then changes in front of the user). Until then its tab shows no count.
+  const [archivedSeen, setArchivedSeen] = useState(tab === 'archived');
+  if (tab === 'archived' && !archivedSeen) setArchivedSeen(true);
+  const archivedQ = useMemoryList(projectId, 'archived', { enabled: archivedSeen || mutations.archive.isSuccess });
   const lists = { approved: approvedQ, suggested: suggestedQ, archived: archivedQ } as const;
   const current = lists[tab];
-  const mutations = useMemoryMutations(projectId);
   const now = useNow(NOW_IDLE_INTERVAL_MS);
   const [addOpen, setAddOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ readonly id: string; readonly title: string; readonly usedByRuns: number; readonly approved: boolean } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [conflict, setConflict] = useState<ConflictTarget | null>(null);
   const [command, setCommand] = useState<DetailCommand | null>(null);
   const detailHeading = useRef<HTMLHeadingElement>(null);
@@ -105,22 +108,6 @@ export function MemoryPage() {
     void current.refetch();
     void detail.refetch();
   };
-
-  const select = useCallback(
-    (next: { readonly tab?: MemoryTab; readonly record?: string | null }) => {
-      setSearch(
-        (prev) => {
-          const p = new URLSearchParams(prev);
-          if (next.tab !== undefined) p.set('tab', next.tab);
-          if (next.record === null) p.delete('record');
-          else if (next.record !== undefined) p.set('record', next.record);
-          return p;
-        },
-        { replace: next.tab === undefined },
-      );
-    },
-    [setSearch],
-  );
 
   // Leaving a record (another selection, tab, or deletion) ends its edit.
   if (editingId !== null && selected !== undefined && editingId !== selected.id) setEditingId(null);
@@ -210,56 +197,35 @@ export function MemoryPage() {
     }
     if (t === 'suggested') {
       return (
-        <div className="stack">
-          <div className="stack" style={{ gap: 4 }}>
-            <h2>{`Review queue: ${String(q.data.length)} suggestion${q.data.length === 1 ? '' : 's'}`}</h2>
-            <p className="muted">
-              Approving creates a durable record included in future runs within its scope. Rejected suggestions are kept
-              in run history only.
-            </p>
-          </div>
-          {q.data.map((s) => (
-            <SuggestionCard
-              key={s.id}
-              projectId={projectId}
-              suggestion={s}
-              titleOf={titleOf}
-              mutations={mutations}
-              onCombine={(id, withId) => {
-                const suggestion = q.data.find((r) => r.id === id);
-                const first =
-                  (withId === undefined ? undefined : approvedList.find((r) => r.id === withId)) ??
-                  approvedList.find((r) => s.conflictsWith.includes(r.id)) ??
-                  approvedList[0];
-                if (suggestion === undefined) return;
-                if (first === undefined) {
-                  toast.show({ key: 'memory:combine-none', title: 'No approved record to combine with', tone: 'info' });
-                  return;
-                }
-                openConflict(suggestion, first, true);
-              }}
-            />
-          ))}
-        </div>
+        <SuggestionQueue
+          projectId={projectId}
+          suggestions={q.data}
+          titleOf={titleOf}
+          mutations={mutations}
+          onCombine={(suggestion, withId) => {
+            const first =
+              (withId === undefined ? undefined : approvedList.find((r) => r.id === withId)) ??
+              approvedList.find((r) => suggestion.conflictsWith.includes(r.id)) ??
+              approvedList[0];
+            if (first === undefined) {
+              toast.show({ key: 'memory:combine-none', title: 'No approved record to combine with', tone: 'info' });
+              return;
+            }
+            openConflict(suggestion, first, true);
+          }}
+        />
       );
     }
     return (
       <div className="grid grid-cols-[minmax(240px,1fr)_minmax(0,1.6fr)] items-start gap-5 max-[1024px]:grid-cols-1">
-        <section className="card stack" aria-label={`${MEMORY_TAB_LABELS[t]} records`}>
-          <ul className="list" aria-label={`${MEMORY_TAB_LABELS[t]} records`}>
-            {q.data.map((r) => (
-              <li key={r.id}>
-                <MemoryRecordCard
-                  record={r}
-                  selected={r.id === selected?.id}
-                  onSelect={(id) => {
-                    select({ record: id });
-                  }}
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
+        <MemoryList
+          label={`${MEMORY_TAB_LABELS[t]} records`}
+          records={q.data}
+          selectedId={selected?.id}
+          onSelect={(id) => {
+            select({ record: id });
+          }}
+        />
         {selected === undefined ? null : detail.error !== null ? (
           <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} />
         ) : record === undefined ? (
@@ -443,85 +409,20 @@ export function MemoryPage() {
         }}
       />
       {deleteTarget === null ? null : (
-        <ConfirmDialog
-          open
-          onOpenChange={(open) => {
-            if (!open) {
-              setDeleteTarget(null);
-              mutations.remove.reset();
-            }
-          }}
-          title={`Delete “${deleteTarget.title}”?`}
+        <MemoryDeleteDialog
+          target={deleteTarget}
+          projectId={projectId}
+          mutations={mutations}
+          archiveWasLast={command === 'archive'}
           returnFocusFallback={detailHeading}
-          consequences={
-            <div className="stack">
-              <ul className="stack" style={{ margin: 0, paddingLeft: 16, gap: 4 }}>
-                <li>
-                  <strong>Future runs:</strong> the record is removed from retrieval immediately. No new run will
-                  include it.
-                </li>
-                <li>
-                  <strong>Past runs:</strong>{' '}
-                  {deleteTarget.usedByRuns === 0
-                    ? 'no run has used it yet.'
-                    : `snapshots of ${String(deleteTarget.usedByRuns)} run${deleteTarget.usedByRuns === 1 ? '' : 's'} keep their copies, so those runs stay reproducible.`}
-                </li>
-                <li>Its revision history is removed from the Memory page.</li>
-              </ul>
-              <p className="subtle">
-                To keep the record but stop using it, archive it instead. To also remove copies inside run snapshots, use{' '}
-                <Link to={paths.settings('data', { project: projectId })}>Purge project history</Link> in Settings → Storage &amp; data (affects
-                run reports).
-              </p>
-              {deleteTarget.approved ? (
-                <div>
-                  <Button
-                    size="sm"
-                    pending={mutations.archive.isPending}
-                    onClick={() => {
-                      const target = deleteTarget;
-                      setCommand('archive');
-                      mutations.archive.mutate(
-                        { recordId: target.id },
-                        {
-                          onSuccess: () => {
-                            setDeleteTarget(null);
-                            toast.show({ key: `memory:archived:${target.id}`, title: `Archived “${target.title}”`, tone: 'success' });
-                          },
-                        },
-                      );
-                    }}
-                  >
-                    Archive instead
-                  </Button>
-                </div>
-              ) : null}
-              <MutationError error={mutations.remove.error ?? (command === 'archive' ? mutations.archive.error : null)} />
-            </div>
-          }
-          confirmLabel="Delete record from future runs"
-          cancelLabel="Cancel"
-          pending={mutations.remove.isPending}
-          onConfirm={() => {
-            const target = deleteTarget;
-            mutations.remove.mutate(
-              { recordId: target.id, confirm: true },
-              {
-                onSuccess: (res) => {
-                  setDeleteTarget(null);
-                  select({ record: null });
-                  toast.show({
-                    key: `memory:deleted:${target.id}`,
-                    title: `Deleted “${target.title}”`,
-                    body:
-                      res.retainedInRunSnapshots === 0
-                        ? 'No run snapshot used it.'
-                        : `${String(res.retainedInRunSnapshots)} run snapshot${res.retainedInRunSnapshots === 1 ? '' : 's'} keep their copies.`,
-                    tone: 'success',
-                  });
-                },
-              },
-            );
+          onClose={() => {
+            setDeleteTarget(null);
+          }}
+          onArchiveStart={() => {
+            setCommand('archive');
+          }}
+          onDeleted={() => {
+            select({ record: null });
           }}
         />
       )}

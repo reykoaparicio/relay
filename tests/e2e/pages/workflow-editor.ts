@@ -20,7 +20,7 @@ export class WorkflowEditor {
 
   /** Header status badge ("Validated", "Draft, unsaved changes", "Draft valid", …). */
   status(): Locator {
-    return this.page.getByRole('main').locator('header').getByRole('status');
+    return this.page.getByRole('main').locator('header .status-line');
   }
 
   /** Breadcrumb version label ("Version 1", "Draft revision 1 · based on v1"). */

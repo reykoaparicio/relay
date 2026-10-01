@@ -1,9 +1,9 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Check, Combine, Pencil, X } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
-import { Button, ErrorView, Field, Hash, KeyValueList, Select, Skeleton } from '../../components/ui';
+import { Button, ErrorView, Field, Hash, KeyValueList, Select, Skeleton, useFocusRescue } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
@@ -14,7 +14,7 @@ import { runLabel } from '../runs/run-display';
 import { paths } from '../shell/paths';
 import { MemoryEditForm } from './MemoryEditForm';
 import type { MemoryEditResult } from './MemoryEditForm';
-import { choiceFromScope, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
+import { choiceFromScope, optionValue, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
 import type { ScopeChoice } from './memory-model';
 import type { useMemoryMutations } from './useMemoryMutations';
 
@@ -35,6 +35,10 @@ export interface SuggestionCardProps {
 export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCombine }: SuggestionCardProps) {
   const headingId = useId();
   const scopeId = useId();
+  const articleRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  // A decision disables the focused button while pending: keep focus in the card (on its heading), never on <body>.
+  useFocusRescue(articleRef, headingRef);
   const detail = useMemoryRecord(suggestion.id);
   const [scope, setScope] = useState<ScopeChoice>(() => choiceFromScope(suggestion.scope));
   const [editing, setEditing] = useState(false);
@@ -118,9 +122,11 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
   ];
 
   return (
-    <article className="card stack" aria-labelledby={headingId}>
+    <article ref={articleRef} className="card stack" aria-labelledby={headingId}>
       <div className="card-header">
-        <h3 id={headingId}>{suggestion.title}</h3>
+        <h3 id={headingId} ref={headingRef} tabIndex={-1} data-suggestion-heading={suggestion.id}>
+          {suggestion.title}
+        </h3>
         <span className="badge warning">Suggested, not used by runs</span>
       </div>
       {detail.error === null ? null : <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} />}
@@ -163,7 +169,7 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
                 {...control}
                 value={scope}
                 onValueChange={(v) => {
-                  setScope(v as ScopeChoice);
+                  setScope(optionValue(SCOPE_CHOICES, v) ?? scope);
                 }}
                 options={SCOPE_CHOICES}
                 style={{ maxWidth: 340 }}

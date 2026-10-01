@@ -9,7 +9,7 @@ import { call } from '../api/client';
 import { qk } from '../api/keys';
 
 /** §5.7: announce completion, pauses, and approval requests only; never tokens or progress. */
-export const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'awaiting_approval',
   'paused',
   'completed',
@@ -22,17 +22,17 @@ export const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>
 const NON_INVALIDATING: ReadonlySet<RunEventType> = new Set<RunEventType>(['attempt.stream_progress']);
 
 /** Invalidation debounce (10 J2). */
-export const RUN_INVALIDATE_DEBOUNCE_MS = 250;
+const RUN_INVALIDATE_DEBOUNCE_MS = 250;
 
 /** At most this many events are kept (the newest); older ones are counted in `droppedCount`. */
 export const MAX_STORED_EVENTS = 1000;
 
 /** Backfill retry delay: exponential from the base, capped (bounded backoff). */
-export const BACKFILL_RETRY_BASE_MS = 500;
-export const BACKFILL_RETRY_MAX_MS = 10_000;
+const BACKFILL_RETRY_BASE_MS = 500;
+const BACKFILL_RETRY_MAX_MS = 10_000;
 
 /** Delay of the `attempt`-th consecutive retry (0-based). */
-export function backfillRetryDelay(attempt: number): number {
+function backfillRetryDelay(attempt: number): number {
   return Math.min(BACKFILL_RETRY_MAX_MS, BACKFILL_RETRY_BASE_MS * 2 ** Math.min(attempt, 16));
 }
 
@@ -54,17 +54,58 @@ export interface UseRunEventsOptions {
   readonly timers?: RunEventsTimers;
 }
 
+/**
+ * Latest `attempt.stream_progress` per attempt (keyed by `attemptId`, else `step:<stepKey>`), outside React state:
+ * a progress push notifies only its subscribers (the streaming attempt card via `useStreamProgress`), never the page
+ * that owns the stream (PERF-02).
+ */
+export interface StreamProgressStore {
+  readonly runId: string;
+  /** Immutable snapshot; a new map after every progress event. */
+  readonly snapshot: () => ReadonlyMap<string, RunEvent>;
+  readonly subscribe: (listener: () => void) => () => void;
+}
+
+interface WritableProgressStore extends StreamProgressStore {
+  readonly set: (key: string, e: RunEvent) => void;
+}
+
+function createProgressStore(runId: string): WritableProgressStore {
+  let map: ReadonlyMap<string, RunEvent> = new Map();
+  const listeners = new Set<() => void>();
+  return {
+    runId,
+    snapshot: () => map,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set: (key, e) => {
+      const next = new Map(map);
+      next.set(key, e);
+      map = next;
+      for (const l of listeners) l();
+    },
+  };
+}
+
 export interface RunEventsState {
   /**
    * Seq-ordered events, gapless from the first kept one to `lastSeq`: the newest {@link MAX_STORED_EVENTS},
    * never `attempt.stream_progress` (see `progress`).
    */
   readonly events: readonly RunEvent[];
+  /**
+   * Seq of the newest applied event as of the last published change. Progress-only pushes advance the stream
+   * internally without publishing (no page re-render), so this can trail them until the next real event.
+   */
   readonly lastSeq: number;
   /** The initial `afterSeq: 0` load succeeded. Stays false (and retries with backoff) while it fails. */
   readonly loaded: boolean;
-  /** Latest `attempt.stream_progress` per attempt (keyed by `attemptId`, else `stepKey`). */
-  readonly progress: ReadonlyMap<string, RunEvent>;
+  /** Stream progress of this run (stable per run id): read it with `useStreamProgress`. */
+  readonly progress: StreamProgressStore;
   /** Older events not kept because of the {@link MAX_STORED_EVENTS} cap (0 when nothing was dropped). */
   readonly droppedCount: number;
 }
@@ -92,7 +133,6 @@ interface Published {
   readonly len: number;
   readonly lastSeq: number;
   readonly loaded: boolean;
-  readonly progress: ReadonlyMap<string, RunEvent>;
   readonly droppedCount: number;
 }
 
@@ -102,8 +142,7 @@ interface Pending {
   pushed: boolean;
 }
 
-const EMPTY_PROGRESS: ReadonlyMap<string, RunEvent> = new Map();
-const INITIAL: Published = { runId: undefined, buf: [], len: 0, lastSeq: 0, loaded: false, progress: EMPTY_PROGRESS, droppedCount: 0 };
+const INITIAL: Published = { runId: undefined, buf: [], len: 0, lastSeq: 0, loaded: false, droppedCount: 0 };
 
 /**
  * Gapless run event stream (02 §B5, 10 J2):
@@ -116,13 +155,15 @@ const INITIAL: Published = { runId: undefined, buf: [], len: 0, lastSeq: 0, load
  *    history from the initial snapshot never is;
  * 4. announces only `run.status_changed` to awaiting_approval, paused, completed, incomplete, failed, interrupted;
  * 5. keeps the newest {@link MAX_STORED_EVENTS} events in an append-only buffer (no per-event array copies) and only the
- *    latest `attempt.stream_progress` per attempt.
+ *    latest `attempt.stream_progress` per attempt, in a {@link StreamProgressStore}: a drain that applied only progress
+ *    does not publish, so the page re-renders only for events that change what it shows.
  */
 export function useRunEvents(runId: string | undefined, options: UseRunEventsOptions = {}): RunEventsState {
   const queryClient = useQueryClient();
   const { announce } = useLiveRegion();
   const timersRef = useRef<RunEventsTimers>(options.timers ?? GLOBAL_TIMERS);
   const [state, setState] = useState<Published>(INITIAL);
+  const progressStore = useMemo(() => createProgressStore(runId ?? ''), [runId]);
 
   useEffect(() => {
     if (runId === undefined || runId === '') return undefined;
@@ -142,12 +183,11 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
     let retryTimer: unknown;
     let buf: RunEvent[] = [];
     let dropped = 0;
-    let progress: ReadonlyMap<string, RunEvent> = EMPTY_PROGRESS;
     const pending = new Map<number, Pending>();
 
     const publish = () => {
       if (cancelled) return;
-      setState({ runId, buf, len: buf.length, lastSeq: last, loaded: snapshotDone, progress, droppedCount: dropped });
+      setState({ runId, buf, len: buf.length, lastSeq: last, loaded: snapshotDone, droppedCount: dropped });
     };
 
     const scheduleInvalidate = () => {
@@ -160,12 +200,11 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
       }, RUN_INVALIDATE_DEBOUNCE_MS);
     };
 
-    const store = (e: RunEvent) => {
+    /** Stores `e`; false for stream progress (kept in the progress store, nothing to publish). */
+    const store = (e: RunEvent): boolean => {
       if (e.type === 'attempt.stream_progress') {
-        const next = new Map(progress);
-        next.set(progressKey(e), e);
-        progress = next;
-        return;
+        progressStore.set(progressKey(e), e);
+        return false;
       }
       buf.push(e);
       if (buf.length > 2 * MAX_STORED_EVENTS) {
@@ -173,6 +212,7 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
         dropped += buf.length - MAX_STORED_EVENTS;
         buf = buf.slice(-MAX_STORED_EVENTS);
       }
+      return true;
     };
 
     const react = (e: RunEvent) => {
@@ -182,18 +222,20 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
     };
 
     const drain = (): boolean => {
-      let changed = false;
+      let advanced = false;
+      let stored = false;
       for (let next = pending.get(last + 1); next !== undefined; next = pending.get(last + 1)) {
         pending.delete(next.event.seq);
         last = next.event.seq;
-        store(next.event);
+        if (store(next.event)) stored = true;
         // History from the initial snapshot is not news; pushes and post-snapshot events are.
         if (next.pushed || next.event.seq > snapshotHigh) react(next.event);
-        changed = true;
+        advanced = true;
       }
       for (const seq of pending.keys()) if (seq <= last) pending.delete(seq);
-      if (changed) publish();
-      return changed;
+      // PERF-02: progress alone never re-renders the page; its subscribers were notified by the store.
+      if (stored) publish();
+      return advanced;
     };
 
     const gapOpen = () => !snapshotDone || pending.size > 0;
@@ -270,12 +312,12 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
       if (invalidateTimer !== undefined) timers.clearTimeout(invalidateTimer);
       if (retryTimer !== undefined) timers.clearTimeout(retryTimer);
     };
-  }, [runId, queryClient, announce]);
+  }, [runId, queryClient, announce, progressStore]);
 
   const current = state.runId === runId && runId !== undefined && runId !== '' ? state : INITIAL;
   const { buf, len } = current;
   // One bounded copy per render (never per event): the newest MAX_STORED_EVENTS of the append-only buffer.
   const events = useMemo(() => buf.slice(Math.max(0, len - MAX_STORED_EVENTS), len), [buf, len]);
   const droppedCount = current.droppedCount + Math.max(0, len - MAX_STORED_EVENTS);
-  return { events, lastSeq: current.lastSeq, loaded: current.loaded, progress: current.progress, droppedCount };
+  return { events, lastSeq: current.lastSeq, loaded: current.loaded, progress: progressStore, droppedCount };
 }

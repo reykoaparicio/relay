@@ -14,7 +14,7 @@ export class Report {
   }
 
   status(): Locator {
-    return this.page.getByRole('main').locator('header').getByRole('status');
+    return this.page.getByRole('main').locator('header .status-line');
   }
 
   section(title: string): Locator {

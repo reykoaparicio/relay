@@ -9,7 +9,7 @@ import { validationIssuesOf } from '../../api/errors';
 import { useMemoryRecord } from '../../hooks/useMemoryRecord';
 import { MutationError } from '../common/MutationError';
 import { ROLE_LABELS } from '../run-setup/model-steps';
-import { MEMORY_FIELD, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
+import { MEMORY_FIELD, optionValue, SCOPE_CHOICES, scopeFromChoice } from './memory-model';
 import type { ScopeChoice } from './memory-model';
 import { useResolveConflict } from './useMemoryMutations';
 
@@ -53,7 +53,7 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
   const [pinnedChoice, setPinnedChoice] = useState<boolean | null>(null);
   const pinned = pinnedChoice ?? (a.pinned || b.pinned);
   const fromSuggestion = a.status === 'suggested' || b.status === 'suggested';
-  const recordIds = [a.id, b.id] as [string, string];
+  const recordIds: [string, string] = [a.id, b.id];
 
   // The rewrite starts from both texts; the user edits it into one instruction (nothing is merged automatically).
   const approvedTitle = (b.status === 'approved' ? b : a).title;
@@ -102,6 +102,81 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
     }
   };
 
+  const combineFields = (
+    <>
+      <p className="small muted">
+        Write the combined record. It becomes a new approved record; {fromSuggestion ? 'the approved record is archived as superseded and the suggestion is rejected' : 'A and B are archived as superseded'}.
+      </p>
+      <Field label="Title" id={MEMORY_FIELD.title} error={titleError ?? titleIssue?.message} required>
+        {(control) => <TextInput {...control} value={rewriteTitle} onValueChange={setTitle} />}
+      </Field>
+      <Field
+        label="Rewritten text"
+        id={MEMORY_FIELD.content}
+        hint="No secrets or provider credentials belong in memory."
+        error={contentError ?? contentIssue?.message}
+        required
+      >
+        {(control) => <Textarea {...control} value={rewriteContent} onValueChange={setContent} rows={5} />}
+      </Field>
+      <Field label="Scope" id={MEMORY_FIELD.roles}>
+        {(control) => (
+          <Select
+            {...control}
+            value={scope}
+            onValueChange={(v) => {
+              setScope(optionValue(SCOPE_CHOICES, v) ?? scope);
+            }}
+            options={SCOPE_CHOICES}
+            style={{ maxWidth: 340 }}
+          />
+        )}
+      </Field>
+      <Checkbox
+        label="Keep pinned: always include the combined record in runs within its scope"
+        checked={pinned}
+        onCheckedChange={setPinnedChoice}
+      />
+      {a.pinned || b.pinned ? (
+        <p className="small muted" style={{ margin: 0 }}>
+          {`${a.pinned && b.pinned ? 'Both records are' : `“${(a.pinned ? a : b).title}” is`} pinned, so the combined record is pinned unless you untick this.`}
+        </p>
+      ) : null}
+    </>
+  );
+
+  const scopeFields = (
+    <>
+      <p className="small muted">Each record applies to a different role, so the two never meet in one request.</p>
+      <div className="grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
+        <Field label={`Scope for A: ${a.title}`}>
+          {(control) => (
+            <Select
+              {...control}
+              value={scopeA}
+              onValueChange={(v) => {
+                setScopeA(optionValue(ROLE_CHOICES, v) ?? scopeA);
+              }}
+              options={ROLE_CHOICES}
+            />
+          )}
+        </Field>
+        <Field label={`Scope for B: ${b.title}`} error={scopesError}>
+          {(control) => (
+            <Select
+              {...control}
+              value={scopeB}
+              onValueChange={(v) => {
+                setScopeB(optionValue(ROLE_CHOICES, v) ?? scopeB);
+              }}
+              options={ROLE_CHOICES}
+            />
+          )}
+        </Field>
+      </div>
+    </>
+  );
+
   return (
     <section className="card stack" aria-labelledby={headingId}>
       <h2 id={headingId} ref={headingRef} tabIndex={-1}>
@@ -133,115 +208,19 @@ export function ConflictResolver({ projectId, a, b, candidates, onChangeB, headi
           key={`${a.id}|${b.id}`}
           a={{ ...a, ...(aDetail.data === undefined ? {} : { content: aDetail.data.content }) }}
           b={{ ...b, ...(bDetail.data === undefined ? {} : { content: bDetail.data.content }) }}
-          pending={resolve.isPending && (choice === 'keep_a' || choice === 'keep_b')}
-          onResolve={(r) => {
+          value={choice}
+          onValueChange={(r) => {
             setChoice(r);
             setSubmitted(false);
-            if (r === 'keep_a' || r === 'keep_b') apply(r);
           }}
+          onSubmit={apply}
+          pending={resolve.isPending}
+          submitDisabled={choice === 'keep_both_scoped' && scopesError !== undefined}
+          slots={{ combine: combineFields, keep_both_scoped: scopeFields }}
         />
       )}
-      {choice === 'combine' ? (
-        <form
-          className="stack"
-          aria-label="Combined record"
-          noValidate
-          onSubmit={(e) => {
-            e.preventDefault();
-            apply('combine');
-          }}
-        >
-          <p className="small muted">
-            Write the combined record. It becomes a new approved record; {fromSuggestion ? 'the approved record is archived as superseded and the suggestion is rejected' : 'A and B are archived as superseded'}.
-          </p>
-          <Field label="Title" id={MEMORY_FIELD.title} error={titleError ?? titleIssue?.message} required>
-            {(control) => <TextInput {...control} value={rewriteTitle} onValueChange={setTitle} />}
-          </Field>
-          <Field
-            label="Rewritten text"
-            id={MEMORY_FIELD.content}
-            hint="No secrets or provider credentials belong in memory."
-            error={contentError ?? contentIssue?.message}
-            required
-          >
-            {(control) => <Textarea {...control} value={rewriteContent} onValueChange={setContent} rows={5} />}
-          </Field>
-          <Field label="Scope" id={MEMORY_FIELD.roles}>
-            {(control) => (
-              <Select
-                {...control}
-                value={scope}
-                onValueChange={(v) => {
-                  setScope(v as ScopeChoice);
-                }}
-                options={SCOPE_CHOICES}
-                style={{ maxWidth: 340 }}
-              />
-            )}
-          </Field>
-          <Checkbox
-            label="Keep pinned: always include the combined record in runs within its scope"
-            checked={pinned}
-            onCheckedChange={setPinnedChoice}
-          />
-          {a.pinned || b.pinned ? (
-            <p className="small muted" style={{ margin: 0 }}>
-              {`${a.pinned && b.pinned ? 'Both records are' : `“${(a.pinned ? a : b).title}” is`} pinned, so the combined record is pinned unless you untick this.`}
-            </p>
-          ) : null}
-          <div className="actions">
-            <Button type="submit" variant="primary" pending={resolve.isPending}>
-              Apply resolution
-            </Button>
-          </div>
-        </form>
-      ) : null}
-      {choice === 'keep_both_scoped' ? (
-        <form
-          className="stack"
-          aria-label="Separate scopes"
-          noValidate
-          onSubmit={(e) => {
-            e.preventDefault();
-            apply('keep_both_scoped');
-          }}
-        >
-          <p className="small muted">Each record applies to a different role, so the two never meet in one request.</p>
-          <div className="grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
-            <Field label={`Scope for A: ${a.title}`}>
-              {(control) => (
-                <Select
-                  {...control}
-                  value={scopeA}
-                  onValueChange={(v) => {
-                    setScopeA(v as Role);
-                  }}
-                  options={ROLE_CHOICES}
-                />
-              )}
-            </Field>
-            <Field label={`Scope for B: ${b.title}`} error={scopesError}>
-              {(control) => (
-                <Select
-                  {...control}
-                  value={scopeB}
-                  onValueChange={(v) => {
-                    setScopeB(v as Role);
-                  }}
-                  options={ROLE_CHOICES}
-                />
-              )}
-            </Field>
-          </div>
-          <div className="actions">
-            <Button type="submit" variant="primary" pending={resolve.isPending} disabled={scopesError !== undefined}>
-              Apply resolution
-            </Button>
-          </div>
-        </form>
-      ) : null}
       {unmapped.length > 0 ? (
-        <InlineAlert tone="danger" title="Relay could not apply this resolution">
+        <InlineAlert tone="danger" live="assertive" title="Relay could not apply this resolution">
           <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
             {unmapped.map((i) => (
               <li key={`${i.path}:${i.message}`}>{i.message}</li>

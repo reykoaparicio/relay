@@ -1,19 +1,18 @@
 import { useId, useState } from 'react';
 import { ROLES } from '@relay/contracts';
 import type { MemoryRecordDetail, MemoryRecordScope, Role } from '@relay/contracts';
-import { Button, Checkbox, Field, InlineAlert, TextInput, Textarea } from '../../components/ui';
+import { Button, Checkbox, DateInput, Field, InlineAlert, ServerChangesNotice, TextInput, Textarea } from '../../components/ui';
 import { validationIssuesOf } from '../../api/errors';
-import { MEMORY_TYPE_LABELS } from '../../lib/format';
+import { dateInputValue, MEMORY_TYPE_LABELS, parseDateInput } from '../../lib/format';
+import { takeFields, useRebasableForm } from '../../hooks/useRebasableForm';
 import { ErrorSummary } from '../common/ErrorSummary';
 import type { FormProblem } from '../common/ErrorSummary';
 import { conflictCopy } from '../common/conflict';
 import { MutationError } from '../common/MutationError';
 import { ROLE_LABELS } from '../run-setup/model-steps';
 import {
-  dateInputValue,
   MEMORY_FIELD,
   memoryFieldOfPath,
-  parseDateInput,
   rolesOfScope,
   scopeFromRoles,
   scopeText,
@@ -83,6 +82,10 @@ function valuesOf(r: MemoryRecordDetail): EditValues {
 
 type EditField = keyof EditValues;
 
+const EDIT_FIELDS: readonly EditField[] = ['title', 'content', 'scope', 'review', 'expires'];
+/** "Edit then approve" a suggestion: review and expiry are set after approval. */
+const APPROVE_FIELDS: readonly EditField[] = ['title', 'content', 'scope'];
+
 function fieldText(field: EditField, v: EditValues): string {
   if (field === 'scope') return v.scope === null ? 'No role' : scopeText(v.scope);
   if (field === 'review' || field === 'expires') return v[field] === '' ? 'None' : v[field];
@@ -102,34 +105,44 @@ function sameField(field: EditField, a: EditValues, b: EditValues): boolean {
  */
 export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCancel, onReload, titleOf, onOpenConflict }: MemoryEditFormProps) {
   const formId = useId();
-  /** The record as the user opened it: "my changes" are always computed against this, never against a newer save. */
-  const [base] = useState(record);
-  const [title, setTitle] = useState(record.title);
-  const [content, setContent] = useState(record.content);
-  const [roles, setRoles] = useState<ReadonlySet<Role>>(() => rolesOfScope(record.scope));
-  const [review, setReview] = useState(dateInputValue(record.reviewAt));
-  const [expires, setExpires] = useState(dateInputValue(record.expiresAt));
-  const [submitted, setSubmitted] = useState(false);
-  /** The revision the next save expects: the opened record, or the latest one the user chose to save over. */
-  const [expectedRevision, setExpectedRevision] = useState(record.currentRevision);
   const isEdit = mode === 'edit';
+  const fields: readonly EditField[] = isEdit ? EDIT_FIELDS : APPROVE_FIELDS;
+  const changedFields = (a: EditValues, b: EditValues) => fields.filter((f) => !sameField(f, a, b));
+  /**
+   * The record as the user opened it (the base): "my changes" are computed against it, and a save expects its
+   * revision. A newer saved revision is compared field by field, and saving over it is an explicit choice.
+   */
+  const editing = useRebasableForm<MemoryRecordDetail, EditValues>({
+    server: record,
+    valuesOf,
+    isNewer: (server, b) => server.currentRevision > b.currentRevision,
+    isDirty: (v, bv) => changedFields(v, bv).length > 0,
+    merge: (bv, mine, theirs) => takeFields(theirs, mine, changedFields(mine, bv)),
+  });
+  const { base, values: mine, setValues, baseValues, serverValues: savedValues } = editing;
+  const { title, content, scope, review, expires } = mine;
+  const set = (patch: Partial<EditValues>) => {
+    setValues((v) => ({ ...v, ...patch }));
+  };
+  const roles: ReadonlySet<Role> = scope === null ? new Set() : rolesOfScope(scope);
+  const [submitted, setSubmitted] = useState(false);
+  /** The revision the next save expects: the base (the opened record, or the newer one the user saved over). */
+  const expectedRevision = base.currentRevision;
   const copy = conflictCopy(error, { ...(titleOf === undefined ? {} : { recordTitle: titleOf }) });
   const stale = copy !== null && copy.stale;
-  /** The saved version is newer than the one this edit expects: compare field by field. */
-  const conflict = stale && record.currentRevision !== expectedRevision;
+  /**
+   * A save was refused as stale (CONFLICT) and the saved version is newer than this edit's base: compare field by
+   * field. A newer version alone (e.g. pushed by another session) does not interrupt typing; the save reports it.
+   */
+  const conflict = stale && editing.serverAhead;
   /** The CONFLICT names a newer revision that has not loaded yet. */
   const conflictPending =
     stale && !conflict && copy.currentRevision !== null && copy.currentRevision > record.currentRevision;
 
-  const scope = scopeFromRoles(roles);
   const reviewAt = parseDateInput(review);
   const expiresAt = parseDateInput(expires);
-  const mine: EditValues = { title, content, scope, review, expires };
-  const baseValues = valuesOf(base);
-  const savedValues = valuesOf(record);
-  const fields: readonly EditField[] = isEdit ? ['title', 'content', 'scope', 'review', 'expires'] : ['title', 'content', 'scope'];
-  const changedByMe = fields.filter((f) => !sameField(f, mine, baseValues));
-  const changedElsewhere = fields.filter((f) => !sameField(f, savedValues, baseValues));
+  const changedByMe = changedFields(mine, baseValues);
+  const changedElsewhere = changedFields(savedValues, baseValues);
   const local: Record<string, string> = {};
   if (title.trim() === '') local[MEMORY_FIELD.title] = 'Enter a title.';
   else if (title.length > TITLE_MAX) local[MEMORY_FIELD.title] = `Use at most ${String(TITLE_MAX)} characters.`;
@@ -151,26 +164,34 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
     : [];
   const nextRevision = expectedRevision + 1;
 
-  const submit = (revision: number) => {
+  /** Sends the fields of `values` that differ from `from` (the base), expecting `from`'s revision. */
+  const submit = (values: EditValues, from: MemoryRecordDetail) => {
     setSubmitted(true);
     if (Object.keys(local).length > 0 || scope === null || reviewAt === undefined || expiresAt === undefined) return;
-    setExpectedRevision(revision);
-    const changed = (f: EditField) => changedByMe.includes(f);
+    const changed = changedFields(values, valuesOf(from));
+    const has = (f: EditField) => changed.includes(f);
+    const at = (text: string) => parseDateInput(text) ?? null;
     onSubmit({
-      expectedRevision: revision,
-      ...(changed('title') ? { title } : {}),
-      ...(changed('content') ? { content } : {}),
-      ...(changed('scope') ? { scope } : {}),
-      ...(isEdit && changed('review') ? { reviewAt } : {}),
-      ...(isEdit && changed('expires') ? { expiresAt } : {}),
+      expectedRevision: from.currentRevision,
+      ...(has('title') ? { title: values.title } : {}),
+      ...(has('content') ? { content: values.content } : {}),
+      ...(has('scope') && values.scope !== null ? { scope: values.scope } : {}),
+      ...(isEdit && has('review') ? { reviewAt: at(values.review) } : {}),
+      ...(isEdit && has('expires') ? { expiresAt: at(values.expires) } : {}),
     });
+  };
+
+  /** "Keep my changes and save over": re-base onto the saved revision, then send only the user's own changes. */
+  const saveOver = () => {
+    const merged = editing.rebase();
+    submit(merged, record);
   };
 
   const toggleRole = (role: Role, on: boolean) => {
     const next = new Set(roles);
     if (on) next.add(role);
     else next.delete(role);
-    setRoles(next);
+    set({ scope: scopeFromRoles(next) });
   };
 
   return (
@@ -180,7 +201,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
       noValidate
       onSubmit={(e) => {
         e.preventDefault();
-        submit(expectedRevision);
+        submit(mine, base);
       }}
     >
       <ErrorSummary
@@ -189,7 +210,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
         title={(n) => `${String(n)} ${n === 1 ? 'problem prevents' : 'problems prevent'} saving this record`}
       />
       <Field label="Title" id={MEMORY_FIELD.title} error={fieldError(MEMORY_FIELD.title)} required>
-        {(control) => <TextInput {...control} value={title} onValueChange={setTitle} maxLength={TITLE_MAX + 20} />}
+        {(control) => <TextInput {...control} value={title} onValueChange={(v) => { set({ title: v }); }} maxLength={TITLE_MAX + 20} />}
       </Field>
       <div className="grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
         <div className="field">
@@ -204,17 +225,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
             hint="Relay asks you to confirm the record is still accurate on this date."
             error={fieldError(MEMORY_FIELD.reviewAt)}
           >
-            {(control) => (
-              <input
-                {...control}
-                className="input mono"
-                type="date"
-                value={review}
-                onChange={(e) => {
-                  setReview(e.target.value);
-                }}
-              />
-            )}
+            {(control) => <DateInput {...control} value={review} onValueChange={(v) => { set({ review: v }); }} />}
           </Field>
         ) : null}
       </div>
@@ -225,7 +236,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
         error={fieldError(MEMORY_FIELD.content)}
         required
       >
-        {(control) => <Textarea {...control} value={content} onValueChange={setContent} rows={5} />}
+        {(control) => <Textarea {...control} value={content} onValueChange={(v) => { set({ content: v }); }} rows={5} />}
       </Field>
       <fieldset className="fieldset field" aria-describedby={fieldError(MEMORY_FIELD.roles) === undefined ? undefined : `${MEMORY_FIELD.roles}-error`}>
         <legend>Roles in scope (this project only)</legend>
@@ -255,22 +266,18 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
           hint="After this date the record is no longer included in runs."
           error={fieldError(MEMORY_FIELD.expiresAt)}
         >
-          {(control) => (
-            <input
-              {...control}
-              className="input mono"
-              type="date"
-              value={expires}
-              onChange={(e) => {
-                setExpires(e.target.value);
-              }}
-            />
-          )}
+          {(control) => <DateInput {...control} value={expires} onValueChange={(v) => { set({ expires: v }); }} />}
         </Field>
       ) : null}
       {conflict ? (
-        <InlineAlert tone="warning" title={`This record changed since you opened it (now revision ${String(record.currentRevision)})`}>
-          <p>Relay did not overwrite it. Compare the saved revision with your edit:</p>
+        <ServerChangesNotice
+          title={`This record changed since you opened it (now revision ${String(record.currentRevision)})`}
+          intro="Relay did not overwrite it. Compare the saved revision with your edit:"
+          keepLabel={`Keep my changes and save over revision ${String(record.currentRevision)}`}
+          onKeep={saveOver}
+          keepPending={pending}
+          keepDisabled={changedByMe.length === 0}
+        >
           <div className="table-wrap" style={{ overflowX: 'auto' }}>
             <table className="table">
               <caption className="sr-only">Saved revision compared with your edit</caption>
@@ -303,19 +310,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
               ? 'You have not changed any field.'
               : `Saving over sends only your changes (${changedByMe.map((f) => FIELD_LABELS[f].toLowerCase()).join(', ')}); the other fields keep the saved values.`}
           </p>
-          <div className="actions">
-            <Button
-              variant="primary"
-              pending={pending}
-              disabled={changedByMe.length === 0}
-              onClick={() => {
-                submit(record.currentRevision);
-              }}
-            >
-              Keep my changes and save over revision {String(record.currentRevision)}
-            </Button>
-          </div>
-        </InlineAlert>
+        </ServerChangesNotice>
       ) : conflictPending ? (
         <InlineAlert tone="warning" title="This record changed since you opened it">
           <p>Loading the saved version…</p>

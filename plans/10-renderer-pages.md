@@ -19,16 +19,18 @@ J depends on contracts (types) and I (components). J does **not** wait for H: it
 | Path | Page (lazy?) | Mock |
 |---|---|---|
 | `/` | `RootRedirect` → `/onboarding` if no project or onboarding is incomplete, else `/p/:activeProjectId` | – |
-| `/onboarding/:step?` | `OnboardingPage` | onboarding.html |
+| `/onboarding/:step?` | `OnboardingPage` (lazy) | onboarding.html |
 | `/p/:projectId` | `OverviewPage` | overview.html |
 | `/p/:projectId/workflows/:workflowId` | `WorkflowEditorPage` (lazy) | workflow-editor.html |
 | `/p/:projectId/runs` | `RunsPage` | runs.html |
-| `/p/:projectId/runs/new` | `NewRunPage` | new-run.html |
-| `/p/:projectId/runs/:runId` | `RunInspectorPage` (`?step=<stepId>&tab=output\|context\|attempts\|events\|ledger`) | run-inspector.html |
+| `/p/:projectId/runs/new` | `NewRunPage` (lazy) | new-run.html |
+| `/p/:projectId/runs/:runId` | `RunInspectorPage` (lazy; prefetched from Overview and New run) (`?step=<stepId>&tab=output\|context\|attempts\|events\|ledger`) | run-inspector.html |
 | `/p/:projectId/runs/:runId/report` | `ReportPage` (lazy) | report.html |
-| `/p/:projectId/memory` | `MemoryPage` (`?tab=approved\|suggested\|archived&record=<id>`) | memory.html |
+| `/p/:projectId/memory` | `MemoryPage` (lazy) (`?tab=approved\|suggested\|archived&record=<id>`) | memory.html |
 | `/settings/:section?` | `SettingsPage` (lazy) — providers, profiles, projects, data, diagnostics, about | settings-providers.html |
 | `*` | `NotFoundPage` | – |
+
+PERF-04: the shell, Overview and Runs load eagerly; every other page is a `React.lazy` route declared in `features/shell/lazy-pages.ts` (shared loaders, so a page can prefetch the next one without importing the router).
 
 **The active project lives in the URL** (§5.1, "prevents accidental cross-project context"). Switching projects navigates to `/p/<id>` and persists `activeProjectId` via `app.updateSettings`.
 
@@ -72,9 +74,10 @@ Hooks (`hooks/`), one file each: `useProject`, `useRuns` (infinite query with `n
   1. On mount it calls `runs.events({afterSeq: 0})`, then subscribes to push.
   2. For each `run.event` with `seq === last+1` it appends. On a gap it backfills.
   3. Relevant event types invalidate `qk.run(runId)` and `qk.ledger(runId)`, **debounced 250 ms**.
-  4. It announces via `LiveRegion` **only** `run.status_changed` to `awaiting_approval`, `paused`, `completed`, `incomplete`, `failed`, or `interrupted` (§5.7).
+  4. It announces via `LiveRegion` **only** `run.status_changed` to `awaiting_approval`, `paused`, `completed`, `incomplete`, `failed`, or `interrupted` (§5.7). It is the **single** run-status announcer (A11Y-01): banners and the page header status are not live regions.
+  5. PERF-02: `attempt.stream_progress` goes to a per-run `StreamProgressStore` (outside React state). A drain that applied only progress publishes nothing, so the page does not re-render per token push; `useStreamProgress(runId, attemptId)` (used only by `StreamingAttemptCard`, which also owns the 1 s clock) subscribes to it.
 - **`useIdempotentMutation(channel)`** generates one `idempotencyKey` (ULID via contracts `createIdGen` with a crypto random) **per user intent**. The key is reused across retries of the same intent and reset after success or when the form changes, so a double-click or a retry never double-starts (02 §B0).
-- Global push handler (`state/push-sync.ts`): `run.status` updates cached run summaries in place. `memory.changed` invalidates the memory queries. `providers.changed` invalidates providers. `runner.state` drives a shell banner ("Background runner restarting…" / "unavailable → Open diagnostics").
+- Global push handler (`state/push-sync.ts`): `run.status` updates cached run summaries and the run detail in place (no `qk.run` refetch), then refreshes `['runs', projectId]` and `qk.project(projectId)` with a 250 ms trailing debounce; the project comes from the cached run detail or the cached list that holds the run (all run lists when nothing cached knows it). `memory.changed` invalidates that project's memory lists and only its cached records (PERF-03/05). `providers.changed` invalidates providers. `runner.state` drives a shell banner ("Background runner restarting…" / "unavailable → Open diagnostics").
 - Error mapping (`api/errors.ts`): `AppError.code` → `ErrorView` props. `nextAction` → the route or handler (for example `reconnect_provider` → `/settings/providers`, `increase_allowance` → opens the dialog, `narrow_scope` → focuses the file picker).
 - Run-action dispatch (`features/run-inspector/run-actions.ts`): the single place that turns a `RunAction` from `RunDetail.availableActions` into a UI control and an IPC call. It follows the 02 action→op table (02 §B, `RUN_ACTIONS`) and is exhaustive over `runActionSchema` (a `satisfies Record<RunAction, …>` map, so a new action is a compile error):
 

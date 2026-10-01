@@ -20,18 +20,17 @@ import {
 import { call } from '../../api/client';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
-import { formatAbsoluteTime } from '../../lib/format';
+import { formatAbsoluteTime, formatBytes, formatMonth } from '../../lib/format';
 import { useAppInfo } from '../../hooks/useAppInfo';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { MutationError } from '../common/MutationError';
 import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
-import { formatBytes } from '../run-setup/PreviewPanel';
 import { paths } from '../shell/paths';
 import { FallbackProjectNote, SettingsProjectPicker, useSettingsProject } from './useSettingsProject';
 
 /** Raw-response retention bounds (02 `app.updateSettings`, §12.3). */
-export const RETENTION_BOUNDS = { min: 1, max: 365 } as const;
+const RETENTION_BOUNDS = { min: 1, max: 365 } as const;
 
 /** The last `count` calendar months, newest first, as `YYYY-MM` (ledger month export). */
 export function recentMonths(now: number, count = 12): string[] {
@@ -46,7 +45,7 @@ export function recentMonths(now: number, count = 12): string[] {
 
 function monthLabel(month: string): string {
   const [y, m] = month.split('-').map(Number);
-  return new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(new Date(y ?? 2000, (m ?? 1) - 1, 1));
+  return formatMonth(new Date(y ?? 2000, (m ?? 1) - 1, 1).getTime(), undefined, { withYear: true });
 }
 
 const DIAGNOSTICS_INCLUDED = [
@@ -361,7 +360,7 @@ const plural = (n: number, one: string, many: string) => `${String(n)} ${n === 1
  * them). Files that could not be removed stay unpurged and the next retention sweep retries them, so the toast says so
  * instead of reporting success.
  */
-export function purgeToast(res: { readonly purgedSnapshots: number; readonly purgedArtifacts?: number | undefined; readonly failed?: number | undefined }): {
+function purgeToast(res: { readonly purgedSnapshots: number; readonly purgedArtifacts?: number | undefined; readonly failed?: number | undefined }): {
   readonly title: string;
   readonly body: string;
   readonly tone: 'success' | 'warning';

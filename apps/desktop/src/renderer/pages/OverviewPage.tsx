@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { Play } from 'lucide-react';
 import { Link, useParams } from 'react-router';
@@ -16,6 +17,7 @@ import {
 } from '../features/overview/OverviewCards';
 import { deriveOverview, disconnectedProviders, OVERVIEW_ACTIVE_STATUSES } from '../features/overview/overview-model';
 import type { OverviewModel } from '../features/overview/overview-model';
+import { prefetchRunInspector } from '../features/shell/prefetch';
 import { paths } from '../features/shell/paths';
 import { useNavPerf } from '../hooks/useNavPerf';
 import { NOW_IDLE_INTERVAL_MS, useNow } from '../hooks/useNow';
@@ -42,6 +44,10 @@ function activeHint(model: OverviewModel): string {
 /** Project overview (10 J4, §5.2). Mock states: awaiting-approval, active-run, empty, interrupted, provider-disconnected. */
 export function OverviewPage() {
   const { projectId = '' } = useParams();
+  // PERF-04: the usual next page is a run; warm its chunk while this page is open.
+  useEffect(() => {
+    prefetchRunInspector();
+  }, []);
   const project = useProject(projectId);
   const recent = useRuns(projectId, { limit: RECENT_RUNS });
   // Status-filtered queries: counts and attention never come from a truncated mixed list.

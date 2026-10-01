@@ -253,7 +253,7 @@ describe('NewRunPage (J7)', () => {
     const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
     bridge.world.notImplemented.add('memory.list');
     await ready();
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();

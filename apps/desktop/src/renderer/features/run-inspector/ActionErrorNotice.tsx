@@ -6,7 +6,7 @@ export function ActionErrorNotice({ error }: { readonly error: unknown }) {
   if (error === null || error === undefined) return null;
   const e = toViewError(error);
   return (
-    <InlineAlert tone="danger" title={errorTitle(e)}>
+    <InlineAlert tone="danger" live="assertive" title={errorTitle(e)}>
       {errorTitle(e) === e.userMessage ? null : <p>{e.userMessage}</p>}
       <p className="subtle">
         Error code <code>{e.code}</code>. The run is unchanged.

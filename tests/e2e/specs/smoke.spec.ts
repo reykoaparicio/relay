@@ -18,14 +18,14 @@ test.describe('smoke', { tag: '@m1' }, () => {
     // First launch lands in setup; create a project from the per-test copy so every nav item exists.
     await setupOwnProject(page, stubDialogs, project);
 
-    // Diagnostics: runner healthy, schema v1, provider mode fake.
+    // Diagnostics: runner healthy, schema current (no pending migrations), provider mode fake.
     await shell.nav('Settings');
     const settings = new Settings(page);
     await settings.expectLoaded();
     await settings.section('Diagnostics');
     await expect(settings.diagnosticsValue('Runner heartbeat')).toContainText('Healthy');
     await expect(settings.diagnosticsValue('Runner heartbeat')).toContainText(/Last beat/);
-    await expect(settings.diagnosticsValue('Database schema')).toContainText(/^Version 1 · current/);
+    await expect(settings.diagnosticsValue('Database schema')).toContainText(/^Version \d+ · current/);
     await expect(settings.diagnosticsValue('Provider mode')).toHaveText(
       'Fake providers · scenario happy-path (no real requests)',
     );

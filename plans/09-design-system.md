@@ -45,7 +45,7 @@ UX rules pulled from the skill (`--domain ux`, `--domain web`, `--stack react`),
   }
   @custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
   ```
-- `fonts.css`: `@import '@fontsource/fira-sans/400.css'`, the 500, 600, and 700 weights, and `@fontsource/fira-code/400.css` and 500. Bundled locally because the CSP blocks remote fonts, with `font-display: swap`.
+- `fonts.css`: local `@font-face` rules, **woff2 only**, for the **latin and latin-ext** subsets of Fira Sans 400/500/600/700 and Fira Code 400/500 (PERF-04). The files come from the `@fontsource` packages (bundled as assets, so their OFL notices are collected); `unicode-range` is copied from @fontsource so a subset loads only when needed. Bundled locally because the CSP blocks remote fonts, with `font-display: swap`.
 - Theme switching: `data-theme` on `<html>`, driven by `app.getSettings().theme` (`'dark' | 'light' | 'system'`). `system` follows `prefers-color-scheme`. Dark is the default (§5.1).
 
 ## I2: Formatting library (`lib/format/*.ts`) — pure, unit-tested
@@ -99,7 +99,7 @@ Each component is a function component with a typed props interface, forwards re
 | `StatusBadge` | `kind`, `value`, `pauseReason?`, `showDetail?` | Icon + text **always**. Never color-only (gate). `showDetail` renders `detail` as visible secondary text | `.badge` |
 | `Card`, `CardHeader` | `as?: 'section'\|'article'`, `labelledBy` | Section landmark with a heading | `.card` |
 | `StatTile` | `label`, `value: ReactNode`, `hint`, `href?` | If `href`, the whole tile is a link with descriptive text | `.stat` |
-| `PageHeader` | `title`, `breadcrumbs`, `status?`, `actions` | `<h1>`. Status is in an `aria-live="polite"` region | `.topbar` |
+| `PageHeader` | `title`, `breadcrumbs`, `status?`, `actions` | `<h1>`. Status is plain text (not a live region: run status is announced once by `useRunEvents`, A11Y-01) | `.topbar` |
 | `AppShell` | `nav`, `workspace`, `children` | Skip link to `#main`, `<nav aria-label="Primary">`, `<main id="main" tabIndex={-1}>` | `.shell` |
 | `SideNav` / `NavItem` | `items`, `activeKey`, `badgeCount?` | `aria-current="page"`. The count badge has sr text: "3 waiting for approval" | `.nav-item` |
 | `ProjectSwitcher` | `projects`, `activeId`, `onSelect` | Radix `DropdownMenu`. The active project is announced | `.project-switcher` |
@@ -107,8 +107,12 @@ Each component is a function component with a typed props interface, forwards re
 | `TextInput`, `Textarea`, `Select`, `Checkbox`, `RadioGroup`, `NumberInput`, `MoneyInput` | controlled | `MoneyInput` accepts a dollar string, converts via `usd()`, and shows parse errors inline, with no float arithmetic | `.input` etc. |
 | `Tabs` | Radix Tabs | Arrow-key navigation, `aria-selected` | `.tabs` |
 | `ResponsivePanels` | `tabs: Panel[]`, `secondary: Panel[]`, `value`, `onValueChange`, `label`, `breakpointPx?` (default 1280) where `Panel = { id, label, content }` | At ≥ `breakpointPx` renders `tabs` in a `Tabs` widget and the `secondary` panels as a bottom row of labelled `<section>`s. Below it, the `secondary` panels **collapse into the same tabs** (appended after `tabs`, same ids), so nothing is hidden. Uses `matchMedia` (via a `useMediaQuery` hook in this folder); if the selected id is a secondary panel and the layout widens, the selection falls back to the first tab. No layout shift beyond the swap. Used by J's `RunInspector` (the ledger + context bottom row, §5.7) | run-inspector bottom row |
-| `Dialog`, `ConfirmDialog` | Radix Dialog; `ConfirmDialog` has `destructive?: boolean`, `consequences: ReactNode` | Focus trap, Esc closes, returns focus. **Destructive only**; no confirmations for read-only actions (§5.7) | `.dialog` |
-| `InlineAlert` | `tone`, `title`, `children`, `actions?` | `role="alert"` for danger, `role="status"` otherwise | `.banner` |
+| `Dialog`, `ConfirmDialog` | Radix Dialog; `ConfirmDialog` has `destructive?: boolean`, `consequences: ReactNode` (the accessible description), `secondaryAction?: { label, onClick, pending? }` (a footer button, e.g. "Archive instead"; every footer button is disabled while any is pending), `children?` (body content kept out of the description: warnings, the mutation error) | Focus trap, Esc closes, returns focus. **Destructive only**; no confirmations for read-only actions (§5.7) | `.dialog` |
+| `InlineAlert` | `tone`, `title`, `children`, `actions?`, `live?: 'off' \| 'polite' \| 'assertive'` (default `'off'`) | Silent by default (a banner that is part of the page is read in place). `'assertive'` (`role="alert"`) only for an alert answering the user's own submit (MutationError, form errors); `'polite'` (`role="status"`) for an update the user waits on (runner state, save confirmations, `ServerChangesNotice`) (A11Y-01) | `.banner` |
+| `ServerChangesNotice` | `title`, `intro?`, `keepLabel`, `onKeep`, `keepPending?`, `keepDisabled?`, `children` (the comparison) | Polite warning: a newer server version arrived while the user had edits; nothing was overwritten and keeping the user's changes is explicit. Used with `hooks/useRebasableForm` (DUP-01) | `.banner.warning` |
+| `ListItemButton` | `title`, `aside?`, `meta?`, `badges?`, `leading?` | One `<button>` per row: `aria-labelledby` the title, `aria-describedby` the aside/meta/badges; never a hand-written `aria-label` (DS-04). Non-interactive rows use `.list-item.static` | `.list-item` |
+| `DateInput` | `value` (`YYYY-MM-DD`), `onValueChange` | Native date input inside `Field`; parse/format helpers in `lib/format/date.ts` (DS-03) | `.input` |
+| `usePageFocusRescue(fallback)` / `useFocusRescue(container, fallback)` | – | When a mutation removes or disables the focused control, focus moves to the fallback (the shell uses `<main tabIndex=-1>`), never `<body>` (A11Y-02) | – |
 | `Toast` / `useToast` | Radix Toast; **dedupe by key** within 10 s | For actionable failures only ("no repeated generic toast spam", §5.1) | `.toast` |
 | `DataTable` | `columns`, `rows`, `onRowActivate`, `emptyState` | `<table>`, `<th scope>`. Rows are keyboard-activatable via a link in the first cell (not a clickable `<tr>` only) | `.table` |
 | `KeyValueList` | `items: {term, value, mono?}[]` | `<dl>` | `.kv` |
@@ -126,17 +130,18 @@ Components that render step outputs or manifests take their prop types from **`@
 
 | Component | Props | Behavior | Mock |
 |---|---|---|---|
-| `StepTimeline` | `steps: StepView[]`, `selectedId`, `onSelect` | `<ol>`. Each step is a `<button aria-current="step">` with a state dot + text state. Arrow keys move the selection | run-inspector timeline |
+| `StepTimeline` | `steps: StepView[]`, `selectedId`, `onSelect` | `<ol>`. Each step is a `ListItemButton` (`aria-current="step"`, named by the step title, described by its text state) with a state dot. Arrow keys move the selection. Memoized | run-inspector timeline |
 | `BudgetMeter` | `cost: CostSummary` | Stacked bar with segments for settled (solid), estimated (hatched), reserved, and unknown (hatched purple), plus a **text legend with amounts** (not color only) and `role="img"` + `aria-label` summarizing the amounts | `.meter` |
 | `BudgetLedger` | `cost`, `byStep?` | `<table>` with rows reported / calculated / estimated / reserved / unknown / allowance / remaining. "Tracked by Relay" caption (§9.1) | `.ledger` |
 | `BudgetBreakdownTable` | `breakdown: BudgetBreakdown` | Shows L, C, R, U, N and the total vs L with the inequality spelled out: "$3.10 > $3.00 → blocked" | new-run `budget-blocked` |
-| `ApprovalCard` | `approval: ApprovalView`, `plan: PlanV1`, `onDecide` | Plan steps, sources, and the "covers plan hash X and context snapshot Y only" line. Approve / Request revision (reveals a required textarea) / Reject. Pending states | run-inspector awaiting-approval |
+| `PlanBody` | `plan: PlanV1`, `fileScope?` | The whole plan body shared by the step panel and ApprovalCard (DUP-02): goal, steps with the findings they address, file scope, sources, suggested tests, risks, open questions | – |
+| `ApprovalCard` | `approval: ApprovalView`, `plan: PlanV1`, `onDecide` | `PlanBody` (so approvers see unresolved questions, test suggestions and finding ids), and the "covers plan hash X and context snapshot Y only" line. Approve / Request revision (reveals a required textarea) / Reject. Pending states | run-inspector awaiting-approval |
 | `AttemptsTable` | `attempts: AttemptView[]` | Model, dispatch state badge, tokens in/out with reported/est labels, cost + certainty, provider latency **separately from** app time (§3.3) | Attempts tab |
 | `ContextManifestView` | `manifest: ContextManifest` | Files (hash, tokens, included/omitted + reason), memory (revision, stale flag), upstream artifacts, "providers receiving this context" | Context tab |
 | `DiffViewer` | `files: PatchV1['files']` | Unified diff with add/del/hunk coloring **plus `+`/`-` gutter glyphs** (not color only). Virtualized beyond 500 lines. Lazy-loaded | report `patch` |
 | `FileTree` | `included`, `excluded` | Excluded rows show the reason text (`secret`, `too_large`, …) | onboarding select-project |
-| `MemoryRecordCard` | `record`, `selected` | Title, excerpt, type/source line, stale indicator | memory list |
-| `ConflictCompare` | `a`, `b`, `onResolve` | Side-by-side columns with the 4 resolution choices. Never merges silently | memory conflict |
+| `MemoryRecordCard` | `record`, `selected` | Title, excerpt, type/source line, stale indicator (a `ListItemButton`) | memory list |
+| `ConflictCompare` | `a`, `b`, `value`, `onValueChange`, `onSubmit`, `slots?` (per-option fields), `pending?`, `submitDisabled?` | Controlled. Side-by-side columns with the 4 resolution choices; the chosen option's slot (e.g. the combine rewrite, the two scopes) renders under them and one "Resolve conflict" submits the single form. Never merges silently | memory conflict |
 | `RecoveryPanel` | `run: RunDetail`, `onDecide` | Last completed step, unresolved attempts with liability, the decision buttons from `availableActions` | overview interrupted / run-inspector unknown-outcome |
 | `CatalogTable` | `entries: CatalogModel[]`, `catalogVersion`, `profileChecks?: Record<ModelId, CapabilityWarning[]>` | Built on `DataTable`. Columns: model (name + mono id), provider, capabilities (each shown as ✓/✗ **with text** "Yes"/"No"; glyphs `aria-hidden`), prices per MTok for input / output / cache read / cache write (via `Money`), catalog version, source (the `https://` URL shown **as text** with a `CopyButton`, not a clickable external link), and effective date (`<time>`). `profileChecks` adds a visible warnings column for per-profile capability check results | settings providers models |
 | `FakeProviderBadge` | – | Persistent badge in the shell when `providerMode === 'fake'` (§22.2 honesty) | – |

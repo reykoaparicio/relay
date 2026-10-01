@@ -71,7 +71,8 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
           ...(overrides === undefined ? {} : { profileOverrides: overrides }),
         };
   const preflightInput = base === null || debouncedGoal === '' ? null : { ...base, goal: debouncedGoal };
-  const preflight = usePreflight(preflightInput);
+  const preflightKey = preflightInput === null ? null : canonicalJson(preflightInput);
+  const preflight = usePreflight(preflightKey);
   const submitInput = base === null ? null : { ...base, goal: goal.trim() };
 
   /** Set synchronously once runs.start succeeded: no further start from this step (one run per setup). */
@@ -157,10 +158,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
         : null;
   // Start is gated on a preflight of exactly the input that would be submitted: not a debounced/placeholder
   // result for an older input, not while it refetches, with no issues and within the allowance.
-  const matches =
-    preflightInput !== null &&
-    submitInput !== null &&
-    canonicalJson(preflightInput) === canonicalJson(submitInput);
+  const matches = preflightKey !== null && submitInput !== null && preflightKey === canonicalJson(submitInput);
   const settledCheck = matches && !preflight.isFetching && !preflight.isPlaceholderData;
   const fresh = settledCheck && preflight.isSuccess ? preflight.data : undefined;
   const pf = preflight.data;
@@ -317,7 +315,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
         Relay will pause for your approval before drafting a patch. No project files will be modified.
       </p>
       {start.error === null || start.error === undefined ? null : (
-        <ErrorView error={toViewError(start.error)} onAction={onStartErrorAction} />
+        <ErrorView live="assertive" error={toViewError(start.error)} onAction={onStartErrorAction} />
       )}
     </StepFrame>
   );

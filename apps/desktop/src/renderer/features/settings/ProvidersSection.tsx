@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import type { CapabilityWarning, ProfileWithWarnings } from '@relay/contracts';
 import { CatalogTable, ErrorView, InlineAlert, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
@@ -12,7 +12,7 @@ import { useNextAction } from '../common/useNextAction';
 import { ProviderCard, providerState } from './ProviderCard';
 
 /** CatalogTable.profileChecks: engine warnings grouped by the profile's model (06 F14); never re-derived here. */
-export function profileChecksByModel(
+function profileChecksByModel(
   rows: readonly ProfileWithWarnings[],
 ): Record<string, CapabilityWarning[]> {
   const out: Record<string, CapabilityWarning[]> = {};
@@ -77,7 +77,7 @@ export function ProvidersSection() {
             title={`The last ${p.displayName} connection test failed`}
           >
             <p>
-              {code === undefined ? 'The test did not pass.' : appError(code).userMessage}
+              {code === undefined ? 'The test did not pass.' : (code === 'INTERNAL' ? errors.internal(undefined) : appError(code)).userMessage}
               {code === undefined ? null : (
                 <>
                   {' '}

@@ -100,14 +100,8 @@
   .stat .label-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
   .stat .label-aside { color: var(--color-text-subtle); font-size: var(--text-sm); }
   /* StatTile with a secondaryAction: the primary link covers label/value/hint only (no nested links). */
-  .stat-main, .link-block { display: flex; flex-direction: column; gap: var(--space-2); text-decoration: none; border-radius: var(--radius-md); }
+  .stat-main { display: flex; flex-direction: column; gap: var(--space-2); text-decoration: none; border-radius: var(--radius-md); }
   .stat-main { color: inherit; }
-  /* Generic block link (a whole region is one link) that works on any background, with its own hover. */
-  .link-block {
-    color: var(--color-text); padding: var(--space-3); border: var(--border-width) solid transparent;
-    transition: background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast);
-  }
-  .link-block:hover { color: var(--color-text); background: var(--color-surface-raised); border-color: var(--color-border-strong); }
   .stat:has(> .stat-main:hover) { border-color: var(--color-border-strong); }
   .stat-secondary { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
   .muted { color: var(--color-text-muted); }
@@ -181,7 +175,7 @@
   /* A tag inside a .num cell reads as a word, not a figure (an explicit .mono tag keeps mono). */
   .num .tag:not(.mono) { font-family: var(--font-sans); font-variant-numeric: normal; }
   /* Cost certainty tag beside an amount (mock .rep / .est): the word is the signal, the border style backs it up. */
-  .tag.certainty-reported, .tag.certainty-estimated, .tag.certainty-unknown {
+  .tag.certainty-reported, .tag.certainty-calculated, .tag.certainty-estimated, .tag.certainty-unknown {
     margin-left: var(--space-1); padding: 0 var(--space-1); font-weight: var(--weight-medium); vertical-align: 1px;
     font-family: var(--font-sans); font-variant-numeric: normal; white-space: nowrap;
   }
@@ -351,6 +345,9 @@
   /* RecoveryPanel: per-attempt decision buttons under the attempt summary. */
   .list-item > .actions { margin-top: var(--space-2); }
   .list-item:hover { border-color: var(--color-border-strong); }
+  /* A list row that is not interactive (plan steps, findings, checks): no pointer, no hover feedback. */
+  .list-item.static { cursor: default; }
+  .list-item.static:hover { border-color: var(--color-border); }
   .list-item[aria-current="true"] { background: var(--color-surface-selected); border-color: var(--color-accent-border); }
   .list-item .title { font-weight: var(--weight-semibold); }
   .list-item .meta { font-size: var(--text-sm); color: var(--color-text-muted); }

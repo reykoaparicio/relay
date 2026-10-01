@@ -48,8 +48,11 @@ const CONTROL_NAME: Readonly<Record<RunAction, string>> = {
   request_revision: 'Request revision',
 };
 
+/** Action controls named `name`, excluding the step timeline (a step may be titled like an action, e.g. "Approve plan"). */
 function controls(name: string): HTMLElement[] {
-  return [...screen.queryAllByRole('button', { name }), ...screen.queryAllByRole('link', { name })];
+  return [...screen.queryAllByRole('button', { name }), ...screen.queryAllByRole('link', { name })].filter(
+    (el) => el.closest('.timeline') === null,
+  );
 }
 
 interface StateCase {
@@ -105,7 +108,7 @@ describe('RunInspectorPage', () => {
     }
     if (proof !== undefined) expect((await screen.findAllByText(proof)).length).toBeGreaterThan(0);
     // Approval controls render once the plan is loaded.
-    if (run.availableActions.includes('approve')) await screen.findByRole('button', { name: 'Approve plan' });
+    if (run.availableActions.includes('approve')) await within(await screen.findByRole('region', { name: 'Proposed plan' })).findByRole('button', { name: 'Approve plan' });
     for (const action of RUN_ACTIONS) {
       // With unresolved attempts, the RecoveryPanel offers decide_unknown per attempt (one button per decision).
       const perAttempt = action === 'decide_unknown' && run.unresolvedAttempts.length > 0;
@@ -211,7 +214,7 @@ describe('RunInspectorPage', () => {
 
   it('a stale approval shows an inline alert and refetches the run', async () => {
     const { bridge } = open('awaiting-approval');
-    const approve = await screen.findByRole('button', { name: 'Approve plan' });
+    const approve = await within(await screen.findByRole('region', { name: 'Proposed plan' })).findByRole('button', { name: 'Approve plan' });
     bridge.failNext('relay/v1/approvals.decide', errors.approvalStale('plan_changed'));
     const before = bridge.callsTo('relay/v1/runs.get').length;
     await userEvent.click(approve);
@@ -372,7 +375,7 @@ describe('RunInspectorPage', () => {
     const run = focusRun(bridge);
     renderApp(`${P}/runs/${run.id}`, { bridge });
     await userEvent.click(await screen.findByRole('button', { name: 'Resume' }));
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('Error code INTERNAL. The run is unchanged.');
   });
 
@@ -665,5 +668,55 @@ describe('RunInspectorPage regressions', () => {
     await waitFor(() => {
       expect(document.activeElement?.id).toBe('inspector-step-heading');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// A11Y-01: one announcer for run status
+
+/** Text currently inside any live container other than the app live region. */
+function otherLiveText(): string {
+  const live = [...document.querySelectorAll<HTMLElement>('[aria-live]:not([aria-live="off"]), [role="status"], [role="alert"], [role="log"]')];
+  return live
+    .filter((el) => el.dataset['testid'] !== 'live-region' && el.closest('[data-testid="live-region"]') === null)
+    .map((el) => el.textContent)
+    .join(' | ');
+}
+
+describe('RunInspectorPage live announcements (A11Y-01)', () => {
+  it('a pushed status change is announced exactly once, by the app live region only', async () => {
+    const { bridge, run } = open('running-streaming');
+    await ready();
+    const announced: string[] = [];
+    const region = screen.getByTestId('live-region');
+    const observer = new MutationObserver(() => {
+      const text = region.textContent.trim();
+      if (text !== '') announced.push(text);
+    });
+    observer.observe(region, { childList: true, subtree: true, characterData: true });
+    bridge.world.runs[0] = { ...run, status: 'paused', pauseReason: 'user' };
+    const last = bridge.world.events.get(run.id)?.at(-1)?.seq ?? 0;
+
+    act(() => {
+      bridge.emit({
+        type: 'run.event',
+        event: runEventSchema.parse({
+          id: 'evt_00000000000000000000099998',
+          runId: run.id,
+          seq: last + 1,
+          type: 'run.status_changed',
+          at: Date.now(),
+          payload: { from: 'running', to: 'paused', pauseReason: 'user' },
+        }),
+      });
+    });
+    const banner = await screen.findByTestId('status-banner');
+    await waitFor(() => {
+      expect(banner).toHaveTextContent('Paused by you');
+    });
+    observer.disconnect();
+
+    expect(announced).toEqual(['Run status: Paused by you.']);
+    expect(otherLiveText()).not.toMatch(/Paused/);
   });
 });

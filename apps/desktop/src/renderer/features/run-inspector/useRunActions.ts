@@ -1,12 +1,27 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
-import type { Channel, RunAction } from '@relay/contracts';
+import type { InputOf, RunAction } from '@relay/contracts';
 import { call } from '../../api/client';
 import { qk } from '../../api/keys';
 import { canonicalJson, IntentInFlightError, useIdempotentMutation } from '../../hooks/useIdempotentMutation';
+import type { IdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { planRunAction } from './run-actions';
-import type { RunActionRequest } from './run-actions';
+import type { IdemCallPlan, PlainCallPlan, RunActionRequest, RunIdemChannel, RunPlainChannel } from './run-actions';
+
+/** One idempotent mutation per run-action channel: a channel added to the action→op table is a compile error here. */
+type RunIdemMutations = { readonly [C in RunIdemChannel]: IdempotentMutation<C> };
+
+function sendIdem<C extends RunIdemChannel>(mutations: RunIdemMutations, plan: IdemCallPlan<C>): Promise<unknown> {
+  const mutation: IdempotentMutation<C> = mutations[plan.channel];
+  return mutation.mutateAsync(plan.input);
+}
+
+type AnyPlainCallPlan = { [C in RunPlainChannel]: PlainCallPlan<C> }[RunPlainChannel];
+
+function sendPlain<C extends RunPlainChannel>(channel: C, input: InputOf<C>): Promise<unknown> {
+  return call(channel, input);
+}
 
 export interface RunActionsApi {
   /**
@@ -37,22 +52,23 @@ export interface RunActionsContext {
 export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const resume = useIdempotentMutation('relay/v1/runs.resume');
-  const decide = useIdempotentMutation('relay/v1/approvals.decide');
-  const increase = useIdempotentMutation('relay/v1/runs.increaseAllowance');
-  const retry = useIdempotentMutation('relay/v1/runs.retryStep');
-  const unknown = useIdempotentMutation('relay/v1/runs.decideUnknown');
-  const plain = useMutation({
-    mutationFn: (p: { readonly channel: Channel; readonly input: unknown }) => call(p.channel, p.input as never),
+  const idemMutations: RunIdemMutations = {
+    'relay/v1/runs.resume': useIdempotentMutation('relay/v1/runs.resume'),
+    'relay/v1/approvals.decide': useIdempotentMutation('relay/v1/approvals.decide'),
+    'relay/v1/runs.increaseAllowance': useIdempotentMutation('relay/v1/runs.increaseAllowance'),
+    'relay/v1/runs.retryStep': useIdempotentMutation('relay/v1/runs.retryStep'),
+    'relay/v1/runs.decideUnknown': useIdempotentMutation('relay/v1/runs.decideUnknown'),
+  };
+  const { mutateAsync: plainMutateAsync } = useMutation({
+    mutationFn: (plan: AnyPlainCallPlan) => sendPlain(plan.channel, plan.input),
   });
-  const { mutateAsync: plainMutateAsync } = plain;
   const [pending, setPending] = useState<RunAction | null>(null);
   const [error, setError] = useState<unknown>(null);
   const inFlight = useRef<{ readonly intent: string; readonly promise: Promise<boolean> } | null>(null);
-  const idem = useRef({ resume, decide, increase, retry, unknown });
+  const idem = useRef(idemMutations);
   const ctx = useRef(context);
   useLayoutEffect(() => {
-    idem.current = { resume, decide, increase, retry, unknown };
+    idem.current = idemMutations;
     ctx.current = context;
   });
 
@@ -84,21 +100,11 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
         void navigate(plan.to);
         return true;
       }
-      const m = idem.current;
       setPending(req.action);
       setError(null);
       try {
-        if (!plan.idempotent) {
-          await plainMutateAsync({ channel: plan.channel, input: plan.input });
-        } else {
-          const c = plan.channel;
-          if (plan.channel === 'relay/v1/runs.resume') await m.resume.mutateAsync(plan.input);
-          else if (plan.channel === 'relay/v1/approvals.decide') await m.decide.mutateAsync(plan.input);
-          else if (plan.channel === 'relay/v1/runs.increaseAllowance') await m.increase.mutateAsync(plan.input);
-          else if (plan.channel === 'relay/v1/runs.retryStep') await m.retry.mutateAsync(plan.input);
-          else if (plan.channel === 'relay/v1/runs.decideUnknown') await m.unknown.mutateAsync(plan.input);
-          else throw new Error(`run action ${req.action} maps to an unexpected channel ${c}`);
-        }
+        if (plan.idempotent) await sendIdem(idem.current, plan);
+        else await plainMutateAsync(plan);
         invalidateAfter(req);
         return true;
       } catch (e) {
@@ -134,5 +140,5 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
     setError(null);
   }, []);
 
-  return { dispatch, pending, busy: pending !== null, error, clearError };
+  return useMemo(() => ({ dispatch, pending, busy: pending !== null, error, clearError }), [dispatch, pending, error, clearError]);
 }

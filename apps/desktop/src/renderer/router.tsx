@@ -1,23 +1,24 @@
-import { lazy } from 'react';
 import { createHashRouter } from 'react-router';
 import type { RouteObject } from 'react-router';
 import { ShellLayout } from './features/shell/Shell';
 import { RouteErrorPage } from './features/shell/RouteErrorPage';
+import {
+  MemoryPage,
+  NewRunPage,
+  OnboardingPage,
+  ReportPage,
+  RunInspectorPage,
+  SettingsPage,
+  WorkflowEditorPage,
+} from './features/shell/lazy-pages';
 import { attachNavPerf } from './hooks/useNavPerf';
-import { MemoryPage } from './pages/MemoryPage';
-import { NewRunPage } from './pages/NewRunPage';
 import { NotFoundPage } from './pages/NotFoundPage';
-import { OnboardingPage } from './pages/OnboardingPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { RootRedirect } from './pages/RootRedirect';
-import { RunInspectorPage } from './pages/RunInspectorPage';
 import { RunsPage } from './pages/RunsPage';
 import { WorkflowsRedirect } from './pages/WorkflowsRedirect';
 
-// Lazy routes (00b §5): workflow editor, report/diff viewer, settings.
-const WorkflowEditorPage = lazy(() => import('./pages/WorkflowEditorPage').then((m) => ({ default: m.WorkflowEditorPage })));
-const ReportPage = lazy(() => import('./pages/ReportPage').then((m) => ({ default: m.ReportPage })));
-const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+// Eager: the shell, Overview and Runs (first paint after onboarding). Everything else is lazy (features/shell/lazy-pages).
 
 /**
  * Route table (10 J1). Leaf `id`s are the `relay:nav:<route>` names (hooks/useNavPerf). Every page renders inside

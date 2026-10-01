@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import { sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
@@ -19,7 +19,8 @@ describe('MemoryPage (J9)', () => {
     await screen.findByRole('heading', { level: 1, name: 'Project memory' });
     expect(await screen.findByRole('tab', { name: /Approved \(8\)/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: /Suggested \(2\)/ })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /Archived \(1\)/ })).toBeInTheDocument();
+    // PERF-05: the archived list (and its count) loads only when needed.
+    expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '2 suggested memories need review' })).toBeInTheDocument();
     const panel = await detail('Preserve the existing public response format');
     expect(within(panel).getByText('User rule', { selector: 'dd' })).toBeInTheDocument();
@@ -186,7 +187,6 @@ describe('MemoryPage (J9)', () => {
     await user.click(within(banner).getByRole('button', { name: 'Resolve conflict' }));
     const panel = (await screen.findByRole('heading', { level: 2, name: 'Resolve conflict' })).closest('section') as HTMLElement;
     await user.click(within(panel).getByRole('radio', { name: 'Combine into a new record' }));
-    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     return panel;
   }
 
@@ -206,7 +206,7 @@ describe('MemoryPage (J9)', () => {
         },
       }),
     );
-    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     expect(await within(panel).findByText('Scope must name a role.')).toBeInTheDocument();
     expect(within(panel).getByText('A record was archived meanwhile.')).toBeInTheDocument();
     expect(within(panel).getByText('Title is too long.')).toBeInTheDocument();
@@ -219,7 +219,7 @@ describe('MemoryPage (J9)', () => {
     const panel = await openCombine(user);
     const keep = within(panel).getByRole('checkbox', { name: /Keep pinned/ });
     expect(keep).toBeChecked();
-    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/memory.resolveConflict')).toHaveLength(1);
     });
@@ -231,7 +231,7 @@ describe('MemoryPage (J9)', () => {
     const { bridge } = renderApp(P, { scenario: 'memory-conflict' });
     const panel = await openCombine(user);
     expect(within(panel).getByRole('checkbox', { name: /Keep pinned/ })).not.toBeChecked();
-    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/memory.resolveConflict')).toHaveLength(1);
     });
@@ -323,6 +323,21 @@ describe('MemoryPage (J9)', () => {
     expect(await screen.findByText('No suggestions to review')).toBeInTheDocument();
   });
 
+  it('A11Y-02: after a decision, focus moves to the next suggestion heading (never <body>)', async () => {
+    const user = userEvent.setup();
+    renderApp(`${P}?tab=suggested`, { scenario: 'awaiting-approval' });
+    const card = (await screen.findByRole('heading', { level: 3, name: 'Log request IDs on every error' })).closest('article') as HTMLElement;
+
+    await user.click(within(card).getByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { level: 3, name: 'Log request IDs on every error' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 3, name: 'Validate with hand-written checks' }));
+    });
+  });
+
   it('suggestions: Edit then approve sends finalContent with the expected revision', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp(`${P}?tab=suggested`, { scenario: 'awaiting-approval' });
@@ -353,14 +368,13 @@ describe('MemoryPage (J9)', () => {
     await user.selectOptions(within(panel).getByRole('combobox', { name: 'Approved record to combine with' }), M(2));
     expect(await within(panel).findByRole('heading', { level: 3, name: 'Validate request bodies with zod' })).toBeInTheDocument();
     await user.click(within(panel).getByRole('radio', { name: 'Combine into a new record' }));
-    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     const title = within(panel).getByRole('textbox', { name: /Title/ });
     await user.clear(title);
     await user.type(title, 'Validation approach');
     const text = within(panel).getByRole('textbox', { name: /Rewritten text/ });
     await user.clear(text);
     await user.type(text, 'Use the shared zod schemas; small hand-written checks are fine for path params.');
-    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/memory.resolveConflict')).toHaveLength(1);
     });
@@ -406,12 +420,11 @@ describe('MemoryPage (J9)', () => {
     await user.click(within(banner).getByRole('button', { name: 'Resolve conflict' }));
     const panel = (await screen.findByRole('heading', { level: 2, name: 'Resolve conflict' })).closest('section') as HTMLElement;
     await user.click(within(panel).getByRole('radio', { name: /Keep both with separate scopes/ }));
-    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     await user.selectOptions(within(panel).getByRole('combobox', { name: /Scope for B/ }), 'reviewer');
     expect(within(panel).getByText('The two records must not apply to the same role.')).toBeInTheDocument();
-    expect(within(panel).getByRole('button', { name: 'Apply resolution' })).toBeDisabled();
+    expect(within(panel).getByRole('button', { name: 'Resolve conflict' })).toBeDisabled();
     await user.selectOptions(within(panel).getByRole('combobox', { name: /Scope for B/ }), 'implementer');
-    await user.click(within(panel).getByRole('button', { name: 'Apply resolution' }));
+    await user.click(within(panel).getByRole('button', { name: 'Resolve conflict' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/memory.resolveConflict')[0]?.input).toMatchObject({
         recordIds: [M(10), M(2)],
@@ -452,7 +465,7 @@ describe('MemoryPage (J9)', () => {
     const bridge = createFakeBridge('awaiting-approval');
     bridge.world.notImplemented.add('memory.list');
     renderApp(P, { bridge });
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
   });
@@ -463,11 +476,30 @@ describe('MemoryPage (J9)', () => {
     const panel = await detail('Validate request bodies with zod');
     bridge.failNext(
       'relay/v1/memory.archive',
-      appError('INTERNAL', { details: { reason: 'not_implemented', channel: 'relay/v1/memory.archive' } }),
+      errors.internal(undefined, 'not_implemented'),
     );
     await user.click(within(panel).getByRole('button', { name: 'Archive' }));
-    expect(await within(panel).findByText('Something went wrong inside Relay.')).toBeInTheDocument();
+    // contracts INTERNAL_REASON_MESSAGES: a stubbed channel has its own static message.
+    expect(await within(panel).findByText('This feature is not available in this build yet.')).toBeInTheDocument();
     expect(within(panel).getByText('INTERNAL')).toBeInTheDocument();
     expect(within(panel).queryByText(/Not available yet/)).not.toBeInTheDocument();
+  });
+});
+
+describe('MemoryPage data loading (PERF-05)', () => {
+  it('fetches the archived list only once the Archived tab is opened', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(P, { scenario: 'awaiting-approval' });
+    await screen.findByRole('tab', { name: /Approved/ });
+    const archivedCalls = () =>
+      bridge.callsTo('relay/v1/memory.list').filter((c) => JSON.stringify(c.input).includes('"archived"'));
+
+    expect(archivedCalls()).toHaveLength(0);
+
+    await user.click(screen.getByRole('tab', { name: /Archived/ }));
+
+    await waitFor(() => {
+      expect(archivedCalls()).toHaveLength(1);
+    });
   });
 });

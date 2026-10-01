@@ -10,7 +10,7 @@ export function ValidationIssueList({ issues }: { readonly issues: readonly Vali
   return (
     <ul className="list" aria-label="Validation issues">
       {issues.map((i, n) => (
-        <li key={`${i.path}-${String(n)}`} className="list-item" style={{ cursor: 'default' }}>
+        <li key={`${i.path}-${String(n)}`} className="list-item static">
           <span className="title mono">{i.path === '' ? '$' : `$.${i.path}`}</span>
           <span className="meta">{i.message}</span>
         </li>

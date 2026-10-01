@@ -3,7 +3,6 @@
 // and tests only: main.tsx imports it dynamically behind `import.meta.env.DEV || MODE === 'test'`, so production
 // bundles never contain it.
 import {
-  appError,
   appSettingsSchema,
   errors,
   isTerminalRunStatus,
@@ -1091,10 +1090,8 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
       // generic error path for INTERNAL `not_implemented` stays covered.
       return {
         ok: false,
-        error: appError('INTERNAL', {
-          userMessage: 'This feature is not available in this build yet.',
-          details: { reason: 'not_implemented', channel },
-        }),
+        // contracts `errors.internal` is the only INTERNAL builder; `not_implemented` carries its static message.
+        error: errors.internal(undefined, 'not_implemented'),
       };
     }
     const handler = HANDLERS[key] as (w: FakeWorld, i: unknown, c: HandlerContext) => unknown;

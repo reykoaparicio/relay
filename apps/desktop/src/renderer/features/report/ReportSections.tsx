@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { addMicrousd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
 import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
-import { formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
+import { APPROVAL_DECISION_LABELS, formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
 import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
 import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
@@ -177,12 +177,6 @@ export function FindingsSection({ findings, error, hasFindings }: { readonly fin
 
 const NOT_RECORDED = 'Not recorded in this report.';
 
-const DECISION_TEXT: Readonly<Record<NonNullable<ReportApproval['decision']>, string>> = {
-  approved: 'approved',
-  revision_requested: 'revision requested',
-  rejected: 'rejected',
-};
-
 /** Why an approval stopped binding (contracts APPROVAL_STALE_REASONS, 06 F17). */
 const INVALIDATED_TEXT: Readonly<Record<NonNullable<ReportApproval['invalidatedReason']>, string>> = {
   plan_changed: 'plan changed',
@@ -211,7 +205,7 @@ export function ApprovalsSection({ report }: { readonly report: ReportV1 }) {
           <li key={a.approvalId} className="list-item" style={{ cursor: 'default' }} data-testid="report-approval">
             <span className="row">
               <span className="title">
-                {stepTitle(a)}: {a.decision === null ? 'not decided' : DECISION_TEXT[a.decision]}
+                {stepTitle(a)}: {a.decision === null ? 'not decided' : APPROVAL_DECISION_LABELS[a.decision]}
               </span>
               {a.invalidatedReason === null ? null : (
                 <span className="badge warning">invalidated: {INVALIDATED_TEXT[a.invalidatedReason]}</span>
@@ -389,7 +383,7 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
       }
     >
       {failed && e !== null ? (
-        <InlineAlert tone="danger" title={errorTitle(e)}>
+        <InlineAlert tone="danger" live="assertive" title={errorTitle(e)}>
           <p>Run is intact; retry export only.</p>
           <p className="subtle">
             Error code <code>{e.code}</code>. No run data, ledger entries, or artifacts were changed.

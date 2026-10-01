@@ -72,6 +72,7 @@ export function WelcomeStep({ dispatch, go }: StepProps) {
         </div>
         {sample.error === null || sample.error === undefined ? null : (
           <ErrorView
+            live="assertive"
             error={toViewError(sample.error)}
             onAction={onSampleErrorAction}
           />
@@ -129,6 +130,7 @@ export function StartPointStep({ state, dispatch, go }: StepProps) {
       <p className="small muted">Either way, you need one connected provider to run the workflow.</p>
       {sample.error === null || sample.error === undefined ? null : (
         <ErrorView
+          live="assertive"
           error={toViewError(sample.error)}
           onAction={onSampleErrorAction}
         />

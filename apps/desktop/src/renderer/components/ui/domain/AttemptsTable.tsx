@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { AttemptView } from '@relay/contracts';
 import { formatDuration } from '../../../lib/format/duration';
 import { ATTEMPT_PURPOSE_LABELS, PROVIDER_LABELS, stepKeyLabel } from '../../../lib/format/labels';
@@ -104,7 +105,7 @@ const COLUMNS: ReadonlyArray<DataTableColumn<AttemptView>> = [
   },
 ];
 
-export function AttemptsTable({ attempts, caption = 'Attempts for this run' }: AttemptsTableProps) {
+function AttemptsTableView({ attempts, caption = 'Attempts for this run' }: AttemptsTableProps) {
   return (
     <div className="stack">
       <DataTable
@@ -121,3 +122,6 @@ export function AttemptsTable({ attempts, caption = 'Attempts for this run' }: A
     </div>
   );
 }
+
+/** Memoized (PERF-02): re-renders only when its props change, not on every parent tick. */
+export const AttemptsTable = memo(AttemptsTableView);

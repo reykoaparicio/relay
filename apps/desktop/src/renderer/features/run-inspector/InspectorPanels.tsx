@@ -1,12 +1,12 @@
 // Events, Ledger, and Context-summary panels of the run inspector (10 J8).
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Download } from 'lucide-react';
 import { microusd, stepStateSchema } from '@relay/contracts';
 import type { ContextManifest, LedgerEntryView, RunDetail, RunEvent } from '@relay/contracts';
 import { Button, DataTable, Hash, KeyValueList, Money, Skeleton } from '../../components/ui';
 import type { DataTableColumn } from '../../components/ui';
-import { formatAbsoluteTime, formatTokens, statusPresentation } from '../../lib/format';
+import { formatAbsoluteTime, formatTokens, statusPresentation, toIsoString } from '../../lib/format';
 import { ActionErrorNotice } from './ActionErrorNotice';
 import { stepTitle } from './inspector-model';
 
@@ -18,7 +18,7 @@ export const EVENTS_VIRTUALIZE_THRESHOLD = 300;
 const EVENT_ROW_PX = 32;
 
 /** One-line, redacted summary of an event payload (no content; payloads are already redacted, 02 B5). */
-export function eventSummary(e: RunEvent): string {
+function eventSummary(e: RunEvent): string {
   const p = e.payload;
   const stepKey = typeof p['stepKey'] === 'string' ? stepTitle({ stepKey: p['stepKey'] }) : null;
   if (e.type === 'run.status_changed') {
@@ -39,7 +39,7 @@ function EventRow({ e }: { readonly e: RunEvent }) {
   return (
     <>
       <span className="num subtle">{e.seq}</span>{' '}
-      <time className="num subtle" dateTime={new Date(e.at).toISOString()}>
+      <time className="num subtle" dateTime={toIsoString(e.at)}>
         {formatAbsoluteTime(e.at)}
       </time>{' '}
       <code>{e.type}</code> <span>{eventSummary(e)}</span>
@@ -100,7 +100,7 @@ export interface EventsListProps {
 }
 
 /** Events of the selected step row, oldest first, plus a separate run-level group for legacy step-key-only events. */
-export function EventsList({ events, runLevel = [], loaded }: EventsListProps) {
+function EventsListView({ events, runLevel = [], loaded }: EventsListProps) {
   if (!loaded && events.length === 0 && runLevel.length === 0) return <Skeleton lines={4} />;
   return (
     <div className="stack">
@@ -123,6 +123,9 @@ export function EventsList({ events, runLevel = [], loaded }: EventsListProps) {
   );
 }
 
+/** Memoized (PERF-02): re-renders only when its props change, not on every parent tick. */
+export const EventsList = memo(EventsListView);
+
 // ---------------------------------------------------------------------------------------------------------------
 // Ledger (run-scoped)
 
@@ -131,7 +134,7 @@ const LEDGER_COLUMNS: ReadonlyArray<DataTableColumn<LedgerEntryView>> = [
     key: 'created',
     header: 'Created',
     cell: (e) => (
-      <time className="num whitespace-nowrap" dateTime={new Date(e.createdAt).toISOString()}>
+      <time className="num whitespace-nowrap" dateTime={toIsoString(e.createdAt)}>
         {formatAbsoluteTime(e.createdAt)}
       </time>
     ),

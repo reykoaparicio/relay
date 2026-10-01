@@ -19,6 +19,8 @@ export function formatTokens(n: number): string {
 }
 
 /** Full count with grouping, for aria-labels and tables where precision matters: "12,400". */
+const EXACT_FORMAT = new Intl.NumberFormat('en-US');
+
 export function formatTokensExact(n: number): string {
-  return new Intl.NumberFormat('en-US').format(Math.round(n));
+  return EXACT_FORMAT.format(Math.round(n));
 }

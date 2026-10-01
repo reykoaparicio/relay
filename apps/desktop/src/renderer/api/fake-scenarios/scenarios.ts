@@ -1,5 +1,5 @@
 // Fake scenarios (10 J3): one per mock state, selected with `?fake=<name>` in `pnpm dev:renderer`.
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import type { PauseReason, RunStatus } from '@relay/contracts';
 import { runEventSchema } from '@relay/contracts';
 import { buildWorld, DAY, HOUR, MINUTE, rawResponseArtifact, sid } from './world';
@@ -282,7 +282,7 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(
         focus('failed', null, {
           steps: { intake: 'succeeded', review: 'failed' },
-          statusDetail: appError('INTERNAL'),
+          statusDetail: errors.internal(undefined),
           cost: { estimated: 60_000 },
         }),
       );

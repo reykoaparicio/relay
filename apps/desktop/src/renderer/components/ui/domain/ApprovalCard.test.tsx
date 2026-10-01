@@ -19,6 +19,18 @@ describe('ApprovalCard', () => {
     expect(screen.getByText(fixture.goalRestatement)).toBeVisible();
   });
 
+  it('shows the approver unresolved questions, test suggestions and the findings each step addresses', () => {
+    const fixture = { ...plan(), unresolvedQuestions: ['Should 422 include the field path?'] };
+
+    render(<ApprovalCard approval={approval()} plan={fixture} onDecide={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: 'Open questions' })).toBeVisible();
+    expect(screen.getByText('Should 422 include the field path?')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Suggested tests (proposed, not executed)' })).toBeVisible();
+    expect(screen.getByText('Post an empty body and expect 422')).toBeVisible();
+    expect(screen.getByText(/addresses F1/)).toBeVisible();
+  });
+
   it('shows the plan and context hashes the approval covers, with copyable full values', () => {
     const a = approval();
 

@@ -150,7 +150,7 @@ describe('OnboardingPage (J6)', () => {
     });
     await user.type(screen.getByRole('textbox', { name: /Rule/ }), 'Keep handlers thin.');
     await user.click(screen.getByRole('button', { name: 'Save rule and continue' }));
-    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('[role="alert"]') as HTMLElement;
+    const alert = (await screen.findByText('This feature is not available in this build yet.')).closest('.banner') as HTMLElement;
     expect(alert).toHaveTextContent('INTERNAL');
     expect(screen.queryByText(/Not available yet/)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Skip for now' }));
@@ -350,7 +350,7 @@ describe('OnboardingPage (J6)', () => {
     expect(bridge.callsTo('relay/v1/projects.create')).toHaveLength(0);
   });
 
-  it('B12: a step change by keyboard focuses the new heading and announces "Step N of 8"', async () => {
+  it('B12: a step change by keyboard focuses the new heading once (no duplicate live-region announcement)', async () => {
     const user = userEvent.setup();
     renderApp('/onboarding', { scenario: 'first-launch' });
     await heading('Welcome to Relay');
@@ -360,7 +360,8 @@ describe('OnboardingPage (J6)', () => {
     await waitFor(() => {
       expect(next).toHaveFocus();
     });
-    expect(screen.getByTestId('live-region')).toHaveTextContent('Step 2 of 8: Choose a starting point');
+    expect(screen.getByText('Step 2 of 8')).toBeInTheDocument();
+    expect(screen.getByTestId('live-region')).not.toHaveTextContent(/Choose a starting point|Step 2 of 8/);
   });
 });
 

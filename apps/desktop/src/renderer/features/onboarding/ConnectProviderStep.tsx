@@ -208,7 +208,7 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
         </Button>
       </div>
       {connect.error === null || connect.error === undefined ? null : (
-        <ErrorView error={toViewError(connect.error)} onAction={onErrorAction} />
+        <ErrorView live="assertive" error={toViewError(connect.error)} onAction={onErrorAction} />
       )}
       {lastForChosen === undefined ? null : (
         <TestOutcomeView

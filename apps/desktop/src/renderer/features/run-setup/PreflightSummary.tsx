@@ -2,8 +2,7 @@ import type { ReactNode } from 'react';
 import type { Microusd, RunPreflight } from '@relay/contracts';
 import { KeyValueList, Money } from '../../components/ui';
 import type { KeyValueItem } from '../../components/ui';
-import { formatTokensExact, PROVIDER_LABELS } from '../../lib/format';
-import { formatBytes } from './PreviewPanel';
+import { formatBytes, formatTokensExact, PROVIDER_LABELS } from '../../lib/format';
 
 export interface PreflightSummaryProps {
   readonly preflight: RunPreflight;

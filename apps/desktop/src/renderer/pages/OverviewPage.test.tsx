@@ -102,7 +102,7 @@ describe('OverviewPage', () => {
   it('provider-disconnected: names the provider, shows the redacted key and a reconnect link', async () => {
     renderApp(OVERVIEW, { scenario: 'provider-disconnected' });
     const banner = await screen.findByText('Authentication failed for OpenAI');
-    const alert = banner.closest('[role="alert"]');
+    const alert = banner.closest('.banner');
     expect(alert).not.toBeNull();
     expect(within(alert as HTMLElement).getByText('sk-…Q7d2')).toBeInTheDocument();
     const reconnect = within(alert as HTMLElement).getByRole('link', { name: 'Reconnect OpenAI' });

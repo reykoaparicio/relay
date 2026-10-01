@@ -52,7 +52,7 @@ export function MutationError({ error, handlers = {}, names, projectId, conflict
     handlers.reload === undefined
       ? { ...view, nextAction: view.nextAction === 'reload' ? ('none' as const) : view.nextAction, alternatives: view.alternatives.filter((a) => a !== 'reload') }
       : view;
-  return <ErrorView error={shown} {...(title === view.userMessage ? {} : { title })} onAction={onAction} />;
+  return <ErrorView error={shown} live="assertive" {...(title === view.userMessage ? {} : { title })} onAction={onAction} />;
 }
 
 export interface ConflictNoticeProps {
@@ -77,6 +77,7 @@ export function ConflictNotice({ copy, correlationId, projectId, onReload, actio
   return (
     <InlineAlert
       tone={copy.stale ? 'warning' : 'danger'}
+      live="assertive"
       title={copy.title}
       {...(hasActions
         ? {

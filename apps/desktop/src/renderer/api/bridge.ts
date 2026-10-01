@@ -7,6 +7,13 @@ export interface RelayBridge {
   subscribe(listener: (e: PushEvent) => void): () => void;
 }
 
+declare global {
+  interface Window {
+    /** Exposed by the preload (08 H2); absent under the fake bridge (dev renderer, tests). */
+    readonly relay?: RelayBridge;
+  }
+}
+
 let installed: RelayBridge | null = null;
 
 /**
@@ -20,7 +27,7 @@ export function installBridge(bridge: RelayBridge | null): void {
 
 /** True when the preload exposed the real bridge. */
 export function hasPreloadBridge(): boolean {
-  return (window as unknown as { relay?: RelayBridge }).relay !== undefined;
+  return window.relay !== undefined;
 }
 
 /**
@@ -29,7 +36,7 @@ export function hasPreloadBridge(): boolean {
  */
 export function getBridge(): RelayBridge {
   if (installed !== null) return installed;
-  const relay = (window as unknown as { relay?: RelayBridge }).relay;
+  const relay = window.relay;
   if (relay !== undefined) return relay;
   throw new Error('Relay bridge unavailable: window.relay is missing.');
 }

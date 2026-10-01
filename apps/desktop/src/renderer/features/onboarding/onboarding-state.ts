@@ -93,7 +93,7 @@ export function selectionExpired(selection: DirectorySelection, now: number): bo
 }
 
 /** Last path segment of a display path ("~/code/my-api" → "my-api"). */
-export function folderName(displayPath: string): string {
+function folderName(displayPath: string): string {
   const parts = displayPath.split(/[\\/]/).filter((p) => p !== '');
   return (parts[parts.length - 1] ?? '').slice(0, 80);
 }

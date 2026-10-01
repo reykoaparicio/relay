@@ -45,7 +45,7 @@ export class RunInspector {
 
   /** The live run status badge in the page header (PageHeader role=status). */
   status(): Locator {
-    return this.page.getByRole('main').locator('header').getByRole('status');
+    return this.page.getByRole('main').locator('header .status-line');
   }
 
   async waitForStatus(text: string | RegExp, timeout = 30_000): Promise<void> {

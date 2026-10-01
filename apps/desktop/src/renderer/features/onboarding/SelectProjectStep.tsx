@@ -21,7 +21,7 @@ import type { StepProps } from './StepFrame';
 const LISTED: readonly ProviderId[] = ['anthropic', 'openai', 'gemini'];
 
 /** "dist/**, *.log" → ["dist/**", "*.log"]. */
-export function parseExclusions(text: string): string[] {
+function parseExclusions(text: string): string[] {
   return text
     .split(/[,\n]/)
     .map((s) => s.trim())
@@ -271,10 +271,10 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
         </>
       )}
       {pick.error === null ? null : (
-        <ErrorView error={toViewError(pick.error)} onAction={onPickErrorAction} />
+        <ErrorView live="assertive" error={toViewError(pick.error)} onAction={onPickErrorAction} />
       )}
       {create.error === null || create.error === undefined || selectionLost ? null : (
-        <ErrorView error={toViewError(create.error)} onAction={onCreateErrorAction} />
+        <ErrorView live="assertive" error={toViewError(create.error)} onAction={onCreateErrorAction} />
       )}
       {state.selection === null && pick.isSuccess && !selectionLost ? (
         <InlineAlert tone="neutral" title="No folder chosen">

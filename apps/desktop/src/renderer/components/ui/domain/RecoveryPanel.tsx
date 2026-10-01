@@ -102,7 +102,7 @@ export function RecoveryPanel({
             {run.unresolvedAttempts.map((a) => {
               const titleId = `${rowIdPrefix}-${a.id}`;
               return (
-                <li key={a.id} className="list-item" style={{ cursor: 'default' }}>
+                <li key={a.id} className="list-item static">
                   <span className="row">
                     <span className="title" id={titleId}>
                       {stepKeyLabel(a.stepKey)} · attempt {a.seq}

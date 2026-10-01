@@ -1,4 +1,5 @@
-import { useId, useState } from 'react';
+import { useId } from 'react';
+import type { ReactNode } from 'react';
 import type { MemoryRecordView } from '@relay/contracts';
 import { MEMORY_TYPE_LABELS } from '../../../lib/format/labels';
 import { Button } from '../Button';
@@ -16,8 +17,21 @@ export interface ConflictRecord extends MemoryRecordView {
 export interface ConflictCompareProps {
   readonly a: ConflictRecord;
   readonly b: ConflictRecord;
-  readonly onResolve: (resolution: ConflictResolution) => void;
+  /** The chosen resolution (controlled); null until the user picks one. */
+  readonly value: ConflictResolution | null;
+  readonly onValueChange: (resolution: ConflictResolution) => void;
+  /** The single submit of the whole form (the radios plus the chosen option's slot fields). */
+  readonly onSubmit: (resolution: ConflictResolution) => void;
+  /**
+   * Extra fields per option, shown under the choices while that option is selected and submitted with the same form
+   * (e.g. the rewrite fields for `combine`, the two scopes for `keep_both_scoped`).
+   */
+  readonly slots?: Partial<Readonly<Record<ConflictResolution, ReactNode>>>;
   readonly pending?: boolean;
+  /** Blocks the submit (e.g. the chosen option's fields are invalid); nothing chosen always blocks it. */
+  readonly submitDisabled?: boolean;
+  /** Accessible names of the slot groups (default: the option labels). */
+  readonly slotLabels?: Partial<Readonly<Record<ConflictResolution, string>>>;
 }
 
 function Column({ record, heading }: { readonly record: ConflictRecord; readonly heading: string }) {
@@ -37,14 +51,36 @@ function Column({ record, heading }: { readonly record: ConflictRecord; readonly
   );
 }
 
-export function ConflictCompare({ a, b, onResolve, pending = false }: ConflictCompareProps) {
-  const [choice, setChoice] = useState<ConflictResolution | null>(null);
+const DEFAULT_SLOT_LABELS: Readonly<Record<ConflictResolution, string>> = {
+  keep_a: 'Keep A',
+  keep_b: 'Keep B',
+  combine: 'Combined record',
+  keep_both_scoped: 'Separate scopes',
+};
+
+/**
+ * Both records side by side with the four §5.5 choices, as one form: the chosen option's slot fields render under the
+ * choices and a single "Resolve conflict" submits everything (Enter in a slot field submits too).
+ */
+export function ConflictCompare({
+  a,
+  b,
+  value,
+  onValueChange,
+  onSubmit,
+  slots = {},
+  pending = false,
+  submitDisabled = false,
+  slotLabels = {},
+}: ConflictCompareProps) {
+  const slot = value === null ? undefined : slots[value];
   return (
     <form
       className="stack"
+      noValidate
       onSubmit={(e) => {
         e.preventDefault();
-        if (choice !== null) onResolve(choice);
+        if (value !== null && !submitDisabled && !pending) onSubmit(value);
       }}
     >
       <div className="compare">
@@ -53,8 +89,8 @@ export function ConflictCompare({ a, b, onResolve, pending = false }: ConflictCo
       </div>
       <RadioGroup<ConflictResolution>
         legend="How should Relay resolve this conflict?"
-        value={choice}
-        onValueChange={setChoice}
+        value={value}
+        onValueChange={onValueChange}
         options={[
           { value: 'keep_a', label: `Keep A: "${a.title}"`, description: 'The other record is archived or rejected.' },
           { value: 'keep_b', label: `Keep B: "${b.title}"`, description: 'The other record is archived or rejected.' },
@@ -66,8 +102,13 @@ export function ConflictCompare({ a, b, onResolve, pending = false }: ConflictCo
           },
         ]}
       />
+      {value === null || slot === undefined ? null : (
+        <div className="stack" role="group" aria-label={slotLabels[value] ?? DEFAULT_SLOT_LABELS[value]}>
+          {slot}
+        </div>
+      )}
       <div className="actions">
-        <Button type="submit" variant="primary" pending={pending} disabled={choice === null}>
+        <Button type="submit" variant="primary" pending={pending} disabled={value === null || submitDisabled}>
           Resolve conflict
         </Button>
       </div>

@@ -231,17 +231,14 @@ const SCENARIOS: ReadonlyArray<readonly [string, () => ReactElement, { readonly 
         <li><MemoryRecordCard record={memoryRecord(1, { stale: true, pinned: true })} selected onSelect={noop} /></li>
         <li><MemoryRecordCard record={memoryRecord(2, { status: 'suggested' })} selected={false} onSelect={noop} /></li>
       </ul>
-      <ConflictCompare a={memoryRecord(1)} b={memoryRecord(2, { status: 'suggested' })} onResolve={noop} />
+      <ConflictCompare a={memoryRecord(1)} b={memoryRecord(2, { status: 'suggested' })} value="combine" onValueChange={noop} onSubmit={noop} slots={{ combine: <p>Rewrite fields</p> }} />
     </>
   )],
   ['RecoveryPanel', () => <RecoveryPanel run={runDetail()} onDecide={noop} />],
-  ['Page section heading + link-block', () => (
+  ['Page section heading', () => (
     <section aria-labelledby="sec-h">
       <h2 id="sec-h" className="section-heading">Recent runs</h2>
-      <a className="link-block" href="#/runs/1">
-        <span className="label">Run 024</span>
-        <span className="hint">Completed 2 minutes ago</span>
-      </a>
+      <p>Completed 2 minutes ago</p>
     </section>
   )],
   ['CatalogTable', () => (
