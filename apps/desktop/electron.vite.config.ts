@@ -23,12 +23,28 @@ export const workspaceAlias = [
   { find: /^@relay\/(contracts|engine|storage|providers|tools|templates)$/, replacement: `${packages}/$1/src/index.ts` },
 ];
 
+/**
+ * `ws` (pulled in by @google/genai) optionally requires the native add-ons `bufferutil` and `utf-8-validate`, which
+ * are not installed. Unresolved, Vite replaces them with a stub that THROWS at load in dev builds (the runner died on
+ * every `pnpm dev` start) and with an empty object in production builds (where `ws` would then call a missing
+ * `bufferUtil.mask` on frames of 48+ bytes). Defining ws's own opt-out flags removes both code paths; the alias
+ * points the now-unused ids at an empty local module so no stub is generated.
+ */
+export const wsOptionalNative = {
+  alias: [{ find: /^(bufferutil|utf-8-validate)$/, replacement: resolve(root, 'build/ws-optional-native.cjs') }],
+  define: {
+    'process.env.WS_NO_BUFFER_UTIL': JSON.stringify('1'),
+    'process.env.WS_NO_UTF_8_VALIDATE': JSON.stringify('1'),
+  },
+};
+
 /** LIC-01: one store shared by the main (+ nested runner), preload and renderer builds. */
 const notices = thirdPartyNotices({ extraPackages: ['tailwindcss'], resolveFrom: root });
 
 export default defineConfig({
   main: {
-    resolve: { alias: workspaceAlias },
+    resolve: { alias: [...workspaceAlias, ...wsOptionalNative.alias] },
+    define: wsOptionalNative.define,
     plugins: [esmShimFix(), notices.collect('main')],
     esbuild: { keepNames: true },
     build: {
