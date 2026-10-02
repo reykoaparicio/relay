@@ -273,6 +273,28 @@ describe('MemoryPage (J9)', () => {
     expect(await screen.findByRole('tab', { name: /Archived \(2\)/ })).toBeInTheDocument();
   });
 
+  it.each([
+    ['delete then archive', ['delete', 'archive'] as const],
+    ['archive then delete', ['archive', 'delete'] as const],
+  ])('delete-confirm shows the error of the most recent action (%s)', async (_name, order) => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(`${P}?record=${M(5)}`, { scenario: 'awaiting-approval' });
+    const panel = await detail('Use the shared error helper');
+    await user.click(within(panel).getByRole('button', { name: 'Delete…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Delete “Use the shared error helper”?' });
+    const DELETE_FAILED = 'The background runner is not available';
+    const ARCHIVE_FAILED = 'This feature is not available in this build yet.';
+    bridge.failNext('relay/v1/memory.delete', appError('RUNNER_UNAVAILABLE', { userMessage: DELETE_FAILED }));
+    bridge.failNext('relay/v1/memory.archive', errors.internal(undefined, 'not_implemented'));
+    const run = async (action: 'delete' | 'archive') => {
+      await user.click(within(dialog).getByRole('button', { name: action === 'delete' ? 'Delete record from future runs' : 'Archive instead' }));
+      expect(await within(dialog).findByText(action === 'delete' ? DELETE_FAILED : ARCHIVE_FAILED)).toBeInTheDocument();
+      expect(within(dialog).queryByText(action === 'delete' ? ARCHIVE_FAILED : DELETE_FAILED)).not.toBeInTheDocument();
+    };
+    await run(order[0]);
+    await run(order[1]);
+  });
+
   it('add project rule: memory.create (idempotent) and the new record is selected', async () => {
     const user = userEvent.setup();
     const { bridge, router } = renderApp(P, { scenario: 'awaiting-approval' });

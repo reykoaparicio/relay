@@ -77,6 +77,19 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
   }
 }
 
+/**
+ * Most memory records a run can name explicitly (contracts `runStartInputSchema.memoryRecordIds`, `.max(50)`). An
+ * untouched picker sends none (every approved record is included), so only an explicit selection is capped.
+ */
+export const MAX_MEMORY_RECORD_IDS = 50;
+
+/** The memory-field message for an explicit selection over {@link MAX_MEMORY_RECORD_IDS}, else null. */
+export function memorySelectionError(memoryIds: readonly string[] | null): string | null {
+  if (memoryIds === null || memoryIds.length <= MAX_MEMORY_RECORD_IDS) return null;
+  const over = memoryIds.length - MAX_MEMORY_RECORD_IDS;
+  return `Choose at most ${String(MAX_MEMORY_RECORD_IDS)} records (${String(memoryIds.length)} are ticked). Untick ${String(over)} more, or include all approved records.`;
+}
+
 /** Field ids: controls use them, and the error summary links to them. */
 export const FIELD = {
   goal: 'new-run-goal',
@@ -181,6 +194,8 @@ export function checkForm(
   if ('error' in attempts) errors[FIELD.attempts] = attempts.error;
   const timeout = checkWhole(texts.timeout, LIMIT_BOUNDS.timeoutMinutes);
   if ('error' in timeout) errors[FIELD.timeout] = timeout.error;
+  const memory = memorySelectionError(form.memoryIds);
+  if (memory !== null) errors[FIELD.memory] = memory;
 
   const overrides = {
     ...('value' in allowance && allowance.value !== d.budget ? { budgetMicrousd: allowance.value } : {}),
@@ -200,6 +215,7 @@ export function checkForm(
     FIELD.revisions,
     FIELD.attempts,
     FIELD.timeout,
+    FIELD.memory,
   ];
   return {
     fieldErrors: errors,

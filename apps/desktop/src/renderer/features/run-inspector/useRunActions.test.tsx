@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router';
 import { createTestQueryClient } from '../../components/ui/test-utils';
 import { installBridge } from '../../api/bridge';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../../api/fake-bridge';
+import { appError } from '@relay/contracts';
 import type { FakeScenarioName } from '../../api/fake-bridge';
 import { IntentInFlightError } from '../../hooks/useIdempotentMutation';
 import { useRunActions } from './useRunActions';
@@ -101,5 +102,56 @@ describe('useRunActions', () => {
     expect(keys).toContainEqual(['run', run.id]);
     expect(keys).toContainEqual(['step', run.id]);
     expect(keys).toContainEqual(['ledger', run.id]);
+  });
+
+  it('error and pending belong to the run they were started from (the inspector keeps the hook across runs)', async () => {
+    const bridge = createFakeBridge('active-run');
+    installBridge(bridge);
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('scenario has no run');
+    const otherRun = 'run_00000000000000000000099999';
+    const queryClient = createTestQueryClient();
+    const wrapper = ({ children }: { readonly children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>{children}</MemoryRouter>
+      </QueryClientProvider>
+    );
+    const initialProps: { runId: string } = { runId: run.id };
+    const hook = renderHook(({ runId }: { runId: string }) => useRunActions({ runId, projectId: FAKE_PROJECT_ID }), {
+      wrapper,
+      initialProps,
+    });
+
+    // A failed action on run A…
+    bridge.failNext('relay/v1/runs.pause', appError('CONFLICT'));
+    await act(async () => {
+      expect(await hook.result.current.dispatch({ action: 'pause', runId: run.id })).toBe(false);
+    });
+    expect(hook.result.current.error).not.toBeNull();
+    // …is not shown on run B, and is back on A (until cleared).
+    hook.rerender({ runId: otherRun });
+    expect(hook.result.current.error).toBeNull();
+    hook.rerender({ runId: run.id });
+    expect(hook.result.current.error).not.toBeNull();
+    act(() => {
+      hook.result.current.clearError();
+    });
+
+    // An action in flight on A: B shows no pending button, but stays busy until A's request settles.
+    const release = bridge.hold('relay/v1/runs.pause');
+    let a: Promise<boolean> = Promise.resolve(false);
+    act(() => {
+      a = hook.result.current.dispatch({ action: 'pause', runId: run.id });
+    });
+    expect(hook.result.current.pending).toBe('pause');
+    hook.rerender({ runId: otherRun });
+    expect(hook.result.current.pending).toBeNull();
+    expect(hook.result.current.busy).toBe(true);
+    release();
+    await act(async () => {
+      expect(await a).toBe(true);
+    });
+    expect(hook.result.current.busy).toBe(false);
+    expect(hook.result.current.error).toBeNull();
   });
 });

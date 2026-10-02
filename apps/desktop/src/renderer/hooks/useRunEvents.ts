@@ -8,12 +8,16 @@ import { getBridge } from '../api/bridge';
 import { call } from '../api/client';
 import { qk } from '../api/keys';
 
-/** §5.7: announce completion, pauses, and approval requests only; never tokens or progress. */
+/**
+ * §5.7: announce completion (every terminal status, `cancelled` included: a stop the user asked for ends the run
+ * later, once the in-flight request finishes), pauses, and approval requests only; never tokens or progress.
+ */
 const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'awaiting_approval',
   'paused',
   'completed',
   'incomplete',
+  'cancelled',
   'failed',
   'interrupted',
 ]);
@@ -153,7 +157,8 @@ const INITIAL: Published = { runId: undefined, buf: [], len: 0, lastSeq: 0, load
  * 3. an event is live when it arrived via push, or when its seq is above the initial snapshot's high-water mark.
  *    Only live events invalidate `run` / `ledger` / `step` queries (debounced 250 ms) and are announced;
  *    history from the initial snapshot never is;
- * 4. announces only `run.status_changed` to awaiting_approval, paused, completed, incomplete, failed, interrupted;
+ * 4. announces only `run.status_changed` to awaiting_approval, paused, completed, incomplete, cancelled, failed,
+ *    interrupted;
  * 5. keeps the newest {@link MAX_STORED_EVENTS} events in an append-only buffer (no per-event array copies) and only the
  *    latest `attempt.stream_progress` per attempt, in a {@link StreamProgressStore}: a drain that applied only progress
  *    does not publish, so the page re-renders only for events that change what it shows.

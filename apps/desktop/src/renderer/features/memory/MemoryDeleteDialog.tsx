@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { ConfirmDialog, useToast } from '../../components/ui';
 import type { RefObject } from 'react';
@@ -40,6 +41,16 @@ export function MemoryDeleteDialog({
   onDeleted,
 }: MemoryDeleteDialogProps) {
   const toast = useToast();
+  /** The command last started from this dialog: its error is the one shown (a later archive failure replaces a delete one). */
+  const [last, setLast] = useState<'remove' | 'archive' | null>(null);
+  const error =
+    last === 'remove'
+      ? mutations.remove.error
+      : last === 'archive'
+        ? archiveWasLast
+          ? mutations.archive.error
+          : null
+        : (mutations.remove.error ?? (archiveWasLast ? mutations.archive.error : null));
   return (
     <ConfirmDialog
       open
@@ -79,7 +90,8 @@ export function MemoryDeleteDialog({
               label: 'Archive instead',
               pending: mutations.archive.isPending,
               onClick: () => {
-                        onArchiveStart();
+                setLast('archive');
+                onArchiveStart();
                 mutations.archive.mutate(
                   { recordId: target.id },
                   {
@@ -97,6 +109,7 @@ export function MemoryDeleteDialog({
       cancelLabel="Cancel"
       pending={mutations.remove.isPending}
       onConfirm={() => {
+        setLast('remove');
         mutations.remove.mutate(
           { recordId: target.id, confirm: true },
           {
@@ -117,7 +130,7 @@ export function MemoryDeleteDialog({
         );
       }}
     >
-      <MutationError error={mutations.remove.error ?? (archiveWasLast ? mutations.archive.error : null)} />
+      <MutationError error={error} />
     </ConfirmDialog>
   );
 }

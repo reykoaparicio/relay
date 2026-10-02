@@ -3,7 +3,7 @@ import type { SyntheticEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router';
 import { assertNever, INPUT_CAPS } from '@relay/contracts';
-import { ButtonLink, ErrorView, InlineAlert, PageHeader, Skeleton } from '../components/ui';
+import { ButtonLink, ErrorView, InlineAlert, PageHeader, Skeleton, useLiveRegion } from '../components/ui';
 import { call } from '../api/client';
 import { toViewError } from '../api/errors';
 import { qk } from '../api/keys';
@@ -20,6 +20,7 @@ import {
   WorkflowCard,
 } from '../features/new-run/NewRunCards';
 import {
+  budgetFromError,
   buildStartInput,
   checkForm,
   deriveNewRunState,
@@ -107,9 +108,18 @@ export function NewRunPage() {
   });
   // The start error belongs to the input that failed; once the form changes, it no longer applies.
   const [failedInput, setFailedInput] = useState<string | null>(null);
+  const { announce } = useLiveRegion();
   const start = useIdempotentMutation('relay/v1/runs.start', {
-    onError: (_e, input) => {
+    onError: (e, input) => {
       setFailedInput(canonicalJson(input));
+      // The preflight passed, so nothing on screen changed before Start: the admission block that now replaces it
+      // (BudgetBlockedPanel, not a live region) is announced as the answer to the user's submit.
+      const blocked = budgetFromError(e);
+      if (blocked !== null) {
+        announce(
+          `Start blocked: the ${blocked.scope === 'project' ? 'project monthly' : 'run'} allowance would be exceeded. Nothing was reserved or sent. Choose how to continue below.`,
+        );
+      }
     },
     onSuccess: (res) => {
       void queryClient.invalidateQueries({ queryKey: ['runs', projectId] });

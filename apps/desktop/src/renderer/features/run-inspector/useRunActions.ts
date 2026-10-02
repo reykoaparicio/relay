@@ -30,10 +30,14 @@ export interface RunActionsApi {
    * {@link IntentInFlightError} (in `error`) and never sent.
    */
   readonly dispatch: (req: RunActionRequest) => Promise<boolean>;
-  /** The action in flight (its button shows pending). */
+  /** The action in flight for the displayed run (its button shows pending). */
   readonly pending: RunAction | null;
-  /** True while any run action is in flight: every other run-action control stays disabled. */
+  /**
+   * True while any run action is in flight, for this run or one shown before it (navigating between runs does not
+   * cancel a request): every run-action control stays disabled.
+   */
   readonly busy: boolean;
+  /** The last action error for the displayed run; another run's error is never shown here. */
   readonly error: unknown;
   readonly clearError: () => void;
 }
@@ -62,8 +66,10 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
   const { mutateAsync: plainMutateAsync } = useMutation({
     mutationFn: (plan: AnyPlainCallPlan) => sendPlain(plan.channel, plan.input),
   });
-  const [pending, setPending] = useState<RunAction | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  // Pending action and error are kept with the run they belong to (`context.runId` at dispatch): the inspector keeps
+  // this hook mounted from one run to the next, and run A's spinner or error must not show on run B.
+  const [pendingState, setPending] = useState<{ readonly runId: string | undefined; readonly action: RunAction } | null>(null);
+  const [errorState, setErrorState] = useState<{ readonly runId: string | undefined; readonly error: unknown } | null>(null);
   const inFlight = useRef<{ readonly intent: string; readonly promise: Promise<boolean> } | null>(null);
   const idem = useRef(idemMutations);
   const ctx = useRef(context);
@@ -71,6 +77,9 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
     idem.current = idemMutations;
     ctx.current = context;
   });
+  const setError = useCallback((e: unknown) => {
+    setErrorState(e === null ? null : { runId: ctx.current.runId, error: e });
+  }, []);
 
   const invalidateAfter = useCallback(
     (req: RunActionRequest) => {
@@ -100,7 +109,9 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
         void navigate(plan.to);
         return true;
       }
-      setPending(req.action);
+      // The run the action was started from owns its outcome, even when it settles after a navigation.
+      const owner = ctx.current.runId;
+      setPending({ runId: owner, action: req.action });
       setError(null);
       try {
         if (plan.idempotent) await sendIdem(idem.current, plan);
@@ -108,13 +119,13 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
         invalidateAfter(req);
         return true;
       } catch (e) {
-        setError(e);
+        setErrorState({ runId: owner, error: e });
         return false;
       } finally {
         setPending(null);
       }
     },
-    [navigate, plainMutateAsync, invalidateAfter],
+    [navigate, plainMutateAsync, invalidateAfter, setError],
   );
 
   const dispatch = useCallback(
@@ -133,12 +144,16 @@ export function useRunActions(context: RunActionsContext = {}): RunActionsApi {
       inFlight.current = { intent, promise };
       return promise;
     },
-    [execute],
+    [execute, setError],
   );
 
   const clearError = useCallback(() => {
     setError(null);
-  }, []);
+  }, [setError]);
 
-  return useMemo(() => ({ dispatch, pending, busy: pending !== null, error, clearError }), [dispatch, pending, error, clearError]);
+  const runId = context.runId;
+  const pending = pendingState !== null && pendingState.runId === runId ? pendingState.action : null;
+  const error = errorState !== null && errorState.runId === runId ? errorState.error : null;
+  const busy = pendingState !== null;
+  return useMemo(() => ({ dispatch, pending, busy, error, clearError }), [dispatch, pending, busy, error, clearError]);
 }

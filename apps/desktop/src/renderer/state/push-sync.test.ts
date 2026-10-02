@@ -51,7 +51,7 @@ describe('push-sync', () => {
     stop();
   });
 
-  it('run.status refreshes only that project (debounced, trailing) and never refetches the patched run detail', async () => {
+  it('run.status refreshes only that project (debounced, trailing) and only marks the unmounted run detail stale', async () => {
     vi.useFakeTimers();
     try {
       const { bridge, queryClient, run } = await seeded();
@@ -72,7 +72,7 @@ describe('push-sync', () => {
         ['project', run.projectId],
       ]);
       expect(keys).not.toContainEqual(['runs']);
-      // The patched detail is only marked stale (refetched on its next mount), never refetched by the push.
+      // No page shows the detail: it is only marked stale (refetched on its next mount), never fetched by the push.
       const runCalls = spy.mock.calls.filter((c) => JSON.stringify(c[0]?.queryKey) === JSON.stringify(qk.run(run.id)));
       expect(runCalls.every((c) => c[0]?.refetchType === 'none')).toBe(true);
       stop();

@@ -1,16 +1,22 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { runStartInputSchema } from '@relay/contracts';
+import { errors, runStartInputSchema, toValidationIssues } from '@relay/contracts';
 import type { InputOf } from '@relay/contracts';
-import { call } from '../api/client';
+import { AppErrorException, call } from '../api/client';
 import { qk } from '../api/keys';
 
 export type PreflightInput = InputOf<'relay/v1/runs.preflight'>;
 
 const preflightInputSchema = runStartInputSchema.omit({ idempotencyKey: true });
 
-/** The canonical key back to the input (built by `canonicalJson` from a typed input, so parsing it cannot fail). */
+/**
+ * The canonical key back to the input (built by `canonicalJson` from a typed input). A typed input can still break a
+ * schema refinement (e.g. more than 50 `memoryRecordIds`): that is reported exactly as the runner would, as
+ * `VALIDATION_FAILED` with field paths (shown at the field), never as a thrown ZodError (an `INTERNAL` system error).
+ */
 function parsePreflightKey(key: string): PreflightInput {
-  return preflightInputSchema.parse(JSON.parse(key));
+  const parsed = preflightInputSchema.safeParse(JSON.parse(key));
+  if (!parsed.success) throw new AppErrorException(errors.validationFailed(toValidationIssues(parsed.error.issues)));
+  return parsed.data;
 }
 
 /**

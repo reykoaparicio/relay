@@ -11,7 +11,7 @@ export { Checkbox } from './Checkbox';
 export type { CheckboxProps } from './Checkbox';
 export { CopyButton } from './CopyButton';
 export type { CopyButtonProps } from './CopyButton';
-export { DateInput } from './DateInput';
+export { DateInput, INCOMPLETE_DATE } from './DateInput';
 export type { DateInputProps } from './DateInput';
 export { DataTable } from './DataTable';
 export type { DataTableColumn, DataTableProps } from './DataTable';

@@ -383,6 +383,25 @@ describe('useRunEvents (gapless contract, 02 §B5)', () => {
     expect(statusAnnouncement(e('completed'))).toBe('Run status: Completed.');
     expect(statusAnnouncement(e('running'))).toBeNull();
     expect(statusAnnouncement(e('cancelling'))).toBeNull();
+    // The run actually ending after a stop is news (cancelling → cancelled), like any other terminal status.
+    expect(statusAnnouncement(e('cancelled'))).toBe('Run status: Cancelled.');
+  });
+
+  it('announces a live cancelling → cancelled transition once the run has actually ended', async () => {
+    const { bridge, run, hook, announce } = setup();
+    await waitFor(() => {
+      expect(hook.result.current.loaded).toBe(true);
+    });
+    const last = hook.result.current.lastSeq;
+    act(() => {
+      bridge.emit({ type: 'run.event', event: event(bridge, run.id, last + 1, 'run.status_changed', { from: 'running', to: 'cancelling' }) });
+    });
+    expect(announce).not.toHaveBeenCalled();
+    act(() => {
+      bridge.emit({ type: 'run.event', event: event(bridge, run.id, last + 2, 'run.status_changed', { from: 'cancelling', to: 'cancelled' }) });
+    });
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith('Run status: Cancelled.');
   });
 
   it('PERF-02: a progress-only push notifies the progress store without re-rendering the owner', async () => {

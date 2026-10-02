@@ -1,12 +1,12 @@
 import type { ReactNode } from 'react';
 import { Pin } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
-import { ErrorView, Skeleton } from '../../components/ui';
+import { Button, ErrorView, Skeleton } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
 import { useRetryAction } from '../common/useNextAction';
 import { ROLE_LABELS } from '../run-setup/model-steps';
-import { FIELD } from './new-run-model';
+import { FIELD, MAX_MEMORY_RECORD_IDS } from './new-run-model';
 
 export interface MemoryPickerProps {
   readonly records: readonly MemoryRecordView[] | undefined;
@@ -15,6 +15,8 @@ export interface MemoryPickerProps {
   /** Ticked non-pinned ids; `null` = untouched (every approved record is included). */
   readonly checked: readonly string[] | null;
   readonly onToggle: (id: string, checked: boolean) => void;
+  /** Back to the untouched selection (every approved record, nothing sent). */
+  readonly onIncludeAll?: () => void;
   readonly suggestions?: number;
   /** A server problem about the memory selection (error-summary target, shown inline). */
   readonly fieldError?: string | undefined;
@@ -35,6 +37,7 @@ export function MemoryPicker({
   onRetry,
   checked,
   onToggle,
+  onIncludeAll,
   suggestions = 0,
   fieldError,
 }: MemoryPickerProps) {
@@ -71,6 +74,9 @@ export function MemoryPicker({
   if (records.length === 0) return wrap(<p className="small muted">No approved memory in this project yet.</p>);
   // The anchor goes on the first control that can take focus: pinned rules are disabled (locked on).
   const firstEnabled = records.findIndex((m) => !m.pinned);
+  // An explicit selection names at most MAX_MEMORY_RECORD_IDS records: at the cap, unticked records cannot be added.
+  const atCap = checked !== null && checked.length >= MAX_MEMORY_RECORD_IDS;
+  const capId = `${FIELD.memory}-cap`;
   return (
     <fieldset
       className="fieldset field"
@@ -92,8 +98,8 @@ export function MemoryPicker({
                 type="checkbox"
                 id={id}
                 checked={m.pinned || checked === null || checked.includes(m.id)}
-                disabled={m.pinned}
-                aria-describedby={fieldError === undefined ? descId : `${descId} ${errorId}`}
+                disabled={m.pinned || (atCap && !checked.includes(m.id))}
+                aria-describedby={[descId, ...(atCap ? [capId] : []), ...(fieldError === undefined ? [] : [errorId])].join(' ')}
                 aria-invalid={fieldError === undefined || m.pinned ? undefined : true}
                 onChange={(e) => {
                   onToggle(m.id, e.target.checked);
@@ -115,6 +121,19 @@ export function MemoryPicker({
           );
         })}
       </ul>
+      {atCap ? (
+        <p className="small muted" id={capId}>
+          At most {String(MAX_MEMORY_RECORD_IDS)} records can be chosen one by one. Untick one to choose another
+          {onIncludeAll === undefined ? '.' : ', or include every approved record.'}
+        </p>
+      ) : null}
+      {checked !== null && onIncludeAll !== undefined && records.length > MAX_MEMORY_RECORD_IDS ? (
+        <div>
+          <Button variant="secondary" size="sm" onClick={onIncludeAll}>
+            Include all approved records
+          </Button>
+        </div>
+      ) : null}
       {suggestions > 0 ? (
         <p className="small muted">
           {String(suggestions)} suggested record{suggestions === 1 ? ' is' : 's are'} excluded until approved.

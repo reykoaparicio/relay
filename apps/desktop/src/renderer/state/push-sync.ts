@@ -1,6 +1,6 @@
 // Global push handler (10 J2): keeps cached queries in step with main/runner push events.
 //   run.status        → updates cached run summaries/details in place, then (debounced) refreshes that project's run
-//                       lists and stats; the run detail is marked stale but never refetched from here
+//                       lists and stats, and the run detail if a page shows it and nothing refetched it meanwhile
 //   memory.changed    → invalidates that project's memory lists and its records
 //   providers.changed → invalidates providers
 //   runner.state      → reported to the shell banner
@@ -65,15 +65,38 @@ function cachedProjectOf(queryClient: QueryClient, runId: string): string | unde
   return undefined;
 }
 
-/** Collects query-key prefixes and invalidates them once, `delayMs` after the last request (trailing debounce). */
+/**
+ * Refetches a run detail (exact key) that is on screen and still stale from a status push. A page that streams the
+ * run (the inspector's useRunEvents) has usually refetched it already, or is fetching it: then nothing is sent, so a
+ * status change costs one `runs.get`, not two.
+ */
+function refreshRunDetail(queryClient: QueryClient, runId: string): void {
+  const query = queryClient.getQueryCache().find({ queryKey: qk.run(runId), exact: true });
+  if (query === undefined || query.getObserversCount() === 0) return;
+  if (!query.state.isInvalidated || query.state.fetchStatus !== 'idle') return;
+  void queryClient.refetchQueries({ queryKey: qk.run(runId), exact: true, type: 'active' }, { cancelRefetch: false });
+}
+
+/**
+ * Collects query-key prefixes (and run details) and refreshes them once, `delayMs` after the last request (trailing
+ * debounce).
+ */
 function createDebouncedInvalidator(queryClient: QueryClient, delayMs: number) {
   const keys = new Map<string, QueryKey>();
+  const runs = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const flush = () => {
     timer = undefined;
     const due = [...keys.values()];
+    const dueRuns = [...runs];
     keys.clear();
+    runs.clear();
     for (const queryKey of due) void queryClient.invalidateQueries({ queryKey });
+    for (const runId of dueRuns) refreshRunDetail(queryClient, runId);
+  };
+  const schedule = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(flush, delayMs);
   };
   return {
     add(queryKey: QueryKey) {
@@ -81,13 +104,18 @@ function createDebouncedInvalidator(queryClient: QueryClient, delayMs: number) {
       // queries on screen waits for the burst to end.
       void queryClient.invalidateQueries({ queryKey, refetchType: 'none' });
       keys.set(JSON.stringify(queryKey), queryKey);
-      if (timer !== undefined) clearTimeout(timer);
-      timer = setTimeout(flush, delayMs);
+      schedule();
+    },
+    /** The run detail was marked stale by a push: refetch it at the end of the burst if a page still shows it stale. */
+    addRun(runId: string) {
+      runs.add(runId);
+      schedule();
     },
     cancel() {
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
       keys.clear();
+      runs.clear();
     },
   };
 }
@@ -100,9 +128,11 @@ function applyRunStatus(queryClient: QueryClient, e: RunStatusPush, later: Inval
     run === undefined ? run : { ...run, status: e.status, pauseReason: e.pauseReason },
   );
   // The detail is patched for what the push carries; its other fields (steps, pendingApproval, availableActions) are
-  // only marked stale, never refetched here: an open inspector refreshes through useRunEvents, and a later visit
-  // refetches on mount instead of showing the pre-push detail.
+  // marked stale at once (a later visit refetches on mount). A page that shows the detail without streaming the run
+  // (Overview) gets it refetched at the end of the burst; an open inspector has refreshed it through useRunEvents by
+  // then, and is left alone.
   void queryClient.invalidateQueries({ queryKey: qk.run(e.runId), exact: true, refetchType: 'none' });
+  later.addRun(e.runId);
   // Status filters and project stats (active run, counts) depend on the status: refresh them in the background,
   // only for the run's project when the cache knows it.
   const projectId = cachedProjectOf(queryClient, e.runId);

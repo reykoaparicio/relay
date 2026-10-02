@@ -334,6 +334,9 @@ export function MemoryCard({ approved, suggestions, checked, fieldError, dispatc
         checked={checked}
         fieldError={fieldError}
         suggestions={suggestions}
+        onIncludeAll={() => {
+          dispatch({ type: 'patch', patch: { memoryIds: null } });
+        }}
         onToggle={(id, on) => {
           dispatch({
             type: 'toggle-memory',

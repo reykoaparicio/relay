@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError } from '@relay/contracts';
+import { appError, errors } from '@relay/contracts';
 import { FAKE_PROJECT_ID } from '../api/fake-bridge';
 import { PROFILES } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
+import { budgetBreakdown } from '../components/ui/test-fixtures';
 
 const NEW_RUN = `/p/${FAKE_PROJECT_ID}/runs/new`;
 const SLOW = { timeout: 3000 };
@@ -338,6 +339,26 @@ describe('NewRunPage (J7)', () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe('/settings/diagnostics');
     });
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+  });
+
+  it('a runs.start BUDGET_BLOCKED after a passing preflight is announced, and the admission panel shows', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review input validation');
+    await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled();
+    }, SLOW);
+    const live = screen.getByTestId('live-region');
+    expect(live).toHaveTextContent('');
+    bridge.failNext('relay/v1/runs.start', errors.budgetBlocked(budgetBreakdown()));
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    expect(await screen.findByRole('region', { name: /Admission check/ })).toBeInTheDocument();
+    expect(live).toHaveTextContent(
+      'Start blocked: the run allowance would be exceeded. Nothing was reserved or sent. Choose how to continue below.',
+    );
     expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
   });
 
