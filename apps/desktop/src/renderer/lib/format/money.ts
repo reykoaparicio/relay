@@ -10,14 +10,39 @@ const HALF_FOUR_DP_STEP_MICROUSD = SMALLEST_FOUR_DP_MICROUSD / 2;
 /** µUSD has 6 decimal places, so 6 dp always shows two different amounts differently. */
 const MAX_PRECISION = 6;
 
-/** Signed magnitude text. Tiny amounts use an inequality that stays true: "< $0.0001" and "> -$0.0001". */
-function formatSigned(m: number): string {
+/** Decimal places for money: 2 (cents) or 4 (sub-cent amounts). */
+export type MoneyPrecision = 2 | 4;
+
+/** True when the default rule shows `m` at 4 dp (a non-zero amount that rounds below one cent). */
+function isSubCent(m: number): boolean {
   const abs = Math.abs(m);
-  if (abs === 0) return formatUsd(0 as Microusd, { precision: 2 });
-  if (abs < SMALLEST_FOUR_DP_MICROUSD) return m < 0 ? '> -$0.0001' : '< $0.0001';
-  // 9_950 µUSD rounds to "$0.0100" at 4 dp, which is one cent: show it as "$0.01" instead.
-  const roundsBelowOneCent = abs + HALF_FOUR_DP_STEP_MICROUSD < FOUR_DP_BELOW_MICROUSD;
-  return formatUsd(m as Microusd, { precision: roundsBelowOneCent ? 4 : 2 });
+  // 9_950 µUSD rounds to "$0.0100" at 4 dp, which is one cent: it reads "$0.01" instead.
+  return abs !== 0 && abs + HALF_FOUR_DP_STEP_MICROUSD < FOUR_DP_BELOW_MICROUSD;
+}
+
+/**
+ * Signed magnitude text. Tiny amounts use an inequality that stays true: "< $0.0001" and "> -$0.0001".
+ * `precision` 4 forces 4 dp for every amount (a column that holds sub-cent values); otherwise each amount picks its own.
+ */
+function formatSigned(m: number, precision?: MoneyPrecision): string {
+  const abs = Math.abs(m);
+  if (abs !== 0 && abs < SMALLEST_FOUR_DP_MICROUSD) return m < 0 ? '> -$0.0001' : '< $0.0001';
+  if (precision === 4) return formatUsd(m as Microusd, { precision: 4 });
+  return formatUsd(m as Microusd, { precision: isSubCent(m) ? 4 : 2 });
+}
+
+/**
+ * One precision for a whole column (or any group of amounts read side by side): 4 dp when any amount in it is
+ * sub-cent, else 2 dp. Mixed rows like "$0.0042" over "$0.02" read as different magnitudes at a glance; with one
+ * rule per column they read "$0.0042" over "$0.0200".
+ */
+export function moneyColumnPrecision(values: readonly Microusd[]): MoneyPrecision {
+  return values.some(isSubCent) ? 4 : 2;
+}
+
+export interface FormatMoneyOptions {
+  /** Force a precision (from {@link moneyColumnPrecision}); default: 4 dp only for sub-cent amounts. */
+  readonly precision?: MoneyPrecision;
 }
 
 /**
@@ -25,8 +50,8 @@ function formatSigned(m: number): string {
  * `formatUsd`, so no float arithmetic touches money.
  * Estimated amounts read "≈ $0.48 est."; unknown liabilities read "$0.48 unknown".
  */
-export function formatMoney(m: Microusd, certainty?: CostCertainty | null): string {
-  const amount = formatSigned(m);
+export function formatMoney(m: Microusd, certainty?: CostCertainty | null, options: FormatMoneyOptions = {}): string {
+  const amount = formatSigned(m, options.precision);
   if (certainty === 'estimated') return `≈ ${amount} est.`;
   if (certainty === 'unknown') return `${amount} unknown`;
   return amount;

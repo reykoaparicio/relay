@@ -45,11 +45,11 @@ test.describe('budget pause', { tag: '@m4' }, () => {
     const blockedKey = TITLE_TO_KEY[blockedTitle];
     expect(blockedKey, `blocked step "${blockedTitle}"`).toBeDefined();
     expect(calls.filter((c) => c.stepKey === blockedKey)).toHaveLength(0);
-    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText('$0.00');
+    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText(RunInspector.amountText('$0.00'));
 
     // Increase the allowance → the run continues on its own.
     await inspector.increaseAllowance('$3.00');
-    await expect(await inspector.ledgerRow('Allowance')).toHaveText('$3.00');
+    await expect(await inspector.ledgerRow('Allowance')).toHaveText(RunInspector.amountText('$3.00'));
     await inspector.expectAwaitingApproval();
     await inspector.approve();
     await inspector.waitForStatus('Completed');

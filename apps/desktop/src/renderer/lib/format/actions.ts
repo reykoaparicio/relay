@@ -49,6 +49,34 @@ export const RUN_ACTION_LABELS: Readonly<Record<RunAction, string>> = {
   export_patch: 'Export patch',
 };
 
+/**
+ * Confirmation toast titles after an action succeeded: what happened, in the past tense ("Plan approved"), not the
+ * button label plus "done". Requests the engine finishes asynchronously say so ("Pause requested"): the call
+ * returning does not mean the run has paused, stopped, or finished. Exhaustive over RUN_ACTIONS.
+ */
+export const RUN_ACTION_DONE_LABELS: Readonly<Record<RunAction, string>> = {
+  pause: 'Pause requested',
+  cancel: 'Cancellation requested',
+  stop: 'Stop requested',
+  resume: 'Run resumed',
+  approve: 'Plan approved',
+  request_revision: 'Revision requested',
+  reject: 'Plan rejected',
+  increase_allowance: 'Run allowance increased',
+  edit_project_allowance: 'Project allowance updated',
+  choose_profile: 'Profile changed',
+  retry_step: 'Step retry started',
+  raise_limits: 'Limits raised',
+  acknowledge_overrun: 'Overrun acknowledged',
+  reconnect_provider: 'Opening provider settings',
+  resnapshot_and_replan: 'Re-snapshot and re-plan started',
+  use_preserved_snapshot: 'Continuing with the preserved snapshot',
+  decide_unknown: 'Unknown charge decided',
+  review_recovery: 'Continuing from the last checkpoint',
+  export_report: 'Report exported',
+  export_patch: 'Patch exported',
+};
+
 /** Actions that stop or discard work and therefore need a ConfirmDialog (§5.7: destructive only). */
 export const DESTRUCTIVE_RUN_ACTIONS: ReadonlySet<RunAction> = new Set<RunAction>(['cancel', 'stop', 'reject']);
 

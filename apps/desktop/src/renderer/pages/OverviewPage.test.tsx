@@ -27,6 +27,16 @@ describe('OverviewPage', () => {
     expect(await screen.findByText('1 waiting for approval')).toBeInTheDocument();
   });
 
+  it('runs that need nothing: recent runs move up beside run controls, leaving no empty grid cell', async () => {
+    renderApp(OVERVIEW, { scenario: 'completed' });
+    const recent = await screen.findByRole('region', { name: 'Recent runs' });
+    const controls = screen.getByRole('region', { name: 'Run controls' });
+    expect(screen.queryByRole('region', { name: 'Start your first run' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Needs your attention' })).toBeNull();
+    expect(recent.parentElement).toBe(controls.parentElement);
+    expect(recent.parentElement?.firstElementChild).toBe(recent);
+  });
+
   it('usage tile says "tracked by Relay" and links to the latest run ledger; run budget values link to ?tab=ledger', async () => {
     const { bridge } = renderApp(OVERVIEW, { scenario: 'awaiting-approval' });
     await ready();

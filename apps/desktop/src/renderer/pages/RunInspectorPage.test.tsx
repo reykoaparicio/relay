@@ -195,6 +195,19 @@ describe('RunInspectorPage', () => {
     });
   });
 
+  it('approving from ?step=<approval> confirms "Plan approved" and hands the selection back to the run', async () => {
+    const approvalStep = createFakeBridge('awaiting-approval').world.runs.find((r) => r.status === 'awaiting_approval')?.steps.find((st) => st.state === 'awaiting_approval');
+    const { router } = open('awaiting-approval', `?step=${approvalStep?.id ?? ''}`);
+    const card = (await screen.findByRole('heading', { name: 'Proposed plan' })).closest('section') as HTMLElement;
+    expect(stepParam(router)).toBe(approvalStep?.id);
+    await userEvent.click(within(card).getByRole('button', { name: 'Approve plan' }));
+    expect(await screen.findByText('Plan approved')).toBeInTheDocument();
+    expect(screen.queryByText(/: done$/)).toBeNull();
+    await waitFor(() => {
+      expect(stepParam(router)).toBeNull();
+    });
+  });
+
   it('request revision requires a note and sends it', async () => {
     const { bridge } = open('awaiting-approval');
     await userEvent.click(await screen.findByRole('button', { name: 'Request revision' }));

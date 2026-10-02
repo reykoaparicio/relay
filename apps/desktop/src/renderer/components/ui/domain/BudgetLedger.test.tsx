@@ -35,3 +35,23 @@ describe('BudgetLedger', () => {
     expect(screen.queryByText(OVERRUN_NOTE)).toBeNull();
   });
 });
+
+describe('BudgetLedger per-step table', () => {
+  const byStep = [
+    { stepKey: 'review', cost: costSummary({ settledReported: 0, settledCalculated: 4_200, settledEstimated: 0, reserved: 0, unknown: 0 }) },
+    { stepKey: 'implement', cost: costSummary({ settledReported: 0, settledCalculated: 20_000, settledEstimated: 0, reserved: 0, unknown: 0 }) },
+  ];
+
+  it('has one header cell per column and one precision per column', () => {
+    render(<BudgetLedger cost={costSummary()} byStep={byStep} />);
+    const table = screen.getByRole('table', { name: /Settled usage by step/ });
+    const headers = screen
+      .getAllByRole('columnheader')
+      .filter((h) => table.contains(h))
+      .map((h) => h.textContent);
+    expect(headers).toEqual(['Step', 'Settled', 'Estimated', 'Reserved', 'Unknown']);
+    const settled = screen.getAllByRole('row').filter((r) => table.contains(r)).slice(1).map((r) => r.querySelectorAll('td')[0]?.textContent);
+    // "$0.0042" over "$0.0200": not "$0.0042" over "$0.02".
+    expect(settled).toEqual(['$0.0042', '$0.0200']);
+  });
+});

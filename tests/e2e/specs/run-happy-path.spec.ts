@@ -82,8 +82,8 @@ test.describe('run happy path', { tag: '@m2' }, () => {
 
     // Ledger: calculated usage > $0, nothing reserved or unknown once the run ended (FR-09).
     await expect.poll(async () => inspector.ledgerAmount('Calculated from usage')).toBeGreaterThan(0);
-    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText('$0.00');
-    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText('$0.00');
+    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText(RunInspector.amountText('$0.00'));
+    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText(RunInspector.amountText('$0.00'));
     expect(new Set((await callLog()).map((c) => c.stepKey))).toEqual(
       new Set(['review', 'plan', 'implement', 'verify']),
     );

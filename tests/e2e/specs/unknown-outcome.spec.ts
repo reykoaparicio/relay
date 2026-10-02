@@ -67,7 +67,7 @@ test.describe('unknown outcome', { tag: '@m3' }, () => {
     expect(await inspector.ledgerAmount('Unknown liability')).toBeGreaterThan(0);
 
     await inspector.decideUnknown(ACCEPT);
-    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText('$0.00');
+    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText(RunInspector.amountText('$0.00'));
     await expect.poll(async () => inspector.ledgerAmount('Estimated')).toBeGreaterThan(0);
     await expect(await inspector.ledgerRow('Estimated')).toContainText('est.');
 
@@ -99,7 +99,7 @@ test.describe('unknown outcome', { tag: '@m3' }, () => {
   }) => {
     const inspector = await reachUnknown(page, stubDialogs, project);
     await inspector.decideUnknown(ACCEPT);
-    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText('$0.00');
+    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText(RunInspector.amountText('$0.00'));
     await inspector.selectStep('Produce patch');
     const attempts = await inspector.attemptsTable();
     await expect(attempts.getByRole('row').filter({ hasText: /#1/ })).toContainText(/\$[\d.]+ est\./, {

@@ -45,6 +45,25 @@ describe('inspector model', () => {
     expect(defaultStep(run as never)?.state).toBe('awaiting_approval');
   });
 
+  it('a finished run opens on its last step with an output, never the decided approval gate (J8)', () => {
+    const run = createFakeBridge('completed').world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    const step = defaultStep(run);
+    expect(step?.stepKey).not.toBe('approve');
+    expect(step?.outputArtifactId).not.toBeNull();
+    expect(step?.id).toBe([...run.steps].reverse().find((s) => s.outputArtifactId !== null)?.id);
+
+    // Without a stored Finalize output, the last model step with output is shown instead.
+    const lastWithOutput = [...run.steps].reverse().find((s) => s.outputArtifactId !== null);
+    const stripped = {
+      ...run,
+      steps: run.steps.map((s) => (s.id === lastWithOutput?.id ? { ...s, outputArtifactId: null } : s)),
+    };
+    const fallback = defaultStep(stripped);
+    expect(fallback?.outputArtifactId).not.toBeNull();
+    expect(fallback?.stepKey).not.toBe('approve');
+  });
+
   it('banner actions never include header or approval actions', () => {
     for (const scenario of ['awaiting-approval', 'running-streaming', 'completed', 'paused-user'] as const) {
       const run = createFakeBridge(scenario).world.runs[0];

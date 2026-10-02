@@ -1,4 +1,5 @@
-export { formatMoney, formatMoneyPair, formatUsdAtPrecision } from './money';
+export { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision } from './money';
+export type { FormatMoneyOptions, MoneyPrecision } from './money';
 export { formatTokens, formatTokensExact } from './tokens';
 export { formatHash } from './hash';
 export { formatBytes } from './bytes';
@@ -11,6 +12,7 @@ export type { StatusPresentation, StatusTone, StatusKind, StatusKindMap } from '
 export {
   NEXT_ACTION_LABELS,
   RUN_ACTION_LABELS,
+  RUN_ACTION_DONE_LABELS,
   DESTRUCTIVE_RUN_ACTIONS,
   UNKNOWN_OUTCOME_DECISION_LABELS,
   UNKNOWN_OUTCOME_DECISION_HINTS,

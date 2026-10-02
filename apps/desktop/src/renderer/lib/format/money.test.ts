@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { usd } from '@relay/contracts';
 import type { Microusd } from '@relay/contracts';
-import { formatMoney, formatMoneyPair, formatUsdAtPrecision } from './money';
+import { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision } from './money';
 
 const m = (n: number) => n as Microusd;
 
@@ -72,5 +72,27 @@ describe('formatUsdAtPrecision', () => {
     expect(formatUsdAtPrecision(m(1_234_567_891), 3)).toBe('$1,234.568');
     expect(formatUsdAtPrecision(m(-4_200), 6)).toBe('-$0.004200');
     expect(formatUsdAtPrecision(m(-1), 2)).toBe('$0.00');
+  });
+});
+
+describe('moneyColumnPrecision (one rule per column)', () => {
+  it('uses 4 dp for the whole column when any amount is sub-cent', () => {
+    const values = [m(4_200), m(20_000), m(0)];
+    const p = moneyColumnPrecision(values);
+    expect(p).toBe(4);
+    expect(values.map((v) => formatMoney(v, null, { precision: p }))).toEqual(['$0.0042', '$0.0200', '$0.0000']);
+  });
+
+  it('uses 2 dp when every amount is zero or at least a cent', () => {
+    expect(moneyColumnPrecision([m(0), m(20_000), m(3_000_000)])).toBe(2);
+    expect(moneyColumnPrecision([])).toBe(2);
+    // 9_950 µUSD reads "$0.01" (it rounds to a cent), so it does not force 4 dp.
+    expect(moneyColumnPrecision([m(9_950)])).toBe(2);
+  });
+
+  it('keeps the true inequality for amounts below $0.0001 and the certainty text at 4 dp', () => {
+    expect(formatMoney(m(50), null, { precision: 4 })).toBe('< $0.0001');
+    expect(formatMoney(m(4_200), 'estimated', { precision: 4 })).toBe('≈ $0.0042 est.');
+    expect(formatMoney(m(-20_000), null, { precision: 4 })).toBe('-$0.0200');
   });
 });

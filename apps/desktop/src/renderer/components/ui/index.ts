@@ -64,6 +64,8 @@ export { StatTile } from './StatTile';
 export type { StatTileProps } from './StatTile';
 export { StatusBadge } from './StatusBadge';
 export type { StatusBadgeProps } from './StatusBadge';
+export { TableScroll, useHorizontalOverflow } from './TableScroll';
+export type { TableScrollProps } from './TableScroll';
 export { Tabs } from './Tabs';
 export type { TabsProps, Panel } from './Tabs';
 export { TextInput } from './TextInput';

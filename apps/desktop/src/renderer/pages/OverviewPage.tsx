@@ -129,6 +129,10 @@ export function OverviewPage() {
   const p = project.data;
   const disconnected = disconnectedProviders(providers.data ?? [], authDetail.data);
   const focus = focusDetail.data;
+  // Whether an attention card belongs here (its run detail may still be loading): decides the layout up front, so
+  // the cards don't jump when the detail arrives.
+  const expectsAttention =
+    model.empty || model.awaiting !== undefined || model.running !== undefined || model.interrupted !== undefined;
   let attention: ReactNode = null;
   if (model.empty) {
     attention = <StartCard project={p} templateVersion={workflow?.latestValidatedVersion ?? null} />;
@@ -156,8 +160,21 @@ export function OverviewPage() {
         latestRunId={recentRuns?.[0]?.id}
         now={now}
       />
-      <div className="grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] items-start gap-5 max-[1024px]:grid-cols-1">
-        <div className="stack">{attention}</div>
+      {/* With an attention card: [attention | run controls], then recent runs full width. Without one (a project
+          whose runs need nothing from the user), recent runs move up beside run controls so no grid cell is empty. */}
+      <div className="grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] items-start gap-5 max-[1180px]:grid-cols-1">
+        {expectsAttention ? (
+          <div className="stack">
+            {attention ??
+              (focusDetail.isLoading || interruptedDetail.isLoading ? (
+                <div aria-busy="true">
+                  <Skeleton lines={3} height={40} />
+                </div>
+              ) : null)}
+          </div>
+        ) : (
+          <RecentRunsCard project={p} runs={recentRuns} now={now} />
+        )}
         <RunControlsCard
           project={p}
           focusRun={focus}
@@ -165,7 +182,7 @@ export function OverviewPage() {
           workflowId={workflow?.id}
         />
       </div>
-      <RecentRunsCard project={p} runs={recentRuns} now={now} />
+      {expectsAttention ? <RecentRunsCard project={p} runs={recentRuns} now={now} /> : null}
     </>
   );
 }

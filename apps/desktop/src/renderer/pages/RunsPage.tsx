@@ -150,14 +150,16 @@ export function RunsPage() {
           getRowKey={(r) => r.id}
           getRowHref={(r) => href(paths.run(projectId, r.id))}
           columns={[
-            { key: 'run', header: 'Run', cell: (r) => <span className="mono whitespace-nowrap">{runLabel(r.id)}</span> },
+            { key: 'run', header: 'Run', nowrap: true, cell: (r) => <span className="mono">{runLabel(r.id)}</span> },
             {
               key: 'goal',
               header: 'Goal',
+              // Text columns wrap; the goal keeps a readable measure while the fixed columns stay on one line.
+              minWidth: '12rem',
               cell: (r) => {
                 const sub = subline(r);
                 return (
-                  <span className="flex min-w-60 flex-col">
+                  <span className="flex flex-col">
                     <span className="font-medium">{r.goal}</span>
                     {sub === null ? null : <span className="subtle text-xs">{sub}</span>}
                   </span>
@@ -167,13 +169,14 @@ export function RunsPage() {
             {
               key: 'workflow',
               header: 'Workflow version',
+              minWidth: '8rem',
               cell: (r) => (
-                <span className="whitespace-nowrap">
-                  {r.workflow.name} <span className="tag mono">v{r.workflow.version}</span>
+                <span>
+                  {r.workflow.name} <span className="tag mono whitespace-nowrap">v{r.workflow.version}</span>
                 </span>
               ),
             },
-            { key: 'status', header: 'Status', cell: (r) => <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} /> },
+            { key: 'status', header: 'Status', nowrap: true, cell: (r) => <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} /> },
             { key: 'steps', header: 'Steps', numeric: true, cell: (r) => `${String(r.stepProgress.done)}/${String(r.stepProgress.total)}` },
             {
               key: 'cost',
@@ -184,8 +187,9 @@ export function RunsPage() {
             {
               key: 'started',
               header: 'Started',
+              nowrap: true,
               cell: (r) => (
-                <span className="subtle whitespace-nowrap">
+                <span className="subtle">
                   <RelativeTime epochMs={r.startedAt ?? r.createdAt} now={now} />
                 </span>
               ),

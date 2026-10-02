@@ -6,6 +6,13 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+/*
+ * Component class names that are also Tailwind utilities. Tailwind's utility layer wins over @layer components, so
+ * the scanner seeing `className="list-item"` emitted `.list-item { display: list-item }` and silently undid the
+ * `.list-item` flex column (plan steps ran their title into the description). Never generate these utilities.
+ */
+@source not inline("{list-item,table}");
+
 @theme inline {
   --color-canvas: var(--color-canvas);
   --color-surface: var(--color-surface);

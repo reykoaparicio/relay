@@ -309,8 +309,11 @@
   .ledger { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
   .ledger caption { text-align: left; font-size: var(--text-xs); color: var(--color-text-subtle); caption-side: bottom; padding-top: var(--space-2); }
   .ledger th, .ledger td { padding: var(--space-2) 0; border-bottom: var(--border-width) solid var(--color-divider); text-align: left; }
+  /* Column gap: without it adjacent headers read as one word ("SettledEstimatedReserved"). */
+  .ledger :is(th, td):not(:first-child) { padding-left: var(--space-3); }
+  .ledger thead th { font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--color-text-subtle); vertical-align: bottom; }
   .ledger tbody th { font-weight: var(--weight-regular); color: var(--color-text-muted); }
-  .ledger td.num, .ledger th.num { text-align: right; }
+  .ledger td.num, .ledger th.num { text-align: right; white-space: nowrap; }
   .ledger tfoot th, .ledger tfoot td { font-weight: var(--weight-semibold); border-bottom: none; color: var(--color-text); }
   .arith { border-collapse: collapse; font-size: var(--text-sm); width: 100%; max-width: 560px; }
   .arith td, .arith th { padding: var(--space-1) var(--space-2); text-align: left; font-weight: var(--weight-regular); }
@@ -319,9 +322,32 @@
   .arith tr.total th, .arith tr.total td { border-top: var(--border-width) solid var(--color-border-strong); font-weight: var(--weight-semibold); }
 
   /* ---------- DataTable ---------- */
-  .table-wrap { overflow-x: auto; }
+  /* TableScroll: fit first (numbers stay on one line, text columns wrap); scroll, never clip, when still too wide. */
+  .table-wrap { overflow-x: auto; max-width: 100%; }
+  /* Styled (not overlay) scrollbar: macOS overlay scrollbars stay hidden until scrolled, so an overflowing table
+     looked silently clipped. Only ::-webkit-scrollbar here: the standard scrollbar-* properties would override it. */
+  .table-wrap::-webkit-scrollbar { height: 10px; }
+  .table-wrap::-webkit-scrollbar-track { background: var(--color-surface-raised); border-radius: 999px; }
+  .table-wrap::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 999px; border: 2px solid var(--color-surface-raised); }
+  .table-wrap::-webkit-scrollbar-thumb:hover { background: var(--color-text-subtle); }
+  .table-wrap.is-overflowing { padding-bottom: var(--space-1); }
+  .table-wrap.is-overflowing:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: var(--radius-sm); }
+  /* While scrolling sideways the row header stays in view, so each row stays identifiable. */
+  .table-wrap.is-overflowing .table :is(thead th:first-child, tbody th[scope="row"]) {
+    position: sticky; left: 0; z-index: 1; background: var(--color-surface);
+    box-shadow: inset calc(-1 * var(--border-width)) 0 0 var(--color-divider);
+  }
+  .table-wrap.is-overflowing .table tbody tr:hover > th[scope="row"] { background: var(--color-surface-raised); }
   .table { width: 100%; border-collapse: collapse; }
-  .table thead th { text-align: left; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--color-text-subtle); font-weight: var(--weight-semibold); padding: var(--space-2) var(--space-3); border-bottom: var(--border-width) solid var(--color-border); white-space: nowrap; }
+  /* Headers may wrap between words ("Tracked / cost") so they never force a column wider than its data. */
+  .table thead th { text-align: left; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: var(--tracking-eyebrow); color: var(--color-text-subtle); font-weight: var(--weight-semibold); padding: var(--space-2) var(--space-3); border-bottom: var(--border-width) solid var(--color-border); vertical-align: bottom; }
+  .table .nowrap { white-space: nowrap; }
+  /* Numeric headers are short unit labels ("Input / MTok"): breaking them strands the "/" on its own line. */
+  .table thead th.num { white-space: nowrap; }
+  /* ProfileAssignmentTable: the select is as wide as its longest option, so the chosen profile is never cut off. */
+  .profile-assignment .select { width: auto; min-width: 100%; }
+  .table.profile-assignment :is(th, td) { padding-inline: var(--space-2); }
+  .table.profile-assignment thead th.num { white-space: normal; }
   .table td, .table tbody th { padding: var(--space-3); border-bottom: var(--border-width) solid var(--color-divider); vertical-align: middle; text-align: left; font-weight: var(--weight-regular); }
   .table tbody tr { transition: background-color var(--duration-fast); }
   .table tbody tr.activatable { cursor: pointer; }
@@ -390,7 +416,9 @@
   .tab[aria-selected="true"] { color: var(--color-text); border-bottom-color: var(--color-accent); }
   .tab-panel { padding-top: var(--space-4); }
   .panels { display: flex; flex-direction: column; gap: var(--space-5); }
-  .panels-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: var(--space-5); }
+  /* Side by side only when each panel gets a readable width (the budget's per-step table needs ~24rem);
+     otherwise they stack full width instead of squeezing the ledger out of its card. */
+  .panels-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--space-5); }
 
   /* ---------- Dialog ---------- */
   .dialog-backdrop { position: fixed; inset: 0; background: rgb(3 7 12 / 0.7); z-index: var(--z-dialog); }

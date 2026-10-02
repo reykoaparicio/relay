@@ -67,14 +67,16 @@ export function PlanBody({ plan, fileScope = plan.fileScope }: PlanBodyProps) {
       </p>
       <ol className="list">
         {plan.steps.map((s) => (
+          // Title and detail are separate paragraphs (not adjacent inline spans), so both the layout and the
+          // accessible text keep them apart ("…150). Uses the existing helper…", never "…150).Uses…").
           <li key={s.n} className="list-item static">
-            <span className="title">
+            <p className="title">
               <span className="num">{s.n}.</span> {s.action}
-            </span>
-            <span className="meta">
+            </p>
+            <p className="meta">
               {s.rationale}
               {s.findingIds.length > 0 ? ` · addresses ${s.findingIds.join(', ')}` : ''}
-            </span>
+            </p>
           </li>
         ))}
       </ol>

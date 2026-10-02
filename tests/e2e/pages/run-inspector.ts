@@ -152,6 +152,15 @@ export class RunInspector {
     return dollars(await (await this.ledgerRow(bucket)).textContent());
   }
 
+  /**
+   * Exact dollar text for a ledger amount. The ledger shows one precision per column (4 dp when any amount in it is
+   * sub-cent), so "$0.00" may read "$0.0000".
+   */
+  static amountText(dollarsText: string): RegExp {
+    const [whole, cents = '00'] = dollarsText.replace('$', '').split('.');
+    return new RegExp(`^\\$${whole ?? '0'}\\.${cents}(00)?$`);
+  }
+
   async reservedAmount(): Promise<number> {
     return this.ledgerAmount('Reserved (in flight)');
   }

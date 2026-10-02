@@ -1,5 +1,5 @@
 import type { ProfileWithWarnings, ProviderId, ProviderStatus } from '@relay/contracts';
-import { Select } from '../../components/ui';
+import { Select, TableScroll } from '../../components/ui';
 import { formatTokensExact, PROVIDER_LABELS, stepKeyLabel } from '../../lib/format';
 import { ROLE_LABELS } from './model-steps';
 import type { ModelStepRow } from './model-steps';
@@ -47,13 +47,15 @@ export function ProfileAssignmentTable({
   selectId,
   disabled = false,
 }: ProfileAssignmentTableProps) {
+  // Profile + provider only (as in the mock): the model is in the next column, and the full label stays short
+  // enough to read in the closed select.
   const options = profiles.map((p) => ({
     value: p.profile.id,
-    label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]} · ${p.profile.modelId}`,
+    label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]}`,
   }));
   return (
-    <div className="table-wrap">
-      <table className="table">
+    <TableScroll label={caption}>
+      <table className="table profile-assignment">
         <caption className="sr-only">{caption}</caption>
         <thead>
           <tr>
@@ -118,12 +120,13 @@ export function ProfileAssignmentTable({
                   {chosen === undefined ? (
                     '—'
                   ) : (
-                    <span className="mono small">
-                      {PROVIDER_LABELS[chosen.profile.providerId]} · {chosen.profile.modelId}
+                    <span className="stack" style={{ gap: 0 }}>
+                      <span className="small">{PROVIDER_LABELS[chosen.profile.providerId]}</span>
+                      <span className="mono small nowrap">{chosen.profile.modelId}</span>
                     </span>
                   )}
                 </td>
-                <td className="num">
+                <td className="num nowrap">
                   {formatTokensExact(row.maxOutputTokens ?? chosen?.profile.params.maxOutputTokens ?? 0)}
                 </td>
               </tr>
@@ -131,6 +134,6 @@ export function ProfileAssignmentTable({
           })}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }

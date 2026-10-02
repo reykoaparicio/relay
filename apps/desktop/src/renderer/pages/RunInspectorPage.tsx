@@ -19,7 +19,7 @@ import {
 import type { ApprovalDecisionInput, RecoveryDecisionDetail } from '../components/ui';
 import { isAppErrorException } from '../api/client';
 import { toViewError } from '../api/errors';
-import { RUN_ACTION_LABELS } from '../lib/format';
+import { RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS } from '../lib/format';
 import { runLabel } from '../features/runs/run-display';
 import { href, paths } from '../features/shell/paths';
 import { ActionErrorNotice } from '../features/run-inspector/ActionErrorNotice';
@@ -141,11 +141,26 @@ export function RunInspectorPage() {
       const ok = await actions.dispatch(req);
       if (!ok && followRef.current === follow) followRef.current = null;
       if (ok && req.action !== 'reconnect_provider') {
-        toast.show({ key: `run-action:${req.action}:${runId}`, title: `${RUN_ACTION_LABELS[req.action]}: done`, tone: 'success' });
+        toast.show({ key: `run-action:${req.action}:${runId}`, title: RUN_ACTION_DONE_LABELS[req.action], tone: 'success' });
+      }
+      // The approval step was selected (the default, a `?step=` from Overview's "Inspect plan", or a click) only to
+      // decide it. Once approved it has nothing more to show, so the selection goes back to following the run: the
+      // step that runs next, and the most informative finished step once the run ends (`defaultStep`).
+      if (ok && req.action === 'approve' && selected?.state === 'awaiting_approval') {
+        const decidedId = selected.id;
+        setSearch(
+          (prev) => {
+            if (prev.get('step') !== decidedId) return prev;
+            const next = new URLSearchParams(prev);
+            next.delete('step');
+            return next;
+          },
+          { replace: true },
+        );
       }
       return ok;
     },
-    [actions, runId, selected, toast],
+    [actions, runId, selected, setSearch, toast],
   );
 
   // B3: move the selection (and `?step=`) to the latest (revision, retry) row the action created.

@@ -71,9 +71,11 @@ export function ListItemButton({ title, aside, meta, badges, leading, className 
       {leading === undefined ? (
         text
       ) : (
-        <span className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
-          <span aria-hidden="true">{leading}</span>
-          <span className="stack" style={{ gap: 2 }}>
+        // No wrap, and the text column may shrink: a long meta line wraps inside the column instead of pushing the
+        // whole column under the leading number (`.row` alone wraps).
+        <span className="row" style={{ gap: 10, alignItems: 'flex-start', flexWrap: 'nowrap' }}>
+          <span aria-hidden="true" style={{ flex: 'none' }}>{leading}</span>
+          <span className="stack" style={{ gap: 2, flex: 1, minWidth: 0 }}>
             {text}
           </span>
         </span>

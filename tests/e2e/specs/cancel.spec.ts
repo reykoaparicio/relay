@@ -47,7 +47,7 @@ test.describe('cancel', { tag: '@m4' }, () => {
     }
     // Honest charge status: the aborted request may have been charged → Unknown > $0, nothing left reserved.
     await expect.poll(async () => inspector.ledgerAmount('Unknown liability')).toBeGreaterThan(0);
-    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText('$0.00');
+    await expect(await inspector.ledgerRow('Reserved (in flight)')).toHaveText(RunInspector.amountText('$0.00'));
     expect(await callLog()).toHaveLength(1);
   });
 });

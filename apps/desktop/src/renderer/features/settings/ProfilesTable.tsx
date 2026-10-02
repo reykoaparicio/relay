@@ -1,6 +1,6 @@
 import { Pencil, Trash2 } from 'lucide-react';
 import type { ModelProfile, ProfileWithWarnings } from '@relay/contracts';
-import { Button } from '../../components/ui';
+import { Button, TableScroll } from '../../components/ui';
 import { PROVIDER_LABELS } from '../../lib/format';
 import { WarningList } from './ProfileLists';
 
@@ -13,7 +13,7 @@ export interface ProfilesTableProps {
 /** The model profiles with the engine's capability warnings, and Edit / Delete per profile. */
 export function ProfilesTable({ rows, onEdit, onDelete }: ProfilesTableProps) {
   return (
-    <div className="table-wrap" style={{ overflowX: 'auto' }}>
+    <TableScroll label="Model profiles">
       <table className="table">
         <caption className="sr-only">Model profiles</caption>
         <thead>
@@ -35,7 +35,7 @@ export function ProfilesTable({ rows, onEdit, onDelete }: ProfilesTableProps) {
             <tr key={profile.id}>
               <th scope="row">{profile.name}</th>
               <td>{PROVIDER_LABELS[profile.providerId]}</td>
-              <td className="mono">{profile.modelId}</td>
+              <td className="mono nowrap">{profile.modelId}</td>
               <td className="num">{profile.params.maxOutputTokens.toLocaleString()}</td>
               <td>
                 <WarningList warnings={warnings} />
@@ -69,6 +69,6 @@ export function ProfilesTable({ rows, onEdit, onDelete }: ProfilesTableProps) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }

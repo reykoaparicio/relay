@@ -149,6 +149,8 @@ export function incompleteTitle(run: Pick<RunDetail, 'statusDetail' | 'revisionC
   }
 }
 
+const TERMINAL_RUN_STATUSES: ReadonlySet<RunDetail['status']> = new Set(['completed', 'incomplete', 'cancelled', 'failed']);
+
 const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([
   'awaiting_approval',
   'executing',
@@ -160,7 +162,8 @@ const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([
 
 /**
  * The step to show when the URL names none (§5.2 "opens the exact pending step"): the pending approval, else the
- * latest step that needs attention or is in flight, else the next step to run, else the last finished one.
+ * latest step that needs attention or is in flight, else the next step to run; for a finished run the last step with
+ * an output; else the last finished one.
  */
 export function defaultStep(run: RunDetail): StepView | undefined {
   const latest = run.steps.filter((s) => isLatestRow(s, run.steps));
@@ -177,6 +180,12 @@ export function defaultStep(run: RunDetail): StepView | undefined {
     if (named !== undefined) return named;
     const next = latest.find((s) => s.state === 'ready' || s.state === 'pending');
     if (next !== undefined) return next;
+  }
+  // A finished run opens on its most informative step: the last one that stored an output (Finalize's report, else
+  // the last model step's output), never a decided approval gate with nothing to show ("Approve plan: no output").
+  if (TERMINAL_RUN_STATUSES.has(run.status)) {
+    const withOutput = [...latest].reverse().find((s) => s.outputArtifactId !== null);
+    if (withOutput !== undefined) return withOutput;
   }
   const done = [...latest].reverse().find((s) => s.state !== 'pending');
   return done ?? latest[0];

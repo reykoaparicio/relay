@@ -441,16 +441,16 @@ export function RecentRunsCard({ project, runs, now }: { readonly project: Proje
           getRowHref={(r) => href(paths.run(project.id, r.id))}
           emptyState={<p className="muted">No runs yet. Runs you start appear here with their status and tracked cost.</p>}
           columns={[
-            { key: 'run', header: 'Run', cell: (r) => <span className="mono whitespace-nowrap">{runLabel(r.id)}</span> },
-            { key: 'goal', header: 'Goal', cell: (r) => r.goal },
-            { key: 'status', header: 'Status', cell: (r) => <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} /> },
+            { key: 'run', header: 'Run', nowrap: true, cell: (r) => <span className="mono">{runLabel(r.id)}</span> },
+            { key: 'goal', header: 'Goal', minWidth: '10rem', cell: (r) => r.goal },
+            { key: 'status', header: 'Status', nowrap: true, cell: (r) => <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} /> },
             {
               key: 'cost',
               header: 'Tracked cost',
               numeric: true,
               cell: (r) => <RunCost cost={r.cost} ledgerPath={paths.run(project.id, r.id, { tab: 'ledger' })} />,
             },
-            { key: 'started', header: 'Started', cell: (r) => <span className="subtle"><RelativeTime epochMs={r.createdAt} now={now} /></span> },
+            { key: 'started', header: 'Started', nowrap: true, cell: (r) => <span className="subtle"><RelativeTime epochMs={r.createdAt} now={now} /></span> },
           ]}
         />
       )}

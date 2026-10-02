@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import { ROLES } from '@relay/contracts';
 import type { MemoryRecordDetail, MemoryRecordScope, Role } from '@relay/contracts';
-import { Button, Checkbox, DateInput, Field, InlineAlert, ServerChangesNotice, TextInput, Textarea } from '../../components/ui';
+import { Button, Checkbox, DateInput, Field, InlineAlert, ServerChangesNotice, TableScroll, Textarea, TextInput } from '../../components/ui';
 import { validationIssuesOf } from '../../api/errors';
 import { dateInputValue, MEMORY_TYPE_LABELS, parseDateInput } from '../../lib/format';
 import { takeFields, useRebasableForm } from '../../hooks/useRebasableForm';
@@ -278,7 +278,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
           keepPending={pending}
           keepDisabled={changedByMe.length === 0}
         >
-          <div className="table-wrap" style={{ overflowX: 'auto' }}>
+          <TableScroll label="Saved revision compared with your edit">
             <table className="table">
               <caption className="sr-only">Saved revision compared with your edit</caption>
               <thead>
@@ -304,7 +304,7 @@ export function MemoryEditForm({ record, mode, pending, error, onSubmit, onCance
                 })}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
           <p>
             {changedByMe.length === 0
               ? 'You have not changed any field.'

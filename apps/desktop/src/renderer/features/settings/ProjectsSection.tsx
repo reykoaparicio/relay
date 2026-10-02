@@ -12,9 +12,10 @@ import {
   InlineAlert,
   MoneyInput,
   parseDollarInput,
-  Skeleton,
-  Textarea,
   ServerChangesNotice,
+  Skeleton,
+  TableScroll,
+  Textarea,
   TextInput,
   useToast,
 } from '../../components/ui';
@@ -256,7 +257,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
           keepLabel="Keep my changes on top of the saved settings"
           onKeep={form.rebase}
         >
-          <div className="table-wrap" style={{ overflowX: 'auto' }}>
+          <TableScroll label="Saved project settings compared with your edits">
             <table className="table">
               <caption className="sr-only">Saved project settings compared with your edits</caption>
               <thead>
@@ -279,7 +280,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
           <p className="subtle">
             Keeping your changes sends only the settings you changed, based on the latest saved version; every other
             setting keeps the saved value.

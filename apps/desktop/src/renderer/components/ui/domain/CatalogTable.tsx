@@ -1,6 +1,7 @@
 import { Check, X } from 'lucide-react';
 import type { CapabilityWarning, CatalogModel, ModelCapabilities } from '@relay/contracts';
 import { PROVIDER_LABELS } from '../../../lib/format/labels';
+import { moneyColumnPrecision } from '../../../lib/format/money';
 import { CopyButton } from '../CopyButton';
 import { DataTable } from '../DataTable';
 import type { DataTableColumn } from '../DataTable';
@@ -36,30 +37,43 @@ function YesNo({ value }: { readonly value: boolean }) {
   );
 }
 
-function buildColumns(profileChecks: CatalogTableProps['profileChecks']): ReadonlyArray<DataTableColumn<CatalogModel>> {
+function buildColumns(
+  entries: readonly CatalogModel[],
+  profileChecks: CatalogTableProps['profileChecks'],
+): ReadonlyArray<DataTableColumn<CatalogModel>> {
+  // One precision per price column.
+  const p = {
+    input: moneyColumnPrecision(entries.map((e) => e.prices.input)),
+    output: moneyColumnPrecision(entries.map((e) => e.prices.output)),
+    cacheRead: moneyColumnPrecision(entries.map((e) => e.prices.cacheRead)),
+    cacheWrite: moneyColumnPrecision(entries.map((e) => e.prices.cacheWrite)),
+  };
   const columns: Array<DataTableColumn<CatalogModel>> = [
     {
       key: 'model',
       header: 'Model',
+      // The name may wrap; the id never breaks mid-token ("claude-/haiku-/4-5").
+      minWidth: '11rem',
       cell: (e) => (
         <span className="stack" style={{ gap: 0 }}>
           <span>{e.displayName}</span>
-          <span className="mono subtle">{e.modelId}</span>
+          <span className="mono subtle whitespace-nowrap">{e.modelId}</span>
         </span>
       ),
     },
-    { key: 'provider', header: 'Provider', cell: (e) => PROVIDER_LABELS[e.providerId] },
+    { key: 'provider', header: 'Provider', nowrap: true, cell: (e) => PROVIDER_LABELS[e.providerId] },
     ...CAPABILITIES.map(
-      (c): DataTableColumn<CatalogModel> => ({ key: c.key, header: c.header, cell: (e) => <YesNo value={e.capabilities[c.key]} /> }),
+      (c): DataTableColumn<CatalogModel> => ({ key: c.key, header: c.header, nowrap: true, cell: (e) => <YesNo value={e.capabilities[c.key]} /> }),
     ),
-    { key: 'input', header: 'Input / MTok', numeric: true, cell: (e) => <Money value={e.prices.input} /> },
-    { key: 'output', header: 'Output / MTok', numeric: true, cell: (e) => <Money value={e.prices.output} /> },
-    { key: 'cache-read', header: 'Cache read / MTok', numeric: true, cell: (e) => <Money value={e.prices.cacheRead} /> },
-    { key: 'cache-write', header: 'Cache write / MTok', numeric: true, cell: (e) => <Money value={e.prices.cacheWrite} /> },
-    { key: 'version', header: 'Catalog version', cell: (e) => <span className="mono">{e.catalogVersion}</span> },
+    { key: 'input', header: 'Input / MTok', numeric: true, cell: (e) => <Money value={e.prices.input} precision={p.input} /> },
+    { key: 'output', header: 'Output / MTok', numeric: true, cell: (e) => <Money value={e.prices.output} precision={p.output} /> },
+    { key: 'cache-read', header: 'Cache read / MTok', numeric: true, cell: (e) => <Money value={e.prices.cacheRead} precision={p.cacheRead} /> },
+    { key: 'cache-write', header: 'Cache write / MTok', numeric: true, cell: (e) => <Money value={e.prices.cacheWrite} precision={p.cacheWrite} /> },
+    { key: 'version', header: 'Catalog version', nowrap: true, cell: (e) => <span className="mono">{e.catalogVersion}</span> },
     {
       key: 'source',
       header: 'Source',
+      nowrap: true,
       // Shown as text with a copy button, never as a clickable external link (§11.4).
       cell: (e) => (
         <span className="row" style={{ gap: 4, flexWrap: 'nowrap' }}>
@@ -71,6 +85,7 @@ function buildColumns(profileChecks: CatalogTableProps['profileChecks']): Readon
     {
       key: 'effective',
       header: 'Effective',
+      nowrap: true,
       cell: (e) => (
         <time dateTime={e.effectiveDate} className="mono">
           {e.effectiveDate}
@@ -107,7 +122,7 @@ export function CatalogTable({ entries, catalogVersion, profileChecks }: Catalog
       </p>
       <DataTable
         caption={`Model catalog, version ${catalogVersion}`}
-        columns={buildColumns(profileChecks)}
+        columns={buildColumns(entries, profileChecks)}
         rows={entries}
         getRowKey={(e) => `${e.providerId}:${e.modelId}:${e.catalogVersion}`}
         emptyState={<p className="subtle">No models in the catalog.</p>}
