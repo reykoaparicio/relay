@@ -4,7 +4,7 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { test } from '../fixtures.js';
+import { expect, test } from '../fixtures.js';
 import { setupOwnProject, startRunViaNewRun } from '../flows.js';
 import { NewRun, Runs, Settings } from '../pages/app-pages.js';
 import type { SettingsSectionName } from '../pages/app-pages.js';
@@ -19,23 +19,41 @@ const SECTIONS: SettingsSectionName[] = ['Providers', 'Model profiles', 'Project
 const WIDE = { width: 1280, height: 860 };
 const NARROW = { width: 1024, height: 768 };
 
-function shooter(page: Page, group: string): (name: string) => Promise<void> {
+interface Shooter {
+  (name: string): Promise<void>;
+  readonly taken: () => number;
+}
+
+/** Full-page screenshots numbered in order; waits for fonts and two frames so transitions have settled. */
+function shooter(page: Page, group: string): Shooter {
   const dir = path.join(OUT, group);
   mkdirSync(dir, { recursive: true });
   let n = 0;
-  return async (name) => {
+  const shot = async (name: string): Promise<void> => {
     n += 1;
-    await page.waitForTimeout(300);
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    });
     await page.screenshot({ path: path.join(dir, `${String(n).padStart(2, '0')}-${name}.png`), fullPage: true });
   };
+  return Object.assign(shot, { taken: () => n });
 }
 
-test.describe('screenshot tour', { tag: '@tour' }, () => {
-  test.skip(OUT === '', 'set TOUR_DIR to an absolute output folder');
+type Inspector = RunInspector;
+const noop = (): Promise<void> => Promise.resolve();
+const approveFirst = async (i: Inspector): Promise<void> => {
+  await i.expectAwaitingApproval();
+  await i.approve();
+};
+
+// Registered only when TOUR_DIR is set, so the regular suite never sees these tests.
+if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
   test.describe.configure({ timeout: 240_000 });
 
   test.describe('happy path and every page', () => {
     test.use({ scenario: 'happy-path' });
+
     test('pages', async ({ page, stubDialogs, project }) => {
       await page.setViewportSize(WIDE);
       const shot = shooter(page, 'a-happy');
@@ -111,36 +129,36 @@ test.describe('screenshot tour', { tag: '@tour' }, () => {
         await shell.nav(nav);
         await shot(`dark-${nav.toLowerCase()}`);
       }
+      expect(shot.taken()).toBeGreaterThan(30);
     });
   });
 
-  const STATES: readonly { scenario: string; status: string; allowance?: string; approveFirst?: boolean }[] = [
-    { scenario: 'budget-exhaustion', status: 'Paused: run budget', allowance: '$0.10' },
-    { scenario: 'unknown-outcome', status: 'Paused: unknown request outcome', approveFirst: true },
-    { scenario: 'malformed-twice', status: "Paused: output didn't match schema" },
-    { scenario: 'auth-fail', status: 'Paused: provider sign-in needed' },
-    { scenario: 'overrun', status: 'Paused: cost exceeded reservation' },
+  const STATES: readonly { scenario: string; status: string; start: { allowance?: string }; before: (i: Inspector) => Promise<void> }[] = [
+    { scenario: 'budget-exhaustion', status: 'Paused: run budget', start: { allowance: '$0.10' }, before: noop },
+    { scenario: 'unknown-outcome', status: 'Paused: unknown request outcome', start: {}, before: approveFirst },
+    { scenario: 'malformed-twice', status: "Paused: output didn't match schema", start: {}, before: noop },
+    { scenario: 'auth-fail', status: 'Paused: provider sign-in needed', start: {}, before: noop },
+    { scenario: 'overrun', status: 'Paused: cost exceeded reservation', start: {}, before: noop },
   ];
   for (const s of STATES) {
     test.describe(`state ${s.scenario}`, () => {
       test.use({ scenario: s.scenario });
+
       test(s.scenario, async ({ page, stubDialogs, project }) => {
         await page.setViewportSize(WIDE);
         const shot = shooter(page, `b-${s.scenario}`);
         await setupOwnProject(page, stubDialogs, project);
-        await startRunViaNewRun(page, GOAL, s.allowance === undefined ? {} : { allowance: s.allowance });
+        await startRunViaNewRun(page, GOAL, s.start);
         const inspector = new RunInspector(page);
         await inspector.expectLoaded();
-        if (s.approveFirst === true) {
-          await inspector.expectAwaitingApproval();
-          await inspector.approve();
-        }
+        await s.before(inspector);
         await inspector.waitForStatus(s.status, 60_000);
         await shot('inspector');
         await inspector.openTab('Attempts');
         await shot('attempts');
         await new Shell(page).nav('Overview');
         await shot('overview');
+        expect(shot.taken()).toBe(3);
       });
     });
   }
