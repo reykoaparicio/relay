@@ -1,11 +1,15 @@
 // 04 §D2: versioned price + capability catalog. Files are static JSON imports (no runtime fs reads, R2-20).
-// Adding a catalog version = adding a JSON file under ../catalog AND its import line + CATALOG_FILES entry below.
+// Adding a catalog version = adding a JSON file under ../catalog AND its import line + CATALOG_FILES entry below, AND
+// its SHA-256 in catalog-immutability.test.ts. A shipped file is NEVER edited, not even a capability or a note: seeding
+// inserts with ON CONFLICT DO NOTHING, so an edited version would hold different rows depending on the DB's age.
+// Every version is seeded; the newest entry per model wins (findCatalogEntry, `model_catalog` reads).
 import { catalogFileSchema, maxPrices } from '@relay/contracts';
 import type { CatalogModel, ModelPrices, ProviderId } from '@relay/contracts';
 import catalog20260925 from '../catalog/2026-09-25.json' with { type: 'json' };
+import catalog20261002 from '../catalog/2026-10-02.json' with { type: 'json' };
 
 /** Every statically imported catalog file, oldest first. */
-export const CATALOG_FILES: readonly unknown[] = [catalog20260925];
+export const CATALOG_FILES: readonly unknown[] = [catalog20260925, catalog20261002];
 
 let memo: readonly CatalogModel[] | undefined;
 

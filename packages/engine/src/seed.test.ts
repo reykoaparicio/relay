@@ -50,6 +50,27 @@ describe('seedDatabase', () => {
     expect(counts()).toEqual(before);
   });
 
+  it('a DB seeded from an older bundle gains the new catalog version and keeps the old rows untouched', async () => {
+    const clock = createManualClock();
+    const ids = createIdGen(clock, (n) => new Uint8Array(randomBytes(n)));
+    db = await openTestDb({ clock, ids });
+    const all = loadCatalogEntries();
+    const released = all.filter((e) => e.catalogVersion === '2026-09-25'); // what the v1 fixture DB and demo snapshot hold
+    const templates = createTemplateRegistry();
+    seedDatabase(db, { catalog: released, templates, ids, clock });
+    const oldSol = db.repos.catalog.get('openai', 'gpt-6.1-sol', '2026-09-25');
+
+    const second = seedDatabase(db, { catalog: all, templates, ids, clock });
+
+    expect(second.catalogEntries).toBe(all.length - released.length);
+    expect(db.repos.catalog.get('openai', 'gpt-6.1-sol', '2026-09-25')).toEqual(oldSol);
+    expect(oldSol?.capabilities.priceCliffInputTokens).toBeUndefined(); // as released
+    expect(db.repos.catalog.latestVersion()).toBe('2026-10-02');
+    const sol = db.repos.catalog.get('openai', 'gpt-6.1-sol');
+    expect([sol?.catalogVersion, sol?.capabilities.priceCliffInputTokens]).toEqual(['2026-10-02', 272_000]);
+    expect(sol?.prices).toEqual(oldSol?.prices);
+  });
+
   it('refuses a default profile that fails its capability check', async () => {
     const clock = createManualClock();
     const ids = createIdGen(clock, (n) => new Uint8Array(randomBytes(n)));

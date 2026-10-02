@@ -3,7 +3,7 @@ import { err, errors, ok } from '@relay/contracts';
 import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, Result, WorkflowId } from '@relay/contracts';
 import type { ProfileRow, Repos } from '@relay/storage';
 import type { EngineCtx } from './ports.js';
-import { liveCapabilities } from './provider-lookup.js';
+import { isModelRejected, liveCapabilities } from './provider-lookup.js';
 
 /** A capability warning code (02 `CAPABILITY_WARNING_CODES`). */
 type CapabilityWarningCode = (typeof CAPABILITY_WARNING_CODES)[number];
@@ -93,13 +93,14 @@ interface UpsertProfileInput {
  */
 export async function upsertProfile(ctx: EngineCtx, input: UpsertProfileInput): Promise<Result<{ profile: ModelProfile; warnings: CapabilityWarning[] }>> {
   const p = input.profile;
-  const entry = ctx.db.repos.catalog.get(p.providerId, p.modelId);
   const live = await liveCapabilities(ctx, p.providerId, p.modelId); // fail closed (provider-lookup.ts)
-  if (!live.ok) return live;
-  const capabilities = live.value;
-  const checked = checkProfile(p, entry, capabilities);
+  if (!live.ok && !isModelRejected(live)) return live; // no adapter
+  // A model the adapter does not serve is checked with no catalog entry: checkProfile's model_unknown.
+  const entry = live.ok ? ctx.db.repos.catalog.get(p.providerId, p.modelId) : undefined;
+  const checked = checkProfile(p, entry, live.ok ? live.value : undefined);
   if (!checked.ok) return checked;
-  if (entry === undefined) return err(errors.modelUnsupported({ providerId: p.providerId, modelId: p.modelId })); // narrowed above
+  if (entry === undefined || !live.ok) return err(errors.modelUnsupported({ providerId: p.providerId, modelId: p.modelId })); // narrowed above
+  const capabilities = live.value;
   return ctx.db.txResult('immediate', (r) => {
     // B8: workflow steps reference profiles by NAME, so a rename would silently break every referencing version.
     const current = p.id === undefined ? undefined : r.profiles.get(p.id);

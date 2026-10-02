@@ -33,7 +33,7 @@ import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './
 import type { ReadinessIssue } from './policy.js';
 import { budgetReadiness, checkStepReadiness, toPreflightIssue } from './policy.js';
 import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
-import { adapterOf, liveCapabilities } from './provider-lookup.js';
+import { adapterOf, isModelRejected, liveCapabilities } from './provider-lookup.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
 import { outputKindOf, stepEntries } from './snapshot.js';
@@ -60,13 +60,14 @@ export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKe
   if (!project.providerPolicy.allowedProviderIds.includes(ref.providerId)) {
     return err(errors.permissionDenied('provider_not_allowed', { details: { stepKey, providerId: ref.providerId } }));
   }
-  const entry = ctx.db.repos.catalog.get(ref.providerId, ref.modelId);
   const live = await liveCapabilities(ctx, ref.providerId, ref.modelId);
-  if (!live.ok) return live;
-  const capabilities = live.value;
-  const checked = checkProfile(ref, entry, capabilities);
+  if (!live.ok && !isModelRejected(live)) return live; // no adapter
+  // A model the adapter does not serve is checked with no catalog entry: checkProfile's model_unknown.
+  const entry = live.ok ? ctx.db.repos.catalog.get(ref.providerId, ref.modelId) : undefined;
+  const checked = checkProfile(ref, entry, live.ok ? live.value : undefined);
   if (!checked.ok) return checked;
-  if (entry === undefined) return err(errors.modelUnsupported({ providerId: ref.providerId, modelId: ref.modelId })); // narrowed above
+  if (entry === undefined || !live.ok) return err(errors.modelUnsupported({ providerId: ref.providerId, modelId: ref.modelId })); // narrowed above
+  const capabilities = live.value;
   return ok({ ...ref, capabilities, prices: entry.prices, priceCatalogVersion: entry.catalogVersion });
 }
 
@@ -292,10 +293,11 @@ async function profileIssues(ctx: EngineCtx, p: PreparedRun, input: StartInput):
       continue;
     }
     const live = await liveCapabilities(ctx, ref.providerId, ref.modelId);
+    const rejected = isModelRejected(live); // the adapter does not serve the model: checkProfile's model_unknown, once
     issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile: ref, capabilities: live.ok ? live.value : undefined,
-      catalogEntry: r.catalog.get(ref.providerId, ref.modelId), hasCredential: r.credentials.get(ref.providerId) !== undefined }));
+      catalogEntry: rejected ? undefined : r.catalog.get(ref.providerId, ref.modelId), hasCredential: r.credentials.get(ref.providerId) !== undefined }));
     // Fail closed (provider-lookup.ts): capabilities that cannot be read are an issue, never a catalog guess.
-    if (!live.ok) issues.push({ stepKey: s.id, reason: 'setup_blocked', code: 'no_adapter', error: live.error });
+    if (!live.ok && !rejected) issues.push({ stepKey: s.id, reason: 'setup_blocked', code: 'no_adapter', error: live.error });
   }
   return issues;
 }

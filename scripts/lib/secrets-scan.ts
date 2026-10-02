@@ -1,11 +1,11 @@
-// Secret scanner for `check:secrets` (13 §M2, §3.3, §18.2). Candidates come from the contracts SECRET_PATTERNS and are
+// Secret scanner for `check:secrets` (13 §M2, §3.3, §18.2). Candidates come from the contracts findSecretMatches and are
 // confirmed with looksLikeSecret, plus the literal e2e test keys in plaintext / UTF-16LE / base64. Findings carry a
 // path, a location and a redacted label only; the matched secret is never returned or printed.
 import { copyFile, lstat, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import * as asar from '@electron/asar';
-import { looksLikeSecret, redactedLabel, redactString, SECRET_PATTERNS } from '@relay/contracts';
+import { findSecretMatches, looksLikeSecret, redactedLabel, redactString, SECRET_PATTERNS } from '@relay/contracts';
 import { makeTempDir, removeDir } from './package-temp-dir.js';
 
 /** The only allowlisted text (13 §M2): the obviously fake fixture marker. Nothing else is exempt. */
@@ -88,12 +88,11 @@ function anchoredHit(masked: string, at: number): Hit | null {
 export function findSecretsInText(text: string, binary = false): Hit[] {
   const masked = maskAllowlisted(text);
   const hits = new Map<number, Hit>();
-  for (const re of SECRET_PATTERNS) {
-    // matchAll clones the regex, so the shared global pattern's lastIndex is never touched.
-    for (const m of masked.matchAll(re)) {
-      if (hits.has(m.index) || !isConfirmed(masked, m.index, m[0])) continue;
-      hits.set(m.index, { offset: m.index, label: safeLabel(m[0]) });
-    }
+  // Not matchAll over SECRET_PATTERNS: a value rejected by its rule's post-match check can hide a later key name, and
+  // detection-only rules (an API-key name before a credential) find keys the redaction candidates skip past.
+  for (const m of findSecretMatches(masked)) {
+    if (hits.has(m.index) || !isConfirmed(masked, m.index, m.match)) continue;
+    hits.set(m.index, { offset: m.index, label: safeLabel(m.match) });
   }
   if (binary) {
     for (const m of masked.matchAll(BINARY_ANCHOR_RE)) {

@@ -18,7 +18,7 @@ import { cp, lstat, mkdir, readdir, readFile, realpath, writeFile } from 'node:f
 import { homedir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { redactString, SECRET_PATTERNS, toDisplayPath } from '@relay/contracts';
+import { findSecretMatches, redactString, toDisplayPath } from '@relay/contracts';
 import {
   RESET_MARKER,
   SAMPLE_MARKER,
@@ -77,14 +77,12 @@ async function scanSnapshot(dir: string, forbiddenStrings: readonly string[]): P
     if (/\.sqlite-(wal|shm)$/.test(rel)) problems.push(`${rel}: the DB copy must be self-contained`);
     const text = (await readFile(file)).toString('latin1');
     for (const s of forbiddenStrings) if (s !== '' && text.includes(s)) problems.push(`${rel}: contains the machine path or key "${s}"`);
-    for (const re of SECRET_PATTERNS) {
-      const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-      for (const m of text.matchAll(new RegExp(re.source, flags))) {
-        // Candidates only: some rules also check the char after the value, so confirm by redacting the match plus it.
-        const candidate = text.slice(m.index, m.index + m[0].length + 1);
-        if (redactString(candidate) === candidate) continue;
-        if (!m[0].includes('sk-fixture-DO-NOT-READ')) problems.push(`${rel}: secret-like string ${m[0].slice(0, 12)}…`);
-      }
+    // findSecretMatches, not matchAll over SECRET_PATTERNS: a rejected value can hide a later key name.
+    for (const m of findSecretMatches(text)) {
+      // Candidates only: some rules also check the char after the value, so confirm by redacting the match plus it.
+      const candidate = text.slice(m.index, m.index + m.match.length + 1);
+      if (redactString(candidate) === candidate) continue;
+      if (!m.match.includes('sk-fixture-DO-NOT-READ')) problems.push(`${rel}: secret-like string ${m.match.slice(0, 12)}…`);
     }
   }
   return problems;

@@ -93,8 +93,26 @@ describe('loadCatalogEntries', () => {
     }
   });
 
+  it('2026-10-02 adds only gpt-6.1-sol priceCliffInputTokens to the released 2026-09-25 (no price changes)', () => {
+    const byVersion = (v: string) => new Map(loadCatalogEntries().filter((e) => e.catalogVersion === v).map((e) => [`${e.providerId}|${e.modelId}`, e]));
+    const released = byVersion('2026-09-25');
+    const current = byVersion('2026-10-02');
+
+    expect([...current.keys()].sort()).toEqual([...released.keys()].sort());
+    for (const [key, e] of current) {
+      const old = released.get(key);
+      expect(e.prices).toEqual(old?.prices);
+      expect(e.effectiveDate).toBe(old?.effectiveDate);
+      const { priceCliffInputTokens: cliff, ...caps } = e.capabilities;
+      expect(caps).toEqual(old?.capabilities);
+      expect(old?.capabilities.priceCliffInputTokens).toBeUndefined();
+      expect(cliff).toBe(key === 'openai|gpt-6.1-sol' ? 272_000 : undefined);
+    }
+    expect(findCatalogEntry('openai', 'gpt-6.1-sol')?.capabilities.priceCliffInputTokens).toBe(272_000);
+  });
+
   it('finds the newest version and the cheapest model of a provider', () => {
-    expect(latestCatalogVersion()).toBe('2026-09-25');
+    expect(latestCatalogVersion()).toBe('2026-10-02');
     expect(cheapestCatalogModel('anthropic')?.modelId).toBe('claude-haiku-4-5');
     expect(cheapestCatalogModel('gemini')?.modelId).toBe('gemini-3.5-flash');
   });

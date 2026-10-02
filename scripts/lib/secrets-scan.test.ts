@@ -65,6 +65,17 @@ describe('findSecretsInText', () => {
     expect(findSecretsInText('\u0003task-abcdefghij0123456789', true)).toEqual([]);
   });
 
+  it('finds a key whose name ends inside a rejected value run (impr bug-hunt finding 1)', () => {
+    const authz = 'authorization=no-token-configured.authorization: abcd1234efgh5678ijkl';
+    const apiKey = 'api_key=use-the-env-var-api_key: sk9f8a7s6d5f4g3h2j1kzz';
+
+    const authzHits = findSecretsInText(`${authz}\n`);
+    const apiKeyHits = findSecretsInText(`${apiKey}\n`);
+
+    expect(authzHits).toEqual([{ offset: authz.indexOf('authorization: '), label: 'authorization: [REDACTED:…ijkl]' }]);
+    expect(apiKeyHits).toEqual([{ offset: apiKey.indexOf('api_key: '), label: 'api_key: [REDACTED:…1kzz]' }]);
+  });
+
   it('flags every known e2e test key', () => {
     for (const key of KNOWN_TEST_KEYS) expect(findSecretsInText(`x ${key} y`)).toHaveLength(1);
   });

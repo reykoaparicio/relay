@@ -3,14 +3,15 @@
 // reader, the `locked_field` draft-patch rule, the snapshot-binding statement, and the >100 paused-run re-evaluation.
 import { createTwoFilesPatch } from 'diff';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok } from '@relay/contracts';
+import { RelayError, errors, ok } from '@relay/contracts';
 import type { ApprovalId, ArtifactId, CostCertainty, Microusd, ProjectId, RunId } from '@relay/contracts';
 import type { LedgerEntryRow } from '@relay/storage';
 import { preservedApproval } from './approval-binding.js';
 import { isAbortReason } from './cancellation.js';
 import { requestHash } from './hash.js';
 import { recordResult, replayStoredId } from './idempotency.js';
-import { adapterOf, liveCapabilities } from './provider-lookup.js';
+import { findProfileByName } from './profiles.js';
+import { adapterOf, isModelRejected, liveCapabilities } from './provider-lookup.js';
 import { stepCost } from './report.js';
 import { RESNAPSHOT_KIND, PROJECT_CHANGED_MARK, hasSnapshotPreserved } from './snapshot.js';
 import { readInputDiff } from './steps/input-diff.js';
@@ -31,6 +32,15 @@ async function harness(o: HarnessOptions = {}): Promise<Harness> {
 }
 
 const noAdapters: HarnessOptions['providers'] = (base) => ({ list: () => base.list(), get: () => { throw new Error('no adapter'); } });
+const GHOST_MODEL = 'claude-not-a-model';
+/** Adapters that reject GHOST_MODEL the way the catalog-backed HTTP adapters reject any model missing from their catalog. */
+const catalogAdapters: HarnessOptions['providers'] = (base) => ({ list: () => base.list(), get: (id) => {
+  const adapter = base.get(id);
+  return { ...adapter, capabilities: (modelId: string) => modelId === GHOST_MODEL
+    ? Promise.reject(new RelayError(errors.modelUnsupported({ providerId: id, modelId, reason: 'not_in_catalog' })))
+    : adapter.capabilities(modelId) };
+} });
+const MODEL_UNKNOWN_MESSAGE = 'This model is not in the price catalog, so its cost cannot be tracked.';
 const errOf = (res: { ok: boolean; error?: { code: string; details?: Record<string, unknown> | undefined } }) =>
   res.ok ? null : [res.error?.code, res.error?.details?.['reason']];
 
@@ -79,6 +89,54 @@ describe('adapter lookup: one fail-closed policy (8)', () => {
     const logged = x.logger.entries.find((e) => e.event === 'provider.capabilities_failed');
     expect(logged?.fields?.['err']).toContain('boom');
     expect(JSON.stringify(logged)).not.toContain('SECRETSECRETSECRET');
+  });
+
+  it('liveCapabilities passes an adapter\'s MODEL_UNSUPPORTED through unlogged (impr bug-hunt finding 2)', async () => {
+    const x = await harness({ providers: catalogAdapters });
+
+    const ghost = await liveCapabilities(x.ctx, 'anthropic', GHOST_MODEL);
+    const known = await liveCapabilities(x.ctx, 'anthropic', 'claude-haiku-4-5');
+    const none = await liveCapabilities({ ...x.ctx, providers: { list: () => [], get: () => { throw new Error('none'); } } }, 'anthropic', GHOST_MODEL);
+
+    expect(errOf(ghost)).toEqual(['MODEL_UNSUPPORTED', 'not_in_catalog']);
+    expect(isModelRejected(ghost)).toBe(true);
+    expect(isModelRejected(known)).toBe(false);
+    expect(errOf(none)).toEqual(['MODEL_UNSUPPORTED', 'no_adapter']);
+    expect(isModelRejected(none)).toBe(false);
+    expect(x.logger.entries.filter((e) => e.event === 'provider.capabilities_failed')).toEqual([]);
+  });
+
+  it('a model the adapter does not serve is one model_unknown in profiles.upsert, workflows.validate and runs.preflight, not no_adapter', async () => {
+    const x = await harness({ providers: catalogAdapters });
+    const workflow = x.db.repos.workflows.listWorkflows()[0];
+    const spec = workflow === undefined ? undefined : x.db.repos.workflows.getVersion(workflow.id, 1)?.spec;
+    const firstModelStep = spec?.steps.find((s) => s.kind === 'model');
+    const row = firstModelStep?.kind === 'model' ? findProfileByName(x.db.repos, firstModelStep.profile) : undefined;
+    if (workflow === undefined || spec === undefined || row === undefined) throw new Error('fixture');
+    const ghostSteps = spec.steps.flatMap((s, i) => (s.kind === 'model' && findProfileByName(x.db.repos, s.profile)?.id === row.id ? [{ i, id: s.id }] : []));
+    x.db.tx('immediate', (r) => {
+      const saved = r.profiles.upsert({ id: row.id, name: row.name, providerId: row.providerId, modelId: GHOST_MODEL, params: row.params,
+        capabilitiesSnapshot: row.capabilitiesSnapshot, catalogVersion: row.catalogVersion }, row.revision);
+      if (!saved.ok) throw new Error('upsert');
+    });
+
+    const upsert = await x.engine.handle('relay/v1/profiles.upsert', { profile: { name: 'Ghost', providerId: 'anthropic', modelId: GHOST_MODEL,
+      params: { maxOutputTokens: 4000, refusalFallback: 'off' } } });
+    const validate = await x.engine.handle('relay/v1/workflows.validate', { workflowId: workflow.id, version: 1 });
+    const preflight = await x.engine.handle('relay/v1/runs.preflight', { projectId: x.projectId, workflowId: workflow.id, workflowVersion: 1,
+      goal: 'Check the adapters.', input: { kind: 'files', relPaths: Object.keys(SAMPLE_FILES) } });
+
+    expect(errOf(upsert)).toEqual(['MODEL_UNSUPPORTED', 'model_unknown']);
+    expect(upsert.ok ? null : upsert.error.userMessage).toBe(MODEL_UNKNOWN_MESSAGE);
+    expect(ghostSteps.length).toBeGreaterThan(0);
+    for (const { i, id } of ghostSteps) {
+      expect(validate.ok && validate.data.issues.filter((v) => v.path === `steps[${String(i)}].profile`).map((v) => [v.code, v.message]))
+        .toEqual([['model_unknown', MODEL_UNKNOWN_MESSAGE]]);
+      expect(preflight.ok && preflight.data.issues.filter((v) => v.path === `profileOverrides.${id}`).map((v) => v.code)).toEqual(['model_unknown']);
+    }
+    expect(validate.ok && validate.data.issues.some((v) => v.code === 'no_adapter')).toBe(false);
+    expect(preflight.ok && preflight.data.issues.some((v) => v.code === 'no_adapter')).toBe(false);
+    expect(x.logger.entries.filter((e) => e.event === 'provider.capabilities_failed')).toEqual([]);
   });
 
   it('profiles.upsert, providers.test, workflows.validate and runs.preflight all report no_adapter when no adapter serves the provider', async () => {

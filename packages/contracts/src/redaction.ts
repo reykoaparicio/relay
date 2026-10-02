@@ -26,30 +26,40 @@ const CRED = 'A-Za-z0-9_\\-+/=.~';
 const CREDENTIAL_VALUE = `(?!\\[REDACTED)[${CRED}]{16,}`;
 /** A value of any shape after an explicit API-key name: ≥ 8 chars. With `value: 'delimited'`, not followed by `(`. */
 const LOOSE_VALUE = `(?!\\[REDACTED)[^\\s"'\\\\,;{}()\\[\\]<>]{8,}`;
-const API_KEY_NAME = `(?<keep>(?:api[_-]?key|x-api-key)${Q}\\s*[:=]\\s*${Q})`;
-const AUTHZ_NAME = `\\bauthorization${Q}\\s*[:=]\\s*${Q}`;
+/**
+ * Explicit API-key names, as literals so {@link resumeBack} can bound their length. No `\\b` before them (unlike
+ * `authorization`), so a name may start anywhere, even inside a word: the resume bound below covers that worst case.
+ */
+const API_KEY_NAMES = ['api_key', 'api-key', 'apikey', 'x-api-key'] as const;
+const AUTHZ_NAMES = ['authorization'] as const;
+const API_KEY_NAME = `(?<keep>(?:${API_KEY_NAMES.join('|')})${Q}\\s*[:=]\\s*${Q})`;
+const AUTHZ_NAME = `\\b(?:${AUTHZ_NAMES.join('|')})${Q}\\s*[:=]\\s*${Q}`;
 
 type LabelKind = 'sk' | 'akia' | 'pem' | 'plain';
+
+/**
+ * A post-match check on the `secret` group: `delimited` = not followed by `(`; `credential` = that plus a letter and
+ * a digit in the value. `keyNames` are the literal key names the regex starts with; they bound where scanning resumes
+ * after a rejected value ({@link resumeBack}). Absent: the regex match is final.
+ */
+type ValueCheck =
+  | { readonly value: 'credential' | 'delimited'; readonly keyNames: readonly string[] }
+  | { readonly value?: undefined; readonly keyNames?: undefined };
 
 /**
  * One secret rule. A regex may name a `keep` group (kept verbatim, e.g. `Authorization: Bearer `) and a `secret` group
  * (the redacted part); without them the whole match is the secret.
  */
-interface SecretRule {
+type SecretRule = ValueCheck & {
   readonly re: RegExp;
   readonly label: LabelKind;
   /** Applied by {@link redactString} (default true). */
   readonly redact?: boolean;
   /** Applied by {@link looksLikeSecret} (default true). */
   readonly detect?: boolean;
-  /**
-   * Post-match check on the `secret` group: `delimited` = not followed by `(`; `credential` = that plus a letter
-   * and a digit in the value. Absent: the regex match is final.
-   */
-  readonly value?: 'credential' | 'delimited';
   /** Finds the next match at or after `from` in code instead of with `re` (for rules a regex cannot keep linear). */
   readonly find?: (text: string, from: number) => Span | null;
-}
+};
 
 /** A match found by {@link SecretRule.find}: `text.slice(start, end)` is the secret. */
 interface Span {
@@ -97,15 +107,23 @@ const RULES: readonly SecretRule[] = [
     re: new RegExp(`(?<keep>${AUTHZ_NAME})(?<secret>${CREDENTIAL_VALUE})`, 'gi'),
     label: 'plain',
     value: 'credential',
+    keyNames: AUTHZ_NAMES,
   },
   { re: new RegExp(`(?<keep>\\bBearer\\s+)(?!\\[REDACTED)(?<secret>[${CRED}]{16,})`, 'gi'), label: 'plain' },
   // Explicit API-key names: logs redact any delimited value; the memory guard needs a credential-shaped one.
-  { re: new RegExp(`${API_KEY_NAME}(?<secret>${LOOSE_VALUE})`, 'gi'), label: 'plain', detect: false, value: 'delimited' },
+  {
+    re: new RegExp(`${API_KEY_NAME}(?<secret>${LOOSE_VALUE})`, 'gi'),
+    label: 'plain',
+    detect: false,
+    value: 'delimited',
+    keyNames: API_KEY_NAMES,
+  },
   {
     re: new RegExp(`${API_KEY_NAME}(?<secret>${CREDENTIAL_VALUE})`, 'gi'),
     label: 'plain',
     redact: false,
     value: 'credential',
+    keyNames: API_KEY_NAMES,
   },
   // PEM private keys. redactString/looksLikeSecret use findPemBlock (same matches, linear time); this regex is the
   // SECRET_PATTERNS candidate for scanners, and its body never crosses another BEGIN line so it is linear too.
@@ -117,10 +135,10 @@ const REDACT_RULES = RULES.filter((r) => r.redact !== false);
 const DETECT_RULES = RULES.filter((r) => r.detect !== false);
 
 /**
- * Canonical redaction patterns (00b §6). All are global regexes; use them only with `String.prototype.replace` or
- * `matchAll`. They are candidate finders: some rules add a post-match check that looks one char past
- * the match, so confirm a hit with {@link looksLikeSecret} on the match plus its next char (as `check:secrets` does)
- * rather than trusting a bare match.
+ * Canonical redaction patterns (00b §6). All are global regexes. They are candidate finders: some rules add a
+ * post-match check that looks one char past the match, and a run rejected by that check can hide a later key name,
+ * so do not `matchAll` them; scanners use {@link findSecretMatches}, then confirm a hit with {@link looksLikeSecret}
+ * on the match plus its next char (as `check:secrets` does).
  */
 export const SECRET_PATTERNS: readonly RegExp[] = REDACT_RULES.map((r) => r.re);
 
@@ -173,18 +191,14 @@ function passesValueCheck(rule: SecretRule, secret: string, next: string): boole
   return rule.value === 'delimited' || isCredentialShaped(secret);
 }
 
-function replacer(rule: SecretRule): (match: string, ...rest: unknown[]) => string {
+function replacer(kind: LabelKind): (match: string, ...rest: unknown[]) => string {
   return (match, ...rest) => {
     // With named groups the trailing replacer args are (…captures, offset, input, groups).
     const last = rest.at(-1);
     const groups: Groups = typeof last === 'object' && last !== null ? last : {};
     const keep = groups.keep ?? '';
     const secret = groups.secret ?? match.slice(keep.length);
-    const offset = rest.at(-3);
-    const input = rest.at(-2);
-    const next = typeof offset === 'number' && typeof input === 'string' ? input.charAt(offset + match.length) : '';
-    if (!passesValueCheck(rule, secret, next)) return match;
-    return `${keep}[REDACTED:${label(rule.label, secret)}]`;
+    return `${keep}[REDACTED:${label(kind, secret)}]`;
   };
 }
 
@@ -198,27 +212,104 @@ function replaceSpans(text: string, rule: SecretRule, find: (text: string, from:
   return at === 0 ? text : out + text.slice(at);
 }
 
-/** Replaces every secret-looking substring, e.g. `sk-ant-api03-…a1F9` → `[REDACTED:sk-…a1F9]`. Idempotent. */
-export function redactString(s: string): string {
-  let out = s;
-  for (const rule of REDACT_RULES) {
-    out = rule.find === undefined ? out.replace(rule.re, replacer(rule)) : replaceSpans(out, rule, rule.find);
-  }
-  return out;
-}
-
 function matchPasses(rule: SecretRule, m: RegExpExecArray, text: string): boolean {
   const secret = m.groups?.['secret'] ?? m[0];
   return passesValueCheck(rule, secret, text.charAt(m.index + m[0].length));
 }
 
+/**
+ * How far before the end of a rejected value scanning resumes: the longest key name plus one.
+ *
+ * The old lookahead regex retried at every position after a rejected start; this skips the positions that cannot
+ * match, which keeps the scan linear. A rule's value is the maximal run of its value alphabet, and a match is rejected
+ * only for its next char (`(`) or for lacking a letter or digit, so any match whose value starts inside the rejected
+ * run [vs, ve) sees a suffix of it (same next char, fewer chars) and is rejected too. A later match must therefore put
+ * its value at or after `ve`. Its key name is made of value-alphabet chars (letters, `_`, `-`), and of the chars
+ * between name and value (`Q`, `\s`, `[:=]`, `Q`) only `:`/`=` can be value chars, so such a name either ends at
+ * `ve` or at `ve - 1` with the separator as the run's last char: it starts at or after `ve - (longest name + 1)`.
+ * A name cannot start inside the rejected match's own name or separators either (no name is a suffix-prefix overlap
+ * of another, except `api-key` inside `x-api-key`, which reaches the same value). The missing `\b` before API-key
+ * names lets them start mid-word, but that only matters inside the window above, which counts the full name.
+ */
+function resumeBack(rule: SecretRule): number {
+  return Math.max(0, ...(rule.keyNames ?? []).map((n) => n.length)) + 1;
+}
+
+/** Private global copies (scanning sets `lastIndex`; the exported patterns are never touched) and their resume bounds. */
+const SCANNERS: ReadonlyMap<SecretRule, { readonly re: RegExp; readonly back: number }> = new Map(
+  RULES.map((r) => [r, { re: new RegExp(r.re.source, r.re.flags), back: resumeBack(r) }]),
+);
+
+/**
+ * The first match of `rule.re` at or after `from` that passes the rule's value check: exactly the next match of the
+ * old lookahead regex. A rejected match resumes at `max(start + 1, valueEnd - back)` (see {@link resumeBack}).
+ */
+function nextMatch(rule: SecretRule, text: string, from: number): RegExpExecArray | null {
+  const scanner = SCANNERS.get(rule);
+  if (scanner === undefined) return null;
+  const { re, back } = scanner;
+  for (let at = from; at <= text.length; ) {
+    re.lastIndex = at;
+    const m = re.exec(text);
+    if (m === null || matchPasses(rule, m, text)) return m;
+    at = Math.max(m.index + 1, m.index + m[0].length - back);
+  }
+  return null;
+}
+
+/** Every passing match of `rule.re` in `text`, non-overlapping and in order (what `replace` with the old regex saw). */
+function ruleMatches(rule: SecretRule, text: string): RegExpExecArray[] {
+  const out: RegExpExecArray[] = [];
+  for (let m = nextMatch(rule, text, 0); m !== null; m = nextMatch(rule, text, m.index + m[0].length)) out.push(m);
+  return out;
+}
+
+function redactMatches(text: string, rule: SecretRule): string {
+  let out = '';
+  let at = 0;
+  for (const m of ruleMatches(rule, text)) {
+    const keep = m.groups?.['keep'] ?? '';
+    const secret = m.groups?.['secret'] ?? m[0].slice(keep.length);
+    out += `${text.slice(at, m.index)}${keep}[REDACTED:${label(rule.label, secret)}]`;
+    at = m.index + m[0].length;
+  }
+  return at === 0 ? text : out + text.slice(at);
+}
+
+function redactRule(text: string, rule: SecretRule): string {
+  if (rule.find !== undefined) return replaceSpans(text, rule, rule.find);
+  if (rule.value !== undefined) return redactMatches(text, rule);
+  return text.replace(rule.re, replacer(rule.label));
+}
+
+/** Replaces every secret-looking substring, e.g. `sk-ant-api03-…a1F9` → `[REDACTED:sk-…a1F9]`. Idempotent. */
+export function redactString(s: string): string {
+  let out = s;
+  for (const rule of REDACT_RULES) out = redactRule(out, rule);
+  return out;
+}
+
 function ruleDetects(rule: SecretRule, text: string): boolean {
   if (rule.find !== undefined) return rule.find(text, 0) !== null;
   if (rule.value === undefined) return DETECT_PATTERNS.get(rule)?.test(text) ?? false;
-  for (const m of text.matchAll(rule.re)) {
-    if (matchPasses(rule, m, text)) return true;
-  }
-  return false;
+  return nextMatch(rule, text, 0) !== null;
+}
+
+/** A secret candidate: `text.slice(index, index + match.length)` matched a rule's pattern and passed its value check. */
+export interface SecretMatch {
+  readonly index: number;
+  readonly match: string;
+}
+
+/**
+ * Candidate secrets for scanners: every match of every rule (redaction and detection-only rules alike, each by its
+ * {@link SECRET_PATTERNS}-style regex) that passes the rule's own value check, in rule order then text order. Unlike
+ * `matchAll` over SECRET_PATTERNS, a run rejected by a value check never hides a later key name. Confirm each with
+ * {@link looksLikeSecret} on the match plus its next char: a redaction-only candidate (any value after an API-key
+ * name) is not necessarily credential-shaped.
+ */
+export function findSecretMatches(text: string): SecretMatch[] {
+  return RULES.flatMap((rule) => ruleMatches(rule, text).map((m) => ({ index: m.index, match: m[0] })));
 }
 
 /**

@@ -506,7 +506,7 @@ describe('fake provider: capabilities, estimate, testConnection', () => {
     const est = await provider.estimate(req('review'), PRICES, { apiKey: 'k' });
 
     expect(est.basis).toBe('local_estimate');
-    expect(est.priceCatalogVersion).toBe('2026-09-25');
+    expect(est.priceCatalogVersion).toBe('2026-10-02');
   });
 
   it('records the explicit price catalog version passed alongside the prices', async () => {

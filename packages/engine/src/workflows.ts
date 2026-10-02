@@ -21,7 +21,7 @@ import type { IdempotentRequest } from './idempotency.js';
 import { recordResult, replayStoredId } from './idempotency.js';
 import type { EngineCtx } from './ports.js';
 import { checkProfile, findProfileByName, profileWarningMessage } from './profiles.js';
-import { liveCapabilities } from './provider-lookup.js';
+import { isModelRejected, liveCapabilities } from './provider-lookup.js';
 import { workflowContentHash } from './seed.js';
 
 const issue = (path: string, message: string, code: string): ValidationIssue => ({ path, message, code });
@@ -159,9 +159,10 @@ async function modelStepIssues(ctx: EngineCtx, s: StepSpec & { kind: 'model' }, 
   if (row === undefined) return { issues: [...issues, issue(`${path}.profile`, `No profile named "${s.profile.slice(0, 40)}".`, 'unknown_profile')], warnings, upper: null };
   const entry = r.catalog.get(row.providerId, row.modelId);
   const live = await liveCapabilities(ctx, row.providerId, row.modelId); // fail closed (provider-lookup.ts)
-  if (!live.ok) issues.push(issue(`${path}.profile`, live.error.userMessage, 'no_adapter'));
-  const caps = live.ok ? live.value : entry?.capabilities;
-  const checked = checkProfile(row, entry, caps);
+  const rejected = isModelRejected(live); // the adapter does not serve the model: checkProfile's model_unknown, once
+  if (!live.ok && !rejected) issues.push(issue(`${path}.profile`, live.error.userMessage, 'no_adapter'));
+  const caps = live.ok ? live.value : rejected ? undefined : entry?.capabilities;
+  const checked = checkProfile(row, rejected ? undefined : entry, caps);
   if (!checked.ok) issues.push(issue(`${path}.profile`, checked.error.userMessage, reasonOf(checked.error.details?.['reason'])));
   const maxOut = s.maxOutputTokens ?? row.params.maxOutputTokens;
   if (caps?.maxOutputTokens !== undefined && maxOut > caps.maxOutputTokens) {

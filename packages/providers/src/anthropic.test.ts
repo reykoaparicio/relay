@@ -338,7 +338,7 @@ describe('anthropic adapter: estimate, capabilities, testConnection', () => {
 
     expect(calls[0]!.url).toBe('https://api.anthropic.com/v1/messages/count_tokens');
     expect(bodyOf(calls[0])).not.toHaveProperty('max_tokens');
-    expect(est).toMatchObject({ basis: 'provider_count', inputTokens: 1234, maxOutputTokens: 8000, priceCatalogVersion: '2026-09-25' });
+    expect(est).toMatchObject({ basis: 'provider_count', inputTokens: 1234, maxOutputTokens: 8000, priceCatalogVersion: '2026-10-02' });
     // Input priced at the highest input-side rate (cache write 1.25×) + output allowance + rounding slack (04 §D2).
     expect(est.upperAllowanceMicrousd).toBe(mulDivCeil(1234, PRICES.cacheWrite) + 80_000 + INPUT_SPLIT_ROUNDING_SLACK_MICROUSD);
   });

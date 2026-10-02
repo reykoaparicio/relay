@@ -43,7 +43,7 @@ describe('runs.start (F15)', () => {
     expect(snap.steps['finalize' as StepKey]?.dependsOn).toEqual(['verify']);
     const review = snap.steps['review' as StepKey];
     expect(review?.kind === 'model' && [review.profile.name, review.profile.modelId, review.maxOutputTokens, review.profile.priceCatalogVersion])
-      .toEqual(['Economy', 'claude-haiku-4-5', 8_000, '2026-09-25']);
+      .toEqual(['Economy', 'claude-haiku-4-5', 8_000, '2026-10-02']);
     expect(r.steps.listForRun(run.id).map((s) => [s.stepKey, s.ordinal, s.state])).toEqual([
       ['intake', 0, 'pending'], ['review', 1, 'pending'], ['plan', 2, 'pending'], ['approve', 3, 'pending'],
       ['implement', 4, 'pending'], ['verify', 5, 'pending'], ['finalize', 6, 'pending'],
