@@ -1,6 +1,7 @@
 // 04 §D9b: the full template once per live adapter, through createRuntime({ providerMode: 'live' }), against a temp copy
 // of tests/fixtures/sample-api. Runs only with RELAY_LIVE_TESTS=1; spends real money under
-// RELAY_LIVE_WORKFLOW_CAP_MICROUSD (default 1 500 000 = $1.50) for the whole file. Run manually:
+// RELAY_LIVE_WORKFLOW_CAP_MICROUSD (default 1 400 000 = $1.40) for the whole file — with the $0.10 connection smoke
+// (providers.live.test.ts) the whole live suite stays within $1.50. Run manually:
 //   RELAY_LIVE_TESTS=1 pnpm test:live
 import { cpSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,7 @@ import { cheapestCatalogModel } from '@relay/providers';
 import { createWorkflowSpend } from './live-budget.js';
 import { LIVE, capFromEnv, liveKey, skipNotice, usd } from './live-env.js';
 
-const DEFAULT_CAP_MICROUSD = 1_500_000;
+const DEFAULT_CAP_MICROUSD = 1_400_000;
 const RUN_TIMEOUT_MS = 20 * 60_000;
 const MODEL_STEPS = ['review', 'plan', 'implement', 'verify'] as const;
 const SAMPLE_API = fileURLToPath(new URL('../fixtures/sample-api', import.meta.url));
@@ -86,6 +87,15 @@ function defineWorkflow(providerId: ProviderId): void {
     let runId: RunId | undefined;
     try {
       await rt.engine.start();
+      // Readiness checks (06 F13) require a credential ref for the step's provider before any reservation; the key
+      // itself stays in the resolver above (session ref, no vault file).
+      const ref = await rt.engine.handle('relay/v1/providers.recordCredentialRef', {
+        providerId,
+        storageMode: 'session',
+        vaultFile: null,
+        redactedLabel: 'live-test',
+      });
+      if (!ref.ok) throw new Error(`providers.recordCredentialRef: ${ref.error.code}`);
       const project = await rt.engine.handle('relay/v1/projects.createFromRoot', {
         idempotencyKey: `live-project-${providerId}-0001`,
         rootRealpath: projectRoot,
@@ -176,4 +186,5 @@ function defineWorkflow(providerId: ProviderId): void {
 describe('live workflow (D9b)', () => {
   defineWorkflow('anthropic');
   defineWorkflow('openai');
+  defineWorkflow('gemini');
 });
