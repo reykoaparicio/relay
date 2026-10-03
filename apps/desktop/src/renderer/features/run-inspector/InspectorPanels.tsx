@@ -12,6 +12,7 @@ import {
   formatClockTime,
   formatMoney,
   formatTokens,
+  formatTokensExact,
   statusPresentation,
   toIsoString,
 } from '../../lib/format';
@@ -38,7 +39,13 @@ const EVENT_SUMMARY: { readonly [T in RunEventType]: (p: Readonly<Record<string,
     const reason = pauseReasonSchema.safeParse(p['pauseReason']);
     return to.success ? `Run: ${statusPresentation('run', to.data, reason.success ? reason.data : null).label}` : 'Run status changed';
   },
-  'run.config_revised': () => 'Run configuration revised',
+  'run.config_revised': (p) => {
+    // L-1: a profile switch to a model with a lower output cap lowered the step's output limit.
+    const lowered = p['outputLimitLowered'] as { to?: unknown; modelId?: unknown } | undefined;
+    return typeof lowered?.to === 'number' && typeof lowered.modelId === 'string'
+      ? `Run configuration revised: output limit lowered to ${formatTokensExact(lowered.to)} for ${lowered.modelId}`
+      : 'Run configuration revised';
+  },
   'step.state_changed': (p, step) => {
     const to = stepStateSchema.safeParse(p['to']);
     return `${step ?? 'Step'}: ${to.success ? statusPresentation('step', to.data).label : 'changed'}`;

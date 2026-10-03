@@ -2,16 +2,16 @@
 // effect), stores it as a `report` artifact (canonical JSON, never redacted), and appends `report.created`.
 // Idempotent: an existing report artifact is returned. `renderReportMarkdown` is the pure Markdown view used by
 // `artifacts.exportTo` (`what: 'report'`).
-import { REVIEW_OUTCOMES, err, errors, invariant, isTerminalRunStatus, ok, reportV1Schema } from '@relay/contracts';
+import { REVIEW_OUTCOMES, err, errors, invariant, isTerminalRunStatus, ok, redactString, reportV1Schema } from '@relay/contracts';
 import type { ArtifactId, Microusd, ReportV1, Result, ReviewOutcome, RunId, RunStatus, StepKey, TerminalRunStatus } from '@relay/contracts';
 import type { LedgerEntryRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { ReportLimitationKey } from '@relay/templates';
 import { canonicalJson, utf8 } from './hash.js';
-import type { EngineCtx, ModelStepSnapshot, OutputArtifactKind, RunSnapshot } from './ports.js';
+import type { EngineCtx, ModelStepSnapshot, RunSnapshot } from './ports.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
 import { effectiveModelSteps, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
-import { attemptCostCertainty, costOfEntries, entriesByStep, latestPerKey, netSettledCertainties, weakestCertainty } from './views.js';
+import { attemptCostCertainty, costOfEntries, outputOfKind, entriesByStep, latestPerKey, netSettledCertainties, weakestCertainty } from './views.js';
 
 /**
  * A step's cost over its attempts' ledger entries: settled and unknown from {@link costOfEntries}; the certainty is
@@ -26,12 +26,9 @@ export function stepCost(entries: readonly LedgerEntryRow[]): ReportV1['steps'][
   return { settledMicrousd: (settled + unknownSettled) as Microusd, certainty, unknownMicrousd: cost.unknown };
 }
 
-function outputOfKind(snapshot: RunSnapshot, latest: readonly StepRow[], kind: OutputArtifactKind): ArtifactId | null {
-  const rows = latest.filter((s) => {
-    const snap = snapshot.steps[s.stepKey];
-    return snap?.kind === 'model' && snap.outputKind === kind && s.outputArtifactId !== null;
-  });
-  return rows.at(-1)?.outputArtifactId ?? null;
+/** The net `estimated` settled amount of one attempt (0 once a correction replaced its estimate). */
+function estimatedLeft(entries: readonly LedgerEntryRow[], attemptId: string): number {
+  return entries.reduce((n, e) => (e.attemptId === attemptId && e.bucket === 'settled' && e.certainty === 'estimated' ? n + e.deltaMicrousd : n), 0);
 }
 
 function verdictOf(snapshot: RunSnapshot, latest: readonly StepRow[]): ReviewOutcome | null {
@@ -94,8 +91,10 @@ export function buildReport<S extends RunStatus>(ctx: Pick<EngineCtx, 'templates
     const u = entries.reduce((n, e) => (e.attemptId === a.id && e.bucket === 'unknown' ? n + e.deltaMicrousd : n), 0) as Microusd;
     return u > 0 ? [{ attemptId: a.id, stepKey: keyOf(a.stepRunId), liabilityMicrousd: u, state: a.state === 'unknown' ? ('unknown' as const) : ('abandoned' as const) }] : [];
   });
-  // Decision 1: uncertain outcomes settled as estimates and not corrected since.
-  const estimatedCharges = attempts.filter((a) => a.outcomeUncertain && attemptCostCertainty(entries, a.id) === 'estimated').map((a) => ({
+  // Decision 1: uncertain outcomes settled as estimates and not corrected since. D1-2: only attempts with an estimated
+  // amount left (a correction, even to $0, removes the attempt from the list).
+  const estimatedCharges = attempts.filter((a) => a.outcomeUncertain && attemptCostCertainty(entries, a.id) === 'estimated'
+    && estimatedLeft(entries, a.id) > 0).map((a) => ({
     attemptId: a.id, stepKey: keyOf(a.stepRunId), mayNotHaveBeenCharged: a.mayNotHaveBeenCharged,
     amountMicrousd: entries.reduce((n, e) => (e.attemptId === a.id && e.bucket === 'settled' ? n + e.deltaMicrousd : n), 0) as Microusd,
   }));
@@ -217,6 +216,37 @@ export async function refreshReport(ctx: EngineCtx, runId: RunId): Promise<Resul
   }
 }
 
+/** The cost-bearing parts of a report (what a late settlement changes), as canonical JSON for comparison. */
+function costFingerprint(x: Pick<ReportV1, 'totals' | 'estimatedCharges' | 'unknownLiabilities' | 'steps'>): string {
+  return canonicalJson({ totals: x.totals, estimatedCharges: x.estimatedCharges ?? [], unknownLiabilities: x.unknownLiabilities ?? [],
+    steps: x.steps.map((s) => [s.stepKey, s.cost]) });
+}
+
+/**
+ * D1-4: whether the newest stored report of a terminal run predates its ledger — its totals, estimated charges, legacy
+ * liabilities or step costs differ from what the ledger says now (a crash between a cost change — the legacy
+ * conversion, a reconciliation — and the report refresh). False when there is nothing to compare (no report, an
+ * unreadable or invalid one: never refreshed in a loop).
+ */
+export async function isReportStale(ctx: EngineCtx, runId: RunId): Promise<boolean> {
+  const r = ctx.db.repos;
+  const run = r.runs.get(runId);
+  if (!isTerminalRunStatus(run.status)) return false;
+  const row = r.artifacts.listForRun(runId, ['report']).at(-1);
+  if (row === undefined) return false;
+  const bytes = await ctx.artifacts.read(row.relPath, Math.max(row.sizeBytes, 1));
+  if (!bytes.ok) return false;
+  let stored: unknown;
+  try {
+    stored = JSON.parse(new TextDecoder().decode(bytes.value));
+  } catch {
+    return false;
+  }
+  const parsed = reportV1Schema.safeParse(stored);
+  if (!parsed.success) return false;
+  return costFingerprint(parsed.data) !== costFingerprint(buildReport(ctx, r, { ...run, status: run.status }));
+}
+
 /**
  * F1 step 3 / F17 crash-safety: at `engine.start()` every terminal run without a `report` artifact gets one (a crash
  * between the terminal commit and the post-commit report effect). Idempotent: a run that has a report is not listed,
@@ -334,16 +364,17 @@ function fenceFor(text: string): string {
   return '`'.repeat(Math.max(3, longest + 1));
 }
 
+/** P-4: a finished output in an export is redacted like every other text leaving Relay (a model may echo a secret). */
 function outputLines(outputs: readonly FinishedOutput[]): string[] {
   if (outputs.length === 0) return ['No step has finished with an output yet.', ''];
   return outputs.flatMap((o) => {
-    const pretty = (() => {
+    const pretty = redactString((() => {
       try {
         return JSON.stringify(JSON.parse(o.json), null, 2);
       } catch {
         return o.json;
       }
-    })();
+    })());
     const fence = fenceFor(pretty);
     return [`### ${o.stepKey} — ${o.kind} (${o.artifactId})`, '', `${fence}json`, pretty, fence, ''];
   });
@@ -422,5 +453,7 @@ export function renderReportMarkdown(report: ReportBody, interim?: InterimMark):
     `- ${REPORT_UNTOUCHED_NOTE}`,
     '',
   ];
-  return lines.join('\n');
+  // P-4: the exported Markdown (final or interim) never carries a secret — the goal, approval notes and step outputs
+  // are free text. The stored report.v1 JSON itself stays unredacted (it is the record, not an export).
+  return redactString(lines.join('\n'));
 }

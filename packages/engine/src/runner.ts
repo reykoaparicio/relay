@@ -13,7 +13,7 @@ import type { DeadlineWatcher, EngineApi, EngineCtx, EngineDeps, RunSnapshot } f
 import type { ReadinessIssue } from './policy.js';
 import { budgetReadiness, checkStepReadiness, minimumReservation } from './policy.js';
 import { reconcileUnknownAttempts, recoverOnStart } from './recovery.js';
-import { generateReport } from './report.js';
+import { generateReport, isReportStale, refreshReport } from './report.js';
 import { eventForFailure } from './retry.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -117,7 +117,8 @@ export function queuedRunIssues(r: Repos, run: RunRow, now: EpochMs): ReadinessI
   for (const { step: s, snap } of open) {
     const { providerId, modelId } = snap.profile;
     issues.push(...checkStepReadiness(project.providerPolicy.allowedProviderIds, { stepKey: s.stepKey, profile: snap.profile,
-      capabilities: snap.profile.capabilities, catalogEntry: r.catalog.get(providerId, modelId), hasCredential: r.credentials.get(providerId) !== undefined }));
+      capabilities: snap.profile.capabilities, catalogEntry: r.catalog.get(providerId, modelId), hasCredential: r.credentials.get(providerId) !== undefined,
+      maxOutputTokens: snap.maxOutputTokens }));
   }
   const next = open.find((x) => x.step.state === 'ready' || x.step.state === 'pending');
   if (next !== undefined) {
@@ -254,8 +255,10 @@ function delay(ctx: Pick<EngineCtx, 'timers'>, ms: number): Promise<void> {
 }
 
 /**
- * Generates up to `limit` missing reports of terminal runs (F1 step 3); returns how many runs still lack one.
- * Failures are logged and skipped (a run whose report keeps failing is retried at the next batch / start).
+ * Generates up to `limit` missing reports of terminal runs (F1 step 3), then — with what is left of `limit` — checks
+ * terminal runs whose costs may have moved after their report was written and refreshes the stale ones (D1-4: a crash
+ * between the legacy conversion / a reconciliation and the report refresh). Returns how many runs are still to do.
+ * Failures are logged and skipped; every run handled here is added to `skip`, so the next batch never repeats it.
  */
 export async function regenerateReportBatch(ctx: EngineCtx, limit: number, skip: Set<string> = new Set()): Promise<number> {
   const pending = ctx.db.repos.runs.listTerminalWithoutReport().filter((r) => !skip.has(r.id));
@@ -267,7 +270,16 @@ export async function regenerateReportBatch(ctx: EngineCtx, limit: number, skip:
       ctx.logger.warn('report.regenerate_failed', { runId: run.id, code: res.error.code });
     }
   }
-  return Math.max(0, pending.length - limit);
+  const room = Math.max(0, limit - pending.length);
+  const stale = ctx.db.repos.runs.listTerminalWithUncertainCosts().filter((r) => !skip.has(r.id));
+  for (const run of stale.slice(0, room)) {
+    skip.add(run.id);
+    if (!(await isReportStale(ctx, run.id))) continue;
+    const res = await refreshReport(ctx, run.id);
+    if (res.ok) ctx.logger.info('report.stale_refreshed', { runId: run.id });
+    else ctx.logger.warn('report.stale_refresh_failed', { runId: run.id, code: res.error.code });
+  }
+  return Math.max(0, pending.length - limit) + Math.max(0, stale.length - room);
 }
 
 /**

@@ -16,7 +16,7 @@ import {
   RunControlsCard,
   StartCard,
 } from '../features/overview/OverviewCards';
-import { deriveOverview, disconnectedProviders, OVERVIEW_ACTIVE_STATUSES } from '../features/overview/overview-model';
+import { deriveOverview, disconnectedProviders, OVERVIEW_ACTIVE_STATUSES, recoveryHint } from '../features/overview/overview-model';
 import type { OverviewModel } from '../features/overview/overview-model';
 import { ProjectRootMissing } from '../features/projects/ProjectRootMissing';
 import { useProjectRootMissing } from '../features/projects/useProjectRootCheck';
@@ -39,7 +39,7 @@ function activeHint(model: OverviewModel): string {
     const { done, total } = model.running.stepProgress;
     return `Running · step ${String(Math.min(done + 1, total))} of ${String(total)}`;
   }
-  if (model.interrupted !== undefined) return '1 interrupted run needs a decision';
+  if (model.interrupted !== undefined) return recoveryHint(model.interrupted);
   const paused = model.paused.length;
   if (paused > 0) return `${String(paused)} paused run${paused === 1 ? ' needs' : 's need'} you`;
   if (model.empty) return 'No runs yet';

@@ -125,10 +125,14 @@ export function createAttemptRepo(driver: SqlDriver): AttemptRepo {
       return driver
         .prepare(
           `SELECT * FROM attempts WHERE state = 'unknown'
-             OR (state = 'abandoned' AND outcome_uncertain = 1 AND provider_response_id IS NOT NULL) ORDER BY created_at, id`,
+             OR (state = 'abandoned' AND outcome_uncertain = 1 AND lookup_done = 0 AND provider_response_id IS NOT NULL)
+             ORDER BY created_at, id`,
         )
         .all()
         .map(mapAttempt);
+    },
+    markLookupDone(id) {
+      return driver.prepare('UPDATE attempts SET lookup_done = 1 WHERE id = ? AND lookup_done = 0').run(id).changes > 0;
     },
     nextSeq(stepRunId) {
       const row = driver.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM attempts WHERE step_run_id = ?').get(stepRunId);

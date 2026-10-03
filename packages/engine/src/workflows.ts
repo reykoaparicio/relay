@@ -223,9 +223,14 @@ async function modelStepIssues(ctx: EngineCtx, s: StepSpec & { kind: 'model' }, 
   const caps = live.ok ? live.value : rejected ? undefined : entry?.capabilities;
   const checked = checkProfile(row, rejected ? undefined : entry, caps);
   if (!checked.ok) issues.push(issue(`${path}.profile`, checked.error.userMessage, reasonOf(checked.error.details?.['reason'])));
-  const maxOut = s.maxOutputTokens ?? row.params.maxOutputTokens;
-  if (caps?.maxOutputTokens !== undefined && maxOut > caps.maxOutputTokens) {
-    issues.push(issue(`${path}.maxOutputTokens`, `This model returns at most ${String(caps.maxOutputTokens)} output tokens.`, 'output_budget_low'));
+  // L-3: the step's output limit is clamped to the model's cap exactly like run start does (`defaultOutputTokens`), so
+  // a setting above it is an informational warning, never a blocking issue.
+  const asked = s.maxOutputTokens ?? row.params.maxOutputTokens;
+  const cap = caps?.maxOutputTokens;
+  const maxOut = cap === undefined ? asked : Math.min(asked, cap);
+  if (cap !== undefined && asked > cap) {
+    warnings.push({ stepKey: s.id, profileId: null, code: 'output_budget_low',
+      message: `This model returns at most ${String(cap)} output tokens; the step will use ${String(cap)}.` });
   }
   warnings.push(...stepWarnings(r, s.id, row.providerId));
   const upper = entry === undefined ? null : upperBound(0, maxOut, entry.prices);

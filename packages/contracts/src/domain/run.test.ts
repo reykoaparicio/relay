@@ -42,4 +42,17 @@ describe('RunDetail E1 fields', () => {
     expect(runDetailSchema.shape.attempts.safeParse(undefined).success).toBe(true);
     expect(runDetailSchema.shape.profileOptions.safeParse(undefined).success).toBe(true);
   });
+
+  it('L-1: an option may name the output limit it would lower to (a positive integer)', () => {
+    const option = { stepKey: 'review', profileId: 'prf_01J9ZZZZZZZZZZZZZZZZZZZZZ0', profileName: 'Economy', providerId: 'anthropic', modelId: 'm',
+      reservationMicrousd: 1, estimatedInputTokens: 0, basis: 'minimum', current: false };
+    expect(profileOptionSchema.parse({ ...option, outputLimitLoweredTo: 64_000 }).outputLimitLoweredTo).toBe(64_000);
+    expect(profileOptionSchema.safeParse({ ...option, outputLimitLoweredTo: 0 }).success).toBe(false);
+  });
+
+  it('U-3: pauseRequested is a boolean, false when a producer leaves it out', () => {
+    expect(runDetailSchema.shape.pauseRequested.parse(undefined)).toBe(false);
+    expect(runDetailSchema.shape.pauseRequested.parse(true)).toBe(true);
+    expect(runDetailSchema.shape.pauseRequested.safeParse('yes').success).toBe(false);
+  });
 });

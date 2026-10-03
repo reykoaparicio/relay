@@ -7823,6 +7823,11 @@ Channel `relay/v1/runs.get` · query · route `runner`
           },
           "current": {
             "type": "boolean"
+          },
+          "outputLimitLoweredTo": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -7866,6 +7871,10 @@ Channel `relay/v1/runs.get` · query · route `runner`
           "instructionVersion"
         ]
       }
+    },
+    "pauseRequested": {
+      "default": false,
+      "type": "boolean"
     }
   },
   "required": [
@@ -11938,6 +11947,11 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
           },
           "current": {
             "type": "boolean"
+          },
+          "outputLimitLoweredTo": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -11981,6 +11995,10 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
           "instructionVersion"
         ]
       }
+    },
+    "pauseRequested": {
+      "default": false,
+      "type": "boolean"
     }
   },
   "required": [
@@ -13532,6 +13550,11 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
           },
           "current": {
             "type": "boolean"
+          },
+          "outputLimitLoweredTo": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
           }
         },
         "required": [
@@ -13575,6 +13598,10 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
           "instructionVersion"
         ]
       }
+    },
+    "pauseRequested": {
+      "default": false,
+      "type": "boolean"
     }
   },
   "required": [
@@ -18085,6 +18112,9 @@ Channel `relay/v1/ledger.projectSummary` · query · route `runner`
         }
       ]
     },
+    "hasEstimates": {
+      "type": "boolean"
+    },
     "label": {
       "type": "string",
       "const": "tracked by Relay"
@@ -18095,6 +18125,7 @@ Channel `relay/v1/ledger.projectSummary` · query · route `runner`
     "reservedMicrousd",
     "unknownMicrousd",
     "allowance",
+    "hasEstimates",
     "label"
   ]
 }

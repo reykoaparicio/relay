@@ -23,7 +23,7 @@ import type { EngineCtx, ExportPort } from './ports.js';
 import type { FinishedOutput, ReportBody } from './report.js';
 import { buildReport, generateReport, renderReportMarkdown, usd6 } from './report.js';
 import { snapshotOf } from './snapshot.js';
-import { latestPerKey, toLedgerEntryView, toRunSummary } from './views.js';
+import { latestPerKey, outputOfKind, toLedgerEntryView, toRunSummary } from './views.js';
 
 
 /** Max bytes read back from one stored report / patch artifact. */
@@ -121,9 +121,26 @@ async function reportMarkdown(ctx: EngineCtx, runId: RunId): Promise<Result<{ te
   return rep.ok ? ok({ text: renderReportMarkdown(rep.value), report: rep.value }) : rep;
 }
 
+/**
+ * The patch a run exports: a finished run's report patch (else its newest patch artifact, as before). P-3: a run in
+ * progress exports only its CURRENT patch, as its interim report states it (a superseded or rejected patch — its step
+ * re-opened for a revision — is never exported), or none.
+ */
+function exportedPatchId(ctx: EngineCtx, runId: RunId, report: Pick<ReportV1, 'artifacts'> | null): ArtifactId | undefined {
+  const r = ctx.db.repos;
+  const run = r.runs.get(runId);
+  if (isTerminalRunStatus(run.status)) return report?.artifacts.patch ?? r.artifacts.listForRun(runId, ['patch']).at(-1)?.id;
+  if (report !== null) return report.artifacts.patch ?? undefined;
+  try {
+    return outputOfKind(snapshotOf(run), latestPerKey(r.steps.listForRun(runId)), 'patch') ?? undefined;
+  } catch {
+    return undefined; // a malformed snapshot: no current patch can be named
+  }
+}
+
 /** The run's validated patch as one `.patch` text (each file's unified diff, newline-terminated, in order). */
 async function runPatchText(ctx: EngineCtx, runId: RunId, report: Pick<ReportV1, 'artifacts'> | null): Promise<Result<string>> {
-  const id = report?.artifacts.patch ?? ctx.db.repos.artifacts.listForRun(runId, ['patch']).at(-1)?.id;
+  const id = exportedPatchId(ctx, runId, report);
   if (id === undefined) return err(errors.notFound('patch'));
   const json = await readJson(ctx, id, 'patch');
   if (!json.ok) return json;

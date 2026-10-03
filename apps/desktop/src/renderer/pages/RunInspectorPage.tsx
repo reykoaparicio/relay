@@ -206,12 +206,15 @@ export function RunInspectorPage() {
   const openExportDialog = exportDialog.open;
 
   // A pause requested while a request is in flight takes effect after it: "Pausing after the current request…" shows
-  // until the run's status changes (B: a user pause resumes exactly where it stopped).
+  // until the run's status changes (B: a user pause resumes exactly where it stopped). U-3: the server's
+  // `RunDetail.pauseRequested` is the source of truth (it survives leaving and reopening the run); the local request
+  // only bridges the moment between the call returning and the run detail being refetched.
   const [pauseRequest, setPauseRequest] = useState<{ readonly runId: string; readonly status: RunDetail['status'] } | null>(null);
-  const pausing = pauseRequest !== null && run !== undefined && pauseRequest.runId === run.id && pauseRequest.status === run.status;
+  const localPausing = pauseRequest !== null && run !== undefined && pauseRequest.runId === run.id && pauseRequest.status === run.status;
+  const pausing = localPausing || (run?.status === 'running' && run.pauseRequested);
   // Once the status moved on, the request is spent (adjusted during render, not in an effect): a later return to the
   // same status never shows "Pausing…" again.
-  if (pauseRequest !== null && !pausing && run !== undefined) setPauseRequest(null);
+  if (pauseRequest !== null && !localPausing && run !== undefined) setPauseRequest(null);
 
   /** A user chose `action`. `confirmed` = a confirmation already happened (RecoveryPanel's own dialog). */
   const trigger = useCallback(

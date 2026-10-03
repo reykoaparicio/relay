@@ -63,6 +63,11 @@ export interface NewRunForm {
   readonly outputTokenTexts: Readonly<Record<string, string>>;
   /** stepKey → why the value was changed for the user (lowered to a newly chosen model's maximum). */
   readonly outputTokenNotes: Readonly<Record<string, string>>;
+  /**
+   * L-2: stepKey → what the user typed before a model change lowered it. Choosing a model that returns enough again
+   * restores it (and clears the "Lowered to…" note); typing or resetting the field forgets it.
+   */
+  readonly outputTokenTyped: Readonly<Record<string, string>>;
   /** Set by the first submit: goal/input errors show from then on. */
   readonly submitted: boolean;
 }
@@ -94,6 +99,7 @@ export const INITIAL_FORM: NewRunForm = {
   memoryIds: null,
   outputTokenTexts: {},
   outputTokenNotes: {},
+  outputTokenTyped: {},
   submitted: false,
 };
 
@@ -132,21 +138,12 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       return { ...s, ...a.patch };
     case 'select-profile': {
       const receiving = a.receivingProviders;
-      const clamped =
-        a.outputMax === undefined
-          ? { text: s.outputTokenTexts[a.stepKey], note: null }
-          : clampOutputText(s.outputTokenTexts[a.stepKey], a.outputMax.max, a.outputMax.modelName);
       return {
         ...s,
         profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId },
         acknowledgedSecrets:
           receiving === undefined ? s.acknowledgedSecrets : s.acknowledgedSecrets.filter((k) => coversProviders(k, receiving)),
-        ...(clamped.note === null || clamped.text === undefined
-          ? {}
-          : {
-              outputTokenTexts: { ...s.outputTokenTexts, [a.stepKey]: clamped.text },
-              outputTokenNotes: { ...s.outputTokenNotes, [a.stepKey]: clamped.note },
-            }),
+        ...(a.outputMax === undefined ? {} : outputForModel(s, a.stepKey, a.outputMax)),
       };
     }
     case 'set-output-tokens':
@@ -154,12 +151,14 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
         ...s,
         outputTokenTexts: { ...s.outputTokenTexts, [a.stepKey]: a.text },
         outputTokenNotes: omitKey(s.outputTokenNotes, a.stepKey),
+        outputTokenTyped: omitKey(s.outputTokenTyped, a.stepKey),
       };
     case 'reset-output-tokens': {
       const key = a.stepKey;
       return key === undefined
-        ? { ...s, outputTokenTexts: {}, outputTokenNotes: {} }
-        : { ...s, outputTokenTexts: omitKey(s.outputTokenTexts, key), outputTokenNotes: omitKey(s.outputTokenNotes, key) };
+        ? { ...s, outputTokenTexts: {}, outputTokenNotes: {}, outputTokenTyped: {} }
+        : { ...s, outputTokenTexts: omitKey(s.outputTokenTexts, key), outputTokenNotes: omitKey(s.outputTokenNotes, key),
+          outputTokenTyped: omitKey(s.outputTokenTyped, key) };
     }
     case 'set-files': {
       const selected = new Set(a.files);
@@ -173,6 +172,32 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       };
     }
   }
+}
+
+/**
+ * L-2: the step's output field for a newly chosen model. The value the user typed (kept while a smaller model had
+ * lowered it) is checked against the new model's maximum: above it → lowered with the "Lowered to…" note (the typed
+ * value is remembered); within it → the typed value is back and no note remains (a note never outlives its model).
+ */
+function outputForModel(
+  s: NewRunForm,
+  stepKey: string,
+  outputMax: { readonly max: number; readonly modelName: string | null },
+): Pick<NewRunForm, 'outputTokenTexts' | 'outputTokenNotes' | 'outputTokenTyped'> {
+  const typed = s.outputTokenTyped[stepKey] ?? s.outputTokenTexts[stepKey];
+  const clamped = clampOutputText(typed, outputMax.max, outputMax.modelName);
+  if (clamped.note !== null && clamped.text !== undefined && typed !== undefined) {
+    return {
+      outputTokenTexts: { ...s.outputTokenTexts, [stepKey]: clamped.text },
+      outputTokenNotes: { ...s.outputTokenNotes, [stepKey]: clamped.note },
+      outputTokenTyped: { ...s.outputTokenTyped, [stepKey]: typed },
+    };
+  }
+  return {
+    outputTokenTexts: typed === undefined ? s.outputTokenTexts : { ...s.outputTokenTexts, [stepKey]: typed },
+    outputTokenNotes: omitKey(s.outputTokenNotes, stepKey),
+    outputTokenTyped: omitKey(s.outputTokenTyped, stepKey),
+  };
 }
 
 function omitKey(r: Readonly<Record<string, string>>, key: string): Readonly<Record<string, string>> {

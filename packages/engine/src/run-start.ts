@@ -3,7 +3,6 @@
 // `allowance_set` ledger entry, the idempotency key, and `run.created`.
 import {
   DEFAULT_LIMITS,
-  MAX_OUTPUT_TOKENS_CEILING,
   MIN_OUTPUT_TOKEN_OVERRIDE,
   RESERVED_STEP_KEYS,
   err,
@@ -44,7 +43,9 @@ import { selectRunMemory } from './memory.js';
 import type { EngineCtx, ModelStepSnapshot, RunSnapshot, StepSnapshot } from './ports.js';
 import type { ReadinessIssue } from './policy.js';
 import { budgetReadiness, checkStepReadiness, toPreflightIssue } from './policy.js';
-import { checkProfile, findProfileByName, toModelProfile } from './profiles.js';
+import { checkProfile, findProfileByName, modelOutputCap, toModelProfile } from './profiles.js';
+
+export { modelOutputCap } from './profiles.js';
 import { adapterOf, isModelRejected, liveCapabilities } from './provider-lookup.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
@@ -66,16 +67,6 @@ interface PreparedRun {
   readonly stepKeys: readonly StepKey[];
   /** Decision 3: per model step (resolved profiles only), in spec order. */
   readonly stepLimits: readonly StepLimit[];
-}
-
-/**
- * Decision 3: the most output tokens the profile's model returns — the catalog's `maxOutputTokens` and the adapter's
- * live capability (the stricter when both are known), else the global ceiling.
- */
-export function modelOutputCap(r: Repos, profile: Pick<ProfileSnapshot, 'providerId' | 'modelId' | 'capabilities'>): number {
-  const catalog = r.catalog.get(profile.providerId, profile.modelId)?.capabilities.maxOutputTokens;
-  const caps = [catalog, profile.capabilities.maxOutputTokens, MAX_OUTPUT_TOKENS_CEILING].filter((n): n is number => n !== undefined);
-  return Math.min(...caps);
 }
 
 /**

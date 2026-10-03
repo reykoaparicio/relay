@@ -39,7 +39,7 @@ import { adapterOf } from './provider-lookup.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { allowedRunActions, appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
-import { resolveProfile } from './run-start.js';
+import { modelOutputCap, resolveProfile } from './run-start.js';
 import { missingCredentialFact, profileOptionsOf, providersMissingCredential } from './run-views.js';
 import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf, stepEntries } from './snapshot.js';
 import type { Snapshotted } from './steps/intake.js';
@@ -127,10 +127,22 @@ async function permittedProfile(ctx: EngineCtx, run: RunRow, stepKey: StepKey, p
 }
 
 /** R3-13: appends a config revision + `run.config_revised` (the effective profile of `stepKey` from now on). */
+/**
+ * R3-13: appends a config revision + `run.config_revised` (the effective profile of `stepKey` from now on). L-1: the
+ * step's output limit is revisited for the new model — the limit the run started with (the user's override or the
+ * default), lowered to the new model's cap when that is below it — and recorded in the revision; a lowered limit is
+ * named in the event (`outputLimitLowered`), so the UI can say "Output limit lowered to N for <model>".
+ */
 function reviseConfig(r: Repos, fx: PostCommitEffect[], run: RunRow, stepKey: StepKey, next: ProfileSnapshot, reason: ConfigRevisionReason): void {
-  const prev = effectiveStepSnapshot(r, run, stepKey).profile;
-  const rev = r.configRevisions.append(run.id, stepKey, prev, next, reason);
-  appendRunEvent(r, fx, run.id, 'run.config_revised', { stepKey, stepRunId: r.steps.latestFor(run.id, stepKey)?.id ?? null, revision: rev.revision, reason, from: prev.name, to: next.name, providerId: next.providerId, modelId: next.modelId });
+  const prevStep = effectiveStepSnapshot(r, run, stepKey);
+  const prev = prevStep.profile;
+  const started = snapshotOf(run).steps[stepKey];
+  const original = started?.kind === 'model' ? started.maxOutputTokens : prevStep.maxOutputTokens;
+  const limit = Math.min(original, modelOutputCap(r, next));
+  const rev = r.configRevisions.append(run.id, stepKey, prev, next, reason, limit);
+  appendRunEvent(r, fx, run.id, 'run.config_revised', { stepKey, stepRunId: r.steps.latestFor(run.id, stepKey)?.id ?? null, revision: rev.revision, reason, from: prev.name, to: next.name, providerId: next.providerId, modelId: next.modelId,
+    maxOutputTokens: limit, previousMaxOutputTokens: prevStep.maxOutputTokens,
+    ...(limit < original ? { outputLimitLowered: { to: limit, from: original, modelId: next.modelId } } : {}) });
 }
 
 function revisionReason(run: RunRow): ConfigRevisionReason {
@@ -207,6 +219,20 @@ function waitsOnPendingApproval(r: Repos, run: RunRow): boolean {
   return r.steps.latestPerStepKey(run.id).some((s) => s.id === pending.stepRunId && s.state === 'awaiting_approval');
 }
 
+/**
+ * P-1: the error of an approval step whose latest row still waits (`awaiting_approval`) while no approval is pending
+ * for the run — the reason its latest approval was invalidated with (`PROJECT_CHANGED` for a project change, so
+ * `use_preserved_snapshot` stays offered) — or null when no approval step is stranded.
+ */
+function approvalStepWithoutPending(r: Repos, run: RunRow): AppError | null {
+  if (r.approvals.pendingForRun(run.id) !== undefined) return null;
+  const snapshot = snapshotOf(run);
+  const waiting = r.steps.latestPerStepKey(run.id).find((s) => snapshot.steps[s.stepKey]?.kind === 'approval' && s.state === 'awaiting_approval');
+  if (waiting === undefined) return null;
+  const last = r.approvals.listForRun(run.id).filter((a) => a.stepRunId === waiting.id).at(-1);
+  return last?.invalidatedReason === 'project_changed' ? errors.projectChanged() : errors.approvalStale(last?.invalidatedReason ?? 'plan_changed');
+}
+
 function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: EpochMs): Result<void> {
   if (run.status === 'interrupted') {
     // Decision 1: an attempt left uncertain by the crash is already settled as an estimate; once re-queued, the loop
@@ -222,6 +248,13 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
   if (run.pauseReason === 'user' && run.deferredPause === null && waitsOnPendingApproval(r, run)) {
     // Decision 2: paused while awaiting approval — the approval was kept, so the run waits for it again.
     applyRunEvent(r, run, { type: 'APPROVAL_RESUMED' }, now, fx);
+    return ok(undefined);
+  }
+  const strandedApproval = approvalStepWithoutPending(r, run);
+  if (strandedApproval !== null) {
+    // P-1 safety net: an approval step still waits but its approval is gone (invalidated while the run was paused):
+    // continuing would leave the run running with nothing to do. The run takes the approval_stale pause instead.
+    applyRunEvent(r, run, { type: 'APPROVAL_STALE', error: strandedApproval }, now, fx);
     return ok(undefined);
   }
   if (run.pauseReason === 'rate_limited') {

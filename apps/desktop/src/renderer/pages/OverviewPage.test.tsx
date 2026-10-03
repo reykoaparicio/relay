@@ -92,7 +92,7 @@ describe('OverviewPage', () => {
     expect(within(card).getByText(/Step 2 of 6/)).toBeInTheDocument();
     expect(within(card).getByRole('img', { name: /Run allowance/ })).toBeInTheDocument();
     expect(screen.getByText('Running · step 2 of 6')).toBeInTheDocument();
-    await userEvent.click(within(card).getByRole('button', { name: 'Pause after this step' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Pause after the current request' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/runs.pause')).toHaveLength(1);
     });

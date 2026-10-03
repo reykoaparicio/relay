@@ -193,6 +193,8 @@ function forceUnknown(ctx: EngineCtx, p: Prepared, i: { run: RunRow; attemptId: 
       const s = r.steps.get(i.stepRunId);
       if (s.state === 'executing') applyStepEvent(r, fx, s, 'OUTCOME_UNKNOWN', { error });
       appendRunEvent(r, fx, i.run.id, 'attempt.unknown', { attemptId: i.attemptId, stepRunId: i.stepRunId, cost, mayNotHaveBeenCharged: mayNot });
+      // D1-4: an estimate above the reservation is an overrun like any other — recorded with its amounts (§9.5).
+      if (cost.microusd > i.N) appendRunEvent(r, fx, i.run.id, 'ledger.overrun', { attemptId: i.attemptId, stepRunId: i.stepRunId, N: i.N, X: cost.microusd });
       const cur = r.runs.get(i.run.id);
       if (cur.status === 'running') {
         const ev: RunMachineEvent = cost.microusd > i.N

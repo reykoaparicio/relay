@@ -231,6 +231,22 @@ describe('settings, credentials, catalog, workflows, config revisions, approvals
     expect(f.db.repos.configRevisions.list(run.id).map((r) => r.reason)).toEqual(['budget_cheaper_profile', 'user_switch']);
   });
 
+  it('L-1: a config revision records the step output limit (null when absent); latestFor returns the newest row', () => {
+    const p = seedProject(f.db, f.clock);
+    const run = seedRun(f.db, f.clock, p.id);
+    const prev = profileSnapshot();
+    const repo = f.db.repos.configRevisions;
+
+    expect(repo.latestFor(run.id, 'review' as StepKey)).toBeNull();
+    repo.append(run.id, 'review' as StepKey, prev, { ...prev, name: 'Economy' }, 'user_switch', 64_000);
+    repo.append(run.id, 'plan' as StepKey, prev, prev, 'user_switch');
+
+    expect([repo.latestFor(run.id, 'review' as StepKey)?.profileSnapshot.name, repo.latestFor(run.id, 'review' as StepKey)?.maxOutputTokens]).toEqual(['Economy', 64_000]);
+    expect(repo.latestFor(run.id, 'plan' as StepKey)?.maxOutputTokens).toBeNull();
+    expect(repo.list(run.id).map((r) => r.maxOutputTokens)).toEqual([64_000, null]);
+    expect(() => repo.append(run.id, 'review' as StepKey, prev, prev, 'user_switch', 0)).toThrow(/CHECK constraint failed/);
+  });
+
   it('ApprovalRepo decides with CAS and tracks pending / latest approved', () => {
     const p = seedProject(f.db, f.clock);
     const run = seedRun(f.db, f.clock, p.id);

@@ -11,8 +11,8 @@ import {
   sha256Schema,
   stepKeySchema,
 } from '@relay/contracts';
-import type { ModelOutputSchemaId, ProfileSnapshot, RunId, StepKey } from '@relay/contracts';
-import type { Repos, RunRow, SnapshotBinding } from '@relay/storage';
+import type { ModelOutputSchemaId, RunId, StepKey } from '@relay/contracts';
+import type { ConfigRevisionRow, Repos, RunRow, SnapshotBinding } from '@relay/storage';
 import type {
   ApprovalStepSnapshot,
   ModelStepSnapshot,
@@ -153,8 +153,13 @@ export function stepEntries(snapshot: RunSnapshot): [StepKey, StepSnapshot][] {
 export function effectiveStepSnapshot(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>, stepKey: StepKey): ModelStepSnapshot {
   const s = snapshotOf(run).steps[stepKey];
   if (s?.kind !== 'model') throw new SnapshotError(`${stepKey} is not a model step`);
-  const revised = r.configRevisions.effectiveProfile(run.id, stepKey);
-  return revised === null ? s : { ...s, profile: revised };
+  const revised = r.configRevisions.latestFor(run.id, stepKey);
+  return revised === null ? s : revisedStep(s, revised);
+}
+
+/** R3-13 + L-1: a model step with a config revision applied — its profile and, when recorded, its output limit. */
+function revisedStep(s: ModelStepSnapshot, rev: Pick<ConfigRevisionRow, 'profileSnapshot' | 'maxOutputTokens'>): ModelStepSnapshot {
+  return { ...s, profile: rev.profileSnapshot, ...(rev.maxOutputTokens === null ? {} : { maxOutputTokens: rev.maxOutputTokens }) };
 }
 
 /**
@@ -163,13 +168,13 @@ export function effectiveStepSnapshot(r: Repos, run: Pick<RunRow, 'id' | 'snapsh
  * @throws SnapshotError when the stored snapshot is malformed.
  */
 export function effectiveModelSteps(r: Repos, run: Pick<RunRow, 'id' | 'snapshot'>, snapshot: RunSnapshot = snapshotOf(run)): ReadonlyMap<StepKey, ModelStepSnapshot> {
-  const revised = new Map<StepKey, ProfileSnapshot>();
-  for (const rev of r.configRevisions.list(run.id)) revised.set(rev.stepKey, rev.profileSnapshot); // ascending: the latest wins
+  const revised = new Map<StepKey, ConfigRevisionRow>();
+  for (const rev of r.configRevisions.list(run.id)) revised.set(rev.stepKey, rev); // ascending: the latest wins
   const out = new Map<StepKey, ModelStepSnapshot>();
   for (const [key, s] of stepEntries(snapshot)) {
     if (s.kind !== 'model') continue;
-    const profile = revised.get(key);
-    out.set(key, profile === undefined ? s : { ...s, profile });
+    const rev = revised.get(key);
+    out.set(key, rev === undefined ? s : revisedStep(s, rev));
   }
   return out;
 }

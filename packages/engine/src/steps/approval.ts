@@ -56,5 +56,9 @@ export async function openApproval(ctx: EngineCtx, runId: RunId, stepRunId: Step
     applyStepEvent(r, fx, s, 'APPROVAL_OPENED');
     appendRunEvent(r, fx, runId, 'approval.requested', { approvalId: approval.id, stepRunId, planHash: approval.planHash, providers });
     applyRunEvent(r, cur, { type: 'PLAN_READY', approvalId: approval.id }, now, fx);
+    // P-2: a pause requested while the approval was being opened (the plan read is async) is applied in the SAME
+    // commit — the run is paused with its approval kept pending (decision 2), never left awaiting with the flag set.
+    const after = r.runs.get(runId);
+    if (after.pauseRequested && after.status === 'awaiting_approval') applyRunEvent(r, after, { type: 'USER_PAUSE' }, now, fx);
   });
 }

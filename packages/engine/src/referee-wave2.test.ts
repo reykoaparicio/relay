@@ -436,7 +436,7 @@ describe('BH-6: the reconcile path applies the F10 scope rule exactly like the l
     expect([run.status, run.pauseReason, run.statusDetail?.code, run.statusDetail?.details?.['reason']]).toEqual(['paused', 'approval_stale', 'APPROVAL_STALE', 'scope_changed']);
     expect(x.db.repos.approvals.get(approval?.id ?? ('' as never))?.invalidatedReason).toBe('scope_changed');
     expect(x.db.repos.steps.latestFor(runId, IMPLEMENT)).toEqual(expect.objectContaining({ state: 'ready', schemaRepairsUsed: 0 }));
-    expect(await actionsOf(x, runId)).toEqual(['resnapshot_and_replan', 'stop', 'export_report', 'export_patch']); // E1 #8: scope change ≠ project change
+    expect(await actionsOf(x, runId)).toEqual(['resnapshot_and_replan', 'stop', 'export_report']); // E1 #8: scope change ≠ project change; P-3: no current patch
   });
 });
 

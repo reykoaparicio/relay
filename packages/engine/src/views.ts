@@ -1,6 +1,7 @@
 // Read-side DTO mapping for the runner handlers (02 §B2 view DTOs). Never leaks `root_realpath`; money is µUSD.
-import { contextManifestSchema, invariant, stepOutputSchema } from '@relay/contracts';
+import { contextManifestSchema, invariant, isTerminalRunStatus, stepOutputSchema } from '@relay/contracts';
 import type {
+  ArtifactId,
   AttemptView,
   ContextManifest,
   Balances,
@@ -32,7 +33,8 @@ import { remaining } from './budget.js';
 import type { RunActionFacts } from './run-machine.js';
 import { allowedRunActions } from './run-machine.js';
 import { latestManifestOf, missingCredentialFact, profileOptionsOf, stepMetaOf } from './run-views.js';
-import { SnapshotError, effectiveModelSteps } from './snapshot.js';
+import { SnapshotError, effectiveModelSteps, snapshotOf } from './snapshot.js';
+import type { OutputArtifactKind, RunSnapshot } from './ports.js';
 
 /**
  * True when any attempt settled more than it reserved (§9.5 "actual usage exceeds the estimate"). `overrun` in the cost
@@ -134,13 +136,19 @@ export function entriesByStep(rows: readonly LedgerEntryWithStep[]): Map<StepKey
 /**
  * The certainties that still carry a settled amount: the NET per certainty (a decision-1 correction `settle −estimate`
  * + `settle +actual` leaves `estimated` at 0, so a corrected cost is no longer shown as an estimate). A certainty whose
- * entries net to 0 while others carry the amount is left out; when everything nets to 0 the certainties seen remain.
+ * entries net to 0 while others carry the amount is left out. D1-2: when everything nets to 0 (an estimate corrected to
+ * $0), the certainty of the LATEST settle entry (insertion order: ids are monotonic) is the one that stands.
  */
 export function netSettledCertainties(settled: readonly LedgerEntryRow[]): CostCertainty[] {
   const net = new Map<CostCertainty, number>();
-  for (const e of settled) net.set(settledCertainty(e), (net.get(settledCertainty(e)) ?? 0) + e.deltaMicrousd);
+  let latest: LedgerEntryRow | null = null;
+  for (const e of settled) {
+    net.set(settledCertainty(e), (net.get(settledCertainty(e)) ?? 0) + e.deltaMicrousd);
+    if (latest === null || e.id > latest.id) latest = e;
+  }
   const carrying = [...net].filter(([, v]) => v !== 0).map(([c]) => c);
-  return carrying.length > 0 ? carrying : [...net.keys()];
+  if (carrying.length > 0) return carrying;
+  return latest === null ? [] : [settledCertainty(latest)];
 }
 
 /**
@@ -153,6 +161,18 @@ export function attemptCostCertainty(entries: readonly LedgerEntryRow[], attempt
   const weakest = weakestCertainty(netSettledCertainties(own.filter((e) => e.bucket === 'settled')));
   if (weakest !== null) return weakest;
   return own.some((e) => e.bucket === 'unknown') ? 'unknown' : null;
+}
+
+/**
+ * The current output artifact of `kind`: the newest latest-row step of that output kind that has one (a superseded or
+ * rejected output — its step re-opened as a new row — is not current). Used by the report and the interim patch export.
+ */
+export function outputOfKind(snapshot: RunSnapshot, latest: readonly StepRow[], kind: OutputArtifactKind): ArtifactId | null {
+  const rows = latest.filter((s) => {
+    const snap = snapshot.steps[s.stepKey];
+    return snap?.kind === 'model' && snap.outputKind === kind && s.outputArtifactId !== null;
+  });
+  return rows.at(-1)?.outputArtifactId ?? null;
 }
 
 /** model of every step key from the effective snapshot (null for non-model steps or a malformed snapshot). */
@@ -292,6 +312,17 @@ function stepKeyLookup(steps: readonly StepRow[]): (stepRunId: StepRow['id']) =>
   };
 }
 
+/** Whether `export_patch` has something to write: any patch of a finished run; the current patch of a run in progress. */
+function hasExportablePatch(r: Repos, run: RunRow, latest: readonly StepRow[]): boolean {
+  if (isTerminalRunStatus(run.status)) return r.artifacts.listForRun(run.id, ['patch']).length > 0;
+  try {
+    return outputOfKind(snapshotOf(run), latest, 'patch') !== null;
+  } catch (e) {
+    if (e instanceof SnapshotError) return false;
+    throw e;
+  }
+}
+
 /** RunDetail (inspector) with the server-computed actions. */
 export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const stepKeyOf = stepKeyLookup(p.steps);
@@ -307,8 +338,9 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const modelOf = modelsOf(r, p.run);
   // Choose-profile options exist only for a paused run; none → choose_profile is not offered (E1 #8).
   const options = p.run.status === 'paused' ? profileOptionsOf(r, p.run, latest, p.attempts, true) : [];
-  // Decision 2: export_patch whenever a patch artifact exists, in every status (an interim export while in progress).
-  const facts = runActionFacts(latest, unresolved.length, r.artifacts.listForRun(p.run.id, ['patch']).length > 0,
+  // Decision 2: export_patch whenever a patch can be exported, in every status (an interim export while in progress:
+  // only the CURRENT patch, P-3 — a superseded/rejected one is not offered).
+  const facts = runActionFacts(latest, unresolved.length, hasExportablePatch(r, p.run, latest),
     missingCredentialFact(r, p.run, latest), p.run);
   const availableActions = allowedRunActions(p.run, { ...facts, hasProfileOptions: options.length > 0 });
   return {
@@ -329,6 +361,8 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
     latestManifest: latestManifestOf(r, p.run, p.steps),
     profileOptions: availableActions.includes('choose_profile') ? options : [],
     stepMeta: stepMetaOf(r, p.run, latest),
+    // U-3: "Pausing…" until the requested pause is applied (cleared by USER_PAUSE / resume / a terminal status).
+    pauseRequested: p.run.pauseRequested,
   };
 }
 

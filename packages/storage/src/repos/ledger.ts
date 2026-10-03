@@ -17,10 +17,16 @@ const windowSql = (scopeFilter: string): string => `SELECT
   COALESCE(SUM(CASE WHEN bucket = 'unknown' THEN delta_microusd END), 0) AS u
   FROM ledger_entries WHERE ${scopeFilter}`;
 const PROJECT_WINDOW_SQL = windowSql("scope = 'run' AND project_id = ?3");
-/** Net settled amount still certainty `estimated` in a project month (corrections net an estimate out). */
-const PROJECT_WINDOW_ESTIMATED_SQL = `SELECT COALESCE(SUM(delta_microusd), 0) AS e FROM ledger_entries
+/**
+ * D1-1: the estimated amount still uncorrected in a project month, PER ATTEMPT: each attempt's `estimated` settle entries
+ * in the window are netted, and only attempts left with a positive estimate count (a correction nets its own attempt to
+ * 0; a stray negative never hides another attempt's genuine estimate). Run-scope entries without an attempt count alone.
+ */
+const PROJECT_WINDOW_ESTIMATED_SQL = `SELECT COALESCE(SUM(e), 0) AS e FROM (
+  SELECT SUM(delta_microusd) AS e FROM ledger_entries
   WHERE scope = 'run' AND project_id = ?3 AND bucket = 'settled' AND certainty = 'estimated'
-  AND created_at >= ?1 AND created_at < ?2`;
+  AND created_at >= ?1 AND created_at < ?2
+  GROUP BY COALESCE(attempt_id, id) HAVING SUM(delta_microusd) > 0)`;
 const SETUP_WINDOW_SQL = windowSql("scope = 'setup'");
 
 const listSql = (sort: 'created_desc' | 'created_asc', withCursor: boolean): string =>

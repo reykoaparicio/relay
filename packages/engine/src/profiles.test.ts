@@ -20,11 +20,11 @@ describe('checkProfile (F14)', () => {
     expect(checkProfile(base, haiku).ok).toBe(true);
   });
 
-  it('returns MODEL_UNSUPPORTED for an unknown model, unsupported effort, no structured output, and a too-large output allowance', () => {
+  it('returns MODEL_UNSUPPORTED for an unknown model, unsupported effort, and no structured output (L-3: a too-large output allowance is clamped, not refused)', () => {
     expect(reason(checkProfile({ ...base, modelId: 'nope' }, undefined))).toBe('model_unknown');
     expect(reason(checkProfile({ ...base, params: { ...base.params, effort: 'high' } }, haiku))).toBe('effort_unsupported');
     expect(reason(checkProfile(base, haiku, { ...haiku.capabilities, structuredOutput: false }))).toBe('structured_output_unsupported');
-    expect(reason(checkProfile({ ...base, params: { ...base.params, maxOutputTokens: 100_000 } }, haiku))).toBe('output_budget_low');
+    expect(checkProfile({ ...base, params: { ...base.params, maxOutputTokens: 100_000 } }, haiku).ok).toBe(true);
     const r = checkProfile({ ...base, modelId: 'nope' }, undefined);
     expect(r.ok ? null : r.error.code).toBe('MODEL_UNSUPPORTED');
   });

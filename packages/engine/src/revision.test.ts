@@ -124,7 +124,7 @@ describe('F10 revision loop (fake scenarios)', () => {
     expect(r.approvals.get(approval?.payload['approvalId'] as never)?.invalidatedReason).toBe('scope_changed');
     expect(rows(r, runId, 'implement').at(-1)?.state).toBe('ready');
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['resnapshot_and_replan', 'stop', 'export_report', 'export_patch']); // E1 #8: not a project change
+    expect(detail.ok && detail.data.availableActions).toEqual(['resnapshot_and_replan', 'stop', 'export_report']); // E1 #8: not a project change; P-3: the out-of-scope patch is not current
 
     const preserved = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'preserve-key-0001', runId, decision: { kind: 'use_preserved_snapshot' } });
     const replan = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'replan-key-000001', runId, decision: { kind: 'resnapshot_and_replan' } });

@@ -1,6 +1,6 @@
 // 06 F14: the single profile validator (`checkProfile`) and `profiles.list` warnings (`profilesWithWarnings`).
-import { err, errors, ok } from '@relay/contracts';
-import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, Result, WorkflowId } from '@relay/contracts';
+import { MAX_OUTPUT_TOKENS_CEILING, err, errors, ok } from '@relay/contracts';
+import type { CAPABILITY_WARNING_CODES, CapabilityWarning, CatalogModel, ModelCapabilities, ModelProfile, ProfileSnapshot, Result, WorkflowId } from '@relay/contracts';
 import type { ProfileRow, Repos } from '@relay/storage';
 import type { EngineCtx } from './ports.js';
 import { isModelRejected, liveCapabilities } from './provider-lookup.js';
@@ -14,15 +14,27 @@ const MESSAGES: Readonly<Record<CapabilityWarningCode, string>> = {
   model_unknown: 'This model is not in the price catalog, so its cost cannot be tracked.',
   effort_unsupported: 'This model does not support the selected effort level.',
   structured_output_unsupported: 'This model cannot return structured output.',
-  output_budget_low: 'The output allowance is larger than this model supports.',
+  output_budget_low: 'This model returns fewer output tokens than this profile asks for; Relay uses the model\'s maximum instead.',
   input_budget_low: 'The input allowance is too small for this model.',
   missing_credential: 'No API key is connected for this provider.',
   provider_not_allowed: 'This provider is not allowed for the project.',
 };
 
 /**
- * F14 `checkProfile`: MODEL_UNSUPPORTED when the model is not in the catalog, the effort is not supported, structured
- * output is unavailable, or `maxOutputTokens` exceeds the capability. `details.reason` is the warning code.
+ * Decision 3: the most output tokens the profile's model returns — the catalog's `maxOutputTokens` and the adapter's
+ * live capability (the stricter when both are known), else the global ceiling.
+ */
+export function modelOutputCap(r: Repos, profile: Pick<ProfileSnapshot, 'providerId' | 'modelId' | 'capabilities'>): number {
+  const catalog = r.catalog.get(profile.providerId, profile.modelId)?.capabilities.maxOutputTokens;
+  const caps = [catalog, profile.capabilities.maxOutputTokens, MAX_OUTPUT_TOKENS_CEILING].filter((n): n is number => n !== undefined);
+  return Math.min(...caps);
+}
+
+/**
+ * F14 `checkProfile`: MODEL_UNSUPPORTED when the model is not in the catalog, the effort is not supported, or
+ * structured output is unavailable. `details.reason` is the warning code. L-3: a profile asking for more output than
+ * its model returns is NOT a problem — it is clamped to the model's cap everywhere (run start, choose-profile options,
+ * workflow validation), with at most the informational `output_budget_low` warning ({@link outputAboveCap}).
  */
 export function checkProfile(profile: CheckedProfile, entry: CatalogModel | undefined, capabilities?: ModelCapabilities): Result<void> {
   const reason = profileProblem(profile, entry, capabilities);
@@ -32,16 +44,20 @@ export function checkProfile(profile: CheckedProfile, entry: CatalogModel | unde
 
 /**
  * The {@link checkProfile} rule as a typed code: the first problem (`model_unknown`, `effort_unsupported`,
- * `structured_output_unsupported`, `output_budget_low`) or null when the profile passes. `capabilities` defaults to
- * the catalog entry's.
+ * `structured_output_unsupported`) or null when the profile passes. `capabilities` defaults to the catalog entry's.
  */
 export function profileProblem(profile: CheckedProfile, entry: CatalogModel | undefined, capabilities?: ModelCapabilities): CapabilityWarningCode | null {
   if (entry === undefined) return 'model_unknown';
   const caps = capabilities ?? entry.capabilities;
   if (profile.params.effort !== undefined && !caps.effortLevels.includes(profile.params.effort)) return 'effort_unsupported';
   if (!caps.structuredOutput) return 'structured_output_unsupported';
-  if (caps.maxOutputTokens !== undefined && profile.params.maxOutputTokens > caps.maxOutputTokens) return 'output_budget_low';
   return null;
+}
+
+/** L-3: the model cap when the profile's own output setting is above it (the profile is clamped to it), else null. */
+export function outputAboveCap(profile: CheckedProfile, entry: CatalogModel | undefined, capabilities?: ModelCapabilities): number | null {
+  const cap = (capabilities ?? entry?.capabilities)?.maxOutputTokens;
+  return cap !== undefined && profile.params.maxOutputTokens > cap ? cap : null;
 }
 
 /** ProfileRow → the contracts ModelProfile DTO. */
@@ -74,8 +90,11 @@ export function profileWarningMessage(code: CapabilityWarningCode): string {
 /** Warnings of one stored profile (`checkProfile` against its catalog entry + credential presence). */
 function warningsFor(r: Repos, p: ProfileRow): CapabilityWarning[] {
   const warnings: CapabilityWarning[] = [];
-  const problem = profileProblem(p, r.catalog.get(p.providerId, p.modelId));
+  const entry = r.catalog.get(p.providerId, p.modelId);
+  const problem = profileProblem(p, entry);
   if (problem !== null) warnings.push(warning(p, problem));
+  // L-3: informational only — the profile is clamped to the model's cap wherever it is used.
+  else if (outputAboveCap(p, entry) !== null) warnings.push(warning(p, 'output_budget_low'));
   if (r.credentials.get(p.providerId) === undefined) warnings.push(warning(p, 'missing_credential'));
   return warnings;
 }

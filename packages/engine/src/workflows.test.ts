@@ -91,7 +91,7 @@ describe('workflows.validate / publish (F14)', () => {
     expect(none.ok ? null : none.error.code).toBe('NOT_FOUND');
   });
 
-  it('reports field paths: unknown profile, output allowance above the model, a budget that cannot cover the first step', async () => {
+  it('reports field paths: unknown profile, a budget that cannot cover the first step; an output allowance above the model is a warning (L-3: clamped)', async () => {
     const { x, wf } = await harness();
     await x.engine.handle('relay/v1/workflows.saveDraft', { workflowId: wf, expectedDraftRevision: 0,
       patch: { limits: { budgetMicrousd: 10 }, steps: { review: { profile: 'Nope' }, plan: { maxOutputTokens: 1_000_000 } } } });
@@ -100,7 +100,9 @@ describe('workflows.validate / publish (F14)', () => {
     const publish = await x.engine.handle('relay/v1/workflows.publish', { idempotencyKey: 'publish-key-00001', workflowId: wf });
 
     expect(res.ok && res.data.valid).toBe(false);
-    expect(res.ok && res.data.issues.map((i) => `${i.path}:${i.code}`)).toEqual(['steps[0].profile:unknown_profile', 'steps[1].maxOutputTokens:output_budget_low', 'limits.budgetMicrousd:budget_too_small']);
+    expect(res.ok && res.data.issues.map((i) => `${i.path}:${i.code}`)).toEqual(['steps[0].profile:unknown_profile', 'limits.budgetMicrousd:budget_too_small']);
+    expect(res.ok && res.data.warnings.filter((w) => w.code === 'output_budget_low').map((w) => [w.stepKey, w.message])).toEqual([
+      ['plan', expect.stringMatching(/^This model returns at most \d+ output tokens; the step will use \d+\.$/)]]);
     expect(publish.ok ? null : publish.error.code).toBe('VALIDATION_FAILED');
   });
 

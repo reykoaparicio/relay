@@ -6,7 +6,7 @@ import type { ReactNode, RefObject } from 'react';
 import { RUN_LIMIT_MAXIMUMS } from '@relay/contracts';
 import type { Microusd, ProfileOption, ProfileWithWarnings, ProjectDetail, RunDetail, StepView } from '@relay/contracts';
 import { Dialog, DialogFooter, Field, Money, MoneyInput, NumberInput, Select } from '../../components/ui';
-import { formatDuration, formatMoney, PROVIDER_LABELS } from '../../lib/format';
+import { formatDuration, formatMoney, formatTokensExact, PROVIDER_LABELS } from '../../lib/format';
 import { dollarsText } from '../run-setup/limits';
 import { ActionErrorNotice } from './ActionErrorNotice';
 import { stepTitle } from './inspector-model';
@@ -178,6 +178,11 @@ export function reservationText(o: Pick<ProfileOption, 'basis' | 'reservationMic
   return o.basis === 'minimum' ? `reserves at least ≈ ${amount}` : `reserves ≈ ${amount}`;
 }
 
+/** L-1: " · output limit lowered to 64,000" when choosing the profile lowers the step's output limit to its model's cap. */
+export function outputLimitNote(o: Pick<ProfileOption, 'outputLimitLoweredTo'>): string {
+  return o.outputLimitLoweredTo === undefined ? '' : ` · output limit lowered to ${formatTokensExact(o.outputLimitLoweredTo)}`;
+}
+
 interface ProfileChoice {
   readonly value: string;
   readonly label: string;
@@ -205,7 +210,7 @@ function choicesOf(
     .filter((o) => allowed === null || allowed.has(o.providerId))
     .map((o) => ({
       value: o.profileId,
-      label: `${o.profileName} · ${PROVIDER_LABELS[o.providerId]} · ${o.modelId} · ${reservationText(o)}${warned.has(o.profileId) ? ' (has warnings)' : ''}${o.current ? ' (current)' : ''}`,
+      label: `${o.profileName} · ${PROVIDER_LABELS[o.providerId]} · ${o.modelId} · ${reservationText(o)}${outputLimitNote(o)}${warned.has(o.profileId) ? ' (has warnings)' : ''}${o.current ? ' (current)' : ''}`,
       // The current profile is listed for comparison but cannot be chosen again.
       ...(o.current ? { disabled: true } : {}),
     }));

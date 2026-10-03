@@ -136,6 +136,24 @@ describe('migrate', () => {
     driver.close();
   });
 
+  it('0006 adds attempts.lookup_done (NOT NULL DEFAULT 0, 0/1) and run_config_revisions.max_output_tokens (NULL or > 0)', async () => {
+    const db = await track(openTestDb({ migrations: MIGRATIONS.slice(0, 5) }));
+    const driver = openNodeSqlite(db.path);
+    applyPragmas(driver);
+
+    const r = await migrate(driver, { clock: manualClock(), backupsDir: join(dirname(db.path), 'pre6') });
+
+    expect(r).toEqual({ from: 5, to: MIGRATIONS.length });
+    const col = (table: string, name: string) =>
+      driver.prepare(`SELECT name, dflt_value, "notnull" AS nn FROM pragma_table_info('${table}') WHERE name = ?`).get(name);
+    expect(col('attempts', 'lookup_done')).toEqual({ name: 'lookup_done', dflt_value: '0', nn: 1 });
+    expect(col('run_config_revisions', 'max_output_tokens')).toEqual({ name: 'max_output_tokens', dflt_value: null, nn: 0 });
+    const ddl = (name: string) => (driver.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(name) as { sql: string }).sql;
+    expect(ddl('attempts')).toContain('CHECK (lookup_done IN (0,1))');
+    expect(ddl('run_config_revisions')).toContain('CHECK (max_output_tokens IS NULL OR max_output_tokens > 0)');
+    driver.close();
+  });
+
   it('keeps CHECK (json_valid) working with trusted_schema = OFF', async () => {
     const db = await track(openTestDb());
     const driver = openNodeSqlite(db.path);

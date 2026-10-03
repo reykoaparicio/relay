@@ -330,6 +330,7 @@ export function mapConfigRevision(row: unknown): ConfigRevisionRow {
     previousProfile: r.json('previous_profile_json', profileSnapshotSchema),
     profileSnapshot: r.json('profile_snapshot_json', profileSnapshotSchema),
     reason: r.oneOf('reason', CONFIG_REVISION_REASONS),
+    maxOutputTokens: r.intN('max_output_tokens'),
     createdAt: r.ms('created_at'),
   });
 }
@@ -432,6 +433,7 @@ export function mapAttempt(row: unknown): AttemptRow {
     finishedAt: r.msN('finished_at'),
     outcomeUncertain: r.bool('outcome_uncertain'),
     mayNotHaveBeenCharged: r.bool('may_not_have_been_charged'),
+    lookupDone: r.bool('lookup_done'),
   });
 }
 

@@ -3,6 +3,7 @@ import { sql as indexes } from './0002_indexes.js';
 import { sql as memoryEventsReview } from './0003_memory_events_review.js';
 import { sql as credentialTestSource } from './0004_credential_test_source.js';
 import { sql as attemptUncertainEstimate } from './0005_attempt_uncertain_estimate.js';
+import { sql as lookupDoneRevisionOutputLimit } from './0006_lookup_done_revision_output_limit.js';
 
 /** One embedded, forward-only migration (03 §C2). */
 export interface Migration {
@@ -18,4 +19,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 3, name: 'memory_events_review', sql: memoryEventsReview },
   { version: 4, name: 'credential_test_source', sql: credentialTestSource },
   { version: 5, name: 'attempt_uncertain_estimate', sql: attemptUncertainEstimate },
+  { version: 6, name: 'lookup_done_revision_output_limit', sql: lookupDoneRevisionOutputLimit },
 ];

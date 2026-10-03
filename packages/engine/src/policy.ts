@@ -173,6 +173,8 @@ interface StepReadinessInput {
   readonly capabilities?: ModelCapabilities | undefined;
   readonly catalogEntry: CatalogModel | undefined;
   readonly hasCredential: boolean;
+  /** L-1: the step's effective output limit; checked against the model's cap like dispatch does. Absent = not checked. */
+  readonly maxOutputTokens?: number | undefined;
 }
 
 /** Per-step readiness in F6 order: provider permitted (#2), credential ref present (#3), model in the catalog and supported (#4). Pure. */
@@ -192,6 +194,13 @@ export function checkStepReadiness(allowedProviderIds: readonly ProviderId[], s:
     const code = typeof checked.error.details?.['reason'] === 'string' ? checked.error.details['reason'] : 'model_unsupported';
     issues.push({ stepKey: s.stepKey, reason: 'setup_blocked', code,
       error: errors.modelUnsupported({ providerId, modelId, reason: code }, { details: { stepKey: s.stepKey }, userMessage: checked.error.userMessage }) });
+  }
+  // L-1: the step's output limit vs the model's cap — the same rule as the dispatch capability check, before any reserve.
+  const cap = (s.capabilities ?? s.catalogEntry?.capabilities)?.maxOutputTokens;
+  if (s.maxOutputTokens !== undefined && cap !== undefined && s.maxOutputTokens > cap) {
+    issues.push({ stepKey: s.stepKey, reason: 'setup_blocked', code: 'output_budget_low',
+      error: errors.modelUnsupported({ providerId, modelId, reason: 'max_output_tokens' }, { details: { stepKey: s.stepKey, maxOutputTokens: s.maxOutputTokens, modelMaxOutputTokens: cap },
+        userMessage: `This step's output limit (${String(s.maxOutputTokens)} tokens) is above what ${modelId} returns (${String(cap)}). Choose another profile.` }) });
   }
   return issues;
 }

@@ -6,7 +6,7 @@ import { upperBound } from '@relay/contracts';
 import type { ManifestRef, ProfileOption, ProviderId, StepKey, StepMeta } from '@relay/contracts';
 import type { AttemptRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { ModelStepSnapshot } from './ports.js';
-import { profileProblem } from './profiles.js';
+import { modelOutputCap, profileProblem } from './profiles.js';
 import { SnapshotError, effectiveModelSteps, snapshotOf } from './snapshot.js';
 
 /** The effective model steps, or an empty map for a malformed snapshot (views never throw on one). */
@@ -76,16 +76,30 @@ export function profileOptionsOf(r: Repos, run: RunRow, latest: readonly StepRow
   const estimated = lastInputTokens(r, run, step, attempts);
   const inputTokens = estimated ?? 0;
   const basis = estimated === null ? ('minimum' as const) : ('step_estimate' as const);
+  // L-1: the limit a switch would start from — the run's original limit for the step (a switch revisits it per model).
+  const original = originalOutputLimit(run, step.stepKey) ?? snap.maxOutputTokens;
   return r.profiles.list().flatMap((p): ProfileOption[] => {
     if (!allowed.includes(p.providerId) || r.credentials.get(p.providerId) === undefined) return [];
     const entry = r.catalog.get(p.providerId, p.modelId);
+    // L-3: a profile asking for more output than its model returns is clamped (never hidden): profileProblem ignores it.
     if (entry === undefined || profileProblem(p, entry) !== null) return [];
-    const maxOut = entry.capabilities.maxOutputTokens;
-    if (maxOut !== undefined && maxOut < snap.maxOutputTokens) return [];
+    // L-1: a model whose cap is below the step's limit is listed with the lowered limit (a note), never hidden.
+    const limit = Math.min(original, modelOutputCap(r, { providerId: p.providerId, modelId: p.modelId, capabilities: entry.capabilities }));
     return [{ stepKey: step.stepKey, profileId: p.id, profileName: p.name, providerId: p.providerId, modelId: p.modelId,
-      reservationMicrousd: upperBound(inputTokens, snap.maxOutputTokens, entry.prices), estimatedInputTokens: inputTokens, basis,
-      current: p.name === snap.profile.name }];
+      reservationMicrousd: upperBound(inputTokens, limit, entry.prices), estimatedInputTokens: inputTokens, basis,
+      current: p.name === snap.profile.name, ...(limit < original ? { outputLimitLoweredTo: limit } : {}) }];
   });
+}
+
+/** The output limit the run started with for a model step (its snapshot), or null (malformed snapshot / not a model step). */
+function originalOutputLimit(run: Pick<RunRow, 'snapshot'>, stepKey: StepKey): number | null {
+  try {
+    const s = snapshotOf(run).steps[stepKey];
+    return s?.kind === 'model' ? s.maxOutputTokens : null;
+  } catch (e) {
+    if (e instanceof SnapshotError) return null;
+    throw e;
+  }
 }
 
 /** Display name (workflow spec) and instruction version (run snapshot) per step key, in step order. */

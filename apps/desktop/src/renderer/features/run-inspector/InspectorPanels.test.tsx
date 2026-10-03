@@ -56,3 +56,21 @@ describe('EventsList', () => {
     expect(ol.style.height).toBe(`${String(total * 32)}px`); // full scroll height is reserved for all rows
   });
 });
+
+describe('run.config_revised summary (L-1)', () => {
+  const revised = (payload: Record<string, unknown>): RunEvent => ({
+    id: fakeId('evt', 1) as RunEvent['id'], runId: fakeId('run', 1) as RunEvent['runId'], seq: 1, type: 'run.config_revised',
+    at: T0 as RunEvent['at'], payload,
+  });
+
+  it('names the lowered output limit when a profile switch lowered it', () => {
+    render(<EventsList events={[revised({ stepKey: 'review', outputLimitLowered: { to: 64_000, from: 100_000, modelId: 'claude-haiku-4-5' } })]} loaded />);
+    expect(screen.getByText(/output limit lowered to 64,000 for claude-haiku-4-5/)).toBeInTheDocument();
+  });
+
+  it('stays generic otherwise', () => {
+    render(<EventsList events={[revised({ stepKey: 'review' })]} loaded />);
+    expect(screen.getByText(/Run configuration revised/)).toBeInTheDocument();
+    expect(screen.queryByText(/output limit lowered/)).not.toBeInTheDocument();
+  });
+});

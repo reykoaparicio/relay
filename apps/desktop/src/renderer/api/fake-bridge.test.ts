@@ -128,6 +128,43 @@ describe('fake bridge', () => {
       expect(resumed.ok ? resumed.data.status : null).toBe('awaiting_approval');
     });
 
+    it('U-1: a run paused while awaiting approval keeps its pending approval (like the engine); resume returns to it, decidable', async () => {
+      const bridge = createFakeBridge('awaiting-approval');
+      const run = bridge.world.runs.find((r) => r.status === 'awaiting_approval');
+      const runId = run?.id ?? '';
+      const approval = run?.pendingApproval;
+      expect(approval).not.toBeNull();
+      await bridge.invoke('relay/v1/runs.pause', { runId });
+      const paused = await bridge.invoke('relay/v1/runs.get', { runId });
+      expect(paused.ok && [paused.data.status, paused.data.pendingApproval?.id]).toEqual(['paused', approval?.id]);
+      await bridge.invoke('relay/v1/runs.resume', { runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZT', decision: { kind: 'continue' } });
+      const back = await bridge.invoke('relay/v1/runs.get', { runId });
+      expect(back.ok && [back.data.status, back.data.pendingApproval?.id]).toEqual(['awaiting_approval', approval?.id]);
+    });
+
+    it('U-3: pauseRequested is true while an in-flight pause is pending and false once it applies', async () => {
+      const bridge = createFakeBridge('active-run');
+      const runId = bridge.world.runs[0]?.id ?? '';
+      expect(bridge.world.runs[0]?.pauseRequested).toBe(false);
+      await bridge.invoke('relay/v1/runs.pause', { runId });
+      const pending = await bridge.invoke('relay/v1/runs.get', { runId });
+      expect(pending.ok && [pending.data.status, pending.data.pauseRequested]).toEqual(['running', true]);
+      bridge.finishInFlight(runId);
+      const paused = await bridge.invoke('relay/v1/runs.get', { runId });
+      expect(paused.ok && [paused.data.status, paused.data.pauseRequested]).toEqual(['paused', false]);
+    });
+
+    it('U-4: a pause taken while queued resumes to queued, like the engine (RESUME_RESOLVED → queued)', async () => {
+      const bridge = createFakeBridge('active-run');
+      const run = bridge.world.runs[0];
+      if (run === undefined) throw new Error('no run');
+      bridge.world.runs = [{ ...run, status: 'queued', availableActions: allowedRunActions('queued', null, { uncertainAttempts: 0, hasFailedStep: false, hasPatchArtifact: false }) }, ...bridge.world.runs.slice(1)];
+      await bridge.invoke('relay/v1/runs.pause', { runId: run.id });
+      expect(bridge.world.runs[0]?.status).toBe('paused');
+      const resumed = await bridge.invoke('relay/v1/runs.resume', { runId: run.id, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZU', decision: { kind: 'continue' } });
+      expect(resumed.ok ? resumed.data.status : null).toBe('queued');
+    });
+
     it('offers pause in queued, running and awaiting_approval, and export_report in every non-terminal state', () => {
       for (const scenario of FAKE_SCENARIOS) {
         for (const run of createFakeBridge(scenario).world.runs) {
@@ -278,6 +315,31 @@ describe('fake bridge', () => {
     expect(fakeScenarioFromUrl({ search: '?fake=interrupted', hash: '' })).toBe('interrupted');
     expect(fakeScenarioFromUrl({ search: '', hash: '#/p/x?fake=empty' })).toBe('empty');
     expect(fakeScenarioFromUrl({ search: '?fake=nope', hash: '' })).toBe('awaiting-approval');
+  });
+
+  describe('U-4: output-limit errors match the engine (runs.preflight and runs.start)', () => {
+    const base = (outputTokenOverrides: Record<string, number>) => ({
+      projectId: FAKE_PROJECT_ID, workflowId: FAKE_WORKFLOW_ID, workflowVersion: 3, goal: 'Fix validation',
+      input: { kind: 'files' as const, relPaths: ['src/a.ts'] }, outputTokenOverrides,
+    });
+    const expectBoth = async (overrides: Record<string, number>, code: string, path: string) => {
+      const bridge = createFakeBridge('awaiting-approval');
+      const pre = await bridge.invoke('relay/v1/runs.preflight', base(overrides));
+      const start = await bridge.invoke('relay/v1/runs.start', { ...base(overrides), idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZV' });
+      for (const res of [pre, start]) {
+        expect(res.ok ? null : [res.error.code, res.error.details?.['issues']]).toEqual(['VALIDATION_FAILED', [expect.objectContaining({ path, code })]]);
+      }
+    };
+    it('an override above the step model maximum → VALIDATION_FAILED above_model_max', async () => {
+      const limits = await createFakeBridge('awaiting-approval').invoke('relay/v1/runs.preflight', base({}));
+      if (!limits.ok) throw new Error(limits.error.code);
+      const capped = limits.data.stepLimits.find((l) => l.modelMaxOutputTokens < 128_000);
+      if (capped === undefined) throw new Error('no capped step');
+      await expectBoth({ [capped.stepKey]: capped.modelMaxOutputTokens + 1 }, 'above_model_max', `outputTokenOverrides.${capped.stepKey}`);
+    });
+    it('an override for a key that is not a model step → VALIDATION_FAILED unknown_step', async () => {
+      await expectBoth({ nope: 1_000 }, 'unknown_step', 'outputTokenOverrides.nope');
+    });
   });
 
   describe('06 F14 readiness parity (preflight issues, queued pauses)', () => {

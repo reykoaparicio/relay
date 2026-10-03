@@ -882,6 +882,7 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
     uncertainAttempts: uncertainAttempts.length,
     hasFailedStep,
     hasPatchArtifact: hasPatch,
+    hasRetryableStep: stepViews.some((s) => s.state === 'failed' || s.state === 'unknown'),
   });
 
   // E1: the newest context manifest of the run (the run-level Context tab), stored as an artifact.

@@ -123,6 +123,7 @@ function setRunStatus(
     uncertainAttempts: merged.uncertainAttempts.length,
     hasFailedStep: merged.steps.some((s) => s.state === 'failed'),
     hasPatchArtifact: hasPatchArtifact(w, run.id),
+    hasRetryableStep: hasRetryableStep(merged),
   });
   const blocked = merged.steps.find((s) => s.state === 'failed') ?? merged.steps.find((s) => s.profileName !== null && s.state !== 'succeeded');
   const profileOptions =
@@ -134,7 +135,11 @@ function setRunStatus(
     status,
     pauseReason: status === 'paused' ? pauseReason : null,
     statusDetail: status === 'paused' ? merged.statusDetail : null,
-    pendingApproval: status === 'awaiting_approval' ? merged.pendingApproval : null,
+    // U-1: like the engine (`approvals.pendingForRun` whatever the run status), a run paused while awaiting approval
+    // keeps its pending approval, so resume returns to the approval card with it.
+    pendingApproval: status === 'awaiting_approval' || (status === 'paused' && pauseReason === 'user') ? merged.pendingApproval : null,
+    // U-3: the engine clears `pause_requested` when the pause applies, on resume, and at a terminal status.
+    pauseRequested: status === 'paused' || terminal ? false : merged.pauseRequested,
     endedAt: terminal ? (merged.endedAt ?? (ctx.now() as RunDetail['createdAt'])) : null,
     // A run paused from `queued` has never started; it starts when it first runs.
     startedAt: status === 'running' && merged.startedAt === null ? (ctx.now() as RunDetail['createdAt']) : merged.startedAt,
@@ -495,6 +500,38 @@ function setRunnerReady(w: FakeWorld, ctx: HandlerContext): void {
 // Handlers: one per OPERATIONS key (a missing key is a compile error; fake-bridge.test.ts checks at runtime).
 
 /** The in-flight request of a run with a pending pause finished: the user pause takes effect now. */
+/** Engine `runActionFacts.hasRetryableStep`: the latest row of some step is failed or unknown (uncertain outcome). */
+function hasRetryableStep(run: Pick<RunDetail, 'steps'>): boolean {
+  const latest = new Map<string, RunDetail['steps'][number]>();
+  for (const s of run.steps) {
+    const cur = latest.get(s.stepKey);
+    if (cur === undefined || s.revisionIndex > cur.revisionIndex || (s.revisionIndex === cur.revisionIndex && s.retryIndex > cur.retryIndex)) latest.set(s.stepKey, s);
+  }
+  return [...latest.values()].some((s) => s.state === 'failed' || s.state === 'unknown');
+}
+
+/**
+ * Engine `buildSnapshot` (decision 3): the FIRST output override that does not fit is the error — an override for a
+ * key that is not a model step (`unknown_step`), else one above the step's model maximum (`above_model_max`). The
+ * engine fails preflight and start alike with that VALIDATION_FAILED.
+ */
+function failIfOutputOverrideInvalid(
+  stepLimits: readonly { readonly stepKey: string; readonly modelMaxOutputTokens: number }[],
+  overrides: Readonly<Partial<Record<string, number>>> | undefined,
+): void {
+  const entries = Object.entries(overrides ?? {});
+  const unknown = entries.find(([stepKey]) => !stepLimits.some((l) => l.stepKey === stepKey));
+  if (unknown !== undefined) {
+    fail(errors.validationFailed([{ path: `outputTokenOverrides.${unknown[0]}`, message: 'Not a model step of this workflow.', code: 'unknown_step' }]));
+  }
+  for (const l of stepLimits) {
+    const n = overrides?.[l.stepKey];
+    if (n !== undefined && n > l.modelMaxOutputTokens) {
+      fail(errors.validationFailed([{ path: `outputTokenOverrides.${l.stepKey}`, message: `This model returns at most ${String(l.modelMaxOutputTokens)} output tokens.`, code: 'above_model_max' }]));
+    }
+  }
+}
+
 function finishInFlightPause(w: FakeWorld, ctx: HandlerContext, runId: string): void {
   const from = w.pendingPauses.get(runId);
   if (from === undefined) return;
@@ -836,14 +873,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     failIfUnreadable(w, input.input);
     const files = input.input.kind === 'files' ? input.input.relPaths.length : 1;
     const { budget, stepLimits } = fakeBudget(w, input);
-    // Decision 3: an override must fit the step's model (engine VALIDATION at `outputTokenOverrides.<step>`).
-    const outputIssues = Object.entries(input.outputTokenOverrides ?? {}).flatMap(([stepKey, n]) => {
-      const limit = stepLimits.find((l) => l.stepKey === stepKey);
-      if (limit === undefined) return [{ path: `outputTokenOverrides.${stepKey}`, code: 'unknown_step', message: `No model step "${stepKey}".` }];
-      return n !== undefined && n > limit.modelMaxOutputTokens
-        ? [{ path: `outputTokenOverrides.${stepKey}`, code: 'output_tokens_above_model_max', message: `Must be at most ${String(limit.modelMaxOutputTokens)} for this model.` }]
-        : [];
-    });
+    // Decision 3: an override must fit the step's model (engine VALIDATION_FAILED at `outputTokenOverrides.<step>`).
+    failIfOutputOverrideInvalid(stepLimits, input.outputTokenOverrides);
     return {
       inputSummary: {
         files,
@@ -865,7 +896,6 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
           : [{ path: 'limitOverrides.budgetMicrousd', code: 'budget_run', message: 'The run allowance cannot cover the first reservation.' }]),
         ...w.preflightIssues,
         ...suspectedSecretIssues(w, input.input),
-        ...outputIssues,
       ],
       stepLimits,
     };
@@ -882,13 +912,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     if (readiness.some((i) => i.code === 'provider_not_allowed')) fail(errors.permissionDenied('provider_not_allowed'));
     const { budget, stepLimits } = fakeBudget(w, input);
     // Decision 3: the engine re-checks each output override against the step's model.
-    const outputIssues = Object.entries(input.outputTokenOverrides ?? {}).flatMap(([stepKey, n]) => {
-      const limit = stepLimits.find((l) => l.stepKey === stepKey);
-      return limit === undefined || (n !== undefined && n > limit.modelMaxOutputTokens)
-        ? [{ path: `outputTokenOverrides.${stepKey}`, code: 'output_tokens_above_model_max', message: 'Lower this step\'s max output tokens.' }]
-        : [];
-    });
-    if (outputIssues.length > 0) fail(errors.validationFailed(outputIssues));
+    failIfOutputOverrideInvalid(stepLimits, input.outputTokenOverrides);
     if (!budget.allowed) fail(errors.budgetBlocked(budget as never));
     const n = w.nextId++;
     const allowance = input.limitOverrides?.budgetMicrousd ?? 3_000_000;
@@ -960,6 +984,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     // A request in flight finishes first: the pause takes effect after it (the status stays until then).
     if (run.status === 'running' && run.steps.some((s) => s.state === 'executing' || s.state === 'validating')) {
       w.pendingPauses.set(run.id, run.status);
+      replaceRun(w, { ...run, pauseRequested: true }); // U-3: "Pausing…" until the request finishes
       setTimeout(() => {
         finishInFlightPause(w, ctx, run.id);
       }, w.pauseDelayMs);
@@ -992,7 +1017,9 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     // A user pause resumes exactly where it stopped (e.g. back to the approval it was waiting for).
     const from = run.pauseReason === 'user' ? w.pausedFrom.get(run.id) : undefined;
     w.pausedFrom.delete(run.id);
-    const next = setRunStatus(w, ctx, run, from === 'awaiting_approval' ? 'awaiting_approval' : 'running', null, { limits });
+    // U-4: a pause taken while queued resumes to queued (engine RESUME_RESOLVED → queued; the loop starts it later).
+    const to = from === 'awaiting_approval' ? 'awaiting_approval' : from === 'queued' ? 'queued' : 'running';
+    const next = setRunStatus(w, ctx, run, to, null, { limits });
     return { status: next.status };
   },
   'runs.cancel': (w, input, ctx) => {

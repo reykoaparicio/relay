@@ -10,7 +10,7 @@ import type { ArtifactId, AttemptId, EpochMs, Microusd, RunId } from '@relay/con
 import type { ModelRequest, NormalizedUsage, ReconciliationResult } from '@relay/providers';
 import type { AttemptRow, Repos } from '@relay/storage';
 import { resolveUnknownEntries, settlementEntries } from './budget.js';
-import { convertLegacyUnknowns, correctionEntries, persistedMayNotHaveBeenCharged, persistedOutputTokens, recordedInputTokens, settledByCertaintyOf, uncertainCost, uncertainError } from './uncertain.js';
+import { chargeDateOf, convertLegacyUnknowns, correctionDateOf, correctionEntries, persistedMayNotHaveBeenCharged, persistedOutputTokens, recordedInputTokens, settledByCertaintyOf, uncertainCost, uncertainError } from './uncertain.js';
 import type { SettleAmount } from './budget.js';
 import type { ArtifactPut } from './checkpoints.js';
 import { isJsonText, putArtifact } from './checkpoints.js';
@@ -52,7 +52,8 @@ export function recoverAttempt(r: Repos, fx: PostCommitEffect[], a: AttemptRow, 
     const mayNot = persistedMayNotHaveBeenCharged(a, out);
     const error = uncertainError(a.id, cost.microusd, mayNot);
     if (!r.attempts.transition(a.id, ['dispatching'], 'unknown', { error, finishedAt: now, outcomeUncertain: true, mayNotHaveBeenCharged: mayNot })) return;
-    r.ledger.append(settlementEntries({ ...refs, cost }));
+    // D1-1: booked at the charge date (the month the request left), like the legacy conversion — never at the restart.
+    r.ledger.append(settlementEntries({ ...refs, createdAt: chargeDateOf(a), cost }));
     if (step.state === 'executing') applyStepEvent(r, fx, step, 'OUTCOME_UNKNOWN', { error });
     appendRunEvent(r, fx, a.runId, 'attempt.unknown', { attemptId: a.id, stepRunId: a.stepRunId, recovered: true, cost, mayNotHaveBeenCharged: mayNot });
     // §9.5: an estimate above the reservation is an overrun like any other (applied when the run continues).
@@ -252,9 +253,11 @@ function currentCharge(r: Repos, a: AttemptRow): { readonly legacyLiability: Mic
  * counted twice. A legacy unknown liability (data from before decision 1, normally converted at start) is resolved as
  * before. `keep`: the provider reported a failure without usage — the estimate stays as it is.
  */
-function settleReconciled(r: Repos, a: AttemptRow, res: Resolution, keep: boolean, now: EpochMs): { readonly cost: SettleAmount; readonly event: SettleAmount } {
+function settleReconciled(r: Repos, a: AttemptRow, res: Resolution, keep: boolean): { readonly cost: SettleAmount; readonly event: SettleAmount } {
   const run = r.runs.get(a.runId);
-  const refs = { attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now };
+  // D1-1: the correction (or the legacy resolution) is booked in the month of the charge, never at the lookup's date.
+  const at = correctionDateOf(r.ledger.listForRun(a.runId).map((x) => x.entry), a);
+  const refs = { attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: at };
   const cur = currentCharge(r, a);
   if (cur.legacyLiability > 0) {
     if (keep) return { cost: { kind: 'unknown' }, event: { kind: 'unknown' } };
@@ -294,7 +297,8 @@ function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileIn
     if (!won) return false; // retried by the user or reconciled elsewhere meanwhile
     const run = r.runs.get(a.runId);
     const N = a.reservationMicrousd;
-    const { cost, event: settledCost } = settleReconciled(r, a, i.res, keep, now);
+    const { cost, event: settledCost } = settleReconciled(r, a, i.res, keep);
+    if (keep) r.attempts.markLookupDone(a.id); // D1-3: a definitive answer without usage is never looked up again
     for (const put of i.puts) {
       if (!put.ok) continue;
       r.artifacts.insertIfAbsent({ ...put.meta, stepRunId: a.stepRunId, attemptId: a.id });
@@ -322,13 +326,16 @@ function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileIn
  */
 function commitCostCorrection(ctx: EngineCtx, fx: PostCommitEffect[], a: AttemptRow, res: Resolution): boolean {
   return ctx.db.tx('immediate', (r) => {
-    const now = ctx.clock.now();
     const cur = currentCharge(r, a);
     if (cur.legacyLiability > 0 || cur.estimate <= 0) return false;
-    if (res.kind === 'failed' && res.flags.usageKnown === false) return false; // nothing better than the estimate
+    if (res.kind === 'failed' && res.flags.usageKnown === false) {
+      r.attempts.markLookupDone(a.id); // D1-3: nothing better than the estimate, ever: no lookup at the next start
+      return false;
+    }
     const { X, certainty } = reconciledAmount(res, a.profileSnapshot.prices, cur.estimate);
     const run = r.runs.get(a.runId);
-    r.ledger.append(correctionEntries({ attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now,
+    const at = correctionDateOf(r.ledger.listForRun(a.runId).map((x) => x.entry), a); // D1-1: the estimate's month
+    r.ledger.append(correctionEntries({ attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: at,
       estimate: cur.estimate, X, certainty }));
     if (res.usage !== null) r.attempts.transition(a.id, ['abandoned'], 'abandoned', { usage: { ...res.usage } });
     appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: res.kind, correctionOnly: true,
@@ -407,11 +414,13 @@ export async function reconcileAttempt(ctx: EngineCtx, attempt: AttemptRow, sign
 }
 
 /**
- * An `abandoned` uncertain attempt is looked up only while its estimate is still uncorrected (a corrected one never
- * costs another provider lookup at the next start). `unknown` attempts always qualify.
+ * An `abandoned` uncertain attempt is looked up only while its estimate is still uncorrected and no lookup answered
+ * definitively without usage (D1-3: a corrected or kept one never costs another provider lookup at the next start).
+ * `unknown` attempts always qualify.
  */
 function stillToCorrect(ctx: Pick<EngineCtx, 'db'>, a: AttemptRow): boolean {
   if (a.state !== 'abandoned') return true;
+  if (a.lookupDone) return false; // D1-3: the provider already answered definitively (no usage): the estimate stays
   return settledByCertaintyOf(ctx.db.repos.ledger.listForRun(a.runId).map((x) => x.entry), a.id).estimated > 0;
 }
 

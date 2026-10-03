@@ -74,6 +74,32 @@ export function uncertainError(attemptId: AttemptId, estimate: Microusd, mayNot:
   return errors.requestOutcomeUnknown(attemptId, { details: { estimatedMicrousd: estimate, mayNotHaveBeenCharged: mayNot } });
 }
 
+/**
+ * The attempt's charge date (§9.3 month window): when the request left (`dispatchedAt`), else when the attempt was
+ * created. Crash recovery and the legacy conversion book an uncertain attempt's estimate there, never at the restart.
+ */
+export function chargeDateOf(a: Pick<AttemptRow, 'dispatchedAt' | 'createdAt'>): EpochMs {
+  return a.dispatchedAt ?? a.createdAt;
+}
+
+/**
+ * D1-1: the date a correction of `attemptId`'s estimate is booked at — the month its estimate lives in (the latest
+ * positive `estimated` settle entry's date), so `settle −estimate` cancels it in the SAME month and `settle +X` lands in
+ * the month the request was charged. Falls back to the attempt's charge date.
+ */
+export function correctionDateOf(entries: readonly LedgerEntryRow[], a: Pick<AttemptRow, 'id' | 'dispatchedAt' | 'createdAt'>): EpochMs {
+  let at: EpochMs | null = null;
+  let id = '';
+  for (const e of entries) {
+    if (e.attemptId !== a.id || e.bucket !== 'settled' || e.certainty !== 'estimated' || e.deltaMicrousd <= 0) continue;
+    if (e.id > id) {
+      id = e.id;
+      at = e.createdAt;
+    }
+  }
+  return at ?? chargeDateOf(a);
+}
+
 /** Per-certainty net settled amount of one attempt's ledger entries. */
 export function settledByCertaintyOf(entries: readonly LedgerEntryRow[], attemptId: AttemptId): { estimated: number; total: number } {
   let estimated = 0;
@@ -163,7 +189,7 @@ function convertOne(r: Repos, fx: PostCommitEffect[], row: { readonly attemptId:
   const estimate = uncertainEstimate({ inputTokens: recordedInputTokens(a), outputTokens: out }, a.profileSnapshot.prices);
   const mayNot = persistedMayNotHaveBeenCharged(a, out);
   const run = r.runs.get(a.runId);
-  const at = a.dispatchedAt ?? a.createdAt; // the liability's month (§9.3 window), never moved to today
+  const at = chargeDateOf(a); // the liability's month (§9.3 window), never moved to today
   const base = { scope: 'run' as const, attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: at };
   r.ledger.append([
     { ...base, type: 'resolve_unknown', bucket: 'unknown', deltaMicrousd: subMicrousd(microusd(0), U), note: 'converted to estimate' },

@@ -42,6 +42,16 @@ export interface OverviewModel {
   readonly focus: RunSummary | undefined;
 }
 
+/**
+ * The Overview headline of the run in the recovery slot: an `interrupted` run, or (decision 1) a run paused because the
+ * last request may not have completed — which is NOT an interruption and is never called one.
+ */
+export function recoveryHint(run: Pick<RunSummary, 'status' | 'pauseReason'>): string {
+  return run.status === 'interrupted'
+    ? '1 interrupted run needs a decision'
+    : '1 paused run needs a decision: the last request may not have completed';
+}
+
 export function deriveOverview(project: ProjectDetail, heads: OverviewRunHeads): OverviewModel {
   const awaiting = heads.awaiting[0];
   const running = awaiting === undefined ? heads.running[0] : undefined;

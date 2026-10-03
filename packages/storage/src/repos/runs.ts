@@ -227,6 +227,18 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
         .all(JSON.stringify(TERMINAL_RUN_STATUSES))
         .map(mapRun);
     },
+    listTerminalWithUncertainCosts() {
+      return driver
+        .prepare(
+          `SELECT * FROM runs WHERE status IN (SELECT value FROM json_each(?))
+             AND EXISTS (SELECT 1 FROM artifacts a WHERE a.run_id = runs.id AND a.kind = 'report')
+             AND (EXISTS (SELECT 1 FROM attempts t WHERE t.run_id = runs.id AND t.outcome_uncertain = 1)
+               OR EXISTS (SELECT 1 FROM ledger_entries l WHERE l.run_id = runs.id AND l.bucket = 'unknown'))
+           ORDER BY created_at, id`,
+        )
+        .all(JSON.stringify(TERMINAL_RUN_STATUSES))
+        .map(mapRun);
+    },
     listTerminalIdsForProject(projectId) {
       return driver
         .prepare('SELECT id FROM runs WHERE project_id = ?1 AND status IN (SELECT value FROM json_each(?2)) ORDER BY created_at, id')

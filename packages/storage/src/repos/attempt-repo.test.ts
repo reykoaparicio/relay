@@ -58,6 +58,24 @@ describe('AttemptRepo', () => {
     expect(repo.get(attempt.id).outcomeUncertain).toBe(false);
   });
 
+  it('D1-3: markLookupDone takes an abandoned uncertain attempt out of the reconcile candidates (never an unknown one)', () => {
+    const { run, step, attempt } = setup();
+    const repo = f.db.repos.attempts;
+    repo.transition(attempt.id, ['reserved'], 'dispatching', {});
+    repo.transition(attempt.id, ['dispatching'], 'unknown', { outcomeUncertain: true });
+    const kept = seedAttempt(f.db, f.clock, run.id, step.id);
+    repo.transition(kept.id, ['reserved'], 'abandoned', { outcomeUncertain: true, providerResponseId: 'resp_kept' });
+    expect(repo.get(kept.id).lookupDone).toBe(false);
+    expect(repo.listReconcileCandidates().map((a) => a.id)).toEqual([attempt.id, kept.id]);
+
+    expect(repo.markLookupDone(kept.id)).toBe(true);
+    expect(repo.markLookupDone(kept.id)).toBe(false); // already done
+    expect(repo.markLookupDone(attempt.id)).toBe(true);
+
+    expect(repo.get(kept.id).lookupDone).toBe(true);
+    expect(repo.listReconcileCandidates().map((a) => a.id)).toEqual([attempt.id]); // unknown attempts always qualify
+  });
+
   it('nextSeq increments per step run', () => {
     const { run, step } = setup();
     const other = f.db.repos.steps.insertRetry(step, { id: newId('stepRun'), state: 'ready', createdAt: f.clock.now() });

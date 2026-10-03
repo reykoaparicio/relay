@@ -307,14 +307,21 @@ export interface ConfigRevisionRow {
   readonly previousProfile: ProfileSnapshot;
   readonly profileSnapshot: ProfileSnapshot;
   readonly reason: ConfigRevisionReason;
+  /**
+   * L-1 (migration 0006): the step's effective output limit from this revision on — never above the new model's cap.
+   * Null for revisions recorded before it (the run snapshot's limit applies).
+   */
+  readonly maxOutputTokens: number | null;
   readonly createdAt: EpochMs;
 }
 
 export interface ConfigRevisionRepo {
   /** Appends revision `max + 1` for the run (call inside a tx). */
-  append(runId: RunId, stepKey: StepKey, prev: ProfileSnapshot, next: ProfileSnapshot, reason: ConfigRevisionReason): ConfigRevisionRow;
+  append(runId: RunId, stepKey: StepKey, prev: ProfileSnapshot, next: ProfileSnapshot, reason: ConfigRevisionReason, maxOutputTokens?: number | null): ConfigRevisionRow;
   /** Latest revised profile for the step, or null (the caller then falls back to `runs.snapshot_json`). */
   effectiveProfile(runId: RunId, stepKey: StepKey): ProfileSnapshot | null;
+  /** Latest revision row for the step (its profile and output limit), or null. */
+  latestFor(runId: RunId, stepKey: StepKey): ConfigRevisionRow | null;
   list(runId: RunId): readonly ConfigRevisionRow[];
 }
 
@@ -453,6 +460,12 @@ export interface RunRepo {
   listActive(): readonly RunRow[];
   /** Terminal runs (completed / incomplete / cancelled / failed) with no `report` artifact row (06 F17 crash-safety), oldest first. */
   listTerminalWithoutReport(): readonly RunRow[];
+  /**
+   * D1-4: terminal runs that HAVE a report and whose costs may have moved after it was written — an uncertain attempt
+   * (an estimate that a legacy conversion or a reconciliation may have booked/corrected) or a legacy unknown-bucket
+   * entry. Oldest first. The engine compares each stored report with the ledger and refreshes the stale ones.
+   */
+  listTerminalWithUncertainCosts(): readonly RunRow[];
   /** Ids of the project's ended runs (completed / incomplete / cancelled / failed), oldest first (E2 #14 purge). */
   listTerminalIdsForProject(projectId: ProjectId): readonly RunId[];
   incrementAttemptCount(id: RunId): void;
@@ -593,6 +606,11 @@ export interface AttemptRow {
   readonly outcomeUncertain: boolean;
   /** Decision 1: the request may never have reached the provider (not sent / no response byte back). */
   readonly mayNotHaveBeenCharged: boolean;
+  /**
+   * D1-3 (migration 0006): a provider lookup answered definitively without usage, so the estimate is kept and the
+   * attempt is never looked up again.
+   */
+  readonly lookupDone: boolean;
 }
 
 export interface AttemptInsert {
@@ -653,9 +671,12 @@ export interface AttemptRepo {
   listUncertain(runId: RunId): readonly AttemptRow[];
   /**
    * F9b candidates (decision 1): `unknown` attempts, plus `abandoned` uncertain attempts that have a provider response
-   * id (the user retried before reconciliation ran: only their cost can still be corrected). Oldest first.
+   * id (the user retried before reconciliation ran: only their cost can still be corrected) and whose lookup is not
+   * done yet (D1-3). Oldest first.
    */
   listReconcileCandidates(): readonly AttemptRow[];
+  /** D1-3: records that the provider lookup of `id` is done (a definitive answer without usage). Returns whether a row changed. */
+  markLookupDone(id: AttemptId): boolean;
 }
 
 // ---------------------------------------------------------------- ledger
@@ -725,7 +746,7 @@ export interface LedgerRepo {
    */
   listForProjectWindow(projectId: ProjectId, startMs: EpochMs, endMs: EpochMs): readonly LedgerEntryWithStep[];
   projectMonthBalances(projectId: ProjectId, monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
-  /** Net settled amount with certainty `estimated` in the project month (decision 1: the "~" on usage totals). */
+  /** Estimated amount still uncorrected in the project month, netted per attempt (decision 1: the "~" on usage totals; D1-1). */
   projectMonthEstimated(projectId: ProjectId, monthStartMs: EpochMs, monthEndMs: EpochMs): Microusd;
   setupBalances(monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
   attemptBalances(attemptId: AttemptId): AttemptBalances;

@@ -297,14 +297,16 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
           Open current step
         </ButtonLink>
         {run.availableActions.includes('pause') ? (
+          // U-2/U-3: the pause applies once the request in flight finishes; until then (RunDetail.pauseRequested) the
+          // control says "Pausing…" and cannot be pressed again — also after leaving and coming back.
           <Button
             pending={actions.pending === 'pause'}
-            disabled={actions.busy && actions.pending !== 'pause'}
+            disabled={(actions.busy && actions.pending !== 'pause') || run.pauseRequested}
             onClick={() => {
               void actions.dispatch({ action: 'pause', runId: run.id });
             }}
           >
-            Pause after this step
+            {run.pauseRequested ? 'Pausing…' : 'Pause after the current request'}
           </Button>
         ) : null}
       </div>

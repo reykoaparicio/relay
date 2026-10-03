@@ -159,6 +159,11 @@ export const profileOptionSchema = z.object({
   estimatedInputTokens: z.number().int().nonnegative(),
   basis: z.enum(['step_estimate', 'minimum']),
   current: z.boolean(),
+  /**
+   * L-1: set when this profile's model returns fewer output tokens than the step's limit — choosing it lowers the
+   * step's output limit to this value (the reservation above is priced with it). Absent = the limit stays.
+   */
+  outputLimitLoweredTo: z.number().int().positive().optional(),
 });
 /** Choose-profile option. */
 export type ProfileOption = z.infer<typeof profileOptionSchema>;
@@ -212,6 +217,11 @@ export const runDetailSchema = runSummarySchema.extend({
   profileOptions: z.array(profileOptionSchema).optional(),
   /** Display name and instruction version per step key, in step order. */
   stepMeta: z.array(stepMetaSchema).optional(),
+  /**
+   * U-3 (decision 2): a pause was requested and is not applied yet (the in-flight request finishes first): the UI
+   * shows "Pausing…" from this, so it survives navigation. Defaults to false when a producer leaves it out.
+   */
+  pauseRequested: z.boolean().default(false),
 });
 /** Run detail. */
 export type RunDetail = z.infer<typeof runDetailSchema>;

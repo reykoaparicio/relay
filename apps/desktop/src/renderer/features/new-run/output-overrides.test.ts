@@ -151,6 +151,25 @@ describe('switching a step profile', () => {
     expect(form.outputTokenNotes).toEqual({});
   });
 
+  it('L-2: switching back to a larger model restores the typed value and clears the stale "Lowered to…" note', () => {
+    let form = formReducer(INITIAL_FORM, { type: 'select-profile', stepKey: 'review', profileId: 'prf_capable', outputMax: { max: 128_000, modelName: 'Claude Opus 5.5' } });
+    form = formReducer(form, { type: 'set-output-tokens', stepKey: 'review', text: '100000' });
+    form = formReducer(form, { type: 'select-profile', stepKey: 'review', profileId: 'prf_economy', outputMax: { max: 64_000, modelName: 'Claude Haiku 4.5' } });
+    expect([form.outputTokenTexts['review'], form.outputTokenNotes['review']]).toEqual(['64000', 'Lowered to 64,000, the most Claude Haiku 4.5 can return.']);
+
+    form = formReducer(form, { type: 'select-profile', stepKey: 'review', profileId: 'prf_capable', outputMax: { max: 128_000, modelName: 'Claude Opus 5.5' } });
+
+    expect(form.outputTokenTexts['review']).toBe('100000');
+    expect(form.outputTokenNotes['review']).toBeUndefined();
+    // A model in between that still cannot return it lowers it again, naming THAT model.
+    form = formReducer(form, { type: 'select-profile', stepKey: 'review', profileId: 'prf_balanced', outputMax: { max: 80_000, modelName: 'Claude Sonnet 5.5' } });
+    expect([form.outputTokenTexts['review'], form.outputTokenNotes['review']]).toEqual(['80000', 'Lowered to 80,000, the most Claude Sonnet 5.5 can return.']);
+    // Typing forgets the earlier value: a later larger model keeps what was typed last.
+    form = formReducer(form, { type: 'set-output-tokens', stepKey: 'review', text: '50000' });
+    form = formReducer(form, { type: 'select-profile', stepKey: 'review', profileId: 'prf_capable', outputMax: { max: 128_000, modelName: 'Claude Opus 5.5' } });
+    expect([form.outputTokenTexts['review'], form.outputTokenNotes['review']]).toEqual(['50000', undefined]);
+  });
+
   it('keeps an override that fits the new model, and leaves untouched steps alone', () => {
     let form = formReducer(INITIAL_FORM, { type: 'set-output-tokens', stepKey: 'plan', text: '30000' });
     form = formReducer(form, { type: 'select-profile', stepKey: 'plan', profileId: 'prf_economy', outputMax: { max: 64_000, modelName: 'x' } });

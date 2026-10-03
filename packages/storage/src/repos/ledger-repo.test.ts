@@ -117,6 +117,21 @@ describe('LedgerRepo', () => {
     expect(repo.projectMonthEstimated(p.id, START, END)).toBe(0);
   });
 
+  it('D1-1: projectMonthEstimated nets per attempt: a negative (corrected) attempt never hides another attempt\'s estimate', () => {
+    const { p, run, step } = setup();
+    const a = seedAttempt(f.db, f.clock, run.id, step.id).id;
+    const b = seedAttempt(f.db, f.clock, run.id, step.id).id;
+    const e = (x: Parameters<typeof runEntry>[2]) => runEntry(run.id, p.id, x);
+    const repo = f.db.repos.ledger;
+
+    // `a`: only the −estimate half of an old correction falls in this month (its estimate was booked earlier).
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: -500, certainty: 'estimated', createdAt: START, attemptId: a })]);
+    // `b`: a genuine uncorrected estimate this month.
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: 120, certainty: 'estimated', createdAt: START, attemptId: b })]);
+
+    expect(repo.projectMonthEstimated(p.id, START, END)).toBe(120);
+  });
+
   it('setupBalances follows the same rules over scope=setup only', () => {
     const { p, run } = setup();
     const repo = f.db.repos.ledger;

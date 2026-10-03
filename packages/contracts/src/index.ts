@@ -39,6 +39,7 @@ export * from './pricing.js';
 export * from './primitives.js';
 export * from './redaction.js';
 export * from './result.js';
+export * from './run-actions.js';
 export * from './runner-protocol.js';
 export * from './status.js';
 export * from './time.js';

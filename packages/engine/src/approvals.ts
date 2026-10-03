@@ -58,14 +58,20 @@ function currentPlanHash(r: Repos, a: ApprovalRow): Sha256 | null {
   return art?.sha256 ?? null;
 }
 
-/** Invalidates the approval and pauses an awaiting run as approval_stale (own tx). */
+/**
+ * Invalidates the approval and pauses the run as approval_stale (own tx): an awaiting run, and (P-1) a run the user
+ * paused while it awaited this approval (its approval step still waits) — otherwise a later resume would find no
+ * pending approval and continue with the approval step stuck in `awaiting_approval`.
+ */
 async function markStale(ctx: EngineCtx, a: ApprovalRow, reason: 'plan_changed' | 'project_changed', error: AppError): Promise<void> {
   const fx: PostCommitEffect[] = [];
   ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     r.approvals.invalidate(a.id, reason, now);
     const run = r.runs.get(a.runId);
-    if (run.status === 'awaiting_approval') applyRunEvent(r, run, { type: 'APPROVAL_STALE', error }, now, fx);
+    const stepWaits = r.steps.get(a.stepRunId).state === 'awaiting_approval';
+    const pausedOnIt = run.status === 'paused' && run.pauseReason !== 'approval_stale' && stepWaits;
+    if (run.status === 'awaiting_approval' || pausedOnIt) applyRunEvent(r, run, { type: 'APPROVAL_STALE', error }, now, fx);
   });
   await runEffects(ctx, fx);
 }
@@ -127,6 +133,9 @@ export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promis
   if (a.invalidatedAt !== null) return err(errors.approvalStale(a.invalidatedReason ?? 'plan_changed'));
   if (input.planHash !== a.planHash || input.contextHash !== a.contextHash) return err(errors.approvalStale('plan_changed'));
   const run = ctx.db.repos.runs.get(a.runId);
+  // P-1: only a run that waits for this decision can take it (a paused run is resumed first: decision 2 keeps the
+  // approval pending). Checked before any hashing, so a decide on a paused run never invalidates its approval.
+  if (run.status !== 'awaiting_approval') return err(errors.conflict({ reason: 'run_not_awaiting_approval', status: run.status }));
   if (currentPlanHash(ctx.db.repos, a) !== a.planHash || run.contextHash !== a.contextHash) {
     const e = errors.approvalStale('plan_changed');
     await markStale(ctx, a, 'plan_changed', e);
