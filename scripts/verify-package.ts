@@ -188,6 +188,8 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
       : { name: 'profile isolation', ok: true, detail: 'userData inside the temp home; real profile untouched' };
     return [{ name: 'smoke launch', ok: true, detail: 'relay.sqlite created' }, isolation, ...checkSeedFacts(final, latest)];
   } finally {
+    // Under CFFIXED_USER_HOME the temp home has no login keychain, and the app's quit stalls on it (the same build
+    // quits in ~1 s on SIGTERM with a real home), so a SIGKILL after QUIT_WAIT_MS is expected here, not a failure.
     const how = await quit(child);
     console.log(`  app quit: ${how}`);
     process.removeListener('exit', onExit);

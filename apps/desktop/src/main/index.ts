@@ -9,6 +9,9 @@ void startApp({
   app,
   env: process.env,
   createServices: createProductionServices,
+  onSignal: (signal, handler) => {
+    process.on(signal, handler);
+  },
   checkWritable: (dir) => checkDirWritable(dir),
   showErrorBox: (title, content) => {
     dialog.showErrorBox(title, content);

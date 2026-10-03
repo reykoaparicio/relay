@@ -133,6 +133,24 @@ describe('boot @m1', () => {
     expect(calls).toContain('createMainWindow');
   });
 
+  it('SIGTERM/SIGINT start the graceful quit; a second signal while quitting exits at once', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services } = fakeServices(calls);
+    const handlers = new Map<string, () => void>();
+    await boot({ ...BASE, app, env: {}, createServices: () => services, onSignal: (sig, h) => handlers.set(sig, h) });
+    expect([...handlers.keys()].sort()).toEqual(['SIGINT', 'SIGTERM']);
+    calls.length = 0;
+
+    handlers.get('SIGTERM')?.();
+    expect(calls).toEqual(['quit']); // the same path as Cmd+Q (before-quit runs the shutdown)
+    app.fire('before-quit'); // what app.quit() triggers: the graceful shutdown starts
+    handlers.get('SIGINT')?.();
+
+    expect(calls).toContain('supervisor.shutdown');
+    expect(calls.at(-1)).toBe('exit:0');
+  });
+
   it('before-quit: first call prevents, awaits shutdown, then quits; a second call does not prevent', async () => {
     const calls: string[] = [];
     const app = fakeApp(calls);

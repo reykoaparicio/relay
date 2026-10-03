@@ -58,6 +58,11 @@ export interface BootDeps {
   readonly app: BootApp;
   readonly env: NodeJS.ProcessEnv;
   readonly createServices: (cfg: BootConfig) => BootServices;
+  /**
+   * Subscribes to a process signal (production: `process.on`). SIGTERM/SIGINT run the same graceful quit as Cmd+Q
+   * (runner shutdown, clean-quit marker, log flush), and a second signal while quitting exits at once. Optional (tests).
+   */
+  readonly onSignal?: (signal: 'SIGTERM' | 'SIGINT', handler: () => void) => void;
   /** userData writability probe (runs before the single-instance lock). */
   readonly checkWritable: (dir: string) => WritableCheck;
   /** `dialog.showErrorBox` (safe to call before `ready`). */
@@ -145,6 +150,14 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
       app.quit();
     })();
   });
+
+  // A signal starts the normal graceful quit; a second signal while quitting exits at once.
+  const onQuitSignal = (): void => {
+    if (quitting) app.exit(0);
+    else app.quit();
+  };
+  deps.onSignal?.('SIGTERM', onQuitSignal);
+  deps.onSignal?.('SIGINT', onQuitSignal);
 
   // `quitting` is re-read after every await (a function call keeps TS from narrowing it to its initial value).
   const quitRequested = (): boolean => quitting;
