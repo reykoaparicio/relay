@@ -16,8 +16,13 @@ export type FakeStepResult =
   | { readonly kind: 'server_error' }
   /** Never resolves until aborted (cancellation tests). */
   | { readonly kind: 'hang' }
-  /** onDispatched + onResponseId, then a connection reset → `sent_no_response`. */
+  /** onDispatched + onResponseId, then a connection reset → `sent_no_response` (a response id arrived: it reached the provider). */
   | { readonly kind: 'unknown_after_dispatch' }
+  /**
+   * Decision 1: onDispatched, then a connection reset before any response byte (no response id) → `sent_no_response`.
+   * The engine settles it as an estimate with "may not have been charged".
+   */
+  | { readonly kind: 'unknown_before_response' }
   /** onDispatched + onResponseId + onProgress, then an SSE error → `responded_partial`. */
   | { readonly kind: 'midstream_error' }
   /** onDispatched, onResponseId, synchronous call-log line, then `exit(137)` (11 §K4). */
@@ -99,6 +104,10 @@ const SCENARIOS = {
     { match: { stepKey: 'implement', purpose: 'initial' }, result: { kind: 'unknown_after_dispatch' } },
   ]),
   'midstream-error': scenario('midstream-error', [{ match: REVIEW_INITIAL, result: { kind: 'midstream_error' } }]),
+  // Decision 1: the request may never have reached the provider (no response byte): an estimate "may not have been charged".
+  'unknown-before-response': scenario('unknown-before-response', [
+    { match: { stepKey: 'implement', purpose: 'initial' }, result: { kind: 'unknown_before_response' } },
+  ]),
   'crash-after-dispatch-plan': scenario('crash-after-dispatch-plan', [
     { match: { stepKey: 'plan', purpose: 'initial' }, result: { kind: 'crash_process_after_dispatch' } },
   ]),

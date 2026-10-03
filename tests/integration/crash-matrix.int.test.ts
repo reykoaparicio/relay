@@ -1,7 +1,8 @@
 // 11 §K4 crash matrix (@crash @m3, FR-07, §7.5, §17.1 rows 5–6). Every crash is a REAL separate Node process
 // (runner-child.ts forked with the tsx loader) dying with exit 137 at a F13 hook, then a fresh child is forked
 // IMMEDIATELY on the same userData dir (fresh heartbeat, dead owner pid → lease acquired, 03 §R4-10) and recovery runs.
-// Recovery always moves every dispatching attempt → unknown (move_to_unknown N) first; only row 4 reconciles.
+// Recovery always moves every dispatching attempt → unknown, settled at once as an estimate (decision 1); only row 4
+// reconciles (and corrects the estimate).
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RunId } from '@relay/contracts';
 import { expectBalances } from '../helpers/assert-ledger.js';
@@ -11,6 +12,7 @@ import { DEFAULT_REL_PATHS, createHarness } from '../helpers/engine-harness.js';
 import type { Harness } from '../helpers/engine-harness.js';
 import { expectStorageInvariants } from '../helpers/invariants.js';
 import { cleanupTempDirs, copyFixture, makeTempDir } from '../helpers/temp-dirs.js';
+import { attemptEntries, expectedEstimate } from './uncertain-estimate.js';
 
 const CRASH_EXIT = 137;
 const GOAL = 'Fix the defects in the handlers.';
@@ -77,7 +79,7 @@ describe('crash matrix @crash @m3', () => {
     });
   });
 
-  it('#2 afterDispatchIntent@review: dispatching → unknown (move_to_unknown N, U = N), 0 calls, no reconcile; retry_acknowledging_charge keeps U @crash @m3', async () => {
+  it('#2 afterDispatchIntent@review: dispatching → unknown, settled at once as an estimate (decision 1: release N + settle E, U = 0, may not have been charged), 0 calls, no reconcile; review_recovery → paused(unknown_outcome) → retry_step @crash @m3', async () => {
     const e = await env();
     const crashed = await runChild({ userDataDir: e.userDataDir, action: startAction(e), until: ['awaiting_approval'] }, { crashAt: 'afterDispatchIntent@review' });
     expectExit(crashed, CRASH_EXIT);
@@ -90,36 +92,42 @@ describe('crash matrix @crash @m3', () => {
       expect(rest).toEqual([]);
       expect(a?.state).toBe('unknown'); // honest by construction: the bytes could have left
       const N = a!.reservationMicrousd;
-      expect(N).toBeGreaterThan(0);
+      const E = expectedEstimate(a!, 0);
+      expect(N).toBeGreaterThan(E);
+      expect(E).toBeGreaterThan(0);
+      expect([a!.outcomeUncertain, a!.mayNotHaveBeenCharged]).toEqual([true, true]); // no response byte ever arrived
       expect(h.db.repos.runs.get(runId).status).toBe('interrupted');
-      expect(ledgerTypes(h, runId).filter((t) => t !== 'allowance_set')).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown']);
-      expectBalances(h.db, runId, { C: 0, R: 0, U: N });
+      expect(attemptEntries(h.db, runId, a!.id)).toEqual([['reserve', 'reserved', N, null], ['release', 'reserved', 0 - N, null], ['settle', 'settled', E, 'estimated']]);
+      expectBalances(h.db, runId, { C: E, R: 0, U: 0 });
       expect(h.calls({ runId })).toHaveLength(0);
       expect(h.callLog.reconcileEntries()).toEqual([]); // supportsRequestLookup false → no reconcile
       await expectStorageInvariants(h.db, e.userDataDir);
       return a!.id;
     });
 
-    // interrupted: decide the unknown attempt, then review_recovery (resume continue) — F2 RECOVERY_DECIDED.
-    const decided = await runChild({ userDataDir: e.userDataDir, action: { kind: 'decideUnknown', attemptId, decision: 'retry_acknowledging_charge' }, runId, until: ['interrupted', 'queued', 'awaiting_approval'] });
-    expectExit(decided, 0);
-    expect(decided.messages.find((m) => m.type === 'acted')).toEqual(expect.objectContaining({ ok: true }));
+    // interrupted: review_recovery re-queues; the loop pauses unknown_outcome on the uncertain step (never re-dispatched).
+    const reviewed = await runChild({ userDataDir: e.userDataDir, action: { kind: 'resume', decision: { kind: 'continue' } }, runId, until: ['paused'] });
+    expectExit(reviewed, 0);
+    expect(reviewed.messages.find((m) => m.type === 'status')).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'unknown_outcome' }));
     await inspect(e, 'happy-path', (h) => {
-      expect(h.attempts(runId, 'review').map((a) => a.state)).toEqual(['abandoned']);
       expect(h.calls({ runId })).toHaveLength(0); // never a silent re-dispatch
     });
-    expectExit(await runChild({ userDataDir: e.userDataDir, action: { kind: 'resume', decision: { kind: 'continue' } }, runId, until: ['awaiting_approval'] }), 0);
+    const retried = await runChild({ userDataDir: e.userDataDir, action: { kind: 'retryStep', stepKey: 'review' }, runId, until: ['awaiting_approval'] });
+    expectExit(retried, 0);
+    expect(retried.messages.find((m) => m.type === 'acted')).toEqual(expect.objectContaining({ ok: true }));
     await inspect(e, 'happy-path', (h) => {
       const [old, fresh] = h.attempts(runId, 'review');
-      expect(old?.state).toBe('abandoned'); // liability kept (06 §R4-28)
-      expect(fresh).toEqual(expect.objectContaining({ state: 'succeeded', purpose: 'user_retry', retryOfAttemptId: attemptId }));
-      expect(h.db.repos.ledger.runBalances(runId).U).toBe(old!.reservationMicrousd);
+      expect(old?.id).toBe(attemptId);
+      expect(old?.state).toBe('abandoned');
+      expect(fresh).toEqual(expect.objectContaining({ state: 'succeeded', purpose: 'user_retry' }));
+      expect(h.db.repos.ledger.attemptBalances(attemptId)).toEqual({ reserved: 0, unknown: 0, settled: expectedEstimate(old!, 0) }); // counted once
+      expect(h.db.repos.ledger.runBalances(runId).U).toBe(0);
       expect(h.calls({ runId, stepKey: 'review' })).toHaveLength(1);
       return expectStorageInvariants(h.db, e.userDataDir);
     });
   });
 
-  it('#3 crash-after-dispatch-plan scenario: plan unknown via move_to_unknown N, 1 call; retry_acknowledging_charge → 2 calls (explicit) @crash @m3', async () => {
+  it('#3 crash-after-dispatch-plan scenario: plan uncertain, settled as an estimate (1 call, a response id arrived); retry_step → 2 calls (explicit) @crash @m3', async () => {
     const e = await env();
     const scenario = 'crash-after-dispatch-plan';
     const crashed = await runChild({ userDataDir: e.userDataDir, scenario, action: startAction(e), until: ['awaiting_approval'] });
@@ -128,23 +136,23 @@ describe('crash matrix @crash @m3', () => {
 
     expectExit(await runChild({ userDataDir: e.userDataDir, scenario, action: { kind: 'recover' }, runId, until: ['interrupted'] }), 0);
 
-    const attemptId = await inspect(e, scenario, async (h) => {
+    await inspect(e, scenario, async (h) => {
       const [a] = h.attempts(runId, 'plan');
       expect(a?.state).toBe('unknown');
       expect(h.attempts(runId, 'review').map((x) => x.state)).toEqual(['succeeded']);
-      const N = a!.reservationMicrousd;
-      expect(h.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: N, settled: 0 });
+      expect(h.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: expectedEstimate(a!, 0) });
+      expect(a!.mayNotHaveBeenCharged).toBe(false); // the response id was recorded before the crash
       expect(h.calls({ runId, stepKey: 'plan' })).toHaveLength(1);
       expect(h.calls({ runId, stepKey: 'review' })).toHaveLength(1);
       await expectStorageInvariants(h.db, e.userDataDir);
-      return a!.id;
     });
 
-    expectExit(await runChild({ userDataDir: e.userDataDir, scenario, action: { kind: 'decideUnknown', attemptId, decision: 'retry_acknowledging_charge' }, runId, until: ['interrupted', 'queued', 'awaiting_approval'] }), 0);
+    expectExit(await runChild({ userDataDir: e.userDataDir, scenario, action: { kind: 'resume', decision: { kind: 'continue' } }, runId, until: ['paused'] }), 0);
     await inspect(e, scenario, (h) => {
-      expect(h.calls({ runId, stepKey: 'plan' })).toHaveLength(1); // the decision alone never dispatches
+      expect(h.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
+      expect(h.calls({ runId, stepKey: 'plan' })).toHaveLength(1); // review_recovery alone never dispatches
     });
-    expectExit(await runChild({ userDataDir: e.userDataDir, scenario, action: { kind: 'resume', decision: { kind: 'continue' } }, runId, until: ['awaiting_approval'] }), 0);
+    expectExit(await runChild({ userDataDir: e.userDataDir, scenario, action: { kind: 'retryStep', stepKey: 'plan' }, runId, until: ['awaiting_approval'] }), 0);
     await inspect(e, scenario, (h) => {
       expect(h.calls({ runId, stepKey: 'plan' })).toHaveLength(2);
       expect(h.calls({ runId, stepKey: 'plan' }).map((c) => c.purpose)).toEqual(['initial', 'user_retry']);
@@ -154,7 +162,7 @@ describe('crash matrix @crash @m3', () => {
     });
   });
 
-  it('#4 afterProviderResponse@implement + reconcile-completed (lookup on): move_to_unknown then F9b → reconciled_succeeded, U back to 0, no new call @crash @m3', async () => {
+  it('#4 afterProviderResponse@implement + reconcile-completed (lookup on): estimate settled at recovery, then F9b → reconciled_succeeded, the estimate corrected (never counted twice), no new call @crash @m3', async () => {
     const e = await env();
     const scenario = 'reconcile-completed';
     const caps = { supportsRequestLookup: true } as const;
@@ -175,9 +183,10 @@ describe('crash matrix @crash @m3', () => {
       expect(rest).toEqual([]);
       expect(a?.providerResponseId).toBe(`fake_resp_${a!.id}`);
       expect(a?.state).toBe('reconciled_succeeded');
-      const types = h.db.repos.ledger.list(runId, { limit: 500, sort: 'created_asc' });
-      const mine = types.ok ? types.value.items.filter((x) => x.attemptId === a!.id).map((x) => x.type) : [];
-      expect(mine).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown', 'resolve_unknown', 'settle']);
+      const mine = attemptEntries(h.db, runId, a!.id);
+      expect(mine.map(([t, , , c]) => [t, c])).toEqual([['reserve', null], ['release', null], ['settle', 'estimated'], ['settle', 'estimated'], ['settle', 'calculated']]);
+      expect(mine[3]?.[2]).toBe(-(mine[2]?.[2] ?? 0)); // the correction removes exactly the estimate
+      expect(h.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: mine[4]?.[2] });
       expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0 }));
       expect(h.steps(runId, 'implement').at(-1)?.state).toBe('succeeded');
       expect(h.calls({ runId, stepKey: 'implement' })).toHaveLength(1);

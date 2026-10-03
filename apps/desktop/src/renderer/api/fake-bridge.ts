@@ -120,7 +120,7 @@ function setRunStatus(
   const merged = { ...run, ...patch };
   const terminal = ['completed', 'incomplete', 'cancelled', 'failed'].includes(status);
   const availableActions = allowedRunActions(status, pauseReason, {
-    unknownAttempts: merged.unresolvedAttempts.length,
+    uncertainAttempts: merged.uncertainAttempts.length,
     hasFailedStep: merged.steps.some((s) => s.state === 'failed'),
     hasPatchArtifact: hasPatchArtifact(w, run.id),
   });
@@ -330,14 +330,29 @@ function redactKey(key: string): string {
   return `${prefix}…${trimmed.slice(-4)}`;
 }
 
-/** Admission breakdown of the first reservation (§9.3). `preflightBlocked` worlds carry prior usage over L. */
-function fakeBudget(w: FakeWorld, allowance: number | undefined) {
-  const N = w.preflightBlocked ? 1_500_000 : 540_000;
+/**
+ * Admission breakdown of the first reservation (§9.3). `preflightBlocked` worlds carry prior usage over L. Decision 3:
+ * `stepLimits` per resolved model step (default = the step's spec value, else the effective profile's, clamped to the
+ * model's catalog cap; min contracts MIN_OUTPUT_TOKEN_OVERRIDE = 256; max the catalog cap, else the 128,000 ceiling),
+ * and N scales with the first model step's output allowance (an override over its default), the call it reserves for.
+ */
+function fakeBudget(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>) {
+  const stepLimits = stepProfiles(w, input).flatMap(({ step, profile }) => {
+    if (profile === undefined) return [];
+    const model = w.catalog.find((c) => c.providerId === profile.profile.providerId && c.modelId === profile.profile.modelId);
+    const modelMaxOutputTokens = Math.min(model?.capabilities.maxOutputTokens ?? 128_000, 128_000);
+    const defaultMaxOutputTokens = Math.min(step.maxOutputTokens ?? profile.profile.params.maxOutputTokens, modelMaxOutputTokens);
+    return [{ stepKey: step.id, defaultMaxOutputTokens, minMaxOutputTokens: 256 as const, modelMaxOutputTokens }];
+  });
+  const first = stepLimits[0];
+  const firstOverride = first === undefined ? undefined : input.outputTokenOverrides?.[first.stepKey];
+  const scale = first === undefined || firstOverride === undefined ? 1 : firstOverride / first.defaultMaxOutputTokens;
+  const N = Math.round((w.preflightBlocked ? 1_500_000 : 540_000) * scale);
   const C = w.preflightBlocked ? 1_200_000 : 0;
   const R = w.preflightBlocked ? 400_000 : 0;
-  const L = allowance ?? 3_000_000;
+  const L = input.limitOverrides?.budgetMicrousd ?? 3_000_000;
   const total = C + R + N;
-  return { L, C, R, U: 0, N, scope: 'run' as const, total, allowed: total <= L };
+  return { budget: { L, C, R, U: 0, N, scope: 'run' as const, total, allowed: total <= L }, stepLimits };
 }
 
 /** Engine `profileWarningMessage` texts of the readiness codes the fake reports (06 F14). */
@@ -478,6 +493,17 @@ function setRunnerReady(w: FakeWorld, ctx: HandlerContext): void {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Handlers: one per OPERATIONS key (a missing key is a compile error; fake-bridge.test.ts checks at runtime).
+
+/** The in-flight request of a run with a pending pause finished: the user pause takes effect now. */
+function finishInFlightPause(w: FakeWorld, ctx: HandlerContext, runId: string): void {
+  const from = w.pendingPauses.get(runId);
+  if (from === undefined) return;
+  w.pendingPauses.delete(runId);
+  const run = w.runs.find((r) => r.id === runId);
+  if (run?.status !== from) return;
+  w.pausedFrom.set(runId, from);
+  setRunStatus(w, ctx, run, 'paused', 'user');
+}
 
 const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   // ---------- app ----------
@@ -809,7 +835,15 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     failIfRootMissing(w, input.projectId);
     failIfUnreadable(w, input.input);
     const files = input.input.kind === 'files' ? input.input.relPaths.length : 1;
-    const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
+    const { budget, stepLimits } = fakeBudget(w, input);
+    // Decision 3: an override must fit the step's model (engine VALIDATION at `outputTokenOverrides.<step>`).
+    const outputIssues = Object.entries(input.outputTokenOverrides ?? {}).flatMap(([stepKey, n]) => {
+      const limit = stepLimits.find((l) => l.stepKey === stepKey);
+      if (limit === undefined) return [{ path: `outputTokenOverrides.${stepKey}`, code: 'unknown_step', message: `No model step "${stepKey}".` }];
+      return n !== undefined && n > limit.modelMaxOutputTokens
+        ? [{ path: `outputTokenOverrides.${stepKey}`, code: 'output_tokens_above_model_max', message: `Must be at most ${String(limit.modelMaxOutputTokens)} for this model.` }]
+        : [];
+    });
     return {
       inputSummary: {
         files,
@@ -831,7 +865,9 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
           : [{ path: 'limitOverrides.budgetMicrousd', code: 'budget_run', message: 'The run allowance cannot cover the first reservation.' }]),
         ...w.preflightIssues,
         ...suspectedSecretIssues(w, input.input),
+        ...outputIssues,
       ],
+      stepLimits,
     };
   },
   'runs.start': (w, input, ctx) => {
@@ -844,7 +880,15 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const readiness = readinessIssues(w, input);
     if (readiness.some((i) => i.code === 'unknown_profile')) fail(errors.notFound('profile'));
     if (readiness.some((i) => i.code === 'provider_not_allowed')) fail(errors.permissionDenied('provider_not_allowed'));
-    const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
+    const { budget, stepLimits } = fakeBudget(w, input);
+    // Decision 3: the engine re-checks each output override against the step's model.
+    const outputIssues = Object.entries(input.outputTokenOverrides ?? {}).flatMap(([stepKey, n]) => {
+      const limit = stepLimits.find((l) => l.stepKey === stepKey);
+      return limit === undefined || (n !== undefined && n > limit.modelMaxOutputTokens)
+        ? [{ path: `outputTokenOverrides.${stepKey}`, code: 'output_tokens_above_model_max', message: 'Lower this step\'s max output tokens.' }]
+        : [];
+    });
+    if (outputIssues.length > 0) fail(errors.validationFailed(outputIssues));
     if (!budget.allowed) fail(errors.budgetBlocked(budget as never));
     const n = w.nextId++;
     const allowance = input.limitOverrides?.budgetMicrousd ?? 3_000_000;
@@ -859,7 +903,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
             agoMs: 0,
             durationMs: 0,
             steps: { intake: 'succeeded', review: 'executing' },
-            cost: { allowance, reserved: 540_000 },
+            cost: { allowance, reserved: budget.N },
           }
         : {
             n,
@@ -913,6 +957,15 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'runs.pause': (w, input, ctx) => {
     const run = findRun(w, input.runId);
     if (!run.availableActions.includes('pause')) fail(errors.conflict({ status: run.status }));
+    // A request in flight finishes first: the pause takes effect after it (the status stays until then).
+    if (run.status === 'running' && run.steps.some((s) => s.state === 'executing' || s.state === 'validating')) {
+      w.pendingPauses.set(run.id, run.status);
+      setTimeout(() => {
+        finishInFlightPause(w, ctx, run.id);
+      }, w.pauseDelayMs);
+      return { status: run.status, inFlight: 'waiting' as const };
+    }
+    w.pausedFrom.set(run.id, run.status);
     setRunStatus(w, ctx, run, 'paused', 'user');
     return { status: 'paused' as const, inFlight: 'none' as const };
   },
@@ -936,7 +989,10 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
             ...(d.executionTimeoutSeconds === undefined ? {} : { executionTimeoutSeconds: d.executionTimeoutSeconds }),
           }
         : run.limits;
-    const next = setRunStatus(w, ctx, run, 'running', null, { limits });
+    // A user pause resumes exactly where it stopped (e.g. back to the approval it was waiting for).
+    const from = run.pauseReason === 'user' ? w.pausedFrom.get(run.id) : undefined;
+    w.pausedFrom.delete(run.id);
+    const next = setRunStatus(w, ctx, run, from === 'awaiting_approval' ? 'awaiting_approval' : 'running', null, { limits });
     return { status: next.status };
   },
   'runs.cancel': (w, input, ctx) => {
@@ -946,7 +1002,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     setRunStatus(w, ctx, run, status);
     return {
       status,
-      unresolvedCharges: run.unresolvedAttempts.map((a) => ({ attemptId: a.id, liabilityMicrousd: a.cost?.microusd ?? 0 })),
+      unresolvedCharges: [],
     };
   },
   'runs.increaseAllowance': (w, input, ctx) => {
@@ -977,21 +1033,10 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
         : { L: cost.allowance, C: cost.allowance - cost.remaining - cost.reserved - cost.unknown, R: cost.reserved, U: cost.unknown, N: nextAdmission, scope: 'run' as const, total: cost.allowance - cost.remaining + nextAdmission, allowed: false },
     };
   },
-  'runs.decideUnknown': (w, input, ctx) => {
+  // No longer offered (a request that may not have completed is counted as an estimate): never available.
+  'runs.decideUnknown': (w, input) => {
     const run = findRun(w, input.runId);
-    if (!run.unresolvedAttempts.some((a) => a.id === input.attemptId)) fail(errors.conflict({ attemptId: input.attemptId }));
-    const unresolvedAttempts = run.unresolvedAttempts.filter((a) => a.id !== input.attemptId);
-    const steps = run.steps.map((s) => (s.state === 'unknown' ? { ...s, state: 'failed' as const } : s));
-    const base = { ...run, unresolvedAttempts, steps };
-    if (run.status === 'paused') return setRunStatus(w, ctx, run, 'paused', run.pauseReason, base);
-    return replaceRun(w, {
-      ...base,
-      availableActions: allowedRunActions(run.status, run.pauseReason, {
-        unknownAttempts: unresolvedAttempts.length,
-        hasFailedStep: true,
-        hasPatchArtifact: hasPatchArtifact(w, run.id),
-      }),
-    });
+    fail(errors.conflict({ status: run.status, attemptId: input.attemptId }));
   },
   'runs.retryStep': (w, input, ctx) => {
     const run = findRun(w, input.runId);
@@ -1255,14 +1300,18 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
         .map((s) => ({ stepKey: s.stepKey, cost: costSummary({ allowance: run.cost.allowance, reported: s.state === 'succeeded' ? 160_000 : 0 }) })),
     };
   },
-  'ledger.projectSummary': (w, input) => {
+  'ledger.projectSummary': (w, input, ctx) => {
     const project = projectDetail(w, input.projectId);
     const runs = w.runs.filter((r) => r.projectId === input.projectId);
+    // Like the engine: only this month's estimated amounts make the tile "~".
+    const month = (t: number): string => new Date(t).toISOString().slice(0, 7);
+    const thisMonth = input.month ?? month(ctx.now());
     return {
       trackedMicrousd: project.stats.trackedMonthMicrousd,
       reservedMicrousd: runs.reduce((sum, r) => sum + r.cost.reserved, 0),
       unknownMicrousd: runs.reduce((sum, r) => sum + r.cost.unknown, 0),
       allowance: project.monthlyAllowanceMicrousd,
+      hasEstimates: runs.some((r) => month(r.createdAt) === thisMonth && (r.cost.settledEstimated > 0 || r.cost.unknown > 0)),
       label: 'tracked by Relay' as const,
     };
   },
@@ -1293,6 +1342,8 @@ export interface FakeBridge extends RelayBridge {
   emit(e: PushEvent): void;
   /** The next call on `channel` fails with `error` (once). */
   failNext(channel: Channel, error: AppError): void;
+  /** The in-flight request of `runId` finishes now: a pause requested during it takes effect (tests). */
+  finishInFlight(runId: string): void;
   /** Holds calls on `channel` until the returned release function is called (pending-state tests). */
   hold(channel: Channel): () => void;
 }
@@ -1402,6 +1453,9 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
     },
     callsTo: (channel) => calls.filter((c) => c.channel === channel),
     emit,
+    finishInFlight(runId) {
+      finishInFlightPause(world, ctx, runId);
+    },
     failNext(channel, error) {
       failures.set(channel, error);
     },

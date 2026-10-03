@@ -8,7 +8,6 @@ import {
   attemptSeqsOf,
   instructionVersionOf,
   stepTitle,
-  unknownDecisionsFor,
   bannerActions,
   defaultStep,
   incompleteCauseOf,
@@ -224,11 +223,4 @@ describe('E1 step meta and finished-run decisions', () => {
     expect(instructionVersionOf({}, 'review')).toBeNull();
   });
 
-  it('unknownDecisionsFor: a finished run never offers a retry', () => {
-    for (const status of ['completed', 'incomplete', 'cancelled', 'failed'] as const) {
-      expect(unknownDecisionsFor({ status })).toEqual(['accept_estimated_charge', 'mark_failed_keep_liability']);
-    }
-    expect(unknownDecisionsFor({ status: 'paused' })).toContain('retry_acknowledging_charge');
-    expect(unknownDecisionsFor({ status: 'interrupted' })).toContain('retry_acknowledging_charge');
-  });
 });

@@ -120,6 +120,8 @@ describe('push-sync: mounted run details', () => {
     // The runner's real order: run.event (run.status_changed), then run.status.
     await act(async () => {
       await bridge.invoke('relay/v1/runs.pause', { runId: run.id, idempotencyKey: newIdempotencyKey() } as never);
+      // The pause takes effect once the in-flight request finishes (decision 2).
+      bridge.finishInFlight(run.id);
     });
     await settle();
     expect(gets()).toBe(before + 1);

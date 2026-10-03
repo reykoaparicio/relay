@@ -28,6 +28,8 @@ export type RunMachineEvent =
       readonly error: AppError;
     }
   | { readonly type: 'PLAN_READY'; readonly approvalId: ApprovalId }
+  /** Decision 2: `resume` of a run the user paused while it waited for approval: back to awaiting_approval. */
+  | { readonly type: 'APPROVAL_RESUMED' }
   | { readonly type: 'APPROVED_MATCHING' }
   | { readonly type: 'REJECTED' }
   | { readonly type: 'REVISION_REQUESTED' }
@@ -97,6 +99,7 @@ const STOP_RULES: Rules = { CANCEL_REQUESTED: always(to('cancelled')), STOP_REQU
 const TABLE: Readonly<Record<RunStatus, Rules>> = {
   queued: {
     CHECKS_PASSED: always(to('running')),
+    USER_PAUSE: always(paused('user')), // decision 2: nothing in flight, pauses at once
     SETUP_BLOCKED: (ev) => (ev.type === 'SETUP_BLOCKED' ? paused(ev.reason) : ILLEGAL), // clarification 9
     CANCEL_REQUESTED: always(to('cancelled')), // clarification 1: nothing in flight
     // Clarification 14: a pause deferred while the run waited in the queue is applied instead of CHECKS_PASSED.
@@ -120,10 +123,12 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
     REJECTED: always(to('cancelled')),
     APPROVAL_STALE: always(paused('approval_stale')), // clarification 3
     CANCEL_REQUESTED: always(to('cancelled')), // clarification 4
+    USER_PAUSE: always(paused('user')), // decision 2: the pending approval stays pending
   },
   paused: {
     ...STOP_RULES,
     RESUME_RESOLVED: always(to('queued')), // clarification 12
+    APPROVAL_RESUMED: always(to('awaiting_approval')), // decision 2: resume of paused(user) with an approval pending
     // E1 #1: a budget re-check (allowance increase, project allowance edit) that now fails at the OTHER scope moves the
     // run to the pause of the scope that failed, so the offered action is the one that can unblock it.
     BUDGET_BLOCKED: (ev) => paused(ev.type === 'BUDGET_BLOCKED' && ev.scope === 'project' ? 'budget_project' : 'budget_run'),
@@ -155,6 +160,7 @@ export function transitionRun(status: RunStatus, ev: RunMachineEvent): RunTransi
 
 /** Facts `allowedRunActions` needs beyond the run row. */
 export interface RunActionFacts {
+  /** Legacy unknown liabilities still open (0 for data since decision 1); informational, never offers an action. */
   readonly unknownAttempts: number;
   readonly hasFailedStep: boolean;
   readonly hasPatchArtifact: boolean;
@@ -173,6 +179,11 @@ export interface RunActionFacts {
    * supported catalog model): `choose_profile` is then not offered. Absent = offered.
    */
   readonly hasProfileOptions?: boolean | undefined;
+  /**
+   * Decision 1: the latest row of some model step is `failed` or `unknown` (an uncertain outcome): `retry_step` can act
+   * on it. Absent = true (the gate re-checks the step when the action is taken).
+   */
+  readonly hasRetryableStep?: boolean | undefined;
 }
 
 /**
@@ -201,10 +212,10 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
     case 'setup_blocked':
       return ['resume', 'choose_profile', 'stop'];
     case 'unknown_outcome':
-      if (f.unknownAttempts > 0) return ['decide_unknown', 'stop'];
-      // Every unknown is decided: a failed step is retried / re-profiled; otherwise (e.g. a decision committed but the
-      // run was not re-queued) `resume` continues, so this pause, like every other, has a non-stop way out.
-      return f.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['resume', 'stop'];
+      // Decision 1: the uncertain attempt is already settled as an estimate; the only choices are "retry (may incur
+      // another charge)" and stop. Never retried automatically. With no step left to retry (e.g. reconciliation
+      // settled it meanwhile) `resume` continues, so this pause, like every other, has a non-stop way out.
+      return f.hasRetryableStep === false ? ['resume', 'stop'] : ['retry_step', 'stop'];
     case 'auth_required':
       return f.missingCredential === true ? ['reconnect_provider', 'stop'] : ['reconnect_provider', 'resume', 'stop'];
     case 'user':
@@ -217,42 +228,36 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
 
 /**
  * Server-computed actions (`RunDetail.availableActions`); the UI renders only these (F2 truth table), and every
- * decision op (`runs.resume`, `runs.retryStep`, `runs.decideUnknown`) refuses an action not listed here for the run's
- * current state (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree. An unresolved
- * unknown attempt is decidable from ANY pause (clarification 15), and from a terminal run (E1 #4: settle only).
+ * decision op (`runs.resume`, `runs.retryStep`, …) refuses an action not listed here for the run's current state
+ * (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree. Decision 1: `decide_unknown` is
+ * never offered (an uncertain outcome is settled as an estimate at once). Decision 2: `pause` is offered while the run
+ * is queued, running or awaiting approval, and `export_report` (+ `export_patch` once a patch exists) in EVERY state —
+ * a non-terminal run exports an interim report of what finished so far.
  */
 export function allowedRunActions(run: Pick<RunRow, 'status' | 'pauseReason'>, f: RunActionFacts): RunAction[] {
   const actions = actionsFor(run, f);
-  return f.hasProfileOptions === false ? actions.filter((a) => a !== 'choose_profile') : actions;
+  const exports: RunAction[] = f.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
+  return [...(f.hasProfileOptions === false ? actions.filter((a) => a !== 'choose_profile') : actions), ...exports];
 }
 
 function actionsFor(run: Pick<RunRow, 'status' | 'pauseReason'>, f: RunActionFacts): RunAction[] {
-  if (run.status === 'paused' && f.unknownAttempts > 0) {
-    const base = run.pauseReason === null ? ['stop' as const] : pausedActions(run.pauseReason, f);
-    return base.includes('decide_unknown') ? base : [...base.filter((a) => a !== 'stop'), 'decide_unknown', 'stop'];
-  }
   switch (run.status) {
     case 'queued':
-      return ['cancel'];
+      return ['pause', 'cancel'];
     case 'running':
       return ['pause', 'cancel'];
     case 'awaiting_approval':
-      return ['approve', 'request_revision', 'reject', 'cancel'];
+      return ['approve', 'request_revision', 'reject', 'pause', 'cancel'];
     case 'paused':
       return run.pauseReason === null ? ['stop'] : pausedActions(run.pauseReason, f);
     case 'interrupted':
-      // E1 #8: review_recovery (RECOVERY_DECIDED) needs every unknown attempt decided first, so it is offered only then.
-      return f.unknownAttempts > 0 ? ['decide_unknown', 'stop'] : ['review_recovery', 'stop'];
+      return ['review_recovery', 'stop'];
     case 'cancelling':
-      return [];
     case 'completed':
     case 'incomplete':
     case 'cancelled':
-    case 'failed': {
-      const exports: RunAction[] = f.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
-      // E1 #4: an unknown charge left on a finished run can still be settled (ledger + attempt only, no status change).
-      return f.unknownAttempts > 0 ? ['decide_unknown', ...exports] : exports;
-    }
+    case 'failed':
+      return [];
   }
 }
 
@@ -387,7 +392,7 @@ export function applyRunEvent(r: Repos, run: RunRow, requested: RunMachineEvent,
     closeSegment(run.id);
   }
   const terminal = isTerminalRunStatus(t.to);
-  if (ev.type === 'USER_PAUSE' || ev.type === 'RESUME_RESOLVED' || terminal) r.runs.setPauseRequested(run.id, false);
+  if (ev.type === 'USER_PAUSE' || ev.type === 'RESUME_RESOLVED' || ev.type === 'APPROVAL_RESUMED' || terminal) r.runs.setPauseRequested(run.id, false);
   const detail = statusDetailOf(ev);
   const event = appendRunEvent(r, fx, run.id, 'run.status_changed', {
     from: run.status,

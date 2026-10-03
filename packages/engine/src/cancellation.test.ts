@@ -65,15 +65,17 @@ describe('runs.pause / runs.cancel (F11)', () => {
     expect(terminal.ok ? null : terminal.error.details?.['reason']).toBe('run_terminal');
   });
 
-  it('stop on a paused(unknown_outcome) run returns the unresolved charge and keeps its liability', async () => {
+  it('stop on a paused(unknown_outcome) run: no unresolved charge (decision 1: the uncertain attempt is already settled as an estimate)', async () => {
     const { x, runId } = await start({ scenario: 'midstream-error' });
     await drive(x, runId, ['paused']);
     const [a] = x.db.repos.attempts.listForRun(runId);
+    const settled = x.db.repos.ledger.attemptBalances(a!.id).settled;
 
     const res = await x.engine.handle('relay/v1/runs.cancel', { runId });
 
-    expect(res.ok && res.data).toEqual({ status: 'cancelled', unresolvedCharges: [{ attemptId: a?.id, liabilityMicrousd: a?.reservationMicrousd }] });
-    expect(x.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: a?.reservationMicrousd }));
+    expect(res.ok && res.data).toEqual({ status: 'cancelled', unresolvedCharges: [] });
+    expect(settled).toBeGreaterThan(0);
+    expect(x.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: settled }));
   });
 
   it('cancel of a queued run is immediate; a running run goes cancelling → cancelled via WORK_STOPPED once nothing is in flight', async () => {

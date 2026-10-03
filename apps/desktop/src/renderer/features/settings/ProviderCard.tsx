@@ -198,8 +198,8 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
       ) : null}
       {p.providerId === 'openai' ? (
         <p className="small muted">
-          OpenAI can store responses (the <code>store</code> option) so Relay can look up a request whose
-          outcome is unknown after a crash. Each project can turn off “Store responses at OpenAI” in Settings
+          OpenAI can store responses (the <code>store</code> option) so Relay can look up a request that may
+          not have completed after a crash. Each project can turn off “Store responses at OpenAI” in Settings
           → Projects; doing so limits that recovery.
         </p>
       ) : null}

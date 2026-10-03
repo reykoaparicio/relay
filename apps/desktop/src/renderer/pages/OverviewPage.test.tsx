@@ -121,23 +121,48 @@ describe('OverviewPage', () => {
     });
   });
 
-  it('interrupted: banner + RecoveryPanel with the unresolved liability', async () => {
+  it('interrupted: banner + RecoveryPanel with the estimated charge (decision 1: never "unknown")', async () => {
     renderApp(OVERVIEW, { scenario: 'interrupted' });
     expect(await screen.findByText(/was interrupted/)).toBeInTheDocument();
     const recovery = await screen.findByRole('region', { name: 'Recovery' });
-    expect(within(recovery).getByText('Requests with an unknown outcome')).toBeInTheDocument();
-    // Continue from last checkpoint is offered only once every unknown request is decided (engine E1 #8).
-    expect(within(recovery).getByRole('button', { name: 'Decide on unknown charge' })).toBeInTheDocument();
-    expect(within(recovery).queryByRole('button', { name: 'Continue from last checkpoint' })).not.toBeInTheDocument();
+    expect(within(recovery).getByText('Requests that may not have completed')).toBeInTheDocument();
+    expect(recovery).toHaveTextContent('Counted toward the budget: ~$0.62 (estimated) · may not have been charged');
+    // Nothing to decide: the run can continue from its last checkpoint (the step runs again) or stop.
+    expect(within(recovery).getByRole('button', { name: 'Continue from last checkpoint' })).toBeInTheDocument();
+    expect(within(recovery).queryByRole('button', { name: /decide/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('uncertain-outcome')).toHaveTextContent(
+      'The last request may or may not have completed. Relay counted ~$0.62 (estimated) toward the budget, may not have been charged.',
+    );
     const review = screen.getByRole('link', { name: 'Review recovery options' });
     expect(review.getAttribute('href')).toMatch(/\/runs\/run_\w+\?step=stp_\w+$/);
     expect(screen.getByText('1 interrupted run needs a decision')).toBeInTheDocument();
+    expect(screen.getByRole('main')).not.toHaveTextContent(/unknown/i);
   });
 
-  it('unknown-outcome pause also renders the recovery state', async () => {
+  it('unknown-outcome pause also renders the recovery state: Retry step and Stop only', async () => {
     renderApp(OVERVIEW, { scenario: 'unknown-outcome' });
-    expect(await screen.findByText(/paused: unknown request outcome/)).toBeInTheDocument();
-    expect(await screen.findByRole('region', { name: 'Recovery' })).toBeInTheDocument();
+    expect(await screen.findByText(/paused: the last request may not have completed/)).toBeInTheDocument();
+    const recovery = await screen.findByRole('region', { name: 'Recovery' });
+    expect(within(recovery).getAllByRole('button').map((b) => b.textContent)).toEqual(['Retry step', 'Stop run']);
+    expect(screen.getByRole('main')).not.toHaveTextContent(/unknown/i);
+  });
+
+  it('the usage tile marks a total that includes estimates with "~"', async () => {
+    renderApp(OVERVIEW, { scenario: 'unknown-outcome' });
+    const summary = await screen.findByRole('region', { name: 'Project summary' });
+    await waitFor(() => {
+      expect(summary).toHaveTextContent(/Usage tracked by Relay.*~\$[\d.]+/);
+    });
+    expect(summary).toHaveTextContent('includes estimates (~)');
+  });
+
+  it('the usage tile has no "~" when nothing is estimated', async () => {
+    renderApp(OVERVIEW, { scenario: 'completed' });
+    const summary = await screen.findByRole('region', { name: 'Project summary' });
+    await waitFor(() => {
+      expect(summary).toHaveTextContent(/Usage tracked by Relay.*\$[\d.]+/);
+    });
+    expect(summary).not.toHaveTextContent('~');
   });
 
   it('provider-disconnected: names the provider, shows the redacted key and a reconnect link', async () => {

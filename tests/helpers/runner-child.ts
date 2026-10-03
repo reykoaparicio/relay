@@ -23,7 +23,9 @@ export type ChildAction =
   | { readonly kind: 'recover' }
   | { readonly kind: 'resume'; readonly decision: RecoveryDecision }
   | { readonly kind: 'approve' }
-  | { readonly kind: 'decideUnknown'; readonly attemptId: AttemptId; readonly decision: 'retry_acknowledging_charge' | 'mark_failed_keep_liability' | 'accept_estimated_charge' };
+  | { readonly kind: 'decideUnknown'; readonly attemptId: AttemptId; readonly decision: 'retry_acknowledging_charge' | 'mark_failed_keep_liability' | 'accept_estimated_charge' }
+  /** Decision 1: `runs.retryStep` on the latest row of `stepKey` ("retry, may incur another charge"). */
+  | { readonly kind: 'retryStep'; readonly stepKey: string };
 
 export interface ChildJob {
   readonly userDataDir: string;
@@ -121,6 +123,11 @@ async function runJob(job: ChildJob): Promise<void> {
     const res = await engine.handle('relay/v1/approvals.decide', { idempotencyKey: `crash-child-approve-${String(Date.now())}`, approvalId: a.id,
       planHash: a.planHash, contextHash: a.contextHash, decision: 'approved' });
     await send(res.ok ? { type: 'acted', ok: true, status: res.data.runStatus } : { type: 'acted', ok: false, code: res.error.code });
+  } else if (action.kind === 'retryStep') {
+    const step = db.repos.steps.latestPerStepKey(runId).find((s) => s.stepKey === action.stepKey);
+    if (step === undefined) throw new Error(`retryStep: no step ${action.stepKey}`);
+    const res = await engine.handle('relay/v1/runs.retryStep', { idempotencyKey: `crash-child-retry-${String(Date.now())}`, runId, stepId: step.id });
+    await send(res.ok ? { type: 'acted', ok: true, status: res.data.status } : { type: 'acted', ok: false, code: res.error.code });
   } else if (action.kind === 'decideUnknown') {
     const res = await engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: `crash-child-unknown-${String(Date.now())}`, runId,
       attemptId: action.attemptId, decision: action.decision });

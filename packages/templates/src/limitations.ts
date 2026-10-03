@@ -3,7 +3,7 @@
 /**
  * Report limitation texts by key. The engine decides which apply:
  * `patch_not_applied`, `tests_not_run`, `cost_tracked` always; `model_checks_only` when a verify step ran;
- * `cost_estimated` when any cost entry is `estimated` or `unknown`; `run_incomplete` / `run_cancelled` /
+ * `cost_estimated` when any settled cost is `estimated` (or a legacy `unknown` liability is open); `run_incomplete` / `run_cancelled` /
  * `run_failed` by terminal status.
  */
 export const REPORT_LIMITATIONS = {
@@ -13,7 +13,8 @@ export const REPORT_LIMITATIONS = {
   model_checks_only: "The verifier's checks are model judgments against the plan and goal, not test results.",
   cost_tracked:
     "Costs are tracked by Relay from provider-reported usage and catalog prices. Your provider's invoice is authoritative.",
-  cost_estimated: 'Some charges are estimates because the provider reported no usage.',
+  cost_estimated:
+    'Some charges are estimates (shown with "~"): the provider reported no usage, or the outcome of a request was uncertain and its cost was estimated from the input and output size.',
   run_incomplete: 'The run ended before the goal was met. Results below are partial.',
   run_cancelled: 'The run was cancelled. Only steps that finished are shown.',
   run_failed: 'The run stopped because of an internal error. Completed artifacts are intact.',

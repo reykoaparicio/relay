@@ -149,6 +149,15 @@ export interface FakeWorld {
   exportFailParts: ExportPart[];
   /** Parts whose artifact is no longer stored: every export of them fails with NOT_FOUND (a retry never helps). */
   exportMissingParts: ExportPart[];
+  /**
+   * Pauses requested while a request was in flight (runId → the status to pause from): the pause takes effect after
+   * that request, `pauseDelayMs` later (or when a test calls `FakeBridge.finishInFlight`).
+   */
+  pendingPauses: Map<string, RunStatus>;
+  /** How long the in-flight request takes to finish after a pause request (ms). */
+  pauseDelayMs: number;
+  /** The status a user pause interrupted (runId → status): Resume returns there (a user pause resumes exactly where it stopped). */
+  pausedFrom: Map<string, RunStatus>;
   /** idempotencyKey → first result (02 §B0: a replay returns the first result). */
   idempotency: Map<string, unknown>;
   /** Next id number for created entities. */
@@ -524,6 +533,8 @@ export function costSummary(c: RunCostSpec): CostSummary {
   const allowance = c.allowance ?? 3_000_000;
   const used = (c.reported ?? 0) + (c.calculated ?? 0) + (c.estimated ?? 0) + (c.reserved ?? 0) + (c.unknown ?? 0);
   return costSummarySchema.parse({
+    // Any estimated part (estimated settlements, or legacy not-confirmed amounts) makes every total an estimate ("~").
+    hasEstimates: (c.estimated ?? 0) > 0 || (c.unknown ?? 0) > 0,
     allowance,
     settledReported: c.reported ?? 0,
     settledCalculated: c.calculated ?? 0,
@@ -548,8 +559,12 @@ export interface RunSpec {
   readonly steps: Partial<Record<StepKeyName, StepState>>;
   readonly cost: RunCostSpec;
   readonly statusDetail?: In<typeof appErrorSchema> | null;
-  /** Step whose attempt outcome is unknown (liability µUSD). */
-  readonly unknownAttempt?: { readonly step: StepKeyName; readonly liability: number };
+  /**
+   * Step whose request may or may not have completed: the engine counts `estimate` µUSD as an estimated charge
+   * (`AttemptView.cost.certainty = 'estimated'`, listed in `RunDetail.uncertainAttempts`). `mayNotHaveBeenCharged`
+   * (default true): the request may never have reached the provider.
+   */
+  readonly uncertainAttempt?: { readonly step: StepKeyName; readonly estimate: number; readonly mayNotHaveBeenCharged?: boolean };
   /** Error attached to the failed / invalid step. */
   readonly stepError?: { readonly step: StepKeyName; readonly error: In<typeof appErrorSchema> };
   readonly streaming?: boolean;
@@ -714,7 +729,7 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
   const artifacts: Array<[string, StoredArtifact]> = [];
   const stepDetails: StepDetail[] = [];
   const attemptsAll: AttemptView[] = [];
-  const unresolvedAttempts: AttemptView[] = [];
+  const uncertainAttempts: AttemptView[] = [];
   let artifactN = spec.n * 100;
   let attemptN = spec.n * 100;
   let hasPatch = false;
@@ -765,7 +780,8 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
     const attempts: AttemptView[] = [];
     const ran = ['succeeded', 'failed', 'unknown', 'executing', 'validating'].includes(state);
     if (profile !== null && ran) {
-      const isUnknown = spec.unknownAttempt?.step === key;
+      const uncertain = spec.uncertainAttempt?.step === key ? spec.uncertainAttempt : undefined;
+      const isUnknown = uncertain !== undefined;
       const settled = state === 'succeeded';
       const attempt = attemptViewSchema.parse({
         id: sid('attempt', (attemptN += 1)),
@@ -777,21 +793,22 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
         providerId: profile.providerId,
         modelId: profile.modelId,
         usage: settled ? { uncachedInputTokens: 12_400, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 1_850 } : null,
-        cost: isUnknown
-          ? { microusd: spec.unknownAttempt.liability, certainty: 'unknown' }
+        cost: uncertain !== undefined
+          ? { microusd: uncertain.estimate, certainty: 'estimated' }
           : settled
             ? { microusd: 160_000, certainty: 'reported' }
             : null,
         providerLatencyMs: settled ? 8_400 : null,
         appElapsedMs: settled ? 9_100 : null,
         providerRequestId: settled ? `req_${String(attemptN)}` : null,
+        mayNotHaveBeenCharged: uncertain !== undefined && uncertain.mayNotHaveBeenCharged !== false,
         // An in-flight attempt started 47 s ago (running-streaming: 46.1 s provider time + 0.4 s app time so far).
         startedAt: state === 'executing' ? now - 47_000 : createdAt + 5_000 * (i + 1),
         finishedAt: settled ? createdAt + 5_000 * (i + 1) + 9_100 : null,
       });
       attempts.push(attempt);
       attemptsAll.push(attempt);
-      if (isUnknown) unresolvedAttempts.push(attempt);
+      if (isUnknown) uncertainAttempts.push(attempt);
     }
     stepDetails.push(
       stepDetailSchema.parse({
@@ -845,11 +862,12 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
         cost: { settledMicrousd: s.state === 'succeeded' && s.profileName ? 160_000 : 0, certainty: 'reported', unknownMicrousd: 0 },
       })),
       totals: cost,
-      unknownLiabilities: unresolvedAttempts.map((a) => ({
+      unknownLiabilities: [],
+      estimatedCharges: uncertainAttempts.map((a) => ({
         attemptId: a.id,
         stepKey: a.stepKey,
-        liabilityMicrousd: a.cost?.microusd ?? 0,
-        state: 'unknown',
+        amountMicrousd: a.cost?.microusd ?? 0,
+        mayNotHaveBeenCharged: a.mayNotHaveBeenCharged,
       })),
       artifacts: { findings: byKind('findings'), plan: byKind('plan'), patch: byKind('patch'), review: byKind('review') },
       limitations: ['Relay proposed a patch. It was not applied to your project.'],
@@ -861,7 +879,7 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
   }
 
   const availableActions = allowedRunActions(spec.status, spec.pauseReason ?? null, {
-    unknownAttempts: unresolvedAttempts.length,
+    uncertainAttempts: uncertainAttempts.length,
     hasFailedStep,
     hasPatchArtifact: hasPatch,
   });
@@ -918,7 +936,8 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
     contextHash: spec.status === 'queued' ? null : sha('9c1e'),
     steps: stepViews,
     pendingApproval,
-    unresolvedAttempts,
+    unresolvedAttempts: [],
+    uncertainAttempts,
     executionMsUsed: Math.min(spec.durationMs, 900_000),
     revisionCycle: spec.revisionCycle ?? 0,
     statusDetail: spec.statusDetail ?? null,
@@ -1086,7 +1105,9 @@ function buildLedger(run: RunDetail, attempts: readonly AttemptView[]): LedgerEn
       add({ createdAt: a.finishedAt ?? a.startedAt, stepKey: a.stepKey, attemptId: a.id, type: 'settle', bucket: 'settled', deltaMicrousd: a.cost?.microusd ?? 0, certainty: 'reported', priceCatalogVersion: '2026-09-25', note: null });
     }
     if (a.state === 'unknown') {
-      add({ createdAt: a.startedAt + 1, stepKey: a.stepKey, attemptId: a.id, type: 'move_to_unknown', bucket: 'unknown', deltaMicrousd: a.cost?.microusd ?? 0, certainty: 'unknown', priceCatalogVersion: '2026-09-25', note: 'Request outcome unknown' });
+      // A request that may not have completed: the reservation is released and the estimate settled (never "unknown").
+      add({ createdAt: a.startedAt + 1, stepKey: a.stepKey, attemptId: a.id, type: 'release', bucket: 'reserved', deltaMicrousd: -360_000, certainty: null, priceCatalogVersion: '2026-09-25', note: null });
+      add({ createdAt: a.startedAt + 1, stepKey: a.stepKey, attemptId: a.id, type: 'settle', bucket: 'settled', deltaMicrousd: a.cost?.microusd ?? 0, certainty: 'estimated', priceCatalogVersion: '2026-09-25', note: 'Estimated: the request may not have completed' });
     }
   }
   return entries;
@@ -1257,6 +1278,9 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     unreadableOnRead: new Set(),
     exportFailParts: [],
     exportMissingParts: [],
+    pendingPauses: new Map(),
+    pauseDelayMs: 1_500,
+    pausedFrom: new Map(),
     idempotency: new Map(),
     nextId: 5_000,
     now: () => now,

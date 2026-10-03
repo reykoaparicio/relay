@@ -75,18 +75,19 @@ describe('providers.test (F18)', () => {
     expect(seen).toEqual([{ providerId: 'openai', purpose: 'connection_test', attemptId: null }]);
   });
 
-  it('an ambiguous outcome moves the full N to the setup liability (move_to_unknown), never released', async () => {
+  it('decision 1: an ambiguous outcome is settled at once as an estimate (never an unknown liability, never released)', async () => {
     const x = await harness({ providers: wrapAdapters({ testConnection: () =>
       Promise.resolve({ kind: 'error', error: errors.providerUnavailable('anthropic'), phase: 'sent_no_response' }) }) });
 
     const res = await x.engine.handle('relay/v1/providers.test', { providerId: 'anthropic' });
 
-    expect(res.ok && [res.data.ok, res.data.certainty, res.data.error?.code]).toEqual([false, 'unknown', 'PROVIDER_UNAVAILABLE']);
+    expect(res.ok && [res.data.ok, res.data.certainty, res.data.error?.code]).toEqual([false, 'estimated', 'PROVIDER_UNAVAILABLE']);
     const b = x.db.repos.ledger.setupBalances(0 as never, Number.MAX_SAFE_INTEGER as never);
-    expect([b.R, b.U, b.C]).toEqual([0, res.ok ? res.data.costMicrousd : -1, 0]);
+    expect([b.R, b.U, b.C]).toEqual([0, 0, res.ok ? res.data.costMicrousd : -1]);
+    expect(b.C).toBeGreaterThan(0); // the input tokens of the test request
   });
 
-  it('aborts a hanging test after 15 s on the injected timers (unknown), and a not-sent failure releases', async () => {
+  it('aborts a hanging test after 15 s on the injected timers (an estimate, decision 1)', async () => {
     const x = await harness({ providers: wrapAdapters({ testConnection: (_base, t) => new Promise<ModelResult>((resolve) => {
       t.signal.addEventListener('abort', () => {
         resolve({ kind: 'error', error: errors.providerUnavailable('anthropic'), phase: 'sent_no_response' });
@@ -98,7 +99,8 @@ describe('providers.test (F18)', () => {
     x.timers.advance(15_000);
     const res = await p;
 
-    expect(res.ok && res.data.certainty).toBe('unknown');
+    expect(res.ok && res.data.certainty).toBe('estimated');
+    expect(x.db.repos.ledger.setupBalances(0 as never, Number.MAX_SAFE_INTEGER as never).U).toBe(0);
   });
 
   it('truncated counts as a working connection; usageKnown=false settles N as estimated; an unknown model is MODEL_UNSUPPORTED', async () => {
@@ -120,12 +122,12 @@ describe('providers.test (F18)', () => {
       .toEqual({ kind: 'known', microusd: 2, certainty: 'calculated' });
   });
 
-  it('recovery moves an orphaned setup reservation (runner died mid-test) to the setup liability', async () => {
+  it('recovery settles an orphaned setup reservation (runner died mid-test) as an estimate at its amount (decision 1)', async () => {
     const x = await harness();
     x.db.tx('immediate', (r) => r.ledger.append([{ scope: 'setup', type: 'reserve', bucket: 'reserved', deltaMicrousd: 500, createdAt: x.clock.now() }]));
 
     expect(recoverSetupReservations(x.ctx)).toBe(500);
     expect(recoverSetupReservations(x.ctx)).toBe(0);
-    expect(x.db.repos.ledger.setupBalances(0 as never, Number.MAX_SAFE_INTEGER as never)).toEqual({ C: 0, R: 0, U: 500 });
+    expect(x.db.repos.ledger.setupBalances(0 as never, Number.MAX_SAFE_INTEGER as never)).toEqual({ C: 500, R: 0, U: 0 });
   });
 });

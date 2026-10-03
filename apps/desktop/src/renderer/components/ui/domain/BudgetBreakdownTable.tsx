@@ -43,8 +43,8 @@ export function BudgetBreakdownTable({ breakdown: b }: BudgetBreakdownTableProps
           </tr>
           <tr>
             <td className="sym">U</td>
-            <th scope="row">Unknown liability</th>
-            <td className="num"><Money value={b.U} /></td>
+            <th scope="row">Estimated charges not yet confirmed</th>
+            <td className="num"><Money value={b.U} approx={b.U > 0} /></td>
           </tr>
           <tr>
             <td className="sym">N</td>
@@ -64,7 +64,7 @@ export function BudgetBreakdownTable({ breakdown: b }: BudgetBreakdownTableProps
         <strong className="num">{verdict}</strong>
       </p>
       <p className="subtle small">
-        L = allowance · C = settled usage · R = reservations in flight · U = unknown liability · N = reservation for the
+        L = allowance · C = settled usage · R = reservations in flight · U = estimated charges not yet confirmed · N = reservation for the
         next request. A request starts only when C + R + U + N ≤ L.
       </p>
     </div>

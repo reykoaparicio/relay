@@ -163,7 +163,7 @@ describe('Settings → Projects (J10)', () => {
     expect(save).toBeDisabled();
     const store = screen.getByRole('checkbox', { name: 'Store responses at OpenAI' });
     expect(store).toBeChecked();
-    expect(screen.getByText(/Relay cannot check an unknown outcome with OpenAI/)).toBeInTheDocument();
+    expect(screen.getByText(/counts an estimate for it instead/)).toBeInTheDocument();
     await user.click(store);
     await user.click(save);
     await waitFor(() => {

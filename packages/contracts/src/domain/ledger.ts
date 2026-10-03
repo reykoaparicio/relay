@@ -43,9 +43,11 @@ export const costSummarySchema = z.object({
   settledCalculated: microusdSchema,
   settledEstimated: microusdSchema,
   reserved: microusdSchema,
-  unknown: microusdSchema,
+  unknown: microusdSchema, // legacy liability bucket; always 0 for data recorded since decision 1
   remaining: microusdSchema, // allowance − settled − reserved − unknown
   overrun: z.boolean(),
+  /** Decision 1: some settled amount in this summary is an estimate (`settledEstimated > 0`): totals display with "~". */
+  hasEstimates: z.boolean(),
 });
 /** Cost summary. */
 export type CostSummary = z.infer<typeof costSummarySchema>;

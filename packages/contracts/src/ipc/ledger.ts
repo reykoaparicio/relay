@@ -17,6 +17,8 @@ export const projectCostSummarySchema = z.object({
   reservedMicrousd: microusdSchema,
   unknownMicrousd: microusdSchema,
   allowance: microusdSchema.nullable(), // the project's monthly allowance; null = none set
+  /** The tracked total includes an estimated amount (decision 1: shown with "~"). */
+  hasEstimates: z.boolean(),
   label: z.literal('tracked by Relay'),
 });
 

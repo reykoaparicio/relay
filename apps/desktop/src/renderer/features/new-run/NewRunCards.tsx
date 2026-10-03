@@ -34,6 +34,7 @@ import { LIMIT_BOUNDS } from '../run-setup/limits';
 import type { ModelStepRow } from '../run-setup/model-steps';
 import { PreflightSummary, ProvidersReceiving } from '../run-setup/PreflightSummary';
 import { ProfileAssignmentTable } from '../run-setup/ProfileAssignmentTable';
+import type { OutputLimitEditor } from '../run-setup/ProfileAssignmentTable';
 import { paths } from '../shell/paths';
 import { FilePicker } from './FilePicker';
 import { MemoryPicker } from './MemoryPicker';
@@ -186,9 +187,11 @@ export interface WorkflowCardProps {
   readonly selection: Readonly<Record<string, string>>;
   readonly profileErrors: FieldErrors;
   readonly onSelectProfile: (stepKey: string, profileId: string) => void;
+  /** Decision 3: the editable "Max output (tokens)" column. */
+  readonly output?: OutputLimitEditor | undefined;
 }
 
-export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, providers, selection, profileErrors, onSelectProfile }: WorkflowCardProps) {
+export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, providers, selection, profileErrors, onSelectProfile, output }: WorkflowCardProps) {
   const titleId = useId();
   return (
     <Card labelledBy={titleId}>
@@ -223,6 +226,7 @@ export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, 
         errors={profileErrors}
         selectId={FIELD.profile}
         onSelect={onSelectProfile}
+        output={output}
       />
     </Card>
   );

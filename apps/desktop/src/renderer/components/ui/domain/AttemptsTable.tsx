@@ -7,7 +7,8 @@ import { DataTable } from '../DataTable';
 import { Disclosure } from '../Disclosure';
 import { KeyValueList } from '../KeyValueList';
 import type { DataTableColumn } from '../DataTable';
-import { Money } from '../Money';
+import { MAY_NOT_HAVE_BEEN_CHARGED, Money } from '../Money';
+import { isEstimate } from '../../../lib/format/money';
 import { StatusBadge } from '../StatusBadge';
 
 export interface AttemptsTableProps {
@@ -110,6 +111,20 @@ function Timing({ a }: { readonly a: AttemptView }) {
   );
 }
 
+/** The attempt's cost: exact, or "~$0.06 (estimated)" on two lines with "may not have been charged" when it applies. */
+function AttemptCost({ a }: { readonly a: AttemptView }) {
+  if (a.cost === null) return <span className="subtle">none</span>;
+  if (!isEstimate(a.cost.certainty)) return <Money value={a.cost.microusd} certainty={a.cost.certainty} />;
+  return (
+    <span className="stack" style={{ gap: 0, alignItems: 'flex-end' }} data-testid="attempt-cost">
+      <Money value={a.cost.microusd} approx />{' '}
+      <span className="subtle small font-sans">(estimated)</span>
+      {a.mayNotHaveBeenCharged ? ' ' : null}
+      {a.mayNotHaveBeenCharged ? <span className="subtle small font-sans whitespace-normal">{MAY_NOT_HAVE_BEEN_CHARGED}</span> : null}
+    </span>
+  );
+}
+
 function columnsFor(stepNameFor: ((stepKey: string) => string) | undefined): ReadonlyArray<DataTableColumn<AttemptView>> {
   return [
     {
@@ -168,7 +183,8 @@ function columnsFor(stepNameFor: ((stepKey: string) => string) | undefined): Rea
       key: 'cost',
       header: 'Cost',
       numeric: true,
-      cell: (a) => (a.cost === null ? <span className="subtle">none</span> : <Money value={a.cost.microusd} certainty={a.cost.certainty} />),
+      // An estimate stacks "~$0.06" over "(estimated)" (and the note) so the column stays narrow in the step panel.
+      cell: (a) => <AttemptCost a={a} />,
     },
   ];
 }
@@ -188,7 +204,8 @@ function AttemptsTableView({ attempts, caption = 'Attempts for this run', stepNa
         emptyState={<p className="subtle">No attempts yet. Nothing has been sent to a provider.</p>}
       />
       <p className="subtle">
-        Token counts are provider-reported unless marked <span className="tag">est.</span> Each retry is a new attempt;
+        Token counts are provider-reported unless marked <span className="tag">est.</span> A cost marked ~ is an
+        estimate. Each retry is a new attempt;
         earlier attempts are never overwritten. Timing shows provider time and app time separately.
       </p>
     </div>

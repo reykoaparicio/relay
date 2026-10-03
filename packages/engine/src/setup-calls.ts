@@ -13,6 +13,7 @@ import { adapterOf } from './provider-lookup.js';
 import { flagsOf } from './retry.js';
 import type { EngineCtx } from './ports.js';
 import { readSettings } from './settings.js';
+import { uncertainCost } from './uncertain.js';
 
 /** 04 §D4: output allowance of the fallback connection-test request (providers size it per provider, e.g. OpenAI 256). */
 export const CONNECTION_TEST_MAX_OUTPUT_TOKENS = 16;
@@ -44,13 +45,18 @@ export function modelForTest(r: Repos, providerId: ProviderId, modelId?: string)
   )[0];
 }
 
-/** Maps a connection-test result to its charge (F5 rows with `scope='setup'`). */
-export function setupCharge(result: ModelResult, aborted: boolean, entry: Pick<CatalogModel, 'prices'>, N: Microusd): SettleAmount {
+/**
+ * Maps a connection-test result to its charge (F5 rows with `scope='setup'`). `inputTokens`: the request's estimated
+ * input tokens — an uncertain outcome is settled as an estimate from them plus any output observed (decision 1).
+ */
+export function setupCharge(result: ModelResult, aborted: boolean, entry: Pick<CatalogModel, 'prices'>, N: Microusd, inputTokens = 0): SettleAmount {
   if (result.kind === 'error') {
-    // REQUEST_OUTCOME_UNKNOWN is unknown in ANY phase (a gateway can answer `responded` without knowing whether the
-    // upstream call ran): the full N becomes setup liability, never released.
+    // REQUEST_OUTCOME_UNKNOWN is uncertain in ANY phase (a gateway can answer `responded` without knowing whether the
+    // upstream call ran): decision 1 settles it at once as an estimate, never as an unknown liability.
     const ambiguous = result.phase === 'sent_no_response' || result.phase === 'responded_partial' || result.error.code === 'REQUEST_OUTCOME_UNKNOWN';
-    if (ambiguous || (aborted && result.phase !== 'not_sent')) return { kind: 'unknown' };
+    if (ambiguous || (aborted && result.phase !== 'not_sent')) {
+      return uncertainCost({ inputTokens, outputTokens: result.usage?.outputTokens ?? 0 }, entry.prices);
+    }
     if (result.usage === undefined) return { kind: 'not_charged' };
   }
   const flags = flagsOf(result);
@@ -112,7 +118,7 @@ export async function testProviderConnection(ctx: EngineCtx, input: { readonly p
   });
   if (!admitted.ok) return admitted;
   const { result, aborted } = await callWithTimeout(ctx, adapter, credential.value, entry.modelId);
-  const cost = setupCharge(result, aborted, entry, N);
+  const cost = setupCharge(result, aborted, entry, N, estimate.inputTokens);
   const error = errorOf(result);
   const settledAt = ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
@@ -120,8 +126,8 @@ export async function testProviderConnection(ctx: EngineCtx, input: { readonly p
     r.credentials.recordTest(providerId, error === null, error?.code ?? null, now, 'connection_test');
     return now;
   });
-  const costMicrousd = cost.kind === 'known' ? cost.microusd : cost.kind === 'unknown' ? N : microusd(0);
-  const certainty: CostCertainty = cost.kind === 'known' ? cost.certainty : cost.kind === 'unknown' ? 'unknown' : 'calculated';
+  const costMicrousd = cost.kind === 'known' ? cost.microusd : microusd(0);
+  const certainty: CostCertainty = cost.kind === 'known' ? cost.certainty : 'calculated';
   return ok({
     ok: error === null,
     latencyMs: Math.max(0, settledAt - admitted.value),

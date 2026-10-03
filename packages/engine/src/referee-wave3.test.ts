@@ -105,7 +105,7 @@ describe('finding 1: a deferred reconciled overrun is durable and never bypassed
     const raised = await raiseDeadline(x, runId, 'raise-limits-00001');
     expect(raised.ok && raised.data.status).toBe('paused');
     expect(x.db.repos.runs.get(runId).pauseReason).toBe('budget_overrun');
-    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop', 'export_report']);
 
     const ack = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'ack-overrun-00001', runId, decision: { kind: 'acknowledge_overrun' } });
     expect(ack.ok && ack.data.status).toBe('queued');
@@ -133,27 +133,28 @@ describe('finding 1: a deferred reconciled overrun is durable and never bypassed
     expect(await driveThroughApproval(x, runId, ['completed', 'paused', 'failed', 'incomplete'])).toBe('completed');
   });
 
-  it('(a) decide_unknown is offered and works from paused(deadline); the run keeps its deadline pause', async () => {
+  it('(a) decision 1: paused(deadline) with an uncertain attempt offers raise_limits / stop only; the estimate is already settled, then the step pauses unknown_outcome (retry_step)', async () => {
     const { x, runId, attemptId } = await deadlineUnknown();
-    expect(await actionsOf(x, runId)).toEqual(['raise_limits', 'decide_unknown', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['raise_limits', 'stop', 'export_report']);
+    expect(x.db.repos.ledger.attemptBalances(attemptId)).toEqual(expect.objectContaining({ reserved: 0, unknown: 0 }));
 
-    const decided = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-deadline-01', runId, attemptId, decision: 'retry_acknowledging_charge' });
-
-    expect(decided.ok).toBe(true);
-    expect(x.db.repos.attempts.get(attemptId).state).toBe('abandoned');
-    const run = x.db.repos.runs.get(runId);
-    expect([run.status, run.pauseReason]).toEqual(['paused', 'deadline']);
-    expect(await actionsOf(x, runId)).toEqual(['raise_limits', 'stop']);
     expect((await raiseDeadline(x, runId, 'raise-limits-00003')).ok).toBe(true);
+    expect(await drive(x, runId, ['paused'])).toBe('paused');
+    expect(x.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
+    expect(await actionsOf(x, runId)).toEqual(['retry_step', 'stop', 'export_report']);
+    const step = x.db.repos.steps.latestFor(runId, x.db.repos.steps.get(x.db.repos.attempts.get(attemptId).stepRunId).stepKey);
+    const retried = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'retry-deadline-01', runId, stepId: step?.id ?? '' });
+    expect(retried.ok && retried.data.status).toBe('queued');
+    expect(x.db.repos.attempts.get(attemptId).state).toBe('abandoned');
     expect(await driveThroughApproval(x, runId, ['completed', 'paused', 'failed', 'incomplete'])).toBe('completed');
   });
 
-  it('(b) switch_profile on paused(unknown_outcome) with an open unknown attempt is refused (decision_not_applicable)', async () => {
+  it('(b) switch_profile on paused(unknown_outcome) is refused (decision_not_applicable): only retry_step / stop', async () => {
     const x = await open({ scenario: 'midstream-error' });
     const runId = await x.startRun();
     expect(await drive(x, runId, ['paused'])).toBe('paused');
     expect(x.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
-    expect(await actionsOf(x, runId)).toEqual(['decide_unknown', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['retry_step', 'stop', 'export_report']);
     const economy = x.db.repos.profiles.getByName('Economy');
 
     const res = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'switch-unknown-001', runId,

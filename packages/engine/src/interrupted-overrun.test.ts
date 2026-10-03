@@ -78,14 +78,14 @@ describe('interrupted run: a reconciled overrun still requires acknowledge_overr
     expect(x.db.repos.attempts.get(a.id).state).toBe('reconciled_succeeded');
     expect(x.db.repos.ledger.attemptBalances(a.id).settled).toBeGreaterThan(N);
     expect(x.db.repos.runs.get(runId).status).toBe('interrupted'); // reconcile never resumes an interrupted run
-    expect(await actionsOf(x, runId)).toEqual(['review_recovery', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['review_recovery', 'stop', 'export_report']);
 
     const recovered = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'int-overrun-review-1', runId, decision: { kind: 'continue' } });
 
     expect(recovered.ok && recovered.data.status).toBe('paused');
     const run = x.db.repos.runs.get(runId);
     expect([run.status, run.pauseReason, run.statusDetail?.details?.['overrun']]).toEqual(['paused', 'budget_overrun', true]);
-    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop', 'export_report']);
     const continued = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'int-overrun-review-2', runId, decision: { kind: 'continue' } });
     expect(continued.ok ? null : continued.error.code).toBe('CONFLICT');
 

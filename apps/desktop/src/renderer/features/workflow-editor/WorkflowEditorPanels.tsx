@@ -444,7 +444,7 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, publi
           {(
             [
               ['transport', 'Transport retries', 'Only when the attempt is known not to have executed.'],
-              ['schemaRepair', 'Schema repair attempts', 'Unknown outcomes never retry automatically.'],
+              ['schemaRepair', 'Schema repair attempts', 'A request that may not have completed never retries automatically.'],
               ['rateLimitWaits', 'Rate-limit waits', 'Waits after a provider rate limit.'],
             ] as const
           ).map(([k, label, hint]) => (

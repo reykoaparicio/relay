@@ -127,8 +127,8 @@ const OTHER_COPY: Readonly<Record<string, { readonly title: string; readonly mes
     message: 'Its status changed (for example it was archived, approved or rejected elsewhere).',
   },
   unknown_attempts: {
-    title: 'A request has an unknown outcome',
-    message: 'Decide each request with an unknown outcome first.',
+    title: 'A request may not have completed',
+    message: 'Retry the step or stop the run first.',
   },
   decision_not_applicable: { title: 'This action no longer applies to the run', message: 'The run state changed.' },
   step_not_ready: { title: 'This step is not ready', message: 'The run state changed.' },

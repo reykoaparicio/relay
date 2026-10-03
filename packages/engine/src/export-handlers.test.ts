@@ -60,7 +60,9 @@ describe('artifacts.exportTo', () => {
     expect(md).toContain('## Limitations');
     expect(md).toContain(REPORT_UNTOUCHED_NOTE);
     expect(md).toMatch(/Settled, calculated from usage: \$\d+\.\d{6}/);
-    expect(md).toContain('## Unknown charges');
+    expect(md).toContain('## Estimated charges');
+    expect(md).not.toContain('## Unknown charges'); // decision 1: no unknown charges
+    expect(md).not.toContain('In progress');
     for (const limitation of x.ctx.templates.reportLimitations().patch_not_applied.split('\n')) expect(md).toContain(limitation);
     const patch = await readFile(join(dest, `relay-patch-${runId}.patch`), 'utf8');
     expect(patch).toMatch(/^(Index: |=+\n)?[\s\S]*--- a\/src\//);
@@ -89,17 +91,26 @@ describe('artifacts.exportTo', () => {
     expect(await readdir(inside)).toEqual([]);
   });
 
-  it('a run that has not ended has no report (NOT_FOUND); an unknown run is NOT_FOUND', async () => {
+  it('decision 2: a run that has not ended exports an interim report (never stored as its report); no patch yet → NOT_FOUND; an unknown run is NOT_FOUND', async () => {
     const x = await harness();
     const runId = await x.startRun();
     const dest = await tempDir();
 
     const res = await x.engine.handle('relay/v1/artifacts.exportTo', { runId, what: 'report', destinationRealpath: dest });
     const patch = await x.engine.handle('relay/v1/artifacts.exportTo', { runId, what: 'patch', destinationRealpath: dest });
+    const both = await x.engine.handle('relay/v1/artifacts.exportTo', { runId, what: 'both', destinationRealpath: dest });
+    const unknown = await x.engine.handle('relay/v1/artifacts.exportTo', { runId: 'run_01J9ZZZZZZZZZZZZZZZZZZZZZ0', what: 'report', destinationRealpath: dest });
 
-    expect(res.ok ? null : res.error.code).toBe('NOT_FOUND');
+    expect(res.ok && res.data.written?.map((w) => w.what)).toEqual(['report']);
+    const md = await readFile(join(dest, `relay-report-${runId}.md`), 'utf8');
+    expect(md).toContain(`# Relay run report (in progress) — ${runId}`);
+    expect(md).toMatch(/> In progress — exported \d{4}-\d{2}-\d{2}T[\d:.]+Z; 0 of 7 steps finished/);
+    expect(md).toContain('- Status: queued');
+    expect(md).toContain('No step has finished with an output yet.');
     expect(patch.ok ? null : patch.error.code).toBe('NOT_FOUND');
-    expect(await readdir(dest)).toEqual([]);
+    expect(both.ok && [both.data.written?.map((w) => w.what), both.data.failed?.map((f) => [f.what, f.code])]).toEqual([['report'], [['patch', 'NOT_FOUND']]]);
+    expect(unknown.ok ? null : unknown.error.code).toBe('NOT_FOUND');
+    expect(x.db.repos.artifacts.listForRun(runId, ['report'])).toEqual([]); // the interim report is never stored
   });
 });
 

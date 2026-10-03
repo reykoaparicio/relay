@@ -75,16 +75,29 @@ describe('statusPresentation', () => {
     expectComplete(statusPresentation('certainty', s));
   });
 
-  it('keeps the unknown_outcome pause detail true after the unknown request is resolved', () => {
-    const detail = statusPresentation('run', 'paused', 'unknown_outcome').detail;
+  it('words the unknown_outcome pause plainly: retry (may charge again) or stop', () => {
+    const p = statusPresentation('run', 'paused', 'unknown_outcome');
 
-    expect(detail).toBe('Resolve any unknown request, then retry or stop');
-    expect(detail).not.toMatch(/possible charge/);
+    expect(p.label).toBe('Paused: request may not have completed');
+    expect(p.detail).toBe('Retry the step (this may charge again) or stop');
   });
 
-  it('labels estimated cost "est." and unknown cost "Unknown charge"', () => {
-    expect(statusPresentation('certainty', 'estimated').label).toBe('est.');
-    expect(statusPresentation('certainty', 'unknown').label).toBe('Unknown charge');
+  it('labels estimated cost "Estimated", and the legacy unknown certainty as an estimate too', () => {
+    expect(statusPresentation('certainty', 'estimated').label).toBe('Estimated');
+    expect(statusPresentation('certainty', 'unknown').label).toBe('Estimated');
+  });
+
+  it('never shows "unknown" in any certainty, attempt, step or pause label or detail (decision 1)', () => {
+    const all = [
+      ...COST_CERTAINTY.map((c) => statusPresentation('certainty', c)),
+      ...ATTEMPT_STATES.map((a) => statusPresentation('attempt', a)),
+      ...STEP_STATES.map((st) => statusPresentation('step', st)),
+      ...PAUSE_REASONS.map((r) => statusPresentation('pause', r)),
+    ];
+    for (const p of all) {
+      expect(p.label).not.toMatch(/unknown/i);
+      expect(p.detail ?? '').not.toMatch(/unknown/i);
+    }
   });
 });
 

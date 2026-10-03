@@ -95,7 +95,7 @@ Hooks (`hooks/`), one file each: `useProject`, `useRuns` (infinite query with `n
 | `acknowledge_overrun` | button in the overrun banner | `runs.resume({ decision: { kind: 'acknowledge_overrun' } })` |
 | `reconnect_provider` | link | navigates to `/settings/providers` (`providers.connect` / `providers.test` there) |
 | `resnapshot_and_replan`, `use_preserved_snapshot` | buttons | `runs.resume({ decision: { kind } })` |
-| `decide_unknown` | `RecoveryPanel` decision buttons | `runs.decideUnknown` |
+| `decide_unknown` | never rendered (decision 1: an uncertain request is settled as an estimate; nothing to decide) | `runs.decideUnknown` (answers CONFLICT) |
 | `review_recovery` | opens `RecoveryPanel` | `runs.resume({ decision: { kind: 'continue' } })` from the panel |
 | `export_report`, `export_patch` | header buttons | `artifacts.export({ what: 'report' \| 'patch' })` |
 
@@ -186,7 +186,7 @@ The first-run flow must not require any knowledge of graph theory, tokenizers, c
 
 ## J8: Run inspector (`pages/RunInspectorPage.tsx`, `features/run-inspector/*`) — §5.4 (the most important page)
 - Layout (via I's `ResponsivePanels`): `StepTimeline` (left) | selected step panel (main) | bottom row `BudgetLedger` + Context summary card. **Below 1280 px** the bottom row collapses into the step-panel tab list as two extra tabs ("Budget", "Context summary"); the timeline stays visible. No content is hidden at narrow widths, only regrouped.
-- Header actions come **only from `RunDetail.availableActions`**, rendered through `run-actions.ts` (J2): Pause, Cancel run (`ConfirmDialog` explaining that in-flight cancellation is best-effort and charges may be unknown, FR-11), Export report / Export patch (terminal only).
+- Header actions come **only from `RunDetail.availableActions`**, rendered through `run-actions.ts` (J2): Pause (queued, running, awaiting_approval), Cancel run (`ConfirmDialog` explaining that in-flight cancellation is best-effort and that a cost the provider does not report is estimated, FR-11), Export report / Export patch on a finished run, and one **"Export…"** while the run is in progress (decision 2): the `ExportDialog` notes "The run is still in progress; the export includes results finished so far (N of M steps)" and the engine writes an interim report ("In progress — exported …"). A pause requested while a request is in flight shows "Pausing after the current request…" until the status changes; a user pause reads "Paused by you — resumes from <step>; nothing is lost" with Resume.
 - Tabs (`?tab=`): Output (renders the structured artifact via per-schema viewers `FindingsView`, `PlanView`, `PatchView` → `DiffViewer`, `ReviewView`; each viewer imports its output type from `@relay/contracts` `outputs/*`, never a local copy), Context (`ContextManifestView`, typed by the contracts `ContextManifest`), Attempts (`AttemptsTable`), Events (virtualized list of the run's events filtered to the step), **Ledger** (run-scoped, independent of the selected step: `useLedger(runId)` → `LedgerEntryView[]` table with created, step, attempt, type, bucket, delta, certainty, price catalog version, plus an "Export ledger (CSV)" button → `ledger.export({ runId })`; main shows the save dialog). `?tab=ledger` is the target of every Overview budget link.
 - The approval step uses `ApprovalCard`. `approvals.decide` sends the **hashes displayed** (`planHash`, `contextHash`). `APPROVAL_STALE` → an inline alert and a refetch.
 - Status banners (`features/run-inspector/StatusBanner.tsx`) map from status/`pauseReason` to `InlineAlert` (label/tone/icon from `statusPresentation`) + the action buttons. The mapping is exhaustive over `pauseReasonSchema` (compile error when a reason is added). Buttons appear only if the action is in `availableActions`; the list below is the expected set from the 06 `allowedRunActions` table:
@@ -201,12 +201,12 @@ The first-run flow must not require any knowledge of graph theory, tokenizers, c
 | `paused(provider_unavailable)` | "The provider did not respond after a retry"; attempt error code | retry step / choose profile / stop | provider-unavailable |
 | `paused(model_refused)` | "The model declined this step"; suggests another profile | retry step / choose profile / stop | refused |
 | `paused(setup_blocked)` | the blocking setup issue (from `RunDetail`), e.g. model no longer supported | resume (re-run checks) / choose profile (`switch_profile`) / stop | provider-unavailable (setup copy variant) |
-| `paused(unknown_outcome)` | `RecoveryPanel`: "Request may have been sent… charge unknown… $X liability retained". The retry decision label contains "may incur another charge" (§4.4). With every unknown decided and no failed step: "Every request with an unknown outcome has been decided" | decide unknown (3 decisions, `runs.decideUnknown`) / stop; or resume (`runs.resume { kind: 'continue' }`) / stop | unknown-outcome |
+| `paused(unknown_outcome)` | Banner (decision 1): "The last request may or may not have completed. Relay counted ~$X (estimated) toward the budget[, may not have been charged]. Retry the step (this may charge again) or stop." plus the request facts (request id, sent time) of each `RunDetail.uncertainAttempts` entry. Never "unknown" | Retry step / Stop only | unknown-outcome |
 | `paused(auth_required)` | "Reconnect provider"; from `queued` (`startedAt` null, no attempt): "No API key is connected for X", the step that needs it, "nothing was sent or reserved" | reconnect provider (link) / resume / stop | auth-failed |
 | `paused(user)` | "Paused by you. The in-flight request (if any) completed." | resume / stop | paused-user |
 | `paused(rate_limited)` | "Provider rate limit: waits exhausted" | resume / stop | rate-limited |
 | `paused(approval_stale)` / `PROJECT_CHANGED` | the changed file and hash (before → after) | resnapshot and replan / use preserved snapshot / stop | approval-stale |
-| `interrupted` | `RecoveryPanel` (last completed step, unresolved attempts with liability) | review recovery / decide unknown (per unknown attempt) / stop | interrupted |
+| `interrupted` | Banner with the same uncertain-request wording + `RecoveryPanel` (last completed step) | review recovery / stop | interrupted |
 | `cancelling` | disabled state: "Cancellation requested; waiting for the in-flight request to stop (best effort)" | none | cancelling |
 | `cancelled` | "Run cancelled"; unresolved charges listed with liability | export report | cancelled |
 | `failed` | "Run failed because of an internal error"; error code + "Open diagnostics"; useful artifacts still listed | export report | failed |
@@ -275,3 +275,10 @@ The first-run flow must not require any knowledge of graph theory, tokenizers, c
 - [ ] No absolute path is displayed except `displayPath`
 - [ ] Announcements are limited to completion, pause, and approval (no token spam)
 - [ ] Every destructive action has a confirmation, and read-only navigation has none (§5.7)
+
+## Founder decisions (wave 5)
+
+1. **Never "unknown"; estimates read "~".** An amount without an exact cost renders "~$0.03 (estimated)" (`formatMoney`); a request that may never have reached the provider (`AttemptView.mayNotHaveBeenCharged`) adds the muted note "may not have been charged" (`Money mayNotHaveBeenCharged`). Every total that includes an estimate (`CostSummary.hasEstimates`, or any estimated / legacy not-confirmed part) reads "~$0.48" (`formatMoneyApprox`, `costHasEstimates`, `trackedTotal` in `lib/format/money.ts`): run totals, the project usage tile, the runs list, the report total, the ledger summary. Uncertain requests come from `RunDetail.uncertainAttempts` (legacy `unresolvedAttempts` folded in, `lib/format/uncertain.ts`); there is no decide-unknown dialog or per-attempt decision anywhere.
+2. **Pause and Export while running.** See the inspector header actions above.
+3. **Per-step output limits on New run.** The profile table's "Max output (tokens)" column is an editable number input per step ("Max output tokens for <Step>"), prefilled from `preflight.stepLimits` (profile/spec default until preflight answers), with the range hint, inline validation, "Reset to default" per step and "Reset all to defaults". Only changed values are sent as `outputTokenOverrides`; a profile switch clamps an override above the new model's max (with a note). Onboarding keeps the read-only column.
+

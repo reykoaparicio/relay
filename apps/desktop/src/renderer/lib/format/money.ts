@@ -48,13 +48,55 @@ export interface FormatMoneyOptions {
 /**
  * Formats integer micro-USD for display (§9.2). Integer-only: rounding goes through contracts
  * `formatUsd`, so no float arithmetic touches money.
- * Estimated amounts read "≈ $0.48 est."; unknown liabilities read "$0.48 unknown".
+ * An estimated amount reads "~$0.03 (estimated)". Relay never shows a charge as "unknown": an amount whose exact cost
+ * is not available (legacy certainty `unknown` included) is an estimate.
  */
 export function formatMoney(m: Microusd, certainty?: CostCertainty | null, options: FormatMoneyOptions = {}): string {
   const amount = formatSigned(m, options.precision);
-  if (certainty === 'estimated') return `≈ ${amount} est.`;
-  if (certainty === 'unknown') return `${amount} unknown`;
+  if (isEstimate(certainty)) return `~${amount} (estimated)`;
   return amount;
+}
+
+/** True for a certainty that makes an amount an estimate (`estimated`, and legacy `unknown`). */
+export function isEstimate(certainty: CostCertainty | null | undefined): boolean {
+  return certainty === 'estimated' || certainty === 'unknown';
+}
+
+/**
+ * A total that includes any estimated part: "~$0.48". Use it for every sum (run totals, usage tiles, report totals,
+ * ledger summaries) so a total with an estimate in it never reads as exact.
+ */
+export function formatMoneyApprox(m: Microusd, approx: boolean, options: FormatMoneyOptions = {}): string {
+  const amount = formatSigned(m, options.precision);
+  return approx ? `~${amount}` : amount;
+}
+
+/** The cost-summary fields the estimate checks read (`hasEstimates` is optional for older producers). */
+export interface EstimateParts {
+  readonly settledEstimated: number;
+  readonly unknown: number;
+  readonly hasEstimates?: boolean | undefined;
+}
+
+/**
+ * True when a cost summary includes any estimate: the producer says so (`hasEstimates`), or it holds an estimated or a
+ * (legacy) not-confirmed amount.
+ */
+export function costHasEstimates(cost: EstimateParts): boolean {
+  return cost.hasEstimates === true || cost.settledEstimated > 0 || cost.unknown > 0;
+}
+
+/**
+ * The tracked total of a cost summary: settled (reported + calculated + estimated) plus any legacy not-confirmed
+ * amount, which Relay counts as an estimate.
+ */
+export function trackedTotal(cost: EstimateParts & { readonly settledReported: number; readonly settledCalculated: number }): Microusd {
+  return (cost.settledReported + cost.settledCalculated + cost.settledEstimated + cost.unknown) as Microusd;
+}
+
+/** The estimated part of a cost summary (estimated settlements plus legacy not-confirmed amounts). */
+export function estimatedPart(cost: EstimateParts): Microusd {
+  return (cost.settledEstimated + cost.unknown) as Microusd;
 }
 
 /** Dollars at an explicit precision (0–6 dp), rounding half away from zero with BigInt only. */

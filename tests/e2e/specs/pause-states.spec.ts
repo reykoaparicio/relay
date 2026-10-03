@@ -56,7 +56,7 @@ test.describe('pause states', { tag: '@m4' }, () => {
       expect(actual).toBeGreaterThan(reserved);
       await expect(banner.getByRole('term').nth(0)).toHaveText('Reserved');
       // The actual amount is labelled by its certainty, as in the Budget card (never a fixed "Reported by provider").
-      await expect(banner.getByRole('term').nth(1)).toHaveText(/^(Reported by provider|Calculated from usage|Estimated|Unknown charge)$/);
+      await expect(banner.getByRole('term').nth(1)).toHaveText(/^(Reported by provider|Calculated from usage|Estimated)$/);
 
       await inspector.acknowledgeOverrun();
       await inspector.expectAwaitingApproval();

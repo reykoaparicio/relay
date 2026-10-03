@@ -1,5 +1,5 @@
-// Request facts of an attempt whose outcome is unknown (E1, §4.4): the provider's request id (copyable, to ask the
-// provider about the charge) and when Relay dispatched it. Shown wherever an unknown request is decided.
+// Request facts of an attempt that may not have completed (E1, §4.4): the provider's request id (copyable, to ask the
+// provider about the charge) and when Relay dispatched it. Shown wherever such a request is listed.
 import type { AttemptView } from '@relay/contracts';
 import { CopyButton, KeyValueList } from '../../components/ui';
 import { formatAbsoluteTime, toIsoString } from '../../lib/format';

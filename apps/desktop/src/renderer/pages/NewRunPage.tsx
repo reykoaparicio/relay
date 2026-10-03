@@ -3,7 +3,7 @@ import type { SyntheticEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router';
 import { assertNever } from '@relay/contracts';
-import type { PreviewResult } from '@relay/contracts';
+import type { PreviewResult, RunPreflight } from '@relay/contracts';
 import { ButtonLink, ErrorView, InlineAlert, PageHeader, Skeleton, useLiveRegion } from '../components/ui';
 import { call } from '../api/client';
 import { isProjectRootMissing, toViewError } from '../api/errors';
@@ -40,10 +40,12 @@ import {
   validAcknowledged,
 } from '../features/new-run/new-run-model';
 import type { NewRunState } from '../features/new-run/new-run-model';
-import { modelSteps } from '../features/run-setup/model-steps';
+import { modelSteps, profileOverridesFor } from '../features/run-setup/model-steps';
+import { modelMaxOutput, modelName, stepOutputLimits } from '../features/run-setup/output-limits';
 import { rolesByProvider } from '../features/run-setup/PreflightSummary';
 import { prefetchRunInspector } from '../features/shell/prefetch';
 import { href, paths } from '../features/shell/paths';
+import { useCatalog } from '../hooks/useCatalog';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { canonicalJson, useIdempotentMutation } from '../hooks/useIdempotentMutation';
 import { useMemoryList } from '../hooks/useMemoryList';
@@ -83,6 +85,8 @@ export function NewRunPage() {
   const workflow = useWorkflow(wfSummary?.id, wfSummary?.latestValidatedVersion);
   const profiles = useProfiles();
   const providers = useProviders();
+  // Decision 3: each model's most output tokens (the range of the "Max output (tokens)" inputs until preflight answers).
+  const catalog = useCatalog();
   const approved = useMemoryList(projectId, 'approved');
   const suggested = useMemoryList(projectId, 'suggested');
 
@@ -96,7 +100,18 @@ export function NewRunPage() {
   // Untouched: every included file except suspected secrets (E2 #11), up to the cap. An explicit selection (e.g. from a
   // draft) keeps only files the current preview still includes: a file deleted, moved or excluded since is never sent.
   const { files, unavailable } = useMemo(() => selectedFiles(form.files, preview.data), [form.files, preview.data]);
-  const check = checkForm(form, texts, defaults, files.length);
+  // Decision 3: the preflight's per-step output limits, kept for the profile choice they were computed for (a change of
+  // profile falls back to the local values until the next answer; typing elsewhere never flips the defaults).
+  const [knownLimits, setKnownLimits] = useState<{ readonly choice: string; readonly limits: RunPreflight['stepLimits'] } | null>(null);
+  const profileChoice = canonicalJson(profileOverridesFor(rows, form.profileSelection) ?? {});
+  const outputLimits = stepOutputLimits({
+    rows,
+    selection: form.profileSelection,
+    profiles: profiles.data,
+    catalog: catalog.data,
+    stepLimits: knownLimits?.choice === profileChoice ? knownLimits.limits : undefined,
+  });
+  const check = checkForm(form, texts, defaults, files.length, outputLimits);
   // Who receives the run's context with the current profile choice (engine: the snapshot's providers with overrides).
   const roles = rolesByProvider(rows, form.profileSelection, profiles.data);
   const receiving = [...roles.keys()];
@@ -125,6 +140,10 @@ export function NewRunPage() {
   const settled = useDebouncedValue(draftKey ?? '', PREFLIGHT_DEBOUNCE_MS);
   const preflight = usePreflight(settled === '' ? null : settled);
   const pf = preflight.data;
+  const settledChoice = pf === undefined || preflight.isPlaceholderData || settled === '' ? null : profileChoiceOfKey(settled);
+  if (settledChoice !== null && pf !== undefined && (knownLimits?.choice !== settledChoice || knownLimits.limits !== pf.stepLimits)) {
+    setKnownLimits({ choice: settledChoice, limits: pf.stepLimits });
+  }
   // `input.relPaths.<i>` preflight issues index the checked input's files: read them from the key it ran for.
   const settledFiles = useMemo(() => relPathsOfKey(settled), [settled]);
   const checkboxIds = useMemo(() => fileCheckboxIds(preview.data), [preview.data]);
@@ -173,7 +192,15 @@ export function NewRunPage() {
   const selectProfile = (stepKey: string, profileId: string) => {
     start.newIntent();
     const next = { ...form.profileSelection, [stepKey]: profileId };
-    dispatch({ type: 'select-profile', stepKey, profileId, receivingProviders: [...rolesByProvider(rows, next, profiles.data).keys()] });
+    const chosen = profiles.data?.find((p) => p.profile.id === profileId);
+    dispatch({
+      type: 'select-profile',
+      stepKey,
+      profileId,
+      receivingProviders: [...rolesByProvider(rows, next, profiles.data).keys()],
+      // Decision 3: an output override above the new model's maximum is lowered to it (with a note at the field).
+      ...(chosen === undefined ? {} : { outputMax: { max: modelMaxOutput(catalog.data, chosen), modelName: modelName(catalog.data, chosen) } }),
+    });
   };
 
   useNavPerf('new-run', project.data !== undefined && workflow.data !== undefined);
@@ -382,6 +409,25 @@ export function NewRunPage() {
               selection={form.profileSelection}
               profileErrors={state.profileErrors}
               onSelectProfile={selectProfile}
+              output={{
+                limits: outputLimits,
+                values: form.outputTokenTexts,
+                errors: state.outputErrors,
+                notes: form.outputTokenNotes,
+                inputId: FIELD.maxOutput,
+                onChange: (stepKey, text) => {
+                  start.newIntent();
+                  dispatch({ type: 'set-output-tokens', stepKey, text });
+                },
+                onReset: (stepKey) => {
+                  start.newIntent();
+                  dispatch({ type: 'reset-output-tokens', stepKey });
+                },
+                onResetAll: () => {
+                  start.newIntent();
+                  dispatch({ type: 'reset-output-tokens' });
+                },
+              }}
             />
             <LimitsCard texts={texts} fieldErrors={fieldErrors} dispatch={dispatch} />
             <MemoryCard
@@ -451,6 +497,17 @@ function relPathsOfKey(key: string): readonly string[] {
     return Array.isArray(input?.relPaths) ? input.relPaths.filter((p): p is string => typeof p === 'string') : [];
   } catch {
     return [];
+  }
+}
+
+/** The profile choice (`canonicalJson` of `profileOverrides`, `{}` when none) a preflight key was checked with. */
+function profileChoiceOfKey(key: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    const overrides = (parsed as { profileOverrides?: unknown } | null)?.profileOverrides;
+    return canonicalJson(overrides ?? {});
+  } catch {
+    return null;
   }
 }
 

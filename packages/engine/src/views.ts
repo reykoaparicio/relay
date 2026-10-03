@@ -1,5 +1,5 @@
 // Read-side DTO mapping for the runner handlers (02 §B2 view DTOs). Never leaks `root_realpath`; money is µUSD.
-import { contextManifestSchema, invariant, isTerminalRunStatus, stepOutputSchema } from '@relay/contracts';
+import { contextManifestSchema, invariant, stepOutputSchema } from '@relay/contracts';
 import type {
   AttemptView,
   ContextManifest,
@@ -69,6 +69,7 @@ function costSummaryOf(
     unknown: b.U,
     remaining: rem,
     overrun: rem < 0 || attemptOverran,
+    hasEstimates: settled.estimated > 0,
   };
 }
 
@@ -131,13 +132,25 @@ export function entriesByStep(rows: readonly LedgerEntryWithStep[]): Map<StepKey
 }
 
 /**
+ * The certainties that still carry a settled amount: the NET per certainty (a decision-1 correction `settle −estimate`
+ * + `settle +actual` leaves `estimated` at 0, so a corrected cost is no longer shown as an estimate). A certainty whose
+ * entries net to 0 while others carry the amount is left out; when everything nets to 0 the certainties seen remain.
+ */
+export function netSettledCertainties(settled: readonly LedgerEntryRow[]): CostCertainty[] {
+  const net = new Map<CostCertainty, number>();
+  for (const e of settled) net.set(settledCertainty(e), (net.get(settledCertainty(e)) ?? 0) + e.deltaMicrousd);
+  const carrying = [...net].filter(([, v]) => v !== 0).map(([c]) => c);
+  return carrying.length > 0 ? carrying : [...net.keys()];
+}
+
+/**
  * The certainty of one attempt's settled cost, from its own `settle` ledger entries (reported / calculated /
- * estimated; the weakest when mixed — e.g. `accept_estimated_charge` settles an unknown liability as `estimated`).
- * `unknown` when the attempt only has unknown-bucket entries; null when it has neither (nothing charged).
+ * estimated; the weakest of those still carrying an amount, {@link netSettledCertainties}). `unknown` when the
+ * attempt only has (legacy) unknown-bucket entries; null when it has neither (nothing charged).
  */
 export function attemptCostCertainty(entries: readonly LedgerEntryRow[], attemptId: AttemptRow['id']): CostCertainty | null {
   const own = entries.filter((e) => e.attemptId === attemptId);
-  const weakest = weakestCertainty(own.filter((e) => e.bucket === 'settled').map(settledCertainty));
+  const weakest = weakestCertainty(netSettledCertainties(own.filter((e) => e.bucket === 'settled')));
   if (weakest !== null) return weakest;
   return own.some((e) => e.bucket === 'unknown') ? 'unknown' : null;
 }
@@ -191,11 +204,11 @@ export function toAttemptView(a: AttemptRow, stepKey: StepKey, entries: readonly
     if (e.bucket === 'settled') settled += e.deltaMicrousd;
     else if (e.bucket === 'unknown') unknown += e.deltaMicrousd;
   }
-  const liability = a.state === 'unknown' || a.state === 'abandoned';
-  const cost = liability
+  // A legacy unknown liability (data from before decision 1, converted at engine start) is the only 'unknown' cost.
+  const cost = unknown > 0
     ? { microusd: unknown as Microusd, certainty: 'unknown' as const }
-    : a.usage !== null || settled > 0
-      ? { microusd: settled as Microusd, certainty: attemptCostCertainty(entries, a.id) ?? ('calculated' as const) }
+    : a.usage !== null || settled > 0 || a.outcomeUncertain
+      ? { microusd: settled as Microusd, certainty: attemptCostCertainty(entries, a.id) ?? (a.outcomeUncertain ? ('estimated' as const) : ('calculated' as const)) }
       : null;
   const providerLatencyMs = a.firstByteAt !== null && a.finishedAt !== null ? Math.max(0, a.finishedAt - a.firstByteAt) : null;
   return {
@@ -214,6 +227,7 @@ export function toAttemptView(a: AttemptRow, stepKey: StepKey, entries: readonly
     providerRequestId: a.providerRequestId,
     startedAt: a.createdAt,
     finishedAt: a.finishedAt,
+    mayNotHaveBeenCharged: a.mayNotHaveBeenCharged,
   };
 }
 
@@ -264,6 +278,7 @@ export function runActionFacts(
   run?: Pick<RunRow, 'statusDetail'>,
 ): RunActionFacts {
   return { unknownAttempts, hasFailedStep: latest.some((s) => s.state === 'failed'), hasPatchArtifact, missingCredential,
+    hasRetryableStep: latest.some((s) => s.state === 'failed' || s.state === 'unknown'),
     ...(run === undefined ? {} : { preservableSnapshot: run.statusDetail?.code === 'PROJECT_CHANGED' }) };
 }
 
@@ -280,14 +295,20 @@ function stepKeyLookup(steps: readonly StepRow[]): (stepRunId: StepRow['id']) =>
 /** RunDetail (inspector) with the server-computed actions. */
 export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const stepKeyOf = stepKeyLookup(p.steps);
-  const unresolved = p.attempts.filter((a) => a.state === 'unknown');
   const latest = latestPerKey(p.steps);
   // The ledger is read once (one statement) when the run has attempts: their cost views (run-level Attempts tab, E1).
   const entries = p.attempts.length === 0 ? [] : r.ledger.listForRun(p.run.id).map((x) => x.entry);
+  const views = new Map(p.attempts.map((a) => [a.id, toAttemptView(a, stepKeyOf(a.stepRunId), entries)]));
+  const viewOf = (a: AttemptRow): AttemptView => views.get(a.id) ?? toAttemptView(a, stepKeyOf(a.stepRunId), entries);
+  // Legacy: attempts still holding an unknown liability (none for data since decision 1).
+  const unresolved = p.attempts.filter((a) => viewOf(a).cost?.certainty === 'unknown');
+  // Decision 1: attempts settled as estimates because their outcome was uncertain, still estimated (not corrected).
+  const uncertain = p.attempts.filter((a) => a.outcomeUncertain && viewOf(a).cost?.certainty === 'estimated');
   const modelOf = modelsOf(r, p.run);
   // Choose-profile options exist only for a paused run; none → choose_profile is not offered (E1 #8).
   const options = p.run.status === 'paused' ? profileOptionsOf(r, p.run, latest, p.attempts, true) : [];
-  const facts = runActionFacts(latest, unresolved.length, isTerminalRunStatus(p.run.status) && r.artifacts.listForRun(p.run.id, ['patch']).length > 0,
+  // Decision 2: export_patch whenever a patch artifact exists, in every status (an interim export while in progress).
+  const facts = runActionFacts(latest, unresolved.length, r.artifacts.listForRun(p.run.id, ['patch']).length > 0,
     missingCredentialFact(r, p.run, latest), p.run);
   const availableActions = allowedRunActions(p.run, { ...facts, hasProfileOptions: options.length > 0 });
   return {
@@ -297,13 +318,14 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
     contextHash: p.run.contextHash,
     steps: p.steps.map((s) => toStepView(s, modelOf(s.stepKey))),
     pendingApproval: p.pendingApproval === null ? null : toApprovalView(p.pendingApproval),
-    unresolvedAttempts: unresolved.map((a) => toAttemptView(a, stepKeyOf(a.stepRunId), entries)),
+    unresolvedAttempts: unresolved.map(viewOf),
+    uncertainAttempts: uncertain.map(viewOf),
     executionMsUsed: p.run.executionMsUsed,
     revisionCycle: p.run.revisionCycle,
     statusDetail: p.run.statusDetail,
     reportArtifactId: p.reportArtifactId,
     availableActions,
-    attempts: p.attempts.map((a) => toAttemptView(a, stepKeyOf(a.stepRunId), entries)),
+    attempts: p.attempts.map(viewOf),
     latestManifest: latestManifestOf(r, p.run, p.steps),
     profileOptions: availableActions.includes('choose_profile') ? options : [],
     stepMeta: stepMetaOf(r, p.run, latest),

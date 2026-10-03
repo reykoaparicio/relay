@@ -1,17 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { RUN_ACTIONS, UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
-import { RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_HINTS, UNKNOWN_OUTCOME_DECISION_LABELS } from './actions';
+import { NEXT_ACTIONS, RUN_ACTIONS } from '@relay/contracts';
+import { NEXT_ACTION_LABELS, RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS } from './actions';
 
-describe('unknown-outcome decision labels', () => {
-  it('labels and explains every contracts decision', () => {
-    for (const d of UNKNOWN_OUTCOME_DECISIONS) {
-      expect(UNKNOWN_OUTCOME_DECISION_LABELS[d]).not.toBe('');
-      expect(UNKNOWN_OUTCOME_DECISION_HINTS[d]).not.toBe('');
+describe('no "unknown" money wording (decision 1)', () => {
+  it('never labels an action, its outcome, or a next action with "unknown"', () => {
+    for (const a of RUN_ACTIONS) {
+      expect(RUN_ACTION_LABELS[a]).not.toMatch(/unknown/i);
+      expect(RUN_ACTION_DONE_LABELS[a]).not.toMatch(/unknown/i);
     }
-  });
-
-  it('says the retry may incur another charge (§4.4)', () => {
-    expect(UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge).toMatch(/may incur another charge/);
+    for (const n of NEXT_ACTIONS) expect(NEXT_ACTION_LABELS[n]).not.toMatch(/unknown/i);
   });
 });
 

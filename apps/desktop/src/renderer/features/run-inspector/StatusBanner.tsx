@@ -6,7 +6,6 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { microusd } from '@relay/contracts';
 import type { CostCertainty, LastShutdown, PauseReason, RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
-import { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import {
   BudgetBreakdownTable,
   Button,
@@ -17,16 +16,18 @@ import {
   Money,
   RecoveryPanel,
 } from '../../components/ui';
-import type { RecoveryDecisionDetail } from '../../components/ui';
 import {
   DESTRUCTIVE_RUN_ACTIONS,
   formatDuration,
   formatSumPart,
+  mayNotHaveBeenCharged,
   PROVIDER_LABELS,
   RUN_ACTION_LABELS,
   statusPresentation,
   stepName,
   sumConsistentPrecision,
+  uncertainAmount,
+  uncertainAttemptsOf,
 } from '../../lib/format';
 import { useAppInfo } from '../../hooks/useAppInfo';
 import { useLedger } from '../../hooks/useLedger';
@@ -40,6 +41,7 @@ import {
   incompleteCauseOf,
   incompleteTitle,
   INTERRUPTION_LEAD,
+  isLatestRow,
   interruptedStep,
   interruptedAtOf,
   interruptionCauseOf,
@@ -64,11 +66,13 @@ export interface StatusBannerProps {
   readonly events: readonly RunEvent[];
   /** A user chose an action: the page opens its dialog / confirmation, or runs it. */
   readonly onAction: (action: RunAction) => void;
+  /** A RecoveryPanel choice: an action it already confirmed (its own ConfirmDialog for stop). */
+  readonly onRecoveryAction: (action: RunAction) => void;
   /**
-   * A RecoveryPanel choice: an action it already confirmed (its own ConfirmDialog for stop), or a per-attempt
-   * `decide_unknown` with `{ attemptId, decision }` (the page confirms and calls `runs.decideUnknown` for it).
+   * The user asked to pause while a request is in flight: the pause takes effect after that request, so the banner says
+   * "Pausing after the current request…" until the status changes.
    */
-  readonly onRecoveryAction: (action: RunAction, detail?: RecoveryDecisionDetail) => void;
+  readonly pausing?: boolean;
   readonly pending: RunAction | null;
   readonly busy: boolean;
   /** Available actions that cannot be used right now, with the reason shown next to the disabled button. */
@@ -156,20 +160,25 @@ function UsefulArtifacts({ run, projectId }: { readonly run: RunDetail; readonly
 }
 
 /**
- * The requests whose outcome is unknown, each with its possible charge and request facts (E1: the provider request
- * id, copyable, and the dispatch time), so the user can ask the provider before deciding.
+ * The requests that may or may not have completed, each with the estimate Relay counted toward the budget and its
+ * request facts (E1: the provider request id, copyable, and the dispatch time), to ask the provider if needed.
  */
-function UnresolvedRequests({ run }: { readonly run: RunDetail }) {
-  if (run.unresolvedAttempts.length === 0) return null;
+function UncertainRequests({ run }: { readonly run: RunDetail }) {
+  const attempts = uncertainAttemptsOf(run);
+  if (attempts.length === 0) return null;
   return (
-    <ul className="stack small" aria-label="Requests with an unknown outcome" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-      {run.unresolvedAttempts.map((a) => {
+    <ul className="stack small" aria-label="Requests that may not have completed" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+      {attempts.map((a) => {
         const label = `${stepTitle(a, run.stepMeta)} · attempt ${String(a.seq)}`;
         return (
           <li key={a.id} className="stack" style={{ gap: 4 }}>
             <span>
-              {label}: liability{' '}
-              {a.cost === null ? 'amount not known' : <Money value={a.cost.microusd} certainty={a.cost.certainty} />}
+              {label}: counted as{' '}
+              {a.cost === null ? (
+                'no amount recorded'
+              ) : (
+                <Money value={a.cost.microusd} certainty="estimated" mayNotHaveBeenCharged={mayNotHaveBeenCharged(a)} />
+              )}
             </span>
             <RequestFacts attempt={a} label={label} />
           </li>
@@ -177,6 +186,32 @@ function UnresolvedRequests({ run }: { readonly run: RunDetail }) {
       })}
     </ul>
   );
+}
+
+/**
+ * The plain explanation of a request that may or may not have completed (founder decision): what Relay counted, and
+ * what the user can do (`next`). Null when the run has no such request.
+ */
+export function UncertainOutcomeText({ run, next }: { readonly run: RunDetail; readonly next: string }) {
+  const attempts = uncertainAttemptsOf(run);
+  if (attempts.length === 0) return null;
+  const maybe = attempts.some(mayNotHaveBeenCharged);
+  return (
+    <p data-testid="uncertain-outcome">
+      The last request may or may not have completed. Relay counted{' '}
+      <Money value={microusd(uncertainAmount(attempts))} certainty="estimated" /> toward the budget
+      {maybe ? <span className="subtle">, may not have been charged</span> : null}. {next}
+    </p>
+  );
+}
+
+/** What the user can do about an uncertain request, from the actions the server offers. */
+function uncertainNext(run: RunDetail): string {
+  const a = run.availableActions;
+  if (a.includes('retry_step')) return 'Retry the step (this may charge again) or stop.';
+  if (a.includes('resume')) return 'Resume continues the run (a step that runs again may charge again) or stop.';
+  if (a.includes('review_recovery')) return 'Continue from the last checkpoint (the step runs again and may charge again) or stop.';
+  return a.includes('stop') ? 'You can stop the run.' : '';
 }
 
 function ReportLink({ run, projectId }: { readonly run: RunDetail; readonly projectId: string }) {
@@ -276,7 +311,7 @@ const ACTUAL_TERM: Readonly<Record<CostCertainty, string>> = {
   reported: 'Reported by provider',
   calculated: 'Calculated from usage',
   estimated: 'Estimated',
-  unknown: 'Unknown charge',
+  unknown: 'Estimated',
 };
 
 /** Reserved + over = actual, all at one precision so the three amounts visibly add up. */
@@ -310,7 +345,7 @@ function OverrunFacts({ run, o }: { readonly run: RunDetail; readonly o: Overrun
         {
           id: 'a',
           term: certainty === null ? 'Actual cost' : ACTUAL_TERM[certainty],
-          value: certainty === 'estimated' ? `≈ ${a.actual} est.` : a.actual,
+          value: certainty === 'estimated' || certainty === 'unknown' ? `~${a.actual} (estimated)` : a.actual,
           mono: true,
         },
         { id: 'd', term: 'Over the reservation', value: a.over, mono: true },
@@ -472,27 +507,17 @@ function pausedSetupBlocked({ run, detail, notStarted, stepKeyDetail, code }: Pa
 }
 
 function pausedUnknownOutcome({ run }: PausedContext): BannerContent {
-  if (run.unresolvedAttempts.length === 0) {
-    // Every unknown request is decided (06 F2): the run can resume from its last completed step.
-    return {
-      title: 'Every request with an unknown outcome has been decided',
-      body: (
-        <p>
-          Resume continues the run from its last completed step. Stop ends it; finished steps and costs are
-          kept.
-        </p>
-      ),
-    };
-  }
   return {
-    title: 'The request may have been sent; its charge is unknown',
+    title: 'The last request may or may not have completed',
     body: (
       <>
-        <p>
-          Relay cannot confirm whether the provider processed the request. The possible charge is kept as
-          unknown liability until you decide. Nothing is retried on its own.
-        </p>
-        <UnresolvedRequests run={run} />
+        {uncertainAttemptsOf(run).length === 0 ? (
+          <p>The last request may or may not have completed. {uncertainNext(run)}</p>
+        ) : (
+          <UncertainOutcomeText run={run} next={uncertainNext(run)} />
+        )}
+        <p className="subtle">Nothing is retried on its own. Finished steps, outputs, and costs are kept.</p>
+        <UncertainRequests run={run} />
       </>
     ),
   };
@@ -532,12 +557,23 @@ function pausedAuthRequired({ run, detail, notStarted, stepKeyDetail }: PausedCo
   };
 }
 
-function pausedUser({}: PausedContext): BannerContent {
+/** The step a user-paused run resumes from: the first latest row that has not finished. */
+function resumeStepOf(run: RunDetail): StepView | undefined {
+  const done = new Set<StepView['state']>(['succeeded', 'skipped']);
+  return run.steps.filter((s) => isLatestRow(s, run.steps)).find((s) => !done.has(s.state));
+}
+
+function pausedUser({ run }: PausedContext): BannerContent {
+  const next = resumeStepOf(run);
   return {
-    title: 'Paused by you',
+    title:
+      next === undefined
+        ? 'Paused by you; nothing is lost'
+        : `Paused by you — resumes from ${stepTitle(next, run.stepMeta)}; nothing is lost`,
     body: (
       <p>
-        The in-flight request (if any) completed and its output was kept. No new step starts until you resume.
+        Any request that was in flight finished and its result was kept. No new request starts until you resume; Resume
+        continues exactly where the run stopped.
       </p>
     ),
   };
@@ -662,12 +698,22 @@ function statusContent(
   events: readonly RunEvent[],
   step: StepView | undefined,
   lastShutdown: LastShutdown | null | undefined,
+  pausing: boolean,
 ): BannerContent | null {
   switch (run.status) {
     case 'queued':
     case 'running':
     case 'awaiting_approval':
-      return null;
+      return pausing
+        ? {
+            title: 'Pausing after the current request…',
+            body: (
+              <p>
+                The request in flight finishes first and its result is kept; then the run pauses. Nothing is lost.
+              </p>
+            ),
+          }
+        : null;
     case 'paused':
       return run.pauseReason === null
         ? { title: 'Paused', body: <p>The run is paused. No new step starts until you resume.</p> }
@@ -686,7 +732,8 @@ function statusContent(
               {cause === 'runner_stopped' ? 'Relay restarted it and did not' : 'Relay did not'} resume or retry anything
               on its own. Your approvals and completed artifacts are kept.
             </p>
-            <UnresolvedRequests run={run} />
+            <UncertainOutcomeText run={run} next={uncertainNext(run)} />
+            <UncertainRequests run={run} />
           </>
         ),
       };
@@ -706,16 +753,12 @@ function statusContent(
         title: 'Run cancelled',
         body: (
           <>
-            {run.unresolvedAttempts.length > 0 ? (
+            {uncertainAttemptsOf(run).length > 0 ? (
               <div className="stack">
-                <p>
-                  These requests have no confirmed charge; the possible amount stays as unknown liability:
-                </p>
-                <UnresolvedRequests run={run} />
+                <p>These requests may or may not have completed; Relay counted an estimate for each toward the budget:</p>
+                <UncertainRequests run={run} />
               </div>
-            ) : (
-              <p>No request is waiting for a charge to be confirmed.</p>
-            )}
+            ) : null}
             <UsefulArtifacts run={run} projectId={projectId} />
             <ReportLink run={run} projectId={projectId} />
           </>
@@ -775,14 +818,16 @@ function StatusBannerView({
   pending,
   busy,
   disabledReasons,
+  pausing = false,
 }: StatusBannerProps) {
   const step = blockedStep(run);
   const lastShutdown = useAppInfo().data?.lastShutdown;
-  const content = statusContent(run, projectId, events, step, lastShutdown);
+  const content = statusContent(run, projectId, events, step, lastShutdown, pausing);
   if (content === null) return null;
   const p = statusPresentation('run', run.status, run.pauseReason);
-  const recovery =
-    run.status === 'interrupted' || (run.status === 'paused' && run.pauseReason === 'unknown_outcome');
+  // Interrupted runs get the RecoveryPanel; every pause (a request that may not have completed included) gets the
+  // banner's own buttons. The banner already lists uncertain requests with their facts.
+  const recovery = run.status === 'interrupted';
   const actions = bannerActions(run);
   return (
     <div className="stack" data-testid="status-banner">
@@ -805,14 +850,7 @@ function StatusBannerView({
         {/* The page header already shows the run's status badge: the banner states the cause and the actions once. */}
         {content.body}
       </InlineAlert>
-      {recovery ? (
-        <RecoveryPanel
-          run={run}
-          onDecide={onRecoveryAction}
-          pendingAction={pending}
-          attemptDecisions={UNKNOWN_OUTCOME_DECISIONS}
-        />
-      ) : null}
+      {recovery ? <RecoveryPanel run={run} onDecide={onRecoveryAction} pendingAction={pending} showRequests={false} /> : null}
     </div>
   );
 }

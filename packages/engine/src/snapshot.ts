@@ -120,7 +120,20 @@ export function parseRunSnapshot(raw: unknown): RunSnapshot {
     if (!r.success) throw new SnapshotError('memoryIncludeIds');
     return r.data;
   });
-  return { steps, workflowContentHash: hash.data, catalogVersion: raw['catalogVersion'], memoryIncludeIds };
+  return { steps, workflowContentHash: hash.data, catalogVersion: raw['catalogVersion'], memoryIncludeIds, ...outputTokenOverridesOf(raw['outputTokenOverrides']) };
+}
+
+/** Decision 3: the recorded per-step output limits (absent in runs started before them). */
+function outputTokenOverridesOf(v: unknown): Pick<RunSnapshot, 'outputTokenOverrides'> {
+  if (v === undefined) return {};
+  if (!isRecord(v)) throw new SnapshotError('outputTokenOverrides');
+  const out: Partial<Record<StepKey, number>> = {};
+  for (const [key, n] of Object.entries(v)) {
+    const k = stepKeySchema.safeParse(key);
+    if (!k.success || typeof n !== 'number' || !Number.isSafeInteger(n) || n <= 0) throw new SnapshotError('outputTokenOverrides');
+    out[k.data] = n;
+  }
+  return { outputTokenOverrides: out };
 }
 
 /** The run's snapshot (parsed). */

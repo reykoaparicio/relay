@@ -36,7 +36,7 @@ export type { KeyValueItem } from './KeyValueList';
 export { ListItemButton } from './ListItemButton';
 export type { ListItemButtonProps } from './ListItemButton';
 export { LiveRegionProvider, useLiveRegion } from './LiveRegion';
-export { Money } from './Money';
+export { MAY_NOT_HAVE_BEEN_CHARGED, Money } from './Money';
 export type { MoneyProps } from './Money';
 export { MoneyInput, parseDollarInput } from './MoneyInput';
 export type { MoneyInputProps, MoneyParseResult } from './MoneyInput';
@@ -109,6 +109,6 @@ export type { FileTreeProps, FileTreeIncluded, FileTreeExcluded } from './domain
 export { MemoryRecordCard } from './domain/MemoryRecordCard';
 export type { MemoryRecordCardProps } from './domain/MemoryRecordCard';
 export { RecoveryPanel } from './domain/RecoveryPanel';
-export type { RecoveryPanelProps, RecoveryDecisionDetail } from './domain/RecoveryPanel';
+export type { RecoveryPanelProps } from './domain/RecoveryPanel';
 export { StepTimeline } from './domain/StepTimeline';
 export type { StepTimelineProps } from './domain/StepTimeline';

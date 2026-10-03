@@ -36,6 +36,28 @@ describe('AttemptRepo', () => {
     expect(end.providerResponseId).toBe('resp_1');
   });
 
+  it('decision 1: transition sets outcome_uncertain / may_not_have_been_charged; markUncertain; listUncertain; listReconcileCandidates', () => {
+    const { run, step, attempt } = setup();
+    const repo = f.db.repos.attempts;
+    expect([attempt.outcomeUncertain, attempt.mayNotHaveBeenCharged]).toEqual([false, false]);
+
+    repo.transition(attempt.id, ['reserved'], 'dispatching', {});
+    repo.transition(attempt.id, ['dispatching'], 'unknown', { outcomeUncertain: true, mayNotHaveBeenCharged: true });
+    const other = seedAttempt(f.db, f.clock, run.id, step.id);
+    repo.transition(other.id, ['reserved'], 'abandoned', {});
+    const legacy = seedAttempt(f.db, f.clock, run.id, step.id);
+    repo.transition(legacy.id, ['reserved'], 'abandoned', {});
+    expect(repo.markUncertain(legacy.id, false)).toBe(true);
+    repo.setProviderIds(legacy.id, { responseId: 'resp_legacy' });
+
+    expect([repo.get(attempt.id).outcomeUncertain, repo.get(attempt.id).mayNotHaveBeenCharged]).toEqual([true, true]);
+    expect(repo.listUncertain(run.id).map((a) => [a.id, a.mayNotHaveBeenCharged])).toEqual([[attempt.id, true], [legacy.id, false]]);
+    // unknown always; abandoned only when uncertain AND a provider response id exists (only its cost can be corrected)
+    expect(repo.listReconcileCandidates().map((a) => a.id)).toEqual([attempt.id, legacy.id]);
+    expect(() => f.db.tx('immediate', () => repo.transition(attempt.id, ['unknown'], 'unknown', { outcomeUncertain: false }))).not.toThrow();
+    expect(repo.get(attempt.id).outcomeUncertain).toBe(false);
+  });
+
   it('nextSeq increments per step run', () => {
     const { run, step } = setup();
     const other = f.db.repos.steps.insertRetry(step, { id: newId('stepRun'), state: 'ready', createdAt: f.clock.now() });

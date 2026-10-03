@@ -158,7 +158,7 @@ describe('toStrictJsonSchema', () => {
 
   it('report.v1 (engine-generated, never sent to a provider) is not strict-convertible: its additive keys are optional', () => {
     expect(MODEL_OUTPUT_SCHEMA_IDS).not.toContain('report.v1');
-    expect(() => toStrictJsonSchema(OUTPUT_SCHEMAS['report.v1'])).toThrow(/optional or defaulted key "approvals"/);
+    expect(() => toStrictJsonSchema(OUTPUT_SCHEMAS['report.v1'])).toThrow(/optional or defaulted key "unknownLiabilities"/);
     expect(OUTPUT_SCHEMAS['report.v1'].safeParse(FIXTURES['report.v1']).success).toBe(true);
   });
 

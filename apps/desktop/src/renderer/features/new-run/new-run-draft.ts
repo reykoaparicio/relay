@@ -13,9 +13,16 @@ export function loadNewRunDraft(projectId: string): NewRunForm | undefined {
 /** Saves the form as the project's draft; an untouched form removes it. */
 export function saveNewRunDraft(projectId: string, form: NewRunForm): void {
   const draft = { ...form, submitted: false };
-  const untouched = (Object.keys(INITIAL_FORM) as Array<keyof NewRunForm>).every((k) => draft[k] === INITIAL_FORM[k]);
+  const untouched = (Object.keys(INITIAL_FORM) as Array<keyof NewRunForm>).every((k) => sameValue(draft[k], INITIAL_FORM[k]));
   if (untouched) drafts.delete(projectId);
   else drafts.set(projectId, draft);
+}
+
+/** By value for object fields (e.g. `outputTokenTexts` back to `{}` after "Reset all to defaults"). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 export function clearNewRunDraft(projectId: string): void {

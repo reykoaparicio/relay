@@ -78,6 +78,11 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
       await inspector.expectLoaded();
       await inspector.expectAwaitingApproval();
       await shot('inspector-awaiting-approval');
+      // Decision 2: export while in progress (an interim report) says what it includes so far.
+      const exportDialog = await inspector.openInterimExport();
+      await expect(exportDialog.getByTestId('export-progress-note')).toContainText('The run is still in progress');
+      await shot('inspector-export-interim');
+      await page.keyboard.press('Escape');
       for (const tab of ['Context', 'Attempts', 'Events', 'Ledger'] as const) {
         await inspector.openTab(tab);
         await shot(`inspector-tab-${tab.toLowerCase()}`);
@@ -138,7 +143,8 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
 
   const STATES: readonly { scenario: string; status: string; start: { allowance?: string }; before: (i: Inspector) => Promise<void> }[] = [
     { scenario: 'budget-exhaustion', status: 'Paused: run budget', start: { allowance: '$0.10' }, before: noop },
-    { scenario: 'unknown-outcome', status: 'Paused: unknown request outcome', start: {}, before: approveFirst },
+    { scenario: 'unknown-outcome', status: 'Paused: request may not have completed', start: {}, before: approveFirst },
+    { scenario: 'unknown-before-response', status: 'Paused: request may not have completed', start: {}, before: approveFirst },
     { scenario: 'malformed-twice', status: "Paused: output didn't match schema", start: {}, before: noop },
     { scenario: 'auth-fail', status: 'Paused: provider sign-in needed', start: {}, before: noop },
     { scenario: 'overrun', status: 'Paused: cost exceeded reservation', start: {}, before: noop },
@@ -162,9 +168,11 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
         await shot('inspector');
         await inspector.openTab('Attempts');
         await shot('attempts');
+        await inspector.openTab('Ledger');
+        await shot('ledger');
         await new Shell(page).nav('Overview');
         await shot('overview');
-        expect(shot.taken()).toBe(3);
+        expect(shot.taken()).toBe(4);
       });
     });
   }

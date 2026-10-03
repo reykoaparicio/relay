@@ -70,7 +70,7 @@ describe('fake bridge', () => {
       for (const run of createFakeBridge(scenario).world.runs) {
         expect(runDetailSchema.safeParse(run).success).toBe(true);
         const expected = allowedRunActions(run.status, run.pauseReason, {
-          unknownAttempts: run.unresolvedAttempts.length,
+          uncertainAttempts: run.uncertainAttempts.length,
           hasFailedStep: run.steps.some((s) => s.state === 'failed'),
           hasPatchArtifact: run.steps.some((s) => s.stepKey === 'implement' && s.outputArtifactId !== null),
         });
@@ -93,15 +93,83 @@ describe('fake bridge', () => {
   });
 
   it('pushes run.status and a gapless run.event when a run changes status', async () => {
-    const bridge = createFakeBridge('active-run');
+    const bridge = createFakeBridge('awaiting-approval');
     const pushes: string[] = [];
     bridge.subscribe((e) => pushes.push(e.type));
-    const run = bridge.world.runs[0];
+    const run = bridge.world.runs.find((r) => r.status === 'awaiting_approval');
     const before = bridge.world.events.get(run?.id ?? '')?.at(-1)?.seq ?? 0;
     const res = await bridge.invoke('relay/v1/runs.pause', { runId: run?.id ?? '' });
     expect(res).toEqual({ ok: true, data: { status: 'paused', inFlight: 'none' } });
     expect(pushes).toEqual(['run.event', 'run.status']);
     expect(bridge.world.events.get(run?.id ?? '')?.at(-1)?.seq).toBe(before + 1);
+  });
+
+  describe('decision 2: pause and export while running', () => {
+    it('a pause during an in-flight request takes effect after it; resume continues where it stopped', async () => {
+      const bridge = createFakeBridge('active-run');
+      const run = bridge.world.runs[0];
+      const runId = run?.id ?? '';
+      expect(run?.availableActions).toContain('pause');
+      const res = await bridge.invoke('relay/v1/runs.pause', { runId });
+      expect(res).toEqual({ ok: true, data: { status: 'running', inFlight: 'waiting' } });
+      expect(bridge.world.runs.find((r) => r.id === runId)?.status).toBe('running');
+      bridge.finishInFlight(runId);
+      expect(bridge.world.runs.find((r) => r.id === runId)).toMatchObject({ status: 'paused', pauseReason: 'user' });
+      expect(bridge.world.runs.find((r) => r.id === runId)?.availableActions).toEqual(['resume', 'stop', 'export_report']);
+      const resumed = await bridge.invoke('relay/v1/runs.resume', { runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZR', decision: { kind: 'continue' } });
+      expect(resumed.ok ? resumed.data.status : null).toBe('running');
+    });
+
+    it('a pause while awaiting approval resumes back to the approval', async () => {
+      const bridge = createFakeBridge('awaiting-approval');
+      const runId = bridge.world.runs.find((r) => r.status === 'awaiting_approval')?.id ?? '';
+      await bridge.invoke('relay/v1/runs.pause', { runId });
+      const resumed = await bridge.invoke('relay/v1/runs.resume', { runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZS', decision: { kind: 'continue' } });
+      expect(resumed.ok ? resumed.data.status : null).toBe('awaiting_approval');
+    });
+
+    it('offers pause in queued, running and awaiting_approval, and export_report in every non-terminal state', () => {
+      for (const scenario of FAKE_SCENARIOS) {
+        for (const run of createFakeBridge(scenario).world.runs) {
+          if (['queued', 'running', 'awaiting_approval'].includes(run.status)) expect(run.availableActions, scenario).toContain('pause');
+          expect(run.availableActions, `${scenario} ${run.status}`).toContain('export_report');
+        }
+      }
+    });
+
+    it('exports a run that is still in progress (an interim report)', async () => {
+      const bridge = createFakeBridge('awaiting-approval');
+      const runId = bridge.world.runs.find((r) => r.status === 'awaiting_approval')?.id ?? '';
+      const res = await bridge.invoke('relay/v1/artifacts.export', { runId, what: 'report' });
+      expect(res.ok ? res.data.exported : null).toBe(true);
+    });
+  });
+
+  describe('decision 1: uncertain requests are settled as estimates', () => {
+    it('unknown-outcome: the attempt is an estimated charge that may not have been charged; Retry step and Stop only', () => {
+      const run = createFakeBridge('unknown-outcome').world.runs[0];
+      expect(run?.unresolvedAttempts).toEqual([]);
+      expect(run?.uncertainAttempts).toHaveLength(1);
+      expect(run?.uncertainAttempts[0]).toMatchObject({ cost: { microusd: 620_000, certainty: 'estimated' }, mayNotHaveBeenCharged: true });
+      expect(run?.cost).toMatchObject({ settledEstimated: 620_000, unknown: 0, hasEstimates: true });
+      expect(run?.availableActions.filter((a) => a !== 'export_report')).toEqual(['retry_step', 'stop']);
+      expect(run?.availableActions).not.toContain('decide_unknown');
+    });
+
+    it('no scenario offers decide_unknown, and runs.decideUnknown is refused', async () => {
+      for (const scenario of FAKE_SCENARIOS) {
+        for (const run of createFakeBridge(scenario).world.runs) expect(run.availableActions, scenario).not.toContain('decide_unknown');
+      }
+      const bridge = createFakeBridge('unknown-outcome');
+      const run = bridge.world.runs[0];
+      const res = await bridge.invoke('relay/v1/runs.decideUnknown', {
+        runId: run?.id ?? '',
+        attemptId: run?.uncertainAttempts[0]?.id ?? '',
+        decision: 'accept_estimated_charge',
+        idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZT',
+      });
+      expect(res.ok ? null : res.error.code).toBe('CONFLICT');
+    });
   });
 
   it('answers approvals.decide with APPROVAL_STALE when the echoed hashes differ', async () => {
@@ -292,7 +360,7 @@ describe('fake bridge', () => {
       const run = bridge.world.runs.find((r) => r.id === res.data.runId);
       expect(run).toMatchObject({ status: 'paused', pauseReason: 'auth_required', startedAt: null });
       expect(run?.statusDetail).toMatchObject({ code: 'AUTH_REQUIRED', details: { providerId: 'openai', stepKey: 'plan' } });
-      expect(run?.availableActions).toEqual(['reconnect_provider', 'resume', 'stop']);
+      expect(run?.availableActions).toEqual(['reconnect_provider', 'resume', 'stop', 'export_report']);
       expect(run?.steps.every((s) => s.state === 'pending')).toBe(true);
       for (const s of run?.steps ?? []) expect(bridge.world.steps.get(s.id)?.attempts).toEqual([]);
       const early = await bridge.invoke('relay/v1/runs.resume', { runId: res.data.runId, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZH', decision: { kind: 'continue' } });
@@ -313,10 +381,6 @@ describe('fake bridge', () => {
       }
     });
 
-    it('paused(unknown_outcome) with every unknown decided and no failed step offers resume', () => {
-      const run = createFakeBridge('unknown-outcome-decided').world.runs[0];
-      expect(run?.availableActions).toEqual(['resume', 'stop']);
-    });
   });
 
   it('memory.purgeProjectHistory reports purged and failed files (03 C8)', async () => {

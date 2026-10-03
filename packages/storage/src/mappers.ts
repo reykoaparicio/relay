@@ -430,6 +430,8 @@ export function mapAttempt(row: unknown): AttemptRow {
     dispatchedAt: r.msN('dispatched_at'),
     firstByteAt: r.msN('first_byte_at'),
     finishedAt: r.msN('finished_at'),
+    outcomeUncertain: r.bool('outcome_uncertain'),
+    mayNotHaveBeenCharged: r.bool('may_not_have_been_charged'),
   });
 }
 

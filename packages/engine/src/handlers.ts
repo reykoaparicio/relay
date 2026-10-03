@@ -228,7 +228,7 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
       }),
     'relay/v1/runs.get': (input) => sync(() => ok(toRunDetail(r, r.runs.getInspectorProjection(input.runId)))),
     'relay/v1/runs.getStep': (input) => stepDetail(ctx, input),
-    'relay/v1/runs.pause': (input) => sync(() => pauseRun(ctx, input.runId)),
+    'relay/v1/runs.pause': (input) => pauseRun(ctx, input.runId),
     'relay/v1/runs.resume': (input) => resumeRun(ctx, input),
     'relay/v1/runs.cancel': (input) => cancelRun(ctx, input.runId),
     'relay/v1/runs.increaseAllowance': (input) => increaseAllowance(ctx, input),
@@ -266,7 +266,15 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
         if (project === undefined) return err(errors.notFound('project'));
         const { start, end } = input.month === undefined ? monthWindow(ctx.clock.now()) : monthWindowOf(input.month);
         const b = r.ledger.projectMonthBalances(project.id, start, end);
-        return ok({ trackedMicrousd: b.C, reservedMicrousd: b.R, unknownMicrousd: b.U, allowance: project.monthlyAllowanceMicrousd, label: 'tracked by Relay' as const });
+        const estimated = r.ledger.projectMonthEstimated(project.id, start, end);
+        return ok({
+          trackedMicrousd: b.C,
+          reservedMicrousd: b.R,
+          unknownMicrousd: b.U,
+          allowance: project.monthlyAllowanceMicrousd,
+          hasEstimates: estimated > 0 || b.U > 0,
+          label: 'tracked by Relay' as const,
+        });
       }),
     'relay/v1/ledger.entries': (input) =>
       sync(() => {

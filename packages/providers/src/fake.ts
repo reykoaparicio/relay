@@ -241,6 +241,8 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
       case 'unknown_after_dispatch':
       case 'crash_process_after_dispatch': // only reached when the injected exit returns (tests)
         return fakeError('REQUEST_OUTCOME_UNKNOWN', 'sent_no_response', { providerId, causeCode: 'ECONNRESET', providerResponseId: ids.providerResponseId }, { providerResponseId: ids.providerResponseId });
+      case 'unknown_before_response':
+        return fakeError('REQUEST_OUTCOME_UNKNOWN', 'sent_no_response', { providerId, causeCode: 'ECONNRESET' });
       case 'midstream_error': {
         const partial = { ...usage, outputTokens: Math.min(MIDSTREAM_PROGRESS_TOKENS, usage.outputTokens) };
         safeHook('onProgress', () => ctx.hooks?.onProgress?.({ outputTokensSoFar: partial.outputTokens, elapsedMs: clock.now() - startedAt }), logger);
@@ -267,7 +269,10 @@ export function createFakeProvider(opts: FakeProviderOptions): ProviderAdapter {
       scriptStep: taken?.index ?? null,
     };
     safeHook('onDispatched', () => ctx.hooks?.onDispatched?.(), logger);
-    safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId: `${FAKE_RESPONSE_ID_PREFIX}${attemptId}` }), logger);
+    // `unknown_before_response`: the connection resets before any response byte, so no response id is ever seen.
+    if (step?.result.kind !== 'unknown_before_response') {
+      safeHook('onResponseId', () => ctx.hooks?.onResponseId?.({ providerResponseId: `${FAKE_RESPONSE_ID_PREFIX}${attemptId}` }), logger);
+    }
     callLog.append(call); // synchronous: on disk before any crash (12 §L6)
     if (step?.result.kind === 'crash_process_after_dispatch') exit(FAKE_CRASH_EXIT_CODE);
     if (step?.delayMs !== undefined && step.delayMs > 0 && !(await sleep(timers, step.delayMs, ctx.signal))) {

@@ -242,6 +242,7 @@ describe('project, run, memory, and settings DTOs', () => {
       steps: [stepViewFixture()],
       pendingApproval: null,
       unresolvedAttempts: [],
+      uncertainAttempts: [],
       executionMsUsed: 1000,
       revisionCycle: 0,
       statusDetail: null,

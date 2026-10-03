@@ -1,52 +1,26 @@
 import { useId, useRef, useState } from 'react';
-import { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import type { RunAction, RunDetail } from '@relay/contracts';
-import {
-  DESTRUCTIVE_RUN_ACTIONS,
-  RUN_ACTION_LABELS,
-  UNKNOWN_OUTCOME_DECISION_HINTS,
-  UNKNOWN_OUTCOME_DECISION_LABELS,
-} from '../../../lib/format/actions';
-import type { UnknownOutcomeDecision } from '../../../lib/format/actions';
+import { DESTRUCTIVE_RUN_ACTIONS, RUN_ACTION_LABELS } from '../../../lib/format/actions';
 import { stepName } from '../../../lib/format/labels';
-import { formatMoney } from '../../../lib/format/money';
 import { statusPresentation } from '../../../lib/format/status-presentation';
+import { mayNotHaveBeenCharged, uncertainAttemptsOf } from '../../../lib/format/uncertain';
 import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
 import { Money } from '../Money';
 import { StatusBadge } from '../StatusBadge';
 import { useFocusRescue } from '../useFocusRescue';
 
-/** The attempt-level choice behind a `decide_unknown` (→ `runs.decideUnknown { attemptId, decision }`). */
-export interface RecoveryDecisionDetail {
-  readonly attemptId?: string;
-  readonly decision?: UnknownOutcomeDecision;
-}
-
 export interface RecoveryPanelProps {
   readonly run: RunDetail;
-  /**
-   * Called with one of `run.availableActions`; the page maps it to an IPC op (02 B5 "Run actions").
-   * A per-attempt row button calls `onDecide('decide_unknown', { attemptId, decision })`; every other
-   * button calls it with the action only (so a `(action) => void` handler keeps working).
-   */
-  readonly onDecide: (action: RunAction, detail?: RecoveryDecisionDetail) => void;
+  /** Called with one of `run.availableActions`; the page maps it to an IPC op (02 B5 "Run actions"). */
+  readonly onDecide: (action: RunAction) => void;
   /** The action in flight: its button shows pending and all other buttons are disabled. */
   readonly pendingAction?: RunAction | null;
   /**
-   * Opt-in per-attempt decisions: while `decide_unknown` is available, each unresolved attempt row gets
-   * one button per listed decision (pass contracts `UNKNOWN_OUTCOME_DECISIONS` for all three; "accept
-   * the estimated charge" only appears on attempts that have an amount) and the single "Decide on
-   * unknown charge" button is dropped. Default `[]` keeps that single button (existing callers).
+   * List the requests that may not have completed, with the estimate counted for each (default). The run inspector's
+   * banner already lists them with their request facts, so it turns this off.
    */
-  readonly attemptDecisions?: readonly UnknownOutcomeDecision[];
-}
-
-const NO_ATTEMPT_DECISIONS: readonly UnknownOutcomeDecision[] = [];
-
-interface AttemptChoice {
-  readonly attemptId: string;
-  readonly decision: UnknownOutcomeDecision;
+  readonly showRequests?: boolean;
 }
 
 const CONFIRM_TEXT: Partial<Record<RunAction, string>> = {
@@ -55,30 +29,24 @@ const CONFIRM_TEXT: Partial<Record<RunAction, string>> = {
   reject: 'The run stops without producing a patch. Finished steps are kept.',
 };
 
-/** Interrupted / unknown-outcome recovery (§4.4): what finished, what is unresolved, and the allowed choices. */
-export function RecoveryPanel({
-  run,
-  onDecide,
-  pendingAction = null,
-  attemptDecisions = NO_ATTEMPT_DECISIONS,
-}: RecoveryPanelProps) {
+/** Actions the panel never renders: exports live in the page header; a charge is never "decided" (it is estimated). */
+const NOT_IN_PANEL: ReadonlySet<RunAction> = new Set<RunAction>(['export_report', 'export_patch', 'decide_unknown', 'pause']);
+
+/**
+ * Interrupted run / a request that may not have completed (§4.4): the last completed step, the estimate Relay counted
+ * for each uncertain request, and the allowed choices (from `availableActions`).
+ */
+export function RecoveryPanel({ run, onDecide, pendingAction = null, showRequests = true }: RecoveryPanelProps) {
   const headingId = useId();
-  const rowIdPrefix = useId();
   const sectionRef = useRef<HTMLElement>(null);
   // Focus lands here when a chosen action disables or removes the button that had it (never on <body>).
   const headingRef = useRef<HTMLHeadingElement>(null);
   useFocusRescue(sectionRef, headingRef);
   const [confirming, setConfirming] = useState<RunAction | null>(null);
-  // The row button that started the in-flight `decide_unknown` (shows its spinner while pending).
-  const [lastChoice, setLastChoice] = useState<AttemptChoice | null>(null);
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
+  const uncertain = uncertainAttemptsOf(run);
   // The server decides which actions apply (06 F2); the UI never re-derives the rules.
-  const perAttempt =
-    attemptDecisions.length > 0 && run.availableActions.includes('decide_unknown') && run.unresolvedAttempts.length > 0;
-  const actions = run.availableActions.filter(
-    (a) => a !== 'export_report' && a !== 'export_patch' && !(perAttempt && a === 'decide_unknown'),
-  );
-  const offered = UNKNOWN_OUTCOME_DECISIONS.filter((d) => attemptDecisions.includes(d));
+  const actions = run.availableActions.filter((a) => !NOT_IN_PANEL.has(a));
   // The status detail sits on its own full-width line under the heading row, so on narrow cards it
   // wraps below "Recovery" instead of being squeezed beside it (no text is truncated).
   const statusDetail = statusPresentation('run', run.status, run.pauseReason).detail;
@@ -96,64 +64,28 @@ export function RecoveryPanel({
         Last completed step:{' '}
         <strong>{lastDone ? stepName(lastDone.stepKey, run.stepMeta) : 'none yet'}</strong>
       </p>
-      {run.unresolvedAttempts.length > 0 ? (
+      {showRequests && uncertain.length > 0 ? (
         <div className="stack">
-          <h3 className="section-label">Requests with an unknown outcome</h3>
+          <h3 className="section-label">Requests that may not have completed</h3>
           <ul className="list">
-            {run.unresolvedAttempts.map((a) => {
-              const titleId = `${rowIdPrefix}-${a.id}`;
-              return (
-                <li key={a.id} className="list-item static">
-                  <span className="row">
-                    <span className="title" id={titleId}>
-                      {stepName(a.stepKey, run.stepMeta)} · attempt {a.seq}
-                    </span>
-                    <StatusBadge kind="attempt" value={a.state} />
+            {uncertain.map((a) => (
+              <li key={a.id} className="list-item static">
+                <span className="row">
+                  <span className="title">
+                    {stepName(a.stepKey, run.stepMeta)} · attempt {a.seq}
                   </span>
-                  <span className="meta">
-                    Possible charge (liability kept):{' '}
-                    {a.cost ? <Money value={a.cost.microusd} certainty={a.cost.certainty} /> : 'amount not known'}
-                  </span>
-                  {perAttempt ? (
-                    <div className="actions" role="group" aria-labelledby={titleId}>
-                      {offered
-                        .filter((d) => d !== 'accept_estimated_charge' || a.cost !== null)
-                        .map((decision) => (
-                          <Button
-                            key={decision}
-                            size="sm"
-                            aria-describedby={titleId}
-                            pending={
-                              pendingAction === 'decide_unknown' &&
-                              lastChoice?.attemptId === a.id &&
-                              lastChoice.decision === decision
-                            }
-                            disabled={pendingAction !== null}
-                            onClick={() => {
-                              setLastChoice({ attemptId: a.id, decision });
-                              onDecide('decide_unknown', { attemptId: a.id, decision });
-                            }}
-                          >
-                            {decision === 'accept_estimated_charge' && a.cost !== null
-                              ? `Accept ${formatMoney(a.cost.microusd)} as the charge`
-                              : UNKNOWN_OUTCOME_DECISION_LABELS[decision]}
-                          </Button>
-                        ))}
-                    </div>
-                  ) : null}
-                </li>
-              );
-            })}
+                </span>
+                <span className="meta">
+                  Counted toward the budget:{' '}
+                  {a.cost === null ? (
+                    'no amount recorded'
+                  ) : (
+                    <Money value={a.cost.microusd} certainty="estimated" mayNotHaveBeenCharged={mayNotHaveBeenCharged(a)} />
+                  )}
+                </span>
+              </li>
+            ))}
           </ul>
-          {perAttempt ? (
-            <ul className="subtle">
-              {offered.map((d) => (
-                <li key={d}>
-                  <strong>{UNKNOWN_OUTCOME_DECISION_LABELS[d]}:</strong> {UNKNOWN_OUTCOME_DECISION_HINTS[d]}
-                </li>
-              ))}
-            </ul>
-          ) : null}
         </div>
       ) : null}
       {actions.length > 0 ? (

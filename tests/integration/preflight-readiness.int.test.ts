@@ -36,7 +36,7 @@ describe('preflight readiness @m3', () => {
     expect(trail).toEqual(['paused']); // queued → paused: it never ran
     const detail = await h.call('relay/v1/runs.get', { runId });
     // No credential ref yet: resume cannot succeed, so only reconnect/stop are offered — and resume is refused.
-    expect(detail.ok && detail.data.availableActions).toEqual(['reconnect_provider', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['reconnect_provider', 'stop', 'export_report']);
     const early = await h.resume(runId, { kind: 'continue' }, 'resume-before-credential');
     expect(early.ok ? 'ok' : early.error.code).toBe('AUTH_REQUIRED');
     expect(h.db.repos.runs.get(runId).status).toBe('paused');

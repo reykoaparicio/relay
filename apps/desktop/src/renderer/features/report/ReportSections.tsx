@@ -2,10 +2,10 @@
 // `report.v1` artifact (type from `@relay/contracts` `outputs/report.v1`), never from a local shape.
 import { useId, useState } from 'react';
 import type { ReactNode } from 'react';
-import { addMicrousd } from '@relay/contracts';
+import { microusd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
 import { Button, Dialog, DialogClose, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
-import { APPROVAL_DECISION_LABELS, formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
+import { APPROVAL_DECISION_LABELS, costHasEstimates, estimatedPart, formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString, trackedTotal } from '../../lib/format';
 import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
 import { anyExportFailed, EXPORT_NOT_FOUND_TEXT, EXPORT_PART_LABELS, exportErrorParts, exportErrorRetryable, retryWhatOf } from './export-results';
@@ -297,30 +297,57 @@ export function LimitationsSection({ report }: { readonly report: ReportV1 }) {
   );
 }
 
+/** One estimated charge of the report: `report.v1.estimatedCharges`, else a legacy `unknownLiabilities` entry. */
+interface ReportEstimate {
+  readonly attemptId: string;
+  readonly stepKey: string;
+  readonly amountMicrousd: number;
+  readonly mayNotHaveBeenCharged: boolean;
+}
+
+/** The report's estimated charges (new reports list them; older ones carried them as "liabilities"). */
+export function reportEstimates(report: ReportV1): ReportEstimate[] {
+  const own = (report.estimatedCharges ?? []).map((e) => ({
+    attemptId: e.attemptId,
+    stepKey: e.stepKey,
+    amountMicrousd: e.amountMicrousd,
+    mayNotHaveBeenCharged: e.mayNotHaveBeenCharged,
+  }));
+  const seen = new Set(own.map((e) => e.attemptId));
+  const legacy = (report.unknownLiabilities ?? [])
+    .filter((u) => !seen.has(u.attemptId))
+    .map((u) => ({ attemptId: u.attemptId, stepKey: u.stepKey, amountMicrousd: u.liabilityMicrousd, mayNotHaveBeenCharged: false }));
+  return [...own, ...legacy];
+}
+
 export function CostSection({ report }: { readonly report: ReportV1 }) {
   const t = report.totals;
-  const total = addMicrousd(t.settledReported, t.settledCalculated, t.settledEstimated);
+  const total = trackedTotal(t);
+  const estimates = reportEstimates(report);
+  const approx = costHasEstimates(t) || estimates.length > 0;
+  const estimated = estimatedPart(t);
   return (
     <Section title="Total tracked cost">
       <p className="text-2xl font-semibold">
-        <Money value={total} certainty={t.settledEstimated > 0 ? 'estimated' : null} />
+        <Money value={total} approx={approx} />
       </p>
       <KeyValueList
         items={[
           { id: 'rep', term: 'Reported', value: <Money value={t.settledReported} /> },
           { id: 'calc', term: 'Calculated', value: <Money value={t.settledCalculated} /> },
-          { id: 'est', term: 'Estimated', value: <Money value={t.settledEstimated} certainty="estimated" /> },
-          { id: 'unk', term: 'Unknown liability', value: <Money value={t.unknown} /> },
+          { id: 'est', term: 'Estimated', value: <Money value={estimated} certainty={estimated > 0 ? 'estimated' : null} /> },
           { id: 'allow', term: 'Run allowance', value: <Money value={t.allowance} /> },
         ]}
       />
-      {report.unknownLiabilities.length > 0 ? (
+      {estimates.length > 0 ? (
         <div className="stack">
-          <h3 className="section-label">Unresolved charges</h3>
+          <h3 className="section-label">Estimated charges</h3>
+          <p className="subtle small">The exact cost of these requests was not available, so Relay counted an estimate.</p>
           <ul className="small">
-            {report.unknownLiabilities.map((u) => (
-              <li key={u.attemptId}>
-                {stepTitle(u)}: up to <Money value={u.liabilityMicrousd} /> ({u.state === 'unknown' ? 'outcome unknown' : 'abandoned'})
+            {estimates.map((e) => (
+              <li key={e.attemptId}>
+                {stepTitle(e)}:{' '}
+                <Money value={microusd(e.amountMicrousd)} certainty="estimated" mayNotHaveBeenCharged={e.mayNotHaveBeenCharged} />
               </li>
             ))}
           </ul>
@@ -375,6 +402,8 @@ export interface ExportDialogProps {
    * "Written" (path) or "Failed" (reason), and the primary action retries only the failed parts.
    */
   readonly parts?: readonly ExportPartResult[] | null;
+  /** The run is still in progress (an interim export): what the export includes, shown above the choices. */
+  readonly progressNote?: string;
 }
 
 /** "Written" / "Failed" rows of a partial export. Status is spelled out, never shown by color alone. */
@@ -401,7 +430,7 @@ function ExportPartRows({ parts }: { readonly parts: readonly ExportPartResult[]
 }
 
 /** What to export; main shows the folder dialog. A failure changes nothing: "Run is intact; retry export only." */
-export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, error, onExport, parts = null }: ExportDialogProps) {
+export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, error, onExport, parts = null, progressNote }: ExportDialogProps) {
   const [what, setWhat] = useState<ExportWhat>(hasPatch ? initial : 'report');
   const failed = error !== null && error !== undefined;
   const e = failed ? toViewError(error) : null;
@@ -465,6 +494,9 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
           </p>
         </InlineAlert>
       ) : null}
+      {progressNote === undefined || partial ? null : (
+        <p data-testid="export-progress-note">{progressNote}</p>
+      )}
       {partial ? (
         <ExportPartRows parts={rows} />
       ) : (
@@ -475,7 +507,7 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
           options={[
             { value: 'report', label: 'Report (Markdown)' },
             { value: 'patch', label: 'Patch (.patch)', disabled: !hasPatch, ...(hasPatch ? {} : { description: 'This run has no patch.' }) },
-            { value: 'both', label: 'Both', description: '2 files', disabled: !hasPatch },
+            { value: 'both', label: 'Both', description: hasPatch ? '2 files' : 'Needs a patch; this run has none yet.', disabled: !hasPatch },
           ]}
         />
       )}

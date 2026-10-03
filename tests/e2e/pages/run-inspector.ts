@@ -17,10 +17,10 @@ export type LedgerBucket =
   | 'Calculated from usage'
   | 'Estimated'
   | 'Reserved (in flight)'
-  | 'Unknown liability'
+  | 'Tracked total'
   | 'Allowance';
 
-/** Parses the first "$1,234.56" amount in a text (Money renders "$0.12", "≈ $0.48 est."). */
+/** Parses the first "$1,234.56" amount in a text (Money renders "$0.12", "~$0.48 (estimated)", "~$0.48"). */
 export function dollars(text: string | null): number {
   const m = /\$([\d,]+(?:\.\d+)?)/.exec(text ?? '');
   if (m?.[1] === undefined) throw new Error(`no dollar amount in ${JSON.stringify(text)}`);
@@ -270,13 +270,12 @@ export class RunInspector {
     return this.page.getByRole('region', { name: 'Recovery' });
   }
 
-  /** A RecoveryPanel per-attempt decision button ("Retry (may incur another charge)", "Accept the estimated charge", …). */
-  async decideUnknown(label: string | RegExp): Promise<void> {
-    await this.recoveryPanel().getByRole('button', { name: label }).first().click();
-    const dialog = this.page.getByRole('dialog');
+  /** Header "Export…" of a run still in progress → the export dialog (with its interim note). Returns the dialog. */
+  async openInterimExport(): Promise<Locator> {
+    await this.headerAction('Export…').click();
+    const dialog = this.page.getByRole('dialog', { name: 'Export the run' });
     await expect(dialog).toBeVisible();
-    await dialog.getByRole('button', { name: label }).click();
-    await expect(dialog).toBeHidden();
+    return dialog;
   }
 
   async increaseAllowance(amount: string): Promise<void> {

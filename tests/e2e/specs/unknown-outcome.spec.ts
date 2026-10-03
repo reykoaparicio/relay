@@ -4,15 +4,18 @@ import type { DialogStub, ProjectCopy } from '../fixtures.js';
 import { setupOwnProject, startRunViaNewRun } from '../flows.js';
 import { RunInspector } from '../pages/run-inspector.js';
 
+/** Decision 1: no visible wording says "unknown" (identifiers such as the error code REQUEST_OUTCOME_UNKNOWN aside). */
+const NO_UNKNOWN = /(?<!\w)unknown/i;
 const GOAL = 'Validate the user id parameter in the user handler.';
-const RETRY = 'Retry (may incur another charge)';
-const ACCEPT = /^Accept \$[\d.,]+ as the charge$/;
+/** Decision 1: an amount without an exact cost reads "~$0.03 (estimated)"; never "unknown". */
+const ESTIMATE = /~\$[\d.,]+ \(estimated\)/;
+const EXPLANATION = /The last request may or may not have completed\. Relay counted ~\$[\d.,]+ \(estimated\) toward the budget/;
 
-// unknown-outcome: the implement request is dispatched, then the connection resets (sent_no_response, §7.5).
-test.use({ scenario: 'unknown-outcome' });
-
-/** Setup → run → approve → the implement attempt ends with an unknown outcome. */
-async function reachUnknown(
+/**
+ * Setup → run → approve → the implement request ends without a confirmed outcome: the engine settles it as an
+ * estimate and pauses with a plain explanation and only Retry step / Stop.
+ */
+async function reachUncertain(
   page: Page,
   stubDialogs: (s: DialogStub) => Promise<void>,
   project: ProjectCopy,
@@ -22,88 +25,88 @@ async function reachUnknown(
   const inspector = new RunInspector(page);
   await inspector.expectAwaitingApproval();
   await inspector.approve();
-  await inspector.waitForStatus('Paused: unknown request outcome');
-  await expect(inspector.banner()).toContainText('The request may have been sent; its charge is unknown');
-  const recovery = inspector.recoveryPanel();
-  await expect(recovery.getByRole('heading', { name: 'Requests with an unknown outcome' })).toBeVisible();
-  await expect(recovery).toContainText(/Produce patch|Implement/);
-  await expect(recovery).toContainText('Possible charge (liability kept)');
+  await inspector.waitForStatus('Paused: request may not have completed');
+  await expect(inspector.banner()).toContainText('The last request may or may not have completed');
+  await expect(inspector.banner()).toContainText(EXPLANATION);
+  await expect(inspector.banner()).toContainText('Retry the step (this may charge again) or stop.');
+  // Only Retry step and Stop: nothing to "decide".
+  await inspector.expectActions(['Retry step', 'Stop run']);
+  await expect(page.getByRole('button', { name: /decide/i })).toHaveCount(0);
+  // The request facts of the uncertain attempt are kept.
+  await expect(inspector.banner().getByRole('list', { name: 'Requests that may not have completed' })).toContainText(/Sent/);
+  await expect(page.getByRole('main')).not.toContainText(NO_UNKNOWN);
   return inspector;
 }
 
 test.describe('unknown outcome', { tag: '@m3' }, () => {
-  test('retry says it may incur another charge; the earlier liability is kept after completion', async ({
-    page,
-    stubDialogs,
-    project,
-    callLog,
-  }) => {
-    const inspector = await reachUnknown(page, stubDialogs, project);
-    const liability = await inspector.ledgerAmount('Unknown liability');
-    expect(liability).toBeGreaterThan(0);
+  // unknown-outcome: the implement request is dispatched and a response id arrives, then the connection resets: it
+  // reached the provider, so its estimate is likely charged (no "may not have been charged" note).
+  test.describe('request reached the provider', () => {
+    test.use({ scenario: 'unknown-outcome' });
 
-    // §4.4: the retry label always says it may incur another charge; the confirmation repeats it.
-    const retry = inspector.recoveryPanel().getByRole('button', { name: RETRY });
-    await expect(retry).toBeVisible();
-    await retry.click();
-    const dialog = page.getByRole('dialog', { name: 'Retry this request?' });
-    await expect(dialog).toContainText('The retry may incur another charge');
-    await dialog.getByRole('button', { name: RETRY }).click();
-    await expect(dialog).toBeHidden();
+    test('the estimate counts toward the budget; Retry step (may charge again) completes and keeps it', async ({
+      page,
+      stubDialogs,
+      project,
+      callLog,
+    }) => {
+      const inspector = await reachUncertain(page, stubDialogs, project);
+      await expect(inspector.banner()).not.toContainText('may not have been charged');
+      // The Budget card: the estimate is an estimated amount and the totals read "~".
+      await expect(await inspector.ledgerRow('Estimated')).toContainText(ESTIMATE);
+      const estimate = await inspector.ledgerAmount('Estimated');
+      expect(estimate).toBeGreaterThan(0);
+      await expect(await inspector.ledgerRow('Tracked total')).toContainText(/^~\$/);
 
-    await inspector.waitForStatus('Completed');
-    expect((await callLog()).filter((c) => c.stepKey === 'implement')).toHaveLength(2);
-    // Not silently dropped: the unknown liability of the first request is still tracked.
-    await expect.poll(async () => inspector.ledgerAmount('Unknown liability')).toBeCloseTo(liability, 4);
-  });
-
-  test('accepting the estimated charge settles it as "est." and clears the unknown liability', async ({
-    page,
-    stubDialogs,
-    project,
-    callLog,
-  }, testInfo) => {
-    const inspector = await reachUnknown(page, stubDialogs, project);
-    expect(await inspector.ledgerAmount('Unknown liability')).toBeGreaterThan(0);
-
-    await inspector.decideUnknown(ACCEPT);
-    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText(RunInspector.amountText('$0.00'));
-    await expect.poll(async () => inspector.ledgerAmount('Estimated')).toBeGreaterThan(0);
-    await expect(await inspector.ledgerRow('Estimated')).toContainText('est.');
-
-    // The per-attempt ledger rows of that implement attempt carry the "estimated" certainty.
-    const ledger = await inspector.openTab('Ledger');
-    const table = ledger.getByRole('table', { name: /^Ledger entries for / });
-    const estimatedRows = table
-      .getByRole('row')
-      .filter({ hasText: 'Produce patch' })
-      .filter({ hasText: 'estimated' });
-    await expect(estimatedRows.first()).toBeVisible();
-    await expect(table.getByRole('row').filter({ hasText: 'Produce patch' })).not.toHaveCount(0);
-    testInfo.annotations.push({
-      type: 'status-after-accept',
-      description: ((await inspector.status().textContent()) ?? '').trim(),
+      await inspector.retryStep();
+      await inspector.waitForStatus('Completed');
+      expect((await callLog()).filter((c) => c.stepKey === 'implement')).toHaveLength(2);
+      // Not dropped: the first request's estimate is still counted after completion.
+      await expect.poll(async () => inspector.ledgerAmount('Estimated')).toBeGreaterThanOrEqual(estimate);
+      await expect(page.getByRole('main')).not.toContainText(NO_UNKNOWN);
     });
-    testInfo.annotations.push({
-      type: 'implement-calls',
-      description: String((await callLog()).filter((c) => c.stepKey === 'implement').length),
+
+    test('the attempt row and ledger entries show the estimate; Stop ends the run with it in the report', async ({
+      page,
+      stubDialogs,
+      project,
+    }) => {
+      const inspector = await reachUncertain(page, stubDialogs, project);
+      await inspector.selectStep('Produce patch');
+      const attempts = await inspector.attemptsTable();
+      await expect(attempts.getByRole('row').filter({ hasText: /#1/ })).toContainText(ESTIMATE, { timeout: 5_000 });
+
+      const ledger = await inspector.openTab('Ledger');
+      const table = ledger.getByRole('table', { name: /^Ledger entries for / });
+      await expect(table.getByRole('row').filter({ hasText: 'Produce patch' }).filter({ hasText: 'Estimated' }).first()).toBeVisible();
+      await expect(ledger).not.toContainText(NO_UNKNOWN);
+
+      await inspector.bannerAction('Stop run').click();
+      const dialog = page.getByRole('dialog', { name: 'Stop this run?' });
+      await dialog.getByRole('button', { name: 'Stop run' }).click();
+      await inspector.waitForStatus('Cancelled');
+      await inspector.viewReportLink().click();
+      const cost = page.getByRole('region', { name: 'Total tracked cost' });
+      await expect(cost.locator('p.text-2xl')).toHaveText(/^~\$/);
+      await expect(cost.getByText('Estimated charges')).toBeVisible();
+      await expect(cost).toContainText(ESTIMATE);
+      await expect(page.getByRole('main')).not.toContainText(NO_UNKNOWN);
     });
   });
 
-  // Regression (engine views.ts toAttemptView): an attempt settled by accept_estimated_charge derives its certainty
-  // from its settle entries ('estimated'), so the Attempts tab labels the charge "est.".
-  test('the accepted attempt row in the Attempts tab shows the "est." label', async ({
-    page,
-    stubDialogs,
-    project,
-  }) => {
-    const inspector = await reachUnknown(page, stubDialogs, project);
-    await inspector.decideUnknown(ACCEPT);
-    await expect(await inspector.ledgerRow('Unknown liability')).toHaveText(RunInspector.amountText('$0.00'));
-    await inspector.selectStep('Produce patch');
-    const attempts = await inspector.attemptsTable();
-    await expect(attempts.getByRole('row').filter({ hasText: /#1/ })).toContainText(/\$[\d.]+ est\./, {
-      timeout: 5_000,
+  // unknown-before-response: the connection resets before any response byte: the request may never have reached the
+  // provider, so the estimate carries the note "may not have been charged".
+  test.describe('request may never have reached the provider', () => {
+    test.use({ scenario: 'unknown-before-response' });
+
+    test('the estimate says "may not have been charged"', async ({ page, stubDialogs, project }) => {
+      const inspector = await reachUncertain(page, stubDialogs, project);
+      await expect(inspector.banner()).toContainText(
+        /Relay counted ~\$[\d.,]+ \(estimated\) toward the budget, may not have been charged\. Retry the step/,
+      );
+      await expect(inspector.banner().getByRole('list', { name: 'Requests that may not have completed' })).toContainText(
+        'may not have been charged',
+      );
     });
   });
 });

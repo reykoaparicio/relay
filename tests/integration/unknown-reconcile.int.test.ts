@@ -1,7 +1,8 @@
-// 11 §K6 unknown-reconcile (@m3, F9b): after a restart the reconcile task looks up `unknown` attempts that carry a
-// provider response id on an adapter with request lookup. in_progress is re-polled on the injected (manual) timers;
-// completed → reconciled_succeeded with resolve_unknown −N + settle and NO new call; failed without usage →
-// resolve_unknown −N + settle 0 (calculated); not_found → stays unknown.
+// 11 §K6 unknown-reconcile (@m3, F9b): after a restart the reconcile task looks up uncertain (`unknown`) attempts that
+// carry a provider response id on an adapter with request lookup. Decision 1: the attempt was already settled as an
+// estimate E; reconciliation appends a correction (settle −E + settle +X) so the estimate is never counted twice.
+// in_progress is re-polled on the injected (manual) timers; completed → reconciled_succeeded, X calculated, NO new
+// call; failed without usage → corrected to 0 (calculated); not_found → stays uncertain, the estimate kept.
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RunId } from '@relay/contracts';
 import type { FakeReconcileAnswer, FakeScenario } from '@relay/providers';
@@ -10,6 +11,7 @@ import { createHarness } from '../helpers/engine-harness.js';
 import type { Harness, HarnessOptions } from '../helpers/engine-harness.js';
 import { createManualClock } from '../helpers/manual-clock.js';
 import { cleanupTempDirs } from '../helpers/temp-dirs.js';
+import { expectedEstimate } from './uncertain-estimate.js';
 
 const harnesses: Harness[] = [];
 afterEach(async () => {
@@ -47,7 +49,7 @@ const scenarioWith = (answers: readonly FakeReconcileAnswer[]): FakeScenario => 
 });
 
 describe('unknown reconcile @m3', () => {
-  it('reconcile-slow: in_progress ×2 (attempt stays unknown) then completed → reconciled_succeeded, resolve_unknown −N + settle, no new call @m3', async () => {
+  it('reconcile-slow: in_progress ×2 (attempt stays uncertain) then completed → reconciled_succeeded, the estimate corrected to the calculated cost, no new call @m3', async () => {
     const mc = createManualClock();
     const { h, runId } = await unknownThenRestart({ scenario: 'reconcile-slow', fakeCapabilityOverrides: LOOKUP, clock: mc });
     const [a] = h.attempts(runId, 'implement');
@@ -65,9 +67,12 @@ describe('unknown reconcile @m3', () => {
     expect(h.db.repos.attempts.get(a!.id).state).toBe('reconciled_succeeded');
     const page = h.db.repos.ledger.list(runId, { limit: 200, sort: 'created_asc' });
     const mine = page.ok ? page.value.items.filter((e) => e.attemptId === a!.id) : [];
-    expect(mine.map((e) => [e.type, e.bucket])).toEqual([['reserve', 'reserved'], ['move_to_unknown', 'reserved'], ['move_to_unknown', 'unknown'], ['resolve_unknown', 'unknown'], ['settle', 'settled']]);
-    expect(mine.find((e) => e.type === 'resolve_unknown')?.deltaMicrousd).toBe(0 - N);
-    expect(mine.find((e) => e.type === 'settle')?.certainty).toBe('calculated');
+    const E = expectedEstimate(a!, 0);
+    const X = h.db.repos.ledger.attemptBalances(a!.id).settled;
+    expect(mine.map((e) => [e.type, e.bucket, e.deltaMicrousd, e.certainty])).toEqual([['reserve', 'reserved', N, null], ['release', 'reserved', 0 - N, null],
+      ['settle', 'settled', E, 'estimated'], ['settle', 'settled', -E, 'estimated'], ['settle', 'settled', X, 'calculated']]);
+    expect(X).toBeGreaterThan(0);
+    expect(h.db.repos.ledger.settledByCertainty(runId).estimated).toBe(0); // never counted twice
     expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0 }));
     expect(h.calls({ runId, stepKey: 'implement' })).toHaveLength(1); // no new call
     expect((await h.waitFor(runId, (r) => !['queued', 'running'].includes(r.status))).status).toBe('completed');
@@ -76,7 +81,7 @@ describe('unknown reconcile @m3', () => {
     expectLedgerMatchesAttempts(h.db, runId);
   });
 
-  it('failed without usage → resolve_unknown −N + settle 0 (calculated) @m3', async () => {
+  it('failed without usage → the estimate is corrected to 0 (calculated) @m3', async () => {
     const { h, runId } = await unknownThenRestart({ scenario: scenarioWith(['failed']), fakeCapabilityOverrides: LOOKUP });
     const [a] = h.attempts(runId, 'implement');
 
@@ -85,12 +90,12 @@ describe('unknown reconcile @m3', () => {
     expect(h.db.repos.attempts.get(a!.id).state).toBe('reconciled_failed');
     const page = h.db.repos.ledger.list(runId, { limit: 200, sort: 'created_asc' });
     const mine = page.ok ? page.value.items.filter((e) => e.attemptId === a!.id) : [];
-    expect(mine.slice(-2).map((e) => [e.type, e.deltaMicrousd, e.certainty])).toEqual([['resolve_unknown', 0 - a!.reservationMicrousd, null], ['settle', 0, 'calculated']]);
+    expect(mine.slice(-2).map((e) => [e.type, e.deltaMicrousd, e.certainty])).toEqual([['settle', -expectedEstimate(a!, 0), 'estimated'], ['settle', 0, 'calculated']]);
     expect(h.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: 0 });
     expect(h.calls({ runId, stepKey: 'implement' })).toHaveLength(1);
   });
 
-  it('not_found → the attempt stays unknown (liability kept, no new call) @m3', async () => {
+  it('not_found → the attempt stays uncertain (the estimate kept, no unknown liability, no new call) @m3', async () => {
     const { h, runId } = await unknownThenRestart({ scenario: scenarioWith(['not_found']), fakeCapabilityOverrides: LOOKUP });
     const [a] = h.attempts(runId, 'implement');
 
@@ -98,7 +103,7 @@ describe('unknown reconcile @m3', () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(h.db.repos.attempts.get(a!.id).state).toBe('unknown');
-    expect(h.db.repos.ledger.attemptBalances(a!.id).unknown).toBe(a!.reservationMicrousd);
+    expect(h.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: expectedEstimate(a!, 0) });
     expect(h.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'unknown_outcome' }));
     expect(h.calls({ runId, stepKey: 'implement' })).toHaveLength(1);
   });

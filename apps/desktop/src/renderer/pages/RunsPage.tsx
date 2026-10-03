@@ -239,10 +239,8 @@ export function RunsPage() {
             <span className="tag certainty-reported">reported</span> provider-reported usage
           </li>
           <li>
-            <span className="tag certainty-estimated">est.</span> Relay estimate from the price catalog
-          </li>
-          <li>
-            <StatusBadge kind="certainty" value="unknown" /> request outcome unknown
+            <span className="tag certainty-estimated">estimated</span> ~ Relay estimate where the exact cost is not
+            available
           </li>
           <li>Costs are tracked by Relay, not your provider bill.</li>
         </ul>

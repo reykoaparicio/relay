@@ -140,9 +140,9 @@ const PAUSE: Record<PauseReason, StatusPresentation> = {
     label: 'Paused: model declined', tone: 'warning', icon: ShieldX, detail: 'Choose another profile or edit the goal',
   },
   unknown_outcome: {
-    // Stays true after the unknown attempt is resolved but before the run resumes (no stale "possible charge").
-    label: 'Paused: unknown request outcome', tone: 'unknown', icon: CircleQuestionMark,
-    detail: 'Resolve any unknown request, then retry or stop',
+    // The last request may or may not have completed; its cost is counted as an estimate (never "unknown").
+    label: 'Paused: request may not have completed', tone: 'unknown', icon: CircleQuestionMark,
+    detail: 'Retry the step (this may charge again) or stop',
   },
 };
 
@@ -156,8 +156,8 @@ const STEP: Record<StepState, StatusPresentation> = {
   succeeded: { label: 'Done', tone: 'success', icon: CircleCheck },
   failed: { label: 'Failed', tone: 'danger', icon: CircleX, detail: 'This step did not produce a valid output' },
   unknown: {
-    label: 'Unknown outcome', tone: 'unknown', icon: CircleQuestionMark,
-    detail: 'The provider may have processed the request',
+    label: 'Outcome not confirmed', tone: 'unknown', icon: CircleQuestionMark,
+    detail: 'The request may or may not have completed',
   },
   skipped: { label: 'Skipped', tone: 'neutral', icon: SkipForward },
 };
@@ -172,13 +172,14 @@ const ATTEMPT: Record<AttemptState, StatusPresentation> = {
   },
   failed: { label: 'Failed', tone: 'danger', icon: CircleX },
   unknown: {
-    label: 'Unknown outcome', tone: 'unknown', icon: CircleQuestionMark,
-    detail: 'The request may have been processed and charged',
+    // Short: it sits in the Attempts table's Dispatch state column next to the cost.
+    label: 'Not confirmed', tone: 'unknown', icon: CircleQuestionMark,
+    detail: 'The request may or may not have completed. Its cost is counted as an estimate',
   },
   reconciled_succeeded: { label: 'Reconciled: succeeded', tone: 'success', icon: CircleCheck },
   reconciled_failed: { label: 'Reconciled: failed', tone: 'danger', icon: CircleX },
   abandoned: {
-    label: 'Abandoned', tone: 'neutral', icon: Ban, detail: 'Marked failed. The possible charge is kept as liability',
+    label: 'Abandoned', tone: 'neutral', icon: Ban, detail: 'Marked failed. Its cost is counted as an estimate',
   },
 };
 
@@ -193,8 +194,9 @@ const MEMORY: Record<MemoryStatus, StatusPresentation> = {
 const CERTAINTY: Record<CostCertainty, StatusPresentation> = {
   reported: { label: 'Reported', tone: 'neutral', icon: Receipt },
   calculated: { label: 'Calculated', tone: 'neutral', icon: Calculator },
-  estimated: { label: 'est.', tone: 'neutral', icon: Sigma },
-  unknown: { label: 'Unknown charge', tone: 'unknown', icon: CircleQuestionMark },
+  estimated: { label: 'Estimated', tone: 'neutral', icon: Sigma },
+  // Legacy certainty: Relay never shows a charge as unknown; an amount without an exact cost is an estimate.
+  unknown: { label: 'Estimated', tone: 'neutral', icon: Sigma },
 };
 
 function runPresentation(status: RunStatus, pauseReason: PauseReason | null | undefined): StatusPresentation {

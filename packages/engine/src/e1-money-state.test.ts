@@ -117,34 +117,21 @@ describe('#4 unknown charge on a terminal run', () => {
     return { x, runId, attemptId: a.id };
   }
 
-  it('offers decide_unknown on the stopped run; accept_estimated_charge settles the liability without a status change', async () => {
+  it('decision 1: the stopped run holds no unknown charge — the uncertain attempt is settled as an estimate; nothing is left to decide', async () => {
     const { x, runId, attemptId } = await stoppedWithUnknown();
-    expect((await detailOf(x, runId)).availableActions).toEqual(['decide_unknown', 'export_report']);
-    const U = x.db.repos.ledger.runBalances(runId).U;
-    expect(U).toBeGreaterThan(0);
-
-    const retry = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'e1-term-decide-0001', runId, attemptId, decision: 'retry_acknowledging_charge' });
-    const accept = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'e1-term-decide-0002', runId, attemptId, decision: 'accept_estimated_charge' });
-
-    expect(retry.ok ? null : retry.error.details?.['reason']).toBe('decision_not_applicable');
-    expect(accept.ok && [accept.data.status, accept.data.availableActions]).toEqual(['cancelled', ['export_report']]);
+    expect((await detailOf(x, runId)).availableActions).toEqual(['export_report']);
     const b = x.db.repos.ledger.runBalances(runId);
     expect([b.U, b.R]).toEqual([0, 0]);
-    expect(x.db.repos.attempts.find(attemptId)?.state).toBe('failed');
-    // Months later the liability no longer reduces the project allowance.
-    x.timers.advance(95 * 24 * 3600 * 1000);
+    expect(b.C).toBeGreaterThan(0);
+    expect(x.db.repos.ledger.settledByCertainty(runId).estimated).toBe(b.C);
+
+    const accept = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'e1-term-decide-0002', runId, attemptId, decision: 'accept_estimated_charge' });
+
+    expect(accept.ok ? null : accept.error.details?.['reason']).toBe('decision_not_applicable');
+    expect(x.db.repos.ledger.runBalances(runId)).toEqual(b); // nothing written
+    // The estimate counts in its month like any settled cost; nothing stays "unknown" against later months.
     const sum = await x.engine.handle('relay/v1/ledger.projectSummary', { projectId: x.projectId });
-    expect(sum.ok && sum.data.unknownMicrousd).toBe(0);
-  });
-
-  it('mark_failed_keep_liability abandons the attempt (liability kept, as chosen)', async () => {
-    const { x, runId, attemptId } = await stoppedWithUnknown();
-
-    const res = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'e1-term-decide-0003', runId, attemptId, decision: 'mark_failed_keep_liability' });
-
-    expect(res.ok && res.data.status).toBe('cancelled');
-    expect(x.db.repos.attempts.find(attemptId)?.state).toBe('abandoned');
-    expect(x.db.repos.ledger.runBalances(runId).U).toBeGreaterThan(0);
+    expect(sum.ok && [sum.data.unknownMicrousd, sum.data.trackedMicrousd]).toEqual([0, b.C]);
   });
 });
 
@@ -238,18 +225,19 @@ describe('#7 same-key concurrent commands replay', () => {
     expect(x.db.repos.steps.listForRun(runId).filter((s) => s.stepKey === 'review')).toHaveLength(2);
   });
 
-  it('runs.decideUnknown double click: both ok, one decision', async () => {
+  it('runs.decideUnknown double click (decision 1: retired): both refused, nothing written', async () => {
     const x = await harness({ scenario: { name: 'u', steps: [{ match: { stepKey: 'review', purpose: 'initial' }, result: { kind: 'unknown_after_dispatch' } }] } });
     const runId = await x.startRun();
     expect(await drive(x, runId, ['paused'])).toBe('paused');
     const a = x.db.repos.attempts.listForRun(runId).find((y) => y.state === 'unknown');
-    if (a === undefined) throw new Error('no unknown');
+    if (a === undefined) throw new Error('no uncertain attempt');
     const input = { idempotencyKey: 'e1-dbl-decide-00001', runId, attemptId: a.id, decision: 'accept_estimated_charge' as const };
+    const before = x.db.repos.ledger.listForRun(runId).length;
 
     const [p, q] = await Promise.all([x.engine.handle('relay/v1/runs.decideUnknown', input), x.engine.handle('relay/v1/runs.decideUnknown', input)]);
 
-    expect([p.ok, q.ok]).toEqual([true, true]);
-    expect(x.db.repos.ledger.listForRun(runId).filter((e) => e.entry.type === 'resolve_unknown')).toHaveLength(1);
+    expect([p.ok, q.ok]).toEqual([false, false]);
+    expect(x.db.repos.ledger.listForRun(runId)).toHaveLength(before);
   });
 });
 
@@ -262,7 +250,7 @@ describe('#8 offered actions are the ones the handlers accept', () => {
       r.runs.updateStatus(runId, ['paused'], 'paused', { pauseReason: 'budget_run', statusDetail: null });
     });
     const d = await detailOf(x, runId);
-    expect(d.availableActions).toEqual(['increase_allowance', 'retry_step', 'choose_profile', 'stop']);
+    expect(d.availableActions).toEqual(['increase_allowance', 'retry_step', 'choose_profile', 'stop', 'export_report']);
     const failed = x.db.repos.steps.latestFor(runId, 'review' as StepKey);
     const option = d.profileOptions?.[0];
     if (failed === undefined || option === undefined) throw new Error('setup');
@@ -272,21 +260,17 @@ describe('#8 offered actions are the ones the handlers accept', () => {
     expect(chosen.ok && chosen.data.status).toBe('queued');
   });
 
-  it('an interrupted run with an unknown attempt offers decide_unknown, then review_recovery once decided', async () => {
+  it('an interrupted run with an uncertain attempt offers review_recovery (decision 1), which the handler accepts', async () => {
     const x = await harness({ scenario: { name: 'u', steps: [{ match: { stepKey: 'review', purpose: 'initial' }, result: { kind: 'unknown_after_dispatch' } }] } });
     const runId = await x.startRun();
     await drive(x, runId, ['paused']);
     x.db.tx('immediate', (r) => {
       r.runs.updateStatus(runId, ['paused'], 'interrupted', {});
     });
-    expect((await detailOf(x, runId)).availableActions).toEqual(['decide_unknown', 'stop']);
-    const a = x.db.repos.attempts.listForRun(runId).find((y) => y.state === 'unknown');
-
-    await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'e1-int-decide-00001', runId, attemptId: a?.id ?? 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ0', decision: 'retry_acknowledging_charge' });
     const d = await detailOf(x, runId);
     const resumed = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'e1-int-resume-00001', runId, decision: { kind: 'continue' } });
 
-    expect(d.availableActions).toEqual(['review_recovery', 'stop']);
+    expect(d.availableActions).toEqual(['review_recovery', 'stop', 'export_report']);
     expect(resumed.ok && resumed.data.status).toBe('queued');
   });
 
@@ -300,7 +284,7 @@ describe('#8 offered actions are the ones the handlers accept', () => {
     const d = await detailOf(x, runId);
     const res = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'e1-auth-resume-0001', runId, decision: { kind: 'continue' } });
 
-    expect(d.availableActions).toEqual(['reconnect_provider', 'stop']);
+    expect(d.availableActions).toEqual(['reconnect_provider', 'stop', 'export_report']);
     expect(res.ok ? null : res.error.code).toBe('AUTH_REQUIRED');
   });
 });

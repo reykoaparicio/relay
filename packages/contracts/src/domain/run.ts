@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { INPUT_CAPS, MIN_EXECUTION_TIMEOUT_SECONDS, RUN_LIMIT_MAXIMUMS } from '../defaults.js';
+import { INPUT_CAPS, MAX_OUTPUT_TOKENS_CEILING, MIN_EXECUTION_TIMEOUT_SECONDS, MIN_OUTPUT_TOKEN_OVERRIDE, RUN_LIMIT_MAXIMUMS } from '../defaults.js';
 import { appErrorSchema } from '../errors.js';
 import { idSchema } from '../ids.js';
 import { nonNegativeMicrousdSchema } from '../money.js';
@@ -93,8 +93,21 @@ function dropLegacyAcks(v: unknown): unknown {
 export const storedRunInputSchema = z.preprocess(dropLegacyAcks, runInputSchema);
 
 /**
+ * Decision 3: per-step output limits set on the New run screen (model steps only). Each value is an integer
+ * `MIN_OUTPUT_TOKEN_OVERRIDE ≤ n`; the engine also checks `n ≤` the chosen profile's model `maxOutputTokens` (catalog)
+ * and refuses unknown step keys (VALIDATION_FAILED at `outputTokenOverrides.<stepKey>`). Absent = the step's default.
+ */
+export const outputTokenOverridesSchema = z.partialRecord(
+  stepKeySchema,
+  z.number().int().min(MIN_OUTPUT_TOKEN_OVERRIDE).max(MAX_OUTPUT_TOKENS_CEILING),
+);
+/** Output token overrides. */
+export type OutputTokenOverrides = z.infer<typeof outputTokenOverridesSchema>;
+
+/**
  * `runs.start` input (§12.5). `memoryRecordIds` = approved records the user ticked; pinned user rules are always
- * included. `profileOverrides` = per-step profile for this run only.
+ * included. `profileOverrides` = per-step profile for this run only. `outputTokenOverrides` = per-step output limit
+ * for this run only (decision 3; recorded in the run snapshot).
  */
 export const runStartInputSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
@@ -105,6 +118,7 @@ export const runStartInputSchema = z.object({
   input: runInputSchema,
   limitOverrides: workflowLimitsSchema.optional(),
   profileOverrides: z.record(stepKeySchema, idSchema('profile')).optional(),
+  outputTokenOverrides: outputTokenOverridesSchema.optional(),
   memoryRecordIds: z.array(idSchema('memory')).max(50).optional(),
 });
 /** Run start input. */
@@ -175,7 +189,15 @@ export const runDetailSchema = runSummarySchema.extend({
   contextHash: sha256Schema.nullable(),
   steps: z.array(stepViewSchema),
   pendingApproval: approvalViewSchema.nullable(),
-  unresolvedAttempts: z.array(attemptViewSchema), // unknown outcomes surfaced on relaunch (§4.4)
+  // Legacy: attempts that still hold an unknown liability. Always empty for data recorded since decision 1 (an
+  // uncertain outcome settles at once as an estimate; older liabilities are converted at engine start).
+  unresolvedAttempts: z.array(attemptViewSchema),
+  /**
+   * Decision 1: attempts whose outcome was uncertain and that are settled as estimates (cost certainty `estimated`),
+   * oldest first: the recovery panel of a `paused(unknown_outcome)` run lists them with their estimate and the
+   * "may not have been charged" note. An attempt leaves this list once reconciliation reports its real usage.
+   */
+  uncertainAttempts: z.array(attemptViewSchema),
   executionMsUsed: z.number().int().nonnegative(), // §9.1 execution time (accrues only while running)
   revisionCycle: z.number().int(),
   statusDetail: appErrorSchema.nullable(), // the blocking error behind pauseReason

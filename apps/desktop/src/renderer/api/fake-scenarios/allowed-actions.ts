@@ -3,7 +3,8 @@
 import type { PauseReason, RunAction, RunStatus } from '@relay/contracts';
 
 export interface AllowedActionsContext {
-  readonly unknownAttempts: number;
+  /** Requests that may not have completed (counted as estimates; nothing to decide). */
+  readonly uncertainAttempts: number;
   readonly hasFailedStep: boolean;
   readonly hasPatchArtifact: boolean;
   /** A provider of an open model step has no key: resume from auth_required would fail, so it is not offered. */
@@ -37,9 +38,8 @@ function pausedActions(reason: PauseReason, ctx: AllowedActionsContext): RunActi
     case 'setup_blocked':
       return ['resume', 'choose_profile', 'stop'];
     case 'unknown_outcome':
-      if (ctx.unknownAttempts > 0) return ['decide_unknown', 'stop'];
-      // Every unknown is decided: retry / re-profile a failed step, else resume (06 F2: every pause has a way out).
-      return ctx.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['resume', 'stop'];
+      // The last request may or may not have completed; its cost is counted as an estimate. Retry (may charge again) or stop.
+      return ['retry_step', 'stop'];
     case 'auth_required':
       return ctx.missingCredential === true ? ['reconnect_provider', 'stop'] : ['reconnect_provider', 'resume', 'stop'];
     case 'user':
@@ -62,33 +62,29 @@ export function allowedRunActions(
   return ctx.hasProfileOptions === false ? actions.filter((a) => a !== 'choose_profile') : actions;
 }
 
+/** Exports of a run that has not finished: an interim report (and the latest patch, when one exists). */
+function interimExports(ctx: AllowedActionsContext): RunAction[] {
+  return ctx.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
+}
+
 function actionsFor(status: RunStatus, pauseReason: PauseReason | null, ctx: AllowedActionsContext): RunAction[] {
-  // An unresolved unknown attempt is decidable from any pause (06 F2 clarification 15).
-  if (status === 'paused' && ctx.unknownAttempts > 0) {
-    const base = pauseReason === null ? (['stop'] as RunAction[]) : pausedActions(pauseReason, ctx);
-    return base.includes('decide_unknown') ? base : [...base.filter((a) => a !== 'stop'), 'decide_unknown', 'stop'];
-  }
   switch (status) {
     case 'queued':
-      return ['cancel'];
+      return ['pause', 'cancel', ...interimExports(ctx)];
     case 'running':
-      return ['pause', 'cancel'];
+      return ['pause', 'cancel', ...interimExports(ctx)];
     case 'awaiting_approval':
-      return ['approve', 'request_revision', 'reject', 'cancel'];
+      return ['approve', 'request_revision', 'reject', 'pause', 'cancel', ...interimExports(ctx)];
     case 'paused':
-      return pauseReason === null ? ['stop'] : pausedActions(pauseReason, ctx);
+      return [...(pauseReason === null ? (['stop'] as RunAction[]) : pausedActions(pauseReason, ctx)), ...interimExports(ctx)];
     case 'interrupted':
-      // review_recovery needs every unknown attempt decided first.
-      return ctx.unknownAttempts > 0 ? ['decide_unknown', 'stop'] : ['review_recovery', 'stop'];
+      return ['review_recovery', 'stop', ...interimExports(ctx)];
     case 'cancelling':
-      return [];
+      return interimExports(ctx);
     case 'completed':
     case 'incomplete':
     case 'cancelled':
-    case 'failed': {
-      const exports: RunAction[] = ctx.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
-      // An unknown charge left on a finished run can still be settled.
-      return ctx.unknownAttempts > 0 ? ['decide_unknown', ...exports] : exports;
-    }
+    case 'failed':
+      return ctx.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
   }
 }

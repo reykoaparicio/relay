@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { expectedEstimate } from './testing/estimates.js';
 import { epochMs } from '@relay/contracts';
 import type { RunId, StepKey } from '@relay/contracts';
 import { executeModelAttempt } from './checkpoints.js';
@@ -49,7 +50,7 @@ describe('deadline (F12)', () => {
 
     expect(harness.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ pauseReason: 'deadline', executionMsUsed: 60_000 }));
     const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['raise_limits', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['raise_limits', 'stop', 'export_report']);
   });
 
   it('does not count time spent awaiting approval (20 min on manual timers)', async () => {
@@ -64,7 +65,7 @@ describe('deadline (F12)', () => {
     expect(harness.timers.pending()).toBe(0); // the segment timer was cleared on leaving `running`
   });
 
-  it('fires during a hang: the call is aborted, the full N becomes unknown, and the run pauses as deadline', async () => {
+  it('fires during a hang: the call is aborted, settled at once as an estimate (decision 1), and the run pauses as deadline', async () => {
     const { harness, runId } = await runningRun({ scenario: { name: 'hang-anything', steps: [{ match: { stepKey: 'review' }, result: { kind: 'hang' } }] } });
     await tick(harness.ctx); // intake
     harness.db.tx('immediate', (r) => {
@@ -79,7 +80,7 @@ describe('deadline (F12)', () => {
 
     const [a] = harness.db.repos.attempts.listForRun(runId);
     expect(a?.state).toBe('unknown');
-    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: a?.reservationMicrousd }));
+    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: expectedEstimate(a!, 0) }));
     expect(harness.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'deadline' }));
   });
 });

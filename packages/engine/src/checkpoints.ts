@@ -18,7 +18,7 @@ import { applyPostValidation } from './outcome.js';
 import { adapterOf } from './provider-lookup.js';
 import { loadValidationInputs } from './steps/validation-inputs.js';
 import type { AssembledContext, CrashHookCtx, EngineCtx, ModelStepSnapshot } from './ports.js';
-import { classify, eventForError, nextPurpose, retryOfFor } from './retry.js';
+import { classify, eventForError, nextPurpose, overrunError, retryOfFor } from './retry.js';
 import type { AttemptPlan, ClassifiedOutcome, OutcomeKind } from './retry.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
@@ -26,6 +26,7 @@ import { effectiveStepSnapshot, isSnapshotPreserved, requiresApproval, snapshotB
 import { applyStepEvent } from './step-machine.js';
 import { validateOutput } from './steps/validate-output.js';
 import { errors } from '@relay/contracts';
+import { mayNotHaveBeenCharged, uncertainCost, uncertainError } from './uncertain.js';
 
 /** What `executeModelAttempt` did. `lease_lost`: this process no longer owns the runner lease; nothing was written. */
 type AttemptOutcome =
@@ -173,21 +174,31 @@ function releaseNotSent(
   return true;
 }
 
-/** Best-effort: never leave `dispatching` in-process (F4 finally). Recovery (F9) repeats this if it fails. */
-function forceUnknown(ctx: EngineCtx, i: { run: RunRow; attemptId: AttemptId; stepRunId: StepRunId; N: Microusd; priceCatalogVersion: string }): PostCommitEffect[] {
+/**
+ * Best-effort: never leave `dispatching` in-process (F4 finally). Recovery (F9) repeats this if it fails. Decision 1:
+ * the attempt is settled at once as an estimate (release −N + settle +estimate), never parked as an unknown liability.
+ */
+function forceUnknown(ctx: EngineCtx, p: Prepared, i: { run: RunRow; attemptId: AttemptId; stepRunId: StepRunId; N: Microusd; priceCatalogVersion: string }): PostCommitEffect[] {
   const fx: PostCommitEffect[] = [];
+  const cost = uncertainCost({ inputTokens: p.estimate.inputTokens, outputTokens: p.observed.outputTokens }, p.stepSnap.profile.prices);
+  // The adapter threw or the settle never ran: whether bytes left is unknown, so only an observed response rules it out.
+  const mayNot = mayNotHaveBeenCharged({ phase: 'sent_no_response', responseSeen: p.observed.responseSeen, outputTokens: p.observed.outputTokens });
+  const error = uncertainError(i.attemptId, cost.microusd, mayNot);
   try {
     ctx.db.tx('immediate', (r) => {
       const now = ctx.clock.now();
-      if (!r.attempts.transition(i.attemptId, ['dispatching'], 'unknown', { error: errors.requestOutcomeUnknown(i.attemptId), finishedAt: now })) return;
-      r.ledger.append(settlementEntries({ reservation: i.N, cost: { kind: 'unknown' }, attemptId: i.attemptId, runId: i.run.id,
+      if (!r.attempts.transition(i.attemptId, ['dispatching'], 'unknown', { error, finishedAt: now, outcomeUncertain: true, mayNotHaveBeenCharged: mayNot })) return;
+      r.ledger.append(settlementEntries({ reservation: i.N, cost, attemptId: i.attemptId, runId: i.run.id,
         projectId: i.run.projectId, priceCatalogVersion: i.priceCatalogVersion, createdAt: now }));
       const s = r.steps.get(i.stepRunId);
-      if (s.state === 'executing') applyStepEvent(r, fx, s, 'OUTCOME_UNKNOWN', { error: errors.requestOutcomeUnknown(i.attemptId) });
-      appendRunEvent(r, fx, i.run.id, 'attempt.unknown', { attemptId: i.attemptId, stepRunId: i.stepRunId });
+      if (s.state === 'executing') applyStepEvent(r, fx, s, 'OUTCOME_UNKNOWN', { error });
+      appendRunEvent(r, fx, i.run.id, 'attempt.unknown', { attemptId: i.attemptId, stepRunId: i.stepRunId, cost, mayNotHaveBeenCharged: mayNot });
       const cur = r.runs.get(i.run.id);
       if (cur.status === 'running') {
-        applyRunEvent(r, cur, { type: 'UNKNOWN_OUTCOME', attemptId: i.attemptId, error: errors.requestOutcomeUnknown(i.attemptId) }, now, fx);
+        const ev: RunMachineEvent = cost.microusd > i.N
+          ? { type: 'BUDGET_OVERRUN', attemptId: i.attemptId, error: overrunError(i.attemptId, i.N, cost.microusd) }
+          : { type: 'UNKNOWN_OUTCOME', attemptId: i.attemptId, error };
+        applyRunEvent(r, cur, ev, now, fx);
       }
     });
   } catch (e) {
@@ -290,6 +301,11 @@ interface Prepared {
   readonly hook: CrashHookCtx;
   /** The run's snapshot-binding events, read once here and passed to every consumer (3). */
   readonly binding: SnapshotBinding;
+  /**
+   * Decision 1: what the in-flight call showed so far (filled by the generate hooks): the largest streamed output
+   * token count and whether a provider response id arrived. Prices an uncertain outcome's estimate.
+   */
+  readonly observed: { outputTokens: number; responseSeen: boolean };
 }
 
 /** 1. Validate inputs, build the immutable execution snapshot, resolve the credential BEFORE the estimate, run policy. */
@@ -338,7 +354,7 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
   if (!policy.ok) return pauseRun(ctx, runId, eventForError(policy.error), invalidateStale(runId, binding, policy.error));
   if (!credential.ok) return pauseRun(ctx, runId, eventForError(credential.error)); // unreachable: check #3
   return { run, step, stepSnap, purpose, prior, assembled: assembled.value, attemptId, request, adapter, apiKey: credential.value, estimate, hook,
-    binding: events };
+    binding: events, observed: { outputTokens: 0, responseSeen: false } };
 }
 
 /** F6 #8 / B4: the invalidation that goes with an APPROVAL_STALE or PROJECT_CHANGED pause (none otherwise). */
@@ -359,8 +375,9 @@ async function dispatch(ctx: EngineCtx, p: Prepared, controller: AbortController
       apiKey: p.apiKey,
       signal: controller.signal,
       hooks: {
-        onProgress: progressReporter(ctx, p.run.id, p.attemptId, p.step.id),
+        onProgress: progressReporter(ctx, p.run.id, p.attemptId, p.step.id, p.observed),
         onResponseId: (seen) => {
+          if (seen.providerResponseId !== undefined) p.observed.responseSeen = true;
           ctx.db.tx('immediate', (r) => {
             r.attempts.setProviderIds(p.attemptId, { requestId: seen.providerRequestId, responseId: seen.providerResponseId });
           });
@@ -388,7 +405,7 @@ function settle(
   fx: PostCommitEffect[],
   p: Prepared,
   i: { outcome: ClassifiedOutcome; cost: SettleAmount; puts: readonly ArtifactPut[]; output: { id: ArtifactId; value: unknown } | null;
-    firstByteAt: EpochMs | null },
+    firstByteAt: EpochMs | null; uncertain: { readonly mayNotHaveBeenCharged: boolean } | null },
 ): Settled | null {
   const N = p.estimate.upperAllowanceMicrousd;
   return ctx.db.tx('immediate', (r): Settled | null => {
@@ -398,6 +415,7 @@ function settle(
     const won = r.attempts.transition(attemptId, ['dispatching'], o.attemptState, {
       usage: usageView(o), rawUsage: redactDeep(o.rawUsage), stopReason: o.stopReason, error: o.error,
       providerRequestId: o.providerRequestId, firstByteAt: i.firstByteAt, finishedAt: now,
+      ...(i.uncertain === null ? {} : { outcomeUncertain: true, mayNotHaveBeenCharged: i.uncertain.mayNotHaveBeenCharged }),
     });
     if (!won) return null;
     r.ledger.append(settlementEntries({ reservation: N, cost: i.cost, attemptId, runId: run.id, projectId: run.projectId,
@@ -413,7 +431,9 @@ function settle(
       }
     }
     appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId, stepRunId: p.step.id, state: o.attemptState, cost: i.cost });
-    if (o.attemptState === 'unknown') appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId, stepRunId: p.step.id });
+    if (o.attemptState === 'unknown') {
+      appendRunEvent(r, fx, run.id, 'attempt.unknown', { attemptId, stepRunId: p.step.id, cost: i.cost, mayNotHaveBeenCharged: i.uncertain?.mayNotHaveBeenCharged ?? false });
+    }
     // BH-6: the same post-validation function as the F9b reconcile path (step move, F10 scope rule, revision, overrun).
     const { plan, event } = applyPostValidation(r, fx, ctx, { source: 'live', stepRunId: p.step.id, runId: run.id, attemptId, outcome: o,
       policy: p.stepSnap.retryPolicy, purpose: p.purpose, output: i.output, cost: i.cost, N, now });
@@ -457,8 +477,22 @@ async function persistAndClassify(ctx: EngineCtx, p: Prepared, result: ModelResu
   const classified = classify(result, validated, canonicalOk, { aborted: signal.aborted, abortReason: isAbortReason(signal.reason) ? signal.reason : undefined, attemptId: p.attemptId });
   const rawPut = puts.find((x) => x.ok && x.meta.kind === 'raw_response');
   const outcome = withRepairDetails(classified, p, rawPut?.ok === true ? rawPut.meta.id : null);
+  if (outcome.charge.kind === 'unknown') return { puts, output, ...uncertainSettlement(p, result, outcome) };
   const cost = settleAmount(outcome, p.stepSnap.profile.prices, fallbackLookup(ctx, p), p.estimate.upperAllowanceMicrousd);
-  return { puts, output, outcome, cost };
+  return { puts, output, outcome, cost, uncertain: null };
+}
+
+/**
+ * Decision 1: an uncertain outcome settles at once as an estimate — the request's input tokens (its estimate) plus
+ * the output observed so far (stream progress or partial usage) at the attempt's prices — with the note whether the
+ * request may never have reached the provider. The attempt's error carries both.
+ */
+function uncertainSettlement(p: Prepared, result: ModelResult, outcome: ClassifiedOutcome) {
+  const outputTokens = Math.max(p.observed.outputTokens, outcome.usage?.outputTokens ?? 0);
+  const cost = uncertainCost({ inputTokens: p.estimate.inputTokens, outputTokens }, p.stepSnap.profile.prices);
+  const responseSeen = p.observed.responseSeen || (result.kind === 'error' && result.providerResponseId !== undefined);
+  const mayNot = mayNotHaveBeenCharged({ phase: result.kind === 'error' ? result.phase : null, responseSeen, outputTokens });
+  return { outcome: { ...outcome, error: uncertainError(p.attemptId, cost.microusd, mayNot) }, cost, uncertain: { mayNotHaveBeenCharged: mayNot } };
 }
 
 /** OUTPUT_INVALID details the run inspector reads: `{ schemaId, repairsUsed, repairsMax, rawResponseArtifactId }`. */
@@ -469,9 +503,17 @@ function withRepairDetails(o: ClassifiedOutcome, p: Prepared, rawResponseArtifac
 }
 
 /** `attempt.stream_progress` (≤ 1 per 500 ms, never content, §5.7): persisted in its own tiny tx, then pushed. */
-function progressReporter(ctx: EngineCtx, runId: RunId, attemptId: AttemptId, stepRunId: StepRunId): (pr: { outputTokensSoFar: number; elapsedMs: number }) => void {
+function progressReporter(
+  ctx: EngineCtx,
+  runId: RunId,
+  attemptId: AttemptId,
+  stepRunId: StepRunId,
+  observed: { outputTokens: number },
+): (pr: { outputTokensSoFar: number; elapsedMs: number }) => void {
   let last: number | null = null;
   return (pr) => {
+    // Every report counts (not only the throttled persisted ones): an uncertain outcome's estimate prices it.
+    if (Number.isSafeInteger(pr.outputTokensSoFar) && pr.outputTokensSoFar > observed.outputTokens) observed.outputTokens = pr.outputTokensSoFar;
     const now = ctx.clock.now();
     if (last !== null && now - last < STREAM_PROGRESS_THROTTLE_MS) return;
     last = now;
@@ -599,7 +641,7 @@ export async function executeModelAttempt(ctx: EngineCtx, runId: RunId, stepRunI
     ctx.cancellation.unregister(controller);
     if (sent.dispatched && !sent.settleReturned && ownsLease(ctx)) {
       const N = p.estimate.upperAllowanceMicrousd;
-      await runEffects(ctx, forceUnknown(ctx, { run: p.run, attemptId: p.attemptId, stepRunId, N, priceCatalogVersion: p.estimate.priceCatalogVersion }));
+      await runEffects(ctx, forceUnknown(ctx, p, { run: p.run, attemptId: p.attemptId, stepRunId, N, priceCatalogVersion: p.estimate.priceCatalogVersion }));
     }
   }
 }

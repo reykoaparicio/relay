@@ -5,7 +5,7 @@ import { appError, errors, RUN_ACTIONS, runEventSchema, stepViewSchema } from '@
 import type { RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
 import type { FakeBridge, FakeScenarioName } from '../api/fake-bridge';
-import { RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_LABELS } from '../lib/format';
+import { RUN_ACTION_LABELS } from '../lib/format';
 import { axe, describeViolations } from '../components/ui/test-utils';
 import { renderApp } from '../features/testing/render-app';
 import { sid } from '../api/fake-scenarios/world';
@@ -70,21 +70,21 @@ const STATES: readonly StateCase[] = [
   { state: 'budget-paused', scenario: 'budget-paused', banner: /Paused before dispatch: the next request needs \$0\.54, only \$0\.38 remains/ },
   { state: 'budget-paused (project)', scenario: 'budget-paused-project', banner: /Paused before dispatch: the next request needs \$0\.54, only \$0\.30 remains this month/ },
   { state: 'budget-overrun', scenario: 'budget-overrun', banner: /The last call cost \$0\.71, more than the \$0\.62 reserved/ },
-  { state: 'unknown-outcome', scenario: 'unknown-outcome', banner: 'The request may have been sent; its charge is unknown', proof: 'Recovery' },
+  { state: 'unknown-outcome', scenario: 'unknown-outcome', banner: 'The last request may or may not have completed', proof: /Nothing is retried on its own/ },
   { state: 'schema-invalid', scenario: 'schema-invalid', banner: null, proof: 'The output did not match patch.v1' },
   { state: 'output-invalid', scenario: 'output-invalid', banner: 'Produce patch returned output in the wrong format', proof: /repair attempts used: 1 of 1/ },
   { state: 'provider-unavailable', scenario: 'provider-unavailable', banner: 'The provider did not respond after a retry' },
   { state: 'provider-unavailable (setup)', scenario: 'setup-blocked', banner: 'A setup check failed before the step could start' },
   { state: 'refused', scenario: 'refused', banner: 'The model declined this step' },
   { state: 'rate-limited', scenario: 'rate-limited', banner: 'Provider rate limit: waits exhausted' },
-  { state: 'paused-user', scenario: 'paused-user', banner: 'Paused by you' },
+  { state: 'paused-user', scenario: 'paused-user', banner: /^Paused by you — resumes from .+; nothing is lost$/ },
   { state: 'paused-limit (attempts)', scenario: 'paused-limit', banner: 'Attempt limit reached (10 of 10)' },
   { state: 'paused-limit (deadline)', scenario: 'paused-deadline', banner: /^Execution time limit reached \(4m 30s of 15m 0s\)$/ },
   { state: 'auth-failed', scenario: 'auth-failed', banner: 'OpenAI rejected the stored credential' },
   { state: 'approval-stale', scenario: 'approval-stale', banner: 'Project files changed after the plan was proposed', proof: 'The plan that was proposed' },
   { state: 'interrupted', scenario: 'interrupted', banner: 'Relay stopped while this run was in progress', proof: 'Recovery' },
   { state: 'cancelling', scenario: 'cancelling', banner: 'Cancellation requested; waiting for the in-flight request to stop (best effort)' },
-  { state: 'cancelled', scenario: 'cancelled', banner: 'Run cancelled', proof: /the possible amount stays as unknown liability/ },
+  { state: 'cancelled', scenario: 'cancelled', banner: 'Run cancelled', proof: /Relay counted an estimate for each toward the budget/ },
   { state: 'failed', scenario: 'failed', banner: 'Run failed because of an internal error', proof: 'Open diagnostics' },
   { state: 'completed', scenario: 'completed', banner: 'Accepted by the workflow reviewer', proof: /does not guarantee the code is correct/ },
   { state: 'incomplete', scenario: 'incomplete', banner: 'Revision limit reached (2 of 2)' },
@@ -92,7 +92,6 @@ const STATES: readonly StateCase[] = [
   { state: 'auth-failed (queued)', scenario: 'queued-auth-required', banner: 'No API key is connected for OpenAI', proof: /The run has not started: nothing was sent/ },
   { state: 'provider-unavailable (setup, queued)', scenario: 'queued-setup-blocked', banner: 'A setup check failed before the run started', proof: 'This provider is not allowed for the project.' },
   { state: 'budget-paused (queued)', scenario: 'queued-budget', banner: /^Paused before the first request: the next request needs \$0\.12, only \$0\.10 remains$/, proof: /The run has not started/ },
-  { state: 'unknown-outcome (all decided)', scenario: 'unknown-outcome-decided', banner: 'Every request with an unknown outcome has been decided', proof: 'Recovery' },
 ];
 
 describe('RunInspectorPage', () => {
@@ -109,12 +108,13 @@ describe('RunInspectorPage', () => {
     if (proof !== undefined) expect((await screen.findAllByText(proof)).length).toBeGreaterThan(0);
     // Approval controls render once the plan is loaded.
     if (run.availableActions.includes('approve')) await within(await screen.findByRole('region', { name: 'Proposed plan' })).findByRole('button', { name: 'Approve plan' });
+    // Decision 1: no money wording says "unknown" in any state.
+    expect(screen.getByRole('main')).not.toHaveTextContent(/unknown (liability|charge|outcome)|\$[\d.]+ unknown/i);
+    const finished = ['completed', 'incomplete', 'cancelled', 'failed'].includes(run.status);
     for (const action of RUN_ACTIONS) {
-      // With unresolved attempts, the RecoveryPanel offers decide_unknown per attempt (one button per decision).
-      // A finished run settles a left-over unknown charge from the banner's single button (no per-attempt rows).
-      const finished = ['completed', 'incomplete', 'cancelled', 'failed'].includes(run.status);
-      const perAttempt = action === 'decide_unknown' && run.unresolvedAttempts.length > 0 && !finished;
-      const found = controls(perAttempt ? UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge : CONTROL_NAME[action]);
+      // While the run is in progress its exports are one "Export…" button (the dialog offers the patch too).
+      if (action === 'export_patch' && !finished) continue;
+      const found = controls(action === 'export_report' && !finished ? 'Export…' : CONTROL_NAME[action]);
       if (run.availableActions.includes(action)) expect(found.length, `${action} should be shown`).toBeGreaterThan(0);
       else expect(found, `${action} must not be shown`).toHaveLength(0);
     }
@@ -161,19 +161,18 @@ describe('RunInspectorPage', () => {
     });
   });
 
-  it('paused(unknown_outcome) offering resume maps it to runs.resume { kind: continue }', async () => {
+  it('paused(unknown_outcome): Retry step retries the step (no decision, no runs.decideUnknown)', async () => {
     const user = userEvent.setup();
-    const { bridge, run } = open('unknown-outcome-decided');
+    const { bridge, run } = open('unknown-outcome');
     await ready();
-    const panel = screen.getByRole('region', { name: 'Recovery' });
-    await user.click(within(panel).getByRole('button', { name: 'Resume' }));
+    const banner = screen.getByTestId('status-banner');
+    expect(screen.queryByRole('region', { name: 'Recovery' })).not.toBeInTheDocument();
+    await user.click(within(banner).getByRole('button', { name: 'Retry step' }));
     await waitFor(() => {
-      expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(1);
+      expect(bridge.callsTo('relay/v1/runs.retryStep')).toHaveLength(1);
     });
-    expect(bridge.callsTo('relay/v1/runs.resume')[0]?.input).toMatchObject({ runId: run.id, decision: { kind: 'continue' } });
-    await waitFor(() => {
-      expect(bridge.world.runs[0]?.status).toBe('running');
-    });
+    expect(bridge.callsTo('relay/v1/runs.retryStep')[0]?.input).toMatchObject({ runId: run.id, stepId: run.uncertainAttempts[0]?.stepRunId });
+    expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
   });
 
   it('approve sends the displayed plan and context hashes', async () => {
@@ -352,38 +351,8 @@ describe('RunInspectorPage', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Cancel run' }));
     const dialog = await screen.findByRole('dialog', { name: 'Cancel this run?' });
     expect(within(dialog).getByText(/best effort/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/charge may stay unknown/)).toBeInTheDocument();
-  });
-
-  it('decide unknown: a RecoveryPanel row decision confirms (retry "may incur another charge") and decides that attempt', async () => {
-    const { bridge, run } = open('unknown-outcome');
-    const attempt = run.unresolvedAttempts[0];
-    expect(screen.queryByRole('button', { name: 'Decide on unknown charge' })).not.toBeInTheDocument();
-    await userEvent.click(await screen.findByRole('button', { name: 'Retry (may incur another charge)' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Retry this request?' });
-    expect(within(dialog).getByText(/The retry may incur another charge/)).toBeInTheDocument();
-    expect(describeViolations(await axe(document.body))).toEqual([]);
-    expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry (may incur another charge)' }));
-    await waitFor(() => {
-      expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(1);
-    });
-    expect(bridge.callsTo('relay/v1/runs.decideUnknown')[0]?.input).toMatchObject({
-      runId: run.id,
-      attemptId: attempt?.id,
-      decision: 'retry_acknowledging_charge',
-    });
-  });
-
-  it('decide unknown: "Not now" closes the confirmation without deciding', async () => {
-    const { bridge } = open('unknown-outcome');
-    await userEvent.click(await screen.findByRole('button', { name: 'Mark as failed without retry' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Mark this request as failed?' });
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Not now' }));
-    await waitFor(() => {
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    });
-    expect(bridge.callsTo('relay/v1/runs.decideUnknown')).toHaveLength(0);
+    expect(within(dialog).getByText(/Relay counts an estimate/)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/unknown/i);
   });
 
   it('a runner channel answering not_implemented shows the generic action error', async () => {
@@ -862,20 +831,20 @@ describe('RunInspectorPage E1 run-level fields', () => {
   });
 });
 
-describe('RunInspectorPage unknown requests', () => {
+describe('RunInspectorPage requests that may not have completed (decision 1)', () => {
   it('unknown-outcome: the request facts show the dispatch time and that no request id was recorded', async () => {
     const { run } = open('unknown-outcome');
     const banner = await screen.findByTestId('status-banner');
-    const facts = within(banner).getByRole('list', { name: 'Requests with an unknown outcome' });
+    const facts = within(banner).getByRole('list', { name: 'Requests that may not have completed' });
     expect(within(facts).getByText('No request id was recorded')).toBeInTheDocument();
     const sent = within(facts).getByText('Sent').nextElementSibling?.querySelector('time');
-    expect(sent).toHaveAttribute('dateTime', new Date(run.unresolvedAttempts[0]?.startedAt ?? 0).toISOString());
+    expect(sent).toHaveAttribute('dateTime', new Date(run.uncertainAttempts[0]?.startedAt ?? 0).toISOString());
   });
 
   it('unknown-outcome: a recorded provider request id is shown and copyable', async () => {
     const bridge = createFakeBridge('unknown-outcome');
     const run = patchRun(bridge, (r) => ({
-      unresolvedAttempts: r.unresolvedAttempts.map((a) => ({ ...a, providerRequestId: 'req_01JABCDEF' })),
+      uncertainAttempts: r.uncertainAttempts.map((a) => ({ ...a, providerRequestId: 'req_01JABCDEF' })),
     }));
     renderApp(`${P}/runs/${run.id}`, { bridge });
     const banner = await screen.findByTestId('status-banner');
@@ -883,15 +852,81 @@ describe('RunInspectorPage unknown requests', () => {
     expect(within(banner).getByRole('button', { name: /Copy provider request id of Produce patch · attempt 1/ })).toBeInTheDocument();
   });
 
-  it('cancelled (finished) run: "Decide on unknown charge" offers only accepting the estimate or marking failed', async () => {
+  it('unknown-outcome: the plain explanation with the estimate and "may not have been charged"; Retry step and Stop only', async () => {
+    open('unknown-outcome');
+    const banner = await screen.findByTestId('status-banner');
+    expect(within(banner).getByTestId('uncertain-outcome')).toHaveTextContent(
+      'The last request may or may not have completed. Relay counted ~$0.62 (estimated) toward the budget, may not have been charged. Retry the step (this may charge again) or stop.',
+    );
+    const buttons = within(banner).getAllByRole('button').map((b) => b.textContent);
+    expect(buttons).toEqual(['Retry step', 'Stop run']);
+  });
+
+  it('a finished run with an estimated charge offers no "decide" button', async () => {
     const { run } = open('cancelled');
-    expect(run.unresolvedAttempts.length).toBeGreaterThan(0);
-    await userEvent.click(await screen.findByRole('button', { name: 'Decide on unknown charge' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Decide on the unknown request' });
-    const radios = within(dialog).getAllByRole('radio');
-    expect(radios.map((r) => r.getAttribute('value'))).toEqual(['accept_estimated_charge', 'mark_failed_keep_liability']);
-    expect(within(dialog).queryByText(UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge)).not.toBeInTheDocument();
-    expect(within(dialog).getByText('No request id was recorded')).toBeInTheDocument();
+    expect(run.uncertainAttempts.length).toBeGreaterThan(0);
+    await screen.findByTestId('status-banner');
+    expect(screen.queryByRole('button', { name: /decide/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('status-banner')).toHaveTextContent('~$0.62 (estimated)');
+    // This request reached the provider: no "may not have been charged" note.
+    expect(screen.getByTestId('status-banner')).not.toHaveTextContent('may not have been charged');
+  });
+
+  it('the Attempts and Ledger tabs show the estimate with "~", never "unknown"', async () => {
+    const user = userEvent.setup();
+    open('unknown-outcome');
+    await ready();
+    await user.click(screen.getByRole('tab', { name: 'Attempts' }));
+    expect(await screen.findByTestId('attempt-cost')).toHaveTextContent('~$0.62 (estimated) may not have been charged');
+    await user.click(screen.getByRole('tab', { name: 'Ledger' }));
+    const ledger = await screen.findByRole('table', { name: /Ledger entries/ });
+    expect(within(ledger).getAllByText('Estimated').length).toBeGreaterThan(0);
+    expect(screen.getByRole('main')).not.toHaveTextContent(/unknown/i);
+  });
+});
+
+describe('RunInspectorPage pause and export while running (decision 2)', () => {
+  it('Pause while a request is in flight shows "Pausing after the current request…" until the run pauses, then Resume', async () => {
+    const user = userEvent.setup();
+    const { bridge, run } = open('active-run');
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.pause')).toHaveLength(1);
+    });
+    expect(await screen.findByText('Pausing after the current request…')).toBeInTheDocument();
+    act(() => {
+      bridge.finishInFlight(run.id);
+    });
+    expect(await screen.findByText(/^Paused by you — resumes from .+; nothing is lost$/)).toBeInTheDocument();
+    expect(screen.queryByText('Pausing after the current request…')).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Resume' }));
+    await waitFor(() => {
+      expect(bridge.world.runs[0]?.status).toBe('running');
+    });
+  });
+
+  it('Pause is offered while awaiting approval', async () => {
+    open('awaiting-approval');
+    await ready();
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled();
+  });
+
+  it('Export… while in progress opens the export dialog with the interim note and exports', async () => {
+    const user = userEvent.setup();
+    const { bridge, run } = open('awaiting-approval');
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Export…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export the run' });
+    expect(within(dialog).getByTestId('export-progress-note')).toHaveTextContent(
+      `The run is still in progress; the export includes results finished so far (${String(run.stepProgress.done)} of ${String(run.stepProgress.total)} steps).`,
+    );
+    await user.click(within(dialog).getByRole('button', { name: /^Export$/ }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/artifacts.export')[0]?.input).toEqual({ runId: run.id, what: 'report' });
+    expect(await screen.findByText('Export saved')).toBeInTheDocument();
   });
 });
 
@@ -943,7 +978,8 @@ describe('RunInspectorPage exports', () => {
     renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
     await userEvent.click(await screen.findByRole('button', { name: RUN_ACTION_LABELS.export_report }));
     expect(await screen.findByText('Export partly saved')).toBeInTheDocument();
-    expect(screen.getByText(/Patch not saved: The folder may be read-only\./)).toBeInTheDocument();
+    // The toast and the app live region may both carry the text at once.
+    expect(screen.getAllByText(/Patch not saved: The folder may be read-only\./).length).toBeGreaterThan(0);
     expect(screen.queryByText('Export saved')).not.toBeInTheDocument();
   });
 

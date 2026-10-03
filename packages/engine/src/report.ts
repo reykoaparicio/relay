@@ -3,7 +3,7 @@
 // Idempotent: an existing report artifact is returned. `renderReportMarkdown` is the pure Markdown view used by
 // `artifacts.exportTo` (`what: 'report'`).
 import { REVIEW_OUTCOMES, err, errors, invariant, isTerminalRunStatus, ok, reportV1Schema } from '@relay/contracts';
-import type { ArtifactId, Microusd, ReportV1, Result, ReviewOutcome, RunId, StepKey, TerminalRunStatus } from '@relay/contracts';
+import type { ArtifactId, Microusd, ReportV1, Result, ReviewOutcome, RunId, RunStatus, StepKey, TerminalRunStatus } from '@relay/contracts';
 import type { LedgerEntryRow, Repos, RunRow, StepRow } from '@relay/storage';
 import type { ReportLimitationKey } from '@relay/templates';
 import { canonicalJson, utf8 } from './hash.js';
@@ -11,18 +11,18 @@ import type { EngineCtx, ModelStepSnapshot, OutputArtifactKind, RunSnapshot } fr
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
 import { effectiveModelSteps, hasSnapshotPreserved, snapshotOf } from './snapshot.js';
-import { costOfEntries, entriesByStep, latestPerKey, settledCertainty, weakestCertainty } from './views.js';
+import { attemptCostCertainty, costOfEntries, entriesByStep, latestPerKey, netSettledCertainties, weakestCertainty } from './views.js';
 
 /**
  * A step's cost over its attempts' ledger entries: settled and unknown from {@link costOfEntries}; the certainty is
- * `unknown` while an unknown liability is open, else the weakest certainty of its settle entries (`calculated` when
- * nothing settled) — the same ordering as the attempt views (an all-`reported` step reports `reported`).
+ * `unknown` while a (legacy) unknown liability is open, else the weakest certainty still carrying a settled amount
+ * (`calculated` when nothing settled; a corrected estimate no longer counts) — the same ordering as the attempt views.
  */
 export function stepCost(entries: readonly LedgerEntryRow[]): ReportV1['steps'][number]['cost'] {
   const cost = costOfEntries(entries);
   const settled = (cost.settledReported + cost.settledCalculated + cost.settledEstimated) as Microusd;
   const unknownSettled = entries.filter((e) => e.bucket === 'settled' && e.certainty === 'unknown').reduce((n, e) => n + e.deltaMicrousd, 0);
-  const certainty = cost.unknown > 0 ? 'unknown' : (weakestCertainty(entries.filter((e) => e.bucket === 'settled').map(settledCertainty)) ?? 'calculated');
+  const certainty = cost.unknown > 0 ? 'unknown' : (weakestCertainty(netSettledCertainties(entries.filter((e) => e.bucket === 'settled'))) ?? 'calculated');
   return { settledMicrousd: (settled + unknownSettled) as Microusd, certainty, unknownMicrousd: cost.unknown };
 }
 
@@ -43,11 +43,11 @@ function verdictOf(snapshot: RunSnapshot, latest: readonly StepRow[]): ReviewOut
   return o !== undefined && o !== null && (REVIEW_OUTCOMES as readonly string[]).includes(o) ? (o as ReviewOutcome) : null;
 }
 
-function limitationKeys(status: TerminalRunStatus, verifyRan: boolean, entries: readonly LedgerEntryRow[]): ReportLimitationKey[] {
+function limitationKeys(status: RunStatus, verifyRan: boolean, totals: ReportV1['totals']): ReportLimitationKey[] {
   const keys: ReportLimitationKey[] = ['patch_not_applied', 'tests_not_run'];
   if (verifyRan) keys.push('model_checks_only');
   keys.push('cost_tracked');
-  if (entries.some((e) => e.certainty === 'estimated' || e.bucket === 'unknown')) keys.push('cost_estimated');
+  if (totals.hasEstimates || totals.unknown > 0) keys.push('cost_estimated');
   if (status === 'incomplete') keys.push('run_incomplete');
   if (status === 'cancelled') keys.push('run_cancelled');
   if (status === 'failed') keys.push('run_failed');
@@ -60,12 +60,16 @@ function modelOf(models: ReadonlyMap<StepKey, ModelStepSnapshot>, stepKey: StepK
   return s === undefined ? { providerId: null, modelId: null } : { providerId: s.profile.providerId, modelId: s.profile.modelId };
 }
 
+/** A report body: `report.v1` of any run status (a non-terminal run's is an interim report, never stored). */
+export type ReportBody = Omit<ReportV1, 'status'> & { readonly status: RunStatus };
+
 /**
- * Builds the report.v1 value of a terminal run (pure over the repos): the snapshot is parsed once and the ledger and
- * attempts are read once, then grouped per step key.
+ * Builds the report value of a run (pure over the repos): the snapshot is parsed once and the ledger and attempts
+ * are read once, then grouped per step key. A terminal run's value is its `report.v1`; a non-terminal run's is the
+ * interim report of what finished so far (decision 2), generated in memory for an export only.
  * @throws SnapshotError when the stored snapshot is malformed; invariant when an FK-bound row is missing.
  */
-function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run: RunRow & { status: TerminalRunStatus }): ReportV1 {
+export function buildReport<S extends RunStatus>(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run: RunRow & { status: S }): ReportBody & { readonly status: S } {
   const version = r.workflows.getVersionById(run.workflowVersionId);
   invariant(version !== undefined, 'a run references its workflow version (FK)');
   const snapshot = snapshotOf(run);
@@ -85,10 +89,17 @@ function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run:
   const byStep = entriesByStep(ledger);
   const verdict = verdictOf(snapshot, latest);
   const texts = ctx.templates.reportLimitations();
+  // Legacy unknown liabilities (none since decision 1: converted to estimates at engine start).
   const liabilities = attempts.filter((a) => a.state === 'unknown' || a.state === 'abandoned').flatMap((a) => {
     const u = entries.reduce((n, e) => (e.attemptId === a.id && e.bucket === 'unknown' ? n + e.deltaMicrousd : n), 0) as Microusd;
     return u > 0 ? [{ attemptId: a.id, stepKey: keyOf(a.stepRunId), liabilityMicrousd: u, state: a.state === 'unknown' ? ('unknown' as const) : ('abandoned' as const) }] : [];
   });
+  // Decision 1: uncertain outcomes settled as estimates and not corrected since.
+  const estimatedCharges = attempts.filter((a) => a.outcomeUncertain && attemptCostCertainty(entries, a.id) === 'estimated').map((a) => ({
+    attemptId: a.id, stepKey: keyOf(a.stepRunId), mayNotHaveBeenCharged: a.mayNotHaveBeenCharged,
+    amountMicrousd: entries.reduce((n, e) => (e.attemptId === a.id && e.bucket === 'settled' ? n + e.deltaMicrousd : n), 0) as Microusd,
+  }));
+  const totals = costOfEntries(entries);
   return {
     schemaId: 'report.v1',
     runId: run.id,
@@ -99,15 +110,16 @@ function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run:
     workflow: { id: version.workflowId, version: version.version, contentHash: snapshot.workflowContentHash },
     steps: latest.map((s) => ({ stepKey: s.stepKey, revisionIndex: s.revisionIndex, retryIndex: s.retryIndex, state: s.state, profileName: s.profileName,
       ...modelOf(models, s.stepKey), cost: stepCost(byStep.get(s.stepKey) ?? []) })),
-    totals: costOfEntries(entries),
+    totals,
     unknownLiabilities: liabilities,
+    estimatedCharges,
     artifacts: {
       findings: outputOfKind(snapshot, latest, 'findings'),
       plan: outputOfKind(snapshot, latest, 'plan'),
       patch: outputOfKind(snapshot, latest, 'patch'),
       review: outputOfKind(snapshot, latest, 'review'),
     },
-    limitations: limitationKeys(run.status, verdict !== null, entries).map((k) => texts[k]),
+    limitations: limitationKeys(run.status, verdict !== null, totals).map((k) => texts[k]),
     snapshotUsed: hasSnapshotPreserved(r, run.id),
     generatedAt: ctx.clock.now(),
     approvals: r.approvals.listForRun(run.id).map((a) => ({
@@ -271,12 +283,88 @@ function revisionLines(rv: ReportV1['revisions']): string[] {
   ];
 }
 
-/** F17: the pure Markdown rendering of a `report.v1` value (limitations, unknown charges, certainty breakdown). */
-export function renderReportMarkdown(report: ReportV1): string {
+/** Decision 1: an estimated amount reads "~$X (estimated)"; any other amount "$X". */
+function costText(m: number, estimated: boolean): string {
+  return estimated ? `~${money(m)} (estimated)` : money(m);
+}
+
+/** A total that includes estimates is marked "~" (decision 1). */
+const approx = (m: number, estimated: boolean): string => (estimated ? `~${money(m)}` : money(m));
+
+/** One step's cost cell: the settled amount (~ when estimated) and a legacy unknown liability if one is open. */
+function stepCostCell(c: ReportV1['steps'][number]['cost']): string {
+  const settled = costText(c.settledMicrousd, c.certainty === 'estimated');
+  return c.unknownMicrousd > 0 ? `${settled} + up to ${money(c.unknownMicrousd)} unknown` : settled;
+}
+
+/** Decision 1: uncertain outcomes settled as estimates, with the "may not have been charged" note. */
+function estimatedChargeLines(report: Pick<ReportV1, 'estimatedCharges'>): string[] {
+  const list = report.estimatedCharges ?? [];
+  if (list.length === 0) return ['None.'];
+  return list.map((c) => `- ${c.stepKey} attempt ${c.attemptId}: ${costText(c.amountMicrousd, true)} — the outcome was uncertain${c.mayNotHaveBeenCharged ? '; may not have been charged' : ''}`);
+}
+
+/** Legacy unknown liabilities (reports from before decision 1); the section is omitted when there are none. */
+function legacyUnknownLines(report: Pick<ReportV1, 'unknownLiabilities'>): string[] {
+  const list = report.unknownLiabilities ?? [];
+  if (list.length === 0) return [];
+  return ['## Unknown charges', '', ...list.map((u) => `- ${u.stepKey} attempt ${u.attemptId} (${u.state}): up to ${money(u.liabilityMicrousd)} may have been charged`), ''];
+}
+
+/** A finished step output included in an interim export (decision 2). */
+export interface FinishedOutput {
+  readonly stepKey: StepKey;
+  readonly kind: string;
+  readonly artifactId: ArtifactId;
+  /** Canonical JSON text of the validated output. */
+  readonly json: string;
+}
+
+/** Decision 2: what marks an interim (in-progress) export. */
+export interface InterimMark {
+  readonly exportedAt: number;
+  readonly stepsFinished: number;
+  readonly stepsTotal: number;
+  readonly outputs: readonly FinishedOutput[];
+}
+
+/** A fence longer than any backtick run in `text`, so the text can never close it. */
+function fenceFor(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
+function outputLines(outputs: readonly FinishedOutput[]): string[] {
+  if (outputs.length === 0) return ['No step has finished with an output yet.', ''];
+  return outputs.flatMap((o) => {
+    const pretty = (() => {
+      try {
+        return JSON.stringify(JSON.parse(o.json), null, 2);
+      } catch {
+        return o.json;
+      }
+    })();
+    const fence = fenceFor(pretty);
+    return [`### ${o.stepKey} — ${o.kind} (${o.artifactId})`, '', `${fence}json`, pretty, fence, ''];
+  });
+}
+
+/**
+ * F17: the pure Markdown rendering of a report (limitations, estimated charges, certainty breakdown). Decision 1: an
+ * estimated amount reads "~$X (estimated)" with the "may not have been charged" note, and totals that include
+ * estimates are marked "~". Decision 2: `interim` renders an in-progress export ("In progress — exported <time>; N of M
+ * steps finished") with the finished step outputs.
+ */
+export function renderReportMarkdown(report: ReportBody, interim?: InterimMark): string {
   const t = report.totals;
+  const est = t.hasEstimates;
+  const settledTotal = t.settledReported + t.settledCalculated + t.settledEstimated;
   const lines: string[] = [
-    `# Relay run report — ${report.runId}`,
+    interim === undefined ? `# Relay run report — ${report.runId}` : `# Relay run report (in progress) — ${report.runId}`,
     '',
+    ...(interim === undefined
+      ? []
+      : [`> In progress — exported ${new Date(interim.exportedAt).toISOString()}; ${String(interim.stepsFinished)} of ${String(interim.stepsTotal)} steps finished`, '']),
     `- Status: ${report.status}`,
     `- Verdict: ${report.verdict ?? 'not reviewed'}`,
     `- Workflow: ${report.workflow.id} v${String(report.workflow.version)} (${report.workflow.contentHash})`,
@@ -290,26 +378,31 @@ export function renderReportMarkdown(report: ReportV1): string {
     '',
     '## Steps',
     '',
-    '| Step | Revision | Retry | State | Profile | Model | Instructions | Settled (USD) | Certainty | Unknown (USD) |',
-    '|---|---|---|---|---|---|---|---|---|---|',
+    '| Step | Revision | Retry | State | Profile | Model | Instructions | Cost (USD) | Certainty |',
+    '|---|---|---|---|---|---|---|---|---|',
     ...report.steps.map((s) => {
       const meta = report.stepMeta?.find((m) => m.stepKey === s.stepKey);
       const label = meta?.name == null ? s.stepKey : `${meta.name} (${s.stepKey})`;
       return `| ${[label, s.revisionIndex, s.retryIndex, s.state, s.profileName,
-      s.providerId === null ? null : `${s.providerId}/${s.modelId ?? '?'}`, meta?.instructionVersion ?? null, usd6(s.cost.settledMicrousd), s.cost.certainty,
-        usd6(s.cost.unknownMicrousd)].map(cell).join(' | ')} |`;
+      s.providerId === null ? null : `${s.providerId}/${s.modelId ?? '?'}`, meta?.instructionVersion ?? null, stepCostCell(s.cost), s.cost.certainty].map(cell).join(' | ')} |`;
     }),
     '',
     '## Cost (tracked by Relay)',
     '',
     `- Run allowance: ${money(t.allowance)}`,
+    `- Total so far: ${approx(settledTotal, est)}${est ? ' (includes estimates)' : ''}`,
     `- Settled, provider-reported: ${money(t.settledReported)}`,
     `- Settled, calculated from usage: ${money(t.settledCalculated)}`,
-    `- Settled, estimated: ${money(t.settledEstimated)}`,
+    `- Settled, estimated: ${approx(t.settledEstimated, est)}`,
     `- Still reserved: ${money(t.reserved)}`,
-    `- Unknown charges: ${money(t.unknown)}`,
-    `- Remaining: ${money(t.remaining)}${t.overrun ? ' (over the allowance)' : ''}`,
+    ...(t.unknown > 0 ? [`- Unknown charges: ${money(t.unknown)}`] : []),
+    `- Remaining: ${approx(t.remaining, est)}${t.overrun ? ' (over the allowance)' : ''}`,
     '',
+    '## Estimated charges',
+    '',
+    ...estimatedChargeLines(report),
+    '',
+    ...legacyUnknownLines(report),
     '## Approvals',
     '',
     ...approvalLines(report.approvals),
@@ -318,12 +411,7 @@ export function renderReportMarkdown(report: ReportV1): string {
     '',
     ...revisionLines(report.revisions),
     '',
-    '## Unknown charges',
-    '',
-    ...(report.unknownLiabilities.length === 0
-      ? ['None.']
-      : report.unknownLiabilities.map((u) => `- ${u.stepKey} attempt ${u.attemptId} (${u.state}): up to ${money(u.liabilityMicrousd)} may have been charged`)),
-    '',
+    ...(interim === undefined ? [] : ['## Finished step outputs', '', ...outputLines(interim.outputs)]),
     '## Artifacts',
     '',
     ...(['findings', 'plan', 'patch', 'review'] as const).map((k) => `- ${k}: ${report.artifacts[k] ?? 'none'}`),

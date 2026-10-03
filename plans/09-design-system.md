@@ -84,9 +84,9 @@ UX rules pulled from the skill (`--domain ux`, `--domain web`, `--stack react`),
 | run `paused` + `output_invalid` | Paused: output didn't match schema | warning | `FileX` | Repair attempts are used up. Retry the step or choose another profile |
 | run `paused` + `provider_unavailable` | Paused: provider unavailable | warning | `CloudOff` | Retries are used up. Retry the step or choose another profile |
 | run `paused` + `model_refused` | Paused: model declined | warning | `ShieldX` | Choose another profile or edit the goal |
-| run `paused` + `unknown_outcome` | Paused: unknown request outcome | unknown | `HelpCircle` | Decide how to handle the possible charge |
+| run `paused` + `unknown_outcome` | Paused: request may not have completed | unknown | `HelpCircle` | Retry the step (this may charge again) or stop |
 | certainty `estimated` | est. | neutral | `Sigma` | – |
-| certainty `unknown` | Unknown charge | unknown | `HelpCircle` | – |
+| certainty `unknown` (legacy) | Estimated | neutral | `Sigma` | – (decision 1: never shown as unknown) |
 
 ## I3: Primitive components (`components/ui/*.tsx`)
 
@@ -131,8 +131,8 @@ Components that render step outputs or manifests take their prop types from **`@
 | Component | Props | Behavior | Mock |
 |---|---|---|---|
 | `StepTimeline` | `steps: StepView[]`, `selectedId`, `onSelect` | `<ol>`. Each step is a `ListItemButton` (`aria-current="step"`, named by the step title, described by its text state) with a state dot. Arrow keys move the selection. Memoized | run-inspector timeline |
-| `BudgetMeter` | `cost: CostSummary` | Stacked bar with segments for settled (solid), estimated (hatched), reserved, and unknown (hatched purple), plus a **text legend with amounts** (not color only) and `role="img"` + `aria-label` summarizing the amounts | `.meter` |
-| `BudgetLedger` | `cost`, `byStep?` | `<table>` with rows reported / calculated / estimated / reserved / unknown / allowance / remaining. "Tracked by Relay" caption (§9.1) | `.ledger` |
+| `BudgetMeter` | `cost: CostSummary` | Stacked bar with segments for settled (solid), estimated (hatched; legacy not-confirmed amounts fold in), and reserved, plus a **text legend with amounts** (estimates and a remaining amount that depends on them read "~$…") and `role="img"` + `aria-label` summarizing the amounts | `.meter` |
+| `BudgetLedger` | `cost`, `byStep?` | `<table>` with rows reported / calculated / estimated ("~$X (estimated)") / reserved / tracked total / allowance / remaining (totals with an estimate read "~"). "Tracked by Relay" caption (§9.1) | `.ledger` |
 | `BudgetBreakdownTable` | `breakdown: BudgetBreakdown` | Shows L, C, R, U, N and the total vs L with the inequality spelled out: "$3.10 > $3.00 → blocked" | new-run `budget-blocked` |
 | `PlanBody` | `plan: PlanV1`, `fileScope?` | The whole plan body shared by the step panel and ApprovalCard (DUP-02): goal, steps with the findings they address, file scope, sources, suggested tests, risks, open questions | – |
 | `ApprovalCard` | `approval: ApprovalView`, `plan: PlanV1`, `onDecide` | `PlanBody` (so approvers see unresolved questions, test suggestions and finding ids), and the "covers plan hash X and context snapshot Y only" line. Approve / Request revision (reveals a required textarea) / Reject. Pending states | run-inspector awaiting-approval |
@@ -142,7 +142,7 @@ Components that render step outputs or manifests take their prop types from **`@
 | `FileTree` | `included`, `excluded` | Excluded rows show the reason text (`secret`, `too_large`, …) | onboarding select-project |
 | `MemoryRecordCard` | `record`, `selected` | Title, excerpt, type/source line, stale indicator (a `ListItemButton`) | memory list |
 | `ConflictCompare` | `a`, `b`, `value`, `onValueChange`, `onSubmit`, `slots?` (per-option fields), `pending?`, `submitDisabled?` | Controlled. Side-by-side columns with the 4 resolution choices; the chosen option's slot (e.g. the combine rewrite, the two scopes) renders under them and one "Resolve conflict" submits the single form. Never merges silently | memory conflict |
-| `RecoveryPanel` | `run: RunDetail`, `onDecide` | Last completed step, unresolved attempts with liability, the decision buttons from `availableActions` | overview interrupted / run-inspector unknown-outcome |
+| `RecoveryPanel` | `run: RunDetail`, `onDecide`, `showRequests?` | Last completed step, the requests that may not have completed with the estimate counted ("may not have been charged" note), the action buttons from `availableActions` (never a per-attempt decision) | overview interrupted / run-inspector unknown-outcome |
 | `CatalogTable` | `entries: CatalogModel[]`, `catalogVersion`, `profileChecks?: Record<ModelId, CapabilityWarning[]>` | Built on `DataTable`. Columns: model (name + mono id), provider, capabilities (each shown as ✓/✗ **with text** "Yes"/"No"; glyphs `aria-hidden`), prices per MTok for input / output / cache read / cache write (via `Money`), catalog version, source (the `https://` URL shown **as text** with a `CopyButton`, not a clickable external link), and effective date (`<time>`). `profileChecks` adds a visible warnings column for per-profile capability check results | settings providers models |
 | `FakeProviderBadge` | – | Persistent badge in the shell when `providerMode === 'fake'` (§22.2 honesty) | – |
 

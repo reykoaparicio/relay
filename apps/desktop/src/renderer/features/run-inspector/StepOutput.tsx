@@ -288,7 +288,7 @@ export function StepOutputTab({ run, projectId, step, detail, detailError, appro
     pending: 'This step has not started. Nothing has been sent for it.',
     ready: 'This step is next. Nothing has been sent for it yet.',
     skipped: 'This step was skipped; it will not run.',
-    unknown: 'The provider may have processed this request. The run shows how to resolve it.',
+    unknown: 'This request may or may not have completed. Relay counted its cost as an estimate; the run banner shows what you can do.',
     succeeded: 'This step finished without a stored output.',
     failed: 'This step did not produce a valid output.',
   };

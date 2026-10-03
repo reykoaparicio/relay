@@ -7,6 +7,9 @@ import type { AttemptRepo, AttemptRow } from '../types.js';
 
 const UNRESOLVED = "('created', 'reserved', 'dispatching', 'unknown')";
 
+/** An optional boolean column value (undefined = keep the current value). */
+const boolParam = (v: boolean | undefined): number | undefined => (v === undefined ? undefined : v ? 1 : 0);
+
 // Provider ids are write-once per column (COALESCE keeps an existing id), everything else is set when provided.
 const TRANSITION_SQL = `UPDATE attempts SET state = ?, ${optionalSetClause([
   'dispatched_at',
@@ -16,6 +19,8 @@ const TRANSITION_SQL = `UPDATE attempts SET state = ?, ${optionalSetClause([
   'raw_usage_json',
   'stop_reason',
   'error_json',
+  'outcome_uncertain',
+  'may_not_have_been_charged',
 ])},
   provider_request_id = COALESCE(provider_request_id, ?),
   provider_response_id = COALESCE(provider_response_id, ?)
@@ -77,6 +82,8 @@ export function createAttemptRepo(driver: SqlDriver): AttemptRepo {
             jsonParam(fields.rawUsage),
             fields.stopReason,
             jsonParam(fields.error),
+            boolParam(fields.outcomeUncertain),
+            boolParam(fields.mayNotHaveBeenCharged),
           ]),
           fields.providerRequestId ?? null,
           fields.providerResponseId ?? null,
@@ -107,6 +114,21 @@ export function createAttemptRepo(driver: SqlDriver): AttemptRepo {
              provider_response_id = COALESCE(provider_response_id, ?) WHERE id = ?`,
         )
         .run(ids.requestId ?? null, ids.responseId ?? null, id);
+    },
+    markUncertain(id, mayNotHaveBeenCharged) {
+      return driver.prepare('UPDATE attempts SET outcome_uncertain = 1, may_not_have_been_charged = ? WHERE id = ?').run(mayNotHaveBeenCharged ? 1 : 0, id).changes > 0;
+    },
+    listUncertain(runId) {
+      return driver.prepare('SELECT * FROM attempts WHERE run_id = ? AND outcome_uncertain = 1 ORDER BY created_at, seq').all(runId).map(mapAttempt);
+    },
+    listReconcileCandidates() {
+      return driver
+        .prepare(
+          `SELECT * FROM attempts WHERE state = 'unknown'
+             OR (state = 'abandoned' AND outcome_uncertain = 1 AND provider_response_id IS NOT NULL) ORDER BY created_at, id`,
+        )
+        .all()
+        .map(mapAttempt);
     },
     nextSeq(stepRunId) {
       const row = driver.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM attempts WHERE step_run_id = ?').get(stepRunId);

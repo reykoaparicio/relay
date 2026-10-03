@@ -47,6 +47,7 @@ function activeHint(model: OverviewModel): string {
 }
 
 /** Project overview (10 J4, §5.2). Mock states: awaiting-approval, active-run, empty, interrupted, provider-disconnected. */
+
 export function OverviewPage() {
   const { projectId = '' } = useParams();
   // PERF-04: the usual next page is a run; warm its chunk while this page is open.

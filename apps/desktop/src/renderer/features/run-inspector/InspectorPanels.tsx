@@ -48,7 +48,7 @@ const EVENT_SUMMARY: { readonly [T in RunEventType]: (p: Readonly<Record<string,
   'attempt.dispatching': (_p, step) => `${step ?? 'Step'}: request sent to the provider`,
   'attempt.stream_progress': (_p, step) => `${step ?? 'Step'}: receiving output`,
   'attempt.settled': (_p, step) => `${step ?? 'Step'}: request finished`,
-  'attempt.unknown': (_p, step) => `${step ?? 'Step'}: request outcome unknown`,
+  'attempt.unknown': (_p, step) => `${step ?? 'Step'}: request may not have completed (cost estimated)`,
   'ledger.reserved': (p) => {
     const n = payloadMoney(p, 'N');
     return n === null ? 'Budget reserved for the request' : `Budget reserved: ${n}`;
@@ -182,7 +182,27 @@ const CERTAINTY_TEXT: Readonly<Record<CostCertainty, string>> = {
   reported: 'Reported',
   calculated: 'Calculated',
   estimated: 'Estimated',
-  unknown: 'Unknown charge',
+  // Legacy certainty: a charge without an exact cost is an estimate (never shown as unknown).
+  unknown: 'Estimated',
+};
+
+/** Entry types in words (exhaustive over contracts LEDGER_ENTRY_TYPES). Legacy "unknown" moves read as estimates. */
+const ENTRY_TYPE_TEXT: Readonly<Record<LedgerEntryView['type'], string>> = {
+  allowance_set: 'allowance set',
+  allowance_change: 'allowance change',
+  reserve: 'reserve',
+  release: 'release',
+  settle: 'settle',
+  move_to_unknown: 'estimate counted',
+  resolve_unknown: 'estimate resolved',
+};
+
+/** Buckets in words (exhaustive over contracts LEDGER_BUCKETS). */
+const BUCKET_TEXT: Readonly<Record<LedgerEntryView['bucket'], string>> = {
+  allowance: 'allowance',
+  reserved: 'reserved',
+  settled: 'settled',
+  unknown: 'estimated',
 };
 
 function ledgerColumns(attemptSeqs: ReadonlyMap<string, number>): ReadonlyArray<DataTableColumn<LedgerEntryView>> {
@@ -217,8 +237,8 @@ function ledgerColumns(attemptSeqs: ReadonlyMap<string, number>): ReadonlyArray<
         );
       },
     },
-    { key: 'type', header: 'Type', nowrap: true, cell: (e) => e.type.replaceAll('_', ' ') },
-    { key: 'bucket', header: 'Bucket', cell: (e) => e.bucket },
+    { key: 'type', header: 'Type', nowrap: true, cell: (e) => ENTRY_TYPE_TEXT[e.type] },
+    { key: 'bucket', header: 'Bucket', cell: (e) => BUCKET_TEXT[e.bucket] },
     {
       key: 'delta',
       header: 'Delta',

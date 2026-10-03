@@ -9,6 +9,7 @@ import { createHarness, sleep } from '../helpers/engine-harness.js';
 import type { Harness } from '../helpers/engine-harness.js';
 import { createManualClock } from '../helpers/manual-clock.js';
 import { cleanupTempDirs } from '../helpers/temp-dirs.js';
+import { expectedEstimate } from './uncertain-estimate.js';
 
 let h: Harness | undefined;
 afterEach(async () => {
@@ -77,7 +78,7 @@ describe('limits @m3', () => {
     expect(done.executionMsUsed).toBeLessThan(60_000);
   });
 
-  it('(c) a hanging step past the remaining execution time → abort + paused(deadline), attempt unknown (U = N) → raise_limits → RESUME_RESOLVED @m3', async () => {
+  it('(c) a hanging step past the remaining execution time → abort + paused(deadline), attempt uncertain and settled as an estimate (U = 0) → raise_limits → RESUME_RESOLVED @m3', async () => {
     const mc = createManualClock();
     h = await createHarness({ scenario: 'hang', clock: mc, limits: { executionTimeoutSeconds: 60 } });
     const runId = await h.startRun();
@@ -89,7 +90,7 @@ describe('limits @m3', () => {
     expect([paused.status, paused.pauseReason]).toEqual(['paused', 'deadline']);
     const [a] = h.attempts(runId, 'review');
     expect(a?.state).toBe('unknown');
-    expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: a!.reservationMicrousd }));
+    expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: expectedEstimate(a!, 0) }));
     expect(h.calls({ runId })).toHaveLength(1);
 
     const raised = await h.resume(runId, { kind: 'raise_limits', executionTimeoutSeconds: 600 });
@@ -97,7 +98,7 @@ describe('limits @m3', () => {
     expect(raised.ok ? raised.data.status : raised.error.code).not.toBe('paused');
     expect(h.db.repos.runs.get(runId).limits.executionTimeoutSeconds).toBe(600);
     const next = await h.waitFor(runId, settled);
-    // The unknown attempt still needs the user's decision (never silently retried).
+    // The uncertain attempt still needs the user's retry (never silently retried): retry_step / stop.
     expect(h.calls({ runId, stepKey: 'review' })).toHaveLength(1);
     expect(next.status).toBe('paused');
     expect(next.pauseReason).toBe('unknown_outcome');

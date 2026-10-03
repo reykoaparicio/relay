@@ -62,6 +62,22 @@ describe('LedgerRepo', () => {
     expect(repo.runBalances(newId('run'))).toEqual({ L: 0, C: 0, R: 0, U: 0 });
   });
 
+  it('decision 1: openUnknownLiabilities lists every open legacy liability (per attempt, and the setup scope as one row), none once resolved', () => {
+    const { p, run, step } = setup();
+    const a = seedAttempt(f.db, f.clock, run.id, step.id);
+    const b = seedAttempt(f.db, f.clock, run.id, step.id);
+    f.db.tx('immediate', (r) => {
+      r.ledger.append([runEntry(run.id, p.id, { type: 'move_to_unknown', bucket: 'unknown', deltaMicrousd: 300, attemptId: a.id, certainty: 'unknown' })]);
+      r.ledger.append([runEntry(run.id, p.id, { type: 'move_to_unknown', bucket: 'unknown', deltaMicrousd: 200, attemptId: b.id, certainty: 'unknown' })]);
+      r.ledger.append([runEntry(run.id, p.id, { type: 'resolve_unknown', bucket: 'unknown', deltaMicrousd: -200, attemptId: b.id })]);
+      r.ledger.append([{ scope: 'setup', type: 'move_to_unknown', bucket: 'unknown', deltaMicrousd: 50, certainty: 'unknown' }]);
+    });
+
+    const open = f.db.repos.ledger.openUnknownLiabilities();
+    expect(open).toHaveLength(2);
+    expect(open).toEqual(expect.arrayContaining([{ attemptId: a.id, microusd: 300 }, { attemptId: null, microusd: 50 }]));
+  });
+
   it('projectMonthBalances uses a half-open window for C and outstanding R/U regardless of date', () => {
     const { p, run, step } = setup();
     const other = seedProject(f.db, f.clock);
@@ -79,6 +95,26 @@ describe('LedgerRepo', () => {
     repo.append([{ scope: 'setup', type: 'settle', bucket: 'settled', deltaMicrousd: 5, certainty: 'reported', createdAt: START }]);
 
     expect(repo.projectMonthBalances(p.id, START, END)).toEqual({ C: 10, R: 300, U: 70 });
+  });
+
+  it('decision 1: projectMonthEstimated nets estimates in the month (a later correction cancels one)', () => {
+    const { p, run, step } = setup();
+    const a = seedAttempt(f.db, f.clock, run.id, step.id).id;
+    const b = seedAttempt(f.db, f.clock, run.id, step.id).id;
+    const e = (x: Parameters<typeof runEntry>[2]) => runEntry(run.id, p.id, x);
+    const repo = f.db.repos.ledger;
+
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: 30, certainty: 'calculated', createdAt: START, attemptId: a })]);
+    expect(repo.projectMonthEstimated(p.id, START, END)).toBe(0);
+
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: 40, certainty: 'estimated', createdAt: START, attemptId: b })]);
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: 99, certainty: 'estimated', createdAt: epochMs(START - 1), attemptId: b })]);
+    expect(repo.projectMonthEstimated(p.id, START, END)).toBe(40);
+
+    // Reconciliation correction: the estimate is netted out and the real cost settled.
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: -40, certainty: 'estimated', createdAt: START, attemptId: b })]);
+    repo.append([e({ type: 'settle', bucket: 'settled', deltaMicrousd: 35, certainty: 'reported', createdAt: START, attemptId: b })]);
+    expect(repo.projectMonthEstimated(p.id, START, END)).toBe(0);
   });
 
   it('setupBalances follows the same rules over scope=setup only', () => {

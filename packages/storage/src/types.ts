@@ -589,6 +589,10 @@ export interface AttemptRow {
   readonly dispatchedAt: EpochMs | null;
   readonly firstByteAt: EpochMs | null;
   readonly finishedAt: EpochMs | null;
+  /** Decision 1 (migration 0005): the outcome was uncertain and the attempt is settled as an estimate. */
+  readonly outcomeUncertain: boolean;
+  /** Decision 1: the request may never have reached the provider (not sent / no response byte back). */
+  readonly mayNotHaveBeenCharged: boolean;
 }
 
 export interface AttemptInsert {
@@ -620,6 +624,9 @@ export interface AttemptTransitionFields {
   readonly error?: AppError | null | undefined;
   readonly providerRequestId?: string | null | undefined;
   readonly providerResponseId?: string | null | undefined;
+  /** Decision 1: set once when the outcome became uncertain (never cleared: it records how the attempt was settled). */
+  readonly outcomeUncertain?: boolean | undefined;
+  readonly mayNotHaveBeenCharged?: boolean | undefined;
 }
 
 export interface AttemptRepo {
@@ -637,6 +644,18 @@ export interface AttemptRepo {
   /** Write-once per column (COALESCE): never overwrites an id, can still fill the other one. */
   setProviderIds(id: AttemptId, ids: { readonly requestId?: string | null | undefined; readonly responseId?: string | null | undefined }): void;
   nextSeq(stepRunId: StepRunId): number;
+  /**
+   * Decision 1: marks a (legacy) attempt as settled from an uncertain outcome, without a state change (the start-time
+   * conversion of an unknown liability). Returns whether a row changed.
+   */
+  markUncertain(id: AttemptId, mayNotHaveBeenCharged: boolean): boolean;
+  /** Decision 1: attempts of the run settled from an uncertain outcome (`outcome_uncertain = 1`), oldest first. */
+  listUncertain(runId: RunId): readonly AttemptRow[];
+  /**
+   * F9b candidates (decision 1): `unknown` attempts, plus `abandoned` uncertain attempts that have a provider response
+   * id (the user retried before reconciliation ran: only their cost can still be corrected). Oldest first.
+   */
+  listReconcileCandidates(): readonly AttemptRow[];
 }
 
 // ---------------------------------------------------------------- ledger
@@ -706,8 +725,15 @@ export interface LedgerRepo {
    */
   listForProjectWindow(projectId: ProjectId, startMs: EpochMs, endMs: EpochMs): readonly LedgerEntryWithStep[];
   projectMonthBalances(projectId: ProjectId, monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
+  /** Net settled amount with certainty `estimated` in the project month (decision 1: the "~" on usage totals). */
+  projectMonthEstimated(projectId: ProjectId, monthStartMs: EpochMs, monthEndMs: EpochMs): Microusd;
   setupBalances(monthStartMs: EpochMs, monthEndMs: EpochMs): WindowBalances;
   attemptBalances(attemptId: AttemptId): AttemptBalances;
+  /**
+   * Decision 1: every open legacy unknown liability — per attempt (`attemptId` set) and the setup scope's (attemptId
+   * null, one row) — with its amount (> 0), oldest attempt first. Empty for data recorded since decision 1.
+   */
+  openUnknownLiabilities(): readonly { readonly attemptId: AttemptId | null; readonly microusd: Microusd }[];
   list(runId: RunId, page: PageRequest): Result<Page<LedgerEntryRow>>;
   /** `runCosts(runId).settledByCertainty`. */
   settledByCertainty(runId: RunId): Readonly<Record<CostCertainty, Microusd>>;

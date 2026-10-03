@@ -20,8 +20,10 @@ import { monthWindowOf } from './clock.js';
 import { fromUtf8, utf8 } from './hash.js';
 import type { ParsedInputOf } from './handler-types.js';
 import type { EngineCtx, ExportPort } from './ports.js';
-import { generateReport, renderReportMarkdown, usd6 } from './report.js';
-import { toLedgerEntryView, toRunSummary } from './views.js';
+import type { FinishedOutput, ReportBody } from './report.js';
+import { buildReport, generateReport, renderReportMarkdown, usd6 } from './report.js';
+import { snapshotOf } from './snapshot.js';
+import { latestPerKey, toLedgerEntryView, toRunSummary } from './views.js';
 
 
 /** Max bytes read back from one stored report / patch artifact. */
@@ -84,8 +86,43 @@ async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>
   return parsed.success ? ok(parsed.data) : err(internal(ctx, 'artifact_invalid', { entity: 'report' }));
 }
 
+/**
+ * Decision 2: the interim report of a run that has not ended, built in memory from its current state (never stored
+ * as the run's report artifact): finished step outputs, costs so far (estimates marked "~"), approvals so far, and the
+ * "In progress — exported <time>; N of M steps finished" mark.
+ */
+async function interimReportMarkdown(ctx: EngineCtx, runId: RunId): Promise<Result<{ text: string; report: ReportBody }>> {
+  const r = ctx.db.repos;
+  const run = r.runs.get(runId);
+  let report: ReportBody;
+  try {
+    report = buildReport(ctx, r, run);
+  } catch {
+    return err(internal(ctx, 'artifact_invalid', { entity: 'report' }));
+  }
+  const snapshot = snapshotOf(run);
+  const latest = latestPerKey(r.steps.listForRun(runId));
+  const outputs: FinishedOutput[] = [];
+  for (const s of latest) {
+    const snap = snapshot.steps[s.stepKey];
+    if (snap?.kind !== 'model' || s.state !== 'succeeded' || s.outputArtifactId === null) continue;
+    const text = await readArtifactText(ctx, s.outputArtifactId, snap.outputKind);
+    if (text.ok) outputs.push({ stepKey: s.stepKey, kind: snap.outputKind, artifactId: s.outputArtifactId, json: text.value });
+  }
+  const finished = latest.filter((s) => s.state === 'succeeded' || s.state === 'skipped').length;
+  const text = renderReportMarkdown(report, { exportedAt: ctx.clock.now(), stepsFinished: finished, stepsTotal: latest.length, outputs });
+  return ok({ text, report });
+}
+
+/** The report part of an export: the stored report of a finished run, or an interim report of a run in progress. */
+async function reportMarkdown(ctx: EngineCtx, runId: RunId): Promise<Result<{ text: string; report: ReportBody }>> {
+  if (!isTerminalRunStatus(ctx.db.repos.runs.get(runId).status)) return interimReportMarkdown(ctx, runId);
+  const rep = await runReport(ctx, runId);
+  return rep.ok ? ok({ text: renderReportMarkdown(rep.value), report: rep.value }) : rep;
+}
+
 /** The run's validated patch as one `.patch` text (each file's unified diff, newline-terminated, in order). */
-async function runPatchText(ctx: EngineCtx, runId: RunId, report: ReportV1 | null): Promise<Result<string>> {
+async function runPatchText(ctx: EngineCtx, runId: RunId, report: Pick<ReportV1, 'artifacts'> | null): Promise<Result<string>> {
   const id = report?.artifacts.patch ?? ctx.db.repos.artifacts.listForRun(runId, ['patch']).at(-1)?.id;
   if (id === undefined) return err(errors.notFound('patch'));
   const json = await readJson(ctx, id, 'patch');
@@ -96,7 +133,9 @@ async function runPatchText(ctx: EngineCtx, runId: RunId, report: ReportV1 | nul
 }
 
 /**
- * `artifacts.exportTo`: report → Markdown (`.md`), patch → concatenated unified diffs (`.patch`), or both. E2 #10: each
+ * `artifacts.exportTo`: report → Markdown (`.md`), patch → concatenated unified diffs (`.patch`), or both. Decision 2:
+ * a run in progress exports too — an interim report of what finished so far (generated in memory, never stored as
+ * its report) and the patch when one exists. E2 #10: each
  * part is rendered and written independently; a part that fails (missing / purged artifact, write error) is reported in
  * `failed` with its code while the other part is still written, so the caller retries only the failed part. Only when
  * NOTHING was written is the result an error (the first failure's error, with `details.failed`). A destination refused
@@ -111,14 +150,14 @@ export async function exportRunArtifacts(ctx: EngineCtx, input: ParsedInputOf<'r
   const roots = projectRoots(r);
   const written: { what: ExportPart; realpath: string }[] = [];
   const failed: { what: ExportPart; error: AppError }[] = [];
-  let report: ReportV1 | null = null;
+  let report: Pick<ReportV1, 'artifacts'> | null = null;
   // The run itself is never touched (§17.1 retry only export).
   for (const what of parts) {
     let file: Result<{ name: string; text: string }>;
     if (what === 'report') {
-      const rep = await runReport(ctx, input.runId);
-      if (rep.ok) report = rep.value;
-      file = rep.ok ? ok({ name: `relay-report-${input.runId}.md`, text: renderReportMarkdown(rep.value) }) : rep;
+      const rep = await reportMarkdown(ctx, input.runId);
+      if (rep.ok) report = rep.value.report;
+      file = rep.ok ? ok({ name: `relay-report-${input.runId}.md`, text: rep.value.text }) : rep;
     } else {
       const patch = await runPatchText(ctx, input.runId, report);
       file = patch.ok ? ok({ name: `relay-patch-${input.runId}.patch`, text: patch.value }) : patch;

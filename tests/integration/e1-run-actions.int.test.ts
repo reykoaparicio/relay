@@ -35,7 +35,7 @@ describe('E1 run actions (integration)', () => {
     expect(Number.isSafeInteger(run.executionMsUsed) && run.executionMsUsed >= 0).toBe(true);
   });
 
-  it('an unknown charge left on a stopped run is settled with accept_estimated_charge (no status change)', async () => {
+  it('decision 1: a stopped run with an uncertain attempt holds no unknown charge; runs.decideUnknown is refused (nothing to decide)', async () => {
     h = await createHarness({ scenario: { name: 'u', steps: [{ match: { stepKey: 'review', purpose: 'initial' }, result: { kind: 'unknown_after_dispatch' } }] } });
     const runId = await h.startRun();
     await h.waitFor(runId, 'paused');
@@ -44,9 +44,14 @@ describe('E1 run actions (integration)', () => {
     const stop = await h.call('relay/v1/runs.cancel', { runId });
     expect(stop.ok && stop.data.status).toBe('cancelled');
 
-    const decided = await h.decideUnknown(runId, attempt.id, 'accept_estimated_charge', 'e1-int-decide-0001');
+    expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0 }));
+    const before = h.db.repos.ledger.runBalances(runId);
 
-    expect(decided.ok && [decided.data.status, decided.data.availableActions.includes('decide_unknown')]).toEqual(['cancelled', false]);
-    expect(h.db.repos.ledger.runBalances(runId).U).toBe(0);
+    const decided = await h.decideUnknown(runId, attempt.id, 'accept_estimated_charge', 'e1-int-decide-0001');
+    const detail = await h.call('relay/v1/runs.get', { runId });
+
+    expect(decided.ok ? null : [decided.error.code, decided.error.details?.['reason']]).toEqual(['CONFLICT', 'decision_not_applicable']);
+    expect(detail.ok && [detail.data.status, detail.data.availableActions]).toEqual(['cancelled', ['export_report']]);
+    expect(h.db.repos.ledger.runBalances(runId)).toEqual(before);
   });
 });

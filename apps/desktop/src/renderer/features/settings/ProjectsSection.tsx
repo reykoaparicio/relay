@@ -501,9 +501,9 @@ function ProjectForm({ project }: { readonly project: Project }) {
             }}
           />
           <p className="hint small" style={{ margin: 0 }}>
-            On by default. OpenAI keeps the response for a limited time, which lets Relay look up a request whose outcome
-            is unknown (for example after a crash). When off, OpenAI does not store responses, and Relay cannot check an
-            unknown outcome with OpenAI: you decide each one yourself.
+            On by default. OpenAI keeps the response for a limited time, which lets Relay look up a request that may not
+            have completed (for example after a crash). When off, OpenAI does not store responses, so Relay cannot look
+            such a request up with OpenAI and counts an estimate for it instead.
           </p>
         </div>
         {serverIssues.length > 0 ? (

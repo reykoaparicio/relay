@@ -25,6 +25,7 @@ export function costSummaryFixture(): Record<string, unknown> {
     unknown: 0,
     remaining: 2_999_650,
     overrun: false,
+    hasEstimates: false,
   };
 }
 
@@ -115,9 +116,6 @@ export function reportFixture(): Record<string, unknown> {
       },
     ],
     totals: costSummaryFixture(),
-    unknownLiabilities: [
-      { attemptId: fakeId('attempt'), stepKey: 'plan', liabilityMicrousd: 10, state: 'abandoned' },
-    ],
     artifacts: { findings: fakeId('artifact', 1), plan: null, patch: null, review: null },
     limitations: ['Relay proposed a patch. It was not applied to your project.'],
     snapshotUsed: false,

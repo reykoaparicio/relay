@@ -33,7 +33,7 @@ describe('NewRunPage (J7)', () => {
     expect(screen.getByRole('button', { name: 'Start run' })).toHaveAccessibleDescription('Enter a goal to start.');
     const summary = screen.getByRole('region', { name: 'Input summary' });
     expect(within(summary).getByText('First reservation')).toBeInTheDocument();
-    expect(within(summary).getByText('≈ $0.54 est.')).toBeInTheDocument();
+    expect(within(summary).getByText('~$0.54 (estimated)')).toBeInTheDocument();
     const providers = screen.getByRole('region', { name: 'Providers that will receive this context' });
     expect(within(providers).getByText(/Anthropic/)).toBeInTheDocument();
     // Debounced: typing a goal does not send one preflight per keystroke.
@@ -757,3 +757,145 @@ function createBridgeWithIssue() {
   ];
   return { bridge };
 }
+
+describe('NewRunPage per-step output limits (decision 3)', () => {
+  const summaryRegion = () => screen.getByRole('region', { name: 'Input summary' });
+  /** The first reservation amount, whatever the estimate wording around it ("~$0.54 (estimated)"). */
+  const reservation = (amount: string) => new RegExp(`\\$${amount.replace('.', '\\.')}(?!\\d)`);
+  const lastPreflight = (bridge: ReturnType<typeof createFakeBridge>) =>
+    bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input as Record<string, unknown> | undefined;
+
+  it('prefills each step with its default, labelled by step name, with the allowed range as the hint', async () => {
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    const plan = screen.getByRole('spinbutton', { name: 'Max output tokens for Plan a fix' });
+    expect(plan).toHaveValue(8000);
+    // The planner uses GPT-5 mini (128,000), the reviewer Claude Haiku 4.5 (64,000).
+    expect(plan).toHaveAccessibleDescription('256–128,000');
+    expect(screen.getByRole('spinbutton', { name: 'Max output tokens for Review input' })).toHaveAccessibleDescription(
+      '256–64,000',
+    );
+    expect(screen.getByRole('spinbutton', { name: 'Max output tokens for Produce patch' })).toHaveValue(16000);
+    expect(screen.queryByRole('button', { name: /Reset to default/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reset all to defaults' })).not.toBeInTheDocument();
+    await screen.findByText('Checks passed. Enter a goal to start.', {}, SLOW);
+    // Untouched: the field is omitted entirely.
+    expect(lastPreflight(bridge)).not.toHaveProperty('outputTokenOverrides');
+  });
+
+  it('a changed value is sent as an override, changes the first reservation, and can be reset per step', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    expect(await within(summaryRegion()).findByText(reservation('0.54'), {}, SLOW)).toBeInTheDocument();
+    const review = screen.getByRole('spinbutton', { name: 'Max output tokens for Review input' });
+    await user.clear(review);
+    await user.type(review, '16000');
+    // The first model step (Review input) doubles its output allowance: the first reservation doubles.
+    expect(await within(summaryRegion()).findByText(reservation('1.08'), {}, SLOW)).toBeInTheDocument();
+    expect(lastPreflight(bridge)?.['outputTokenOverrides']).toEqual({ review: 16_000 });
+    // Typing the default back is not an override.
+    await user.clear(review);
+    await user.type(review, '8000');
+    expect(await within(summaryRegion()).findByText(reservation('0.54'), {}, SLOW)).toBeInTheDocument();
+    expect(lastPreflight(bridge)).not.toHaveProperty('outputTokenOverrides');
+    await user.clear(review);
+    await user.type(review, '4000');
+    expect(await within(summaryRegion()).findByText(reservation('0.27'), {}, SLOW)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Reset to default: max output tokens for Review input' }));
+    expect(review).toHaveValue(8000);
+    expect(screen.queryByRole('button', { name: /Reset to default/ })).not.toBeInTheDocument();
+    expect(await within(summaryRegion()).findByText(reservation('0.54'), {}, SLOW)).toBeInTheDocument();
+    expect(lastPreflight(bridge)).not.toHaveProperty('outputTokenOverrides');
+  });
+
+  it('"Reset all to defaults" shows only with an override and clears every step', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    const plan = screen.getByRole('spinbutton', { name: 'Max output tokens for Plan a fix' });
+    const implement = screen.getByRole('spinbutton', { name: 'Max output tokens for Produce patch' });
+    await user.clear(plan);
+    await user.type(plan, '20000');
+    await user.clear(implement);
+    await user.type(implement, '1000');
+    await waitFor(() => {
+      expect(lastPreflight(bridge)?.['outputTokenOverrides']).toEqual({ plan: 20_000, implement: 1000 });
+    }, SLOW);
+    expect(screen.getAllByRole('button', { name: /^Reset to default/ })).toHaveLength(2);
+    await user.click(screen.getByRole('button', { name: 'Reset all to defaults' }));
+    expect(plan).toHaveValue(8000);
+    expect(implement).toHaveValue(16000);
+    expect(screen.queryByRole('button', { name: 'Reset all to defaults' })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(lastPreflight(bridge)).not.toHaveProperty('outputTokenOverrides');
+    }, SLOW);
+  });
+
+  it('an out-of-range value shows at the field and in the error summary, and blocks Start', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Tighten validation');
+    const review = screen.getByRole('spinbutton', { name: 'Max output tokens for Review input' });
+    await user.clear(review);
+    await user.type(review, '70000');
+    expect(review).toHaveAttribute('aria-invalid', 'true');
+    expect(review).toHaveAccessibleDescription(/Must be at most 64,000, the most Claude Haiku 4\.5 can return\./);
+    await user.clear(review);
+    await user.type(review, '100');
+    expect(review).toHaveAccessibleDescription(/Must be at least 256\./);
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    const summary = await screen.findByRole('alert', { name: /1 problem prevents starting this run/ });
+    await user.click(within(summary).getByRole('link', { name: 'Must be at least 256.' }));
+    expect(review).toHaveFocus();
+    expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(0);
+  });
+
+  it('switching to a model with a lower maximum lowers the override, with a note; a fitting one is kept', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    const plan = screen.getByRole('spinbutton', { name: 'Max output tokens for Plan a fix' });
+    await user.clear(plan);
+    await user.type(plan, '100000');
+    expect(plan).toHaveAccessibleDescription('256–128,000');
+    await user.selectOptions(screen.getByRole('combobox', { name: /Planner profile \(Plan a fix step\)/ }), PROFILES.economy.id);
+    expect(plan).toHaveValue(64000);
+    expect(plan).toHaveAccessibleDescription(/256–64,000 Lowered to 64,000, the most Claude Haiku 4\.5 can return\./);
+    expect(plan).not.toHaveAttribute('aria-invalid');
+    await waitFor(() => {
+      expect(lastPreflight(bridge)?.['outputTokenOverrides']).toEqual({ plan: 64_000 });
+    }, SLOW);
+    // A value that fits the next model is kept as is.
+    await user.clear(plan);
+    await user.type(plan, '30000');
+    await user.selectOptions(screen.getByRole('combobox', { name: /Planner profile \(Plan a fix step\)/ }), PROFILES.balanced.id);
+    expect(plan).toHaveValue(30000);
+    expect(plan).toHaveAccessibleDescription('256–128,000');
+  });
+
+  it('runs.start carries the overrides, and the draft keeps them across a trip elsewhere', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    const verify = screen.getByRole('spinbutton', { name: 'Max output tokens for Review patch' });
+    await user.clear(verify);
+    await user.type(verify, '2048');
+    await act(async () => {
+      await router.navigate('/settings/projects');
+    });
+    await act(async () => {
+      await router.navigate(NEW_RUN);
+    });
+    await ready();
+    expect(screen.getByRole('spinbutton', { name: 'Max output tokens for Review patch' })).toHaveValue(2048);
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Tighten validation');
+    expect(await screen.findByText('All checks passed. Ready to start.', {}, SLOW)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+    });
+    expect((bridge.callsTo('relay/v1/runs.start')[0]?.input as Record<string, unknown>)['outputTokenOverrides']).toEqual({ verify: 2048 });
+  });
+});

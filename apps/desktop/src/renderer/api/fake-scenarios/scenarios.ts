@@ -45,7 +45,6 @@ export const FAKE_SCENARIOS = [
   'queued-auth-required',
   'queued-setup-blocked',
   'queued-budget',
-  'unknown-outcome-decided',
   'report-legacy',
   // E1/E2 recovery states (R2 wiring):
   'interrupted-quit',
@@ -197,8 +196,8 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(
         focus('interrupted', null, {
           steps: { ...DONE_TO_IMPLEMENT, implement: 'unknown' },
-          unknownAttempt: { step: 'implement', liability: 620_000 },
-          cost: { reported: 480_000, unknown: 620_000 },
+          uncertainAttempt: { step: 'implement', estimate: 620_000 },
+          cost: { reported: 480_000, estimated: 620_000 },
         }),
         { lastShutdown: { clean: name === 'interrupted-quit', runActive: true, agoMs: 2 * HOUR } },
       );
@@ -237,8 +236,8 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(
         focus('paused', 'unknown_outcome', {
           steps: { ...DONE_TO_IMPLEMENT, implement: 'unknown' },
-          unknownAttempt: { step: 'implement', liability: 620_000 },
-          cost: { reported: 480_000, unknown: 620_000 },
+          uncertainAttempt: { step: 'implement', estimate: 620_000 },
+          cost: { reported: 480_000, estimated: 620_000 },
           statusDetail: appError('REQUEST_OUTCOME_UNKNOWN'),
         }),
       );
@@ -334,8 +333,9 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
       return withFocus(
         focus('cancelled', null, {
           steps: { ...DONE_TO_IMPLEMENT, implement: 'unknown', verify: 'skipped' },
-          unknownAttempt: { step: 'implement', liability: 620_000 },
-          cost: { reported: 480_000, unknown: 620_000 },
+          // The request reached the provider (its stream ended early): an estimate that was likely charged.
+          uncertainAttempt: { step: 'implement', estimate: 620_000, mayNotHaveBeenCharged: false },
+          cost: { reported: 480_000, estimated: 620_000 },
         }),
       );
     case 'completed':
@@ -404,14 +404,6 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
           statusDetail: appError('BUDGET_BLOCKED', {
             details: { L: 100_000, C: 0, R: 0, U: 0, N: 120_000, scope: 'run', total: 120_000, allowed: false },
           }),
-        }),
-      );
-    case 'unknown-outcome-decided':
-      // Every unknown request was decided and no step failed: the engine offers resume (06 F2).
-      return withFocus(
-        focus('paused', 'unknown_outcome', {
-          steps: DONE_TO_IMPLEMENT,
-          statusDetail: appError('REQUEST_OUTCOME_UNKNOWN'),
         }),
       );
     case 'first-launch':

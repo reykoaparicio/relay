@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PAGE_LIMITS, RATE_LIMITS } from '../defaults.js';
+import { MIN_OUTPUT_TOKEN_OVERRIDE, PAGE_LIMITS, RATE_LIMITS } from '../defaults.js';
 import { runEventSchema } from '../domain/event.js';
 import { budgetBreakdownSchema, costSummarySchema } from '../domain/ledger.js';
 import { estimateBasisSchema } from '../domain/manifest.js';
@@ -8,7 +8,7 @@ import { runDetailSchema, runStartInputSchema, runSummarySchema } from '../domai
 import { recoveryDecisionSchema, stepDetailSchema } from '../domain/views.js';
 import { idSchema } from '../ids.js';
 import { microusdSchema, nonNegativeMicrousdSchema } from '../money.js';
-import { idempotencyKeySchema } from '../primitives.js';
+import { idempotencyKeySchema, stepKeySchema } from '../primitives.js';
 import { providerIdSchema, runStatusSchema } from '../status.js';
 import { validationIssueSchema } from '../validation.js';
 import { op, pageOf, pageRequestShape } from './common.js';
@@ -35,11 +35,30 @@ export const runPreflightSchema = z.object({
   }),
   budget: budgetBreakdownSchema,
   issues: z.array(validationIssueSchema),
+  /**
+   * Decision 3: the output-limit box of every model step on the New run screen, for the currently chosen profiles.
+   * `defaultMaxOutputTokens` is what the step uses when the box is left empty: the workflow step's own setting, else
+   * the profile's `maxOutputTokens`, clamped to the model cap. An override must lie in
+   * `[minMaxOutputTokens, modelMaxOutputTokens]` (the model cap from the catalog). A step whose profile cannot be
+   * resolved is left out (it is reported in `issues`). `firstReservation` already reflects the overrides.
+   */
+  stepLimits: z.array(
+    z.object({
+      stepKey: stepKeySchema,
+      defaultMaxOutputTokens: z.number().int().positive(),
+      minMaxOutputTokens: z.literal(MIN_OUTPUT_TOKEN_OVERRIDE),
+      modelMaxOutputTokens: z.number().int().positive(),
+    }),
+  ),
 });
 /** Run preflight. */
 export type RunPreflight = z.infer<typeof runPreflightSchema>;
 
-/** Decisions for an attempt whose outcome is unknown (§4.4, §7.5). */
+/**
+ * Legacy decisions for an attempt whose outcome was unknown (§4.4, §7.5). Decision 1 retired them: an uncertain
+ * outcome is settled at once as an estimate and the run offers only `retry_step` / `stop`, so `runs.decideUnknown`
+ * answers CONFLICT `decision_not_applicable` (kept so older renderers get a typed refusal).
+ */
 export const UNKNOWN_OUTCOME_DECISIONS = [
   'retry_acknowledging_charge',
   'mark_failed_keep_liability',
@@ -99,6 +118,9 @@ export const runOps = {
     errors: ['NOT_FOUND'],
     idempotent: false,
   }),
+  // Decision 2: queued, running and awaiting_approval runs can be paused. A running run pauses at the next checkpoint
+  // (an in-flight call completes, `inFlight: 'waiting'`); a queued or awaiting-approval run pauses at once (a pending
+  // approval stays pending and `resume` returns the run to awaiting_approval).
   'runs.pause': op({
     channel: 'relay/v1/runs.pause',
     kind: 'command',

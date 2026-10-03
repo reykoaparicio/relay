@@ -118,6 +118,24 @@ describe('migrate', () => {
     driver.close();
   });
 
+  it('0005 adds attempts.outcome_uncertain / may_not_have_been_charged: NOT NULL DEFAULT 0 (older attempts read false) with 0/1 CHECKs', async () => {
+    const db = await track(openTestDb({ migrations: MIGRATIONS.slice(0, 4) }));
+    const driver = openNodeSqlite(db.path);
+    applyPragmas(driver);
+    const before = driver.prepare("SELECT name FROM pragma_table_info('attempts')").all().map((r) => (r as { name: string }).name);
+
+    const r = await migrate(driver, { clock: manualClock(), backupsDir: join(dirname(db.path), 'pre5') });
+
+    expect(r).toEqual({ from: 4, to: MIGRATIONS.length });
+    expect(before).not.toContain('outcome_uncertain');
+    const cols = driver.prepare("SELECT name, dflt_value, \"notnull\" AS nn FROM pragma_table_info('attempts') WHERE name IN ('outcome_uncertain', 'may_not_have_been_charged') ORDER BY cid").all();
+    expect(cols).toEqual([{ name: 'outcome_uncertain', dflt_value: '0', nn: 1 }, { name: 'may_not_have_been_charged', dflt_value: '0', nn: 1 }]);
+    const ddl = (driver.prepare("SELECT sql FROM sqlite_master WHERE name = 'attempts'").get() as { sql: string }).sql;
+    expect(ddl).toContain('CHECK (outcome_uncertain IN (0,1))');
+    expect(ddl).toContain('CHECK (may_not_have_been_charged IN (0,1))');
+    driver.close();
+  });
+
   it('keeps CHECK (json_valid) working with trusted_schema = OFF', async () => {
     const db = await track(openTestDb());
     const driver = openNodeSqlite(db.path);

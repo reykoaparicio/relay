@@ -8,6 +8,7 @@ import { stepsToPromote, tick } from './runner.js';
 import { effectiveStepSnapshot, snapshotOf } from './snapshot.js';
 import { applyStepEvent } from './step-machine.js';
 import { createHarness } from './testing/harness.js';
+import { expectedEstimate } from './testing/estimates.js';
 import type { Harness } from './testing/harness.js';
 
 let h: Harness | undefined;
@@ -17,9 +18,10 @@ afterEach(async () => {
 });
 
 const N = microusd(40_000);
+const INPUT_TOKENS = 1_000;
 
 /** A running run whose review step holds an attempt crafted in `state` (as a crash would leave it). */
-async function crashedAttempt(state: 'reserved' | 'dispatching', responseId = false): Promise<{ harness: Harness; runId: RunId; stepRunId: StepRunId }> {
+async function crashedAttempt(state: 'reserved' | 'dispatching', responseId = false, streamedOutputTokens = 0): Promise<{ harness: Harness; runId: RunId; stepRunId: StepRunId }> {
   const harness = await createHarness();
   h = harness;
   const runId = await harness.startRun();
@@ -35,13 +37,14 @@ async function crashedAttempt(state: 'reserved' | 'dispatching', responseId = fa
     const now = harness.clock.now();
     r.attempts.insert({ id, runId, stepRunId: step.id, seq: 1, purpose: 'initial', providerId: 'anthropic', modelId: snap.profile.modelId,
       profileSnapshot: snap.profile, requestFingerprint: 'f'.repeat(64), state: 'reserved', reservationMicrousd: N,
-      priceCatalogVersion: snap.profile.priceCatalogVersion, createdAt: now });
+      estimate: { inputTokens: INPUT_TOKENS, upperAllowanceMicrousd: N }, priceCatalogVersion: snap.profile.priceCatalogVersion, createdAt: now });
     r.ledger.append(reserveEntries({ N, attemptId: id, runId, projectId: run.projectId, priceCatalogVersion: 'v', createdAt: now }));
     applyStepEvent(r, [], step, 'RESERVED');
     if (state === 'dispatching') {
       r.attempts.transition(id, ['reserved'], 'dispatching', { dispatchedAt: now });
       applyStepEvent(r, [], r.steps.get(step.id), 'DISPATCHING');
       if (responseId) r.attempts.setProviderIds(id, { responseId: 'resp_123' });
+      if (streamedOutputTokens > 0) r.events.append(runId, 'attempt.stream_progress', { attemptId: id, stepRunId: step.id, outputTokensSoFar: streamedOutputTokens, elapsedMs: 10 });
     }
     return step.id;
   });
@@ -63,19 +66,36 @@ describe('recovery (F9 Wave-1 subset)', () => {
     expect(harness.db.repos.ledger.runBalances(runId).R).toBe(0);
   });
 
-  it.each([false, true])('moves EVERY dispatching attempt to unknown with the full N (responseId: %s)', async (responseId) => {
+  it.each([false, true])('decision 1: settles EVERY dispatching attempt at once as an estimate, R back to 0, never unknown (responseId: %s)', async (responseId) => {
     const { harness, runId, stepRunId } = await crashedAttempt('dispatching', responseId);
 
     await recoverOnStart(harness.ctx);
 
     const [a] = harness.db.repos.attempts.listForRun(runId);
+    const E = expectedEstimate(a!, 0); // the recorded input tokens, no output observed
+    expect(E).toBeGreaterThan(0);
     expect(a?.state).toBe('unknown');
+    expect([a?.outcomeUncertain, a?.mayNotHaveBeenCharged]).toEqual([true, !responseId]); // a response id proves it arrived
     expect(harness.db.repos.steps.get(stepRunId).state).toBe('unknown');
-    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: N }));
+    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: E }));
+    expect(harness.db.repos.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: E });
     expect(harness.db.repos.runs.get(runId).status).toBe('interrupted');
     const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['decide_unknown', 'stop']); // E1 #8: review_recovery once decided
-    expect(detail.ok && detail.data.unresolvedAttempts.map((x) => x.cost)).toEqual([{ microusd: N, certainty: 'unknown' }]);
+    expect(detail.ok && detail.data.availableActions).toEqual(['review_recovery', 'stop', 'export_report']);
+    expect(detail.ok && detail.data.unresolvedAttempts).toEqual([]);
+    expect(detail.ok && detail.data.uncertainAttempts.map((x) => [x.cost, x.mayNotHaveBeenCharged])).toEqual([[{ microusd: E, certainty: 'estimated' }, !responseId]]);
+    expect(detail.ok && detail.data.cost.hasEstimates).toBe(true);
+  });
+
+  it('decision 1: output streamed before the crash (stream progress events) is part of the estimate, and rules out "may not have been charged"', async () => {
+    const { harness, runId } = await crashedAttempt('dispatching', false, 300);
+
+    await recoverOnStart(harness.ctx);
+
+    const [a] = harness.db.repos.attempts.listForRun(runId);
+    expect(harness.db.repos.ledger.attemptBalances(a!.id).settled).toBe(expectedEstimate(a!, 300));
+    expect(expectedEstimate(a!, 300)).toBeGreaterThan(expectedEstimate(a!, 0));
+    expect(a?.mayNotHaveBeenCharged).toBe(false);
   });
 
   it('never touches succeeded steps and cancels a cancelling run with its open steps skipped', async () => {

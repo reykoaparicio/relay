@@ -1,5 +1,5 @@
 // 06 F2 "Who emits RESUME_RESOLVED" + F7 + F12: the user decisions on a blocked run — `runs.resume` (every
-// RecoveryDecision kind), `runs.increaseAllowance`, `runs.decideUnknown`, `runs.retryStep`, and the re-evaluation of
+// RecoveryDecision kind), `runs.increaseAllowance`, `runs.retryStep` (`runs.decideUnknown` is retired, decision 1), and the re-evaluation of
 // `paused(budget_project)` runs after a project allowance edit. Async resolution (profiles, estimates, file hashes)
 // happens BEFORE each transaction; the transaction re-reads the run, applies the decision + the run transition, and
 // stores the idempotency result (02 §B0: a replay returns the stored result and never re-applies the decision).
@@ -23,10 +23,10 @@ import type {
   StepKey,
   StepRunId,
 } from '@relay/contracts';
-import type { AttemptRow, ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
+import type { ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
 import type { InputDrift } from './approval-binding.js';
 import { inputDrift, invalidateApproval } from './approval-binding.js';
-import { admitAgainstLedger, resolveUnknownEntries } from './budget.js';
+import { admitAgainstLedger } from './budget.js';
 import { buildModelRequest } from './checkpoints.js';
 import { executionMsAt } from './deadline.js';
 import { requestHash } from './hash.js';
@@ -36,8 +36,6 @@ import type { EngineCtx } from './ports.js';
 import { logSafe } from './log-safe.js';
 import { toModelProfile } from './profiles.js';
 import { adapterOf } from './provider-lookup.js';
-import { resumeIfUnknownsResolved } from './recovery.js';
-import { refreshReport } from './report.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { allowedRunActions, appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -86,7 +84,7 @@ const notApplicable = (run: RunRow, decision: string): AppError =>
  */
 function offered(r: Repos, run: RunRow, action: RunAction, decision: string): AppError | null {
   const latest = r.steps.latestPerStepKey(run.id);
-  const facts = runActionFacts(latest, r.attempts.countInState(run.id, 'unknown'), false, missingCredentialFact(r, run, latest), run);
+  const facts = runActionFacts(latest, 0, false, missingCredentialFact(r, run, latest), run);
   const hasProfileOptions = action !== 'choose_profile' || profileOptionsOf(r, run, latest, r.attempts.listForRun(run.id), run.status === 'paused').length > 0;
   const actions = allowedRunActions(run, { ...facts, hasProfileOptions });
   return actions.includes(action) ? null : notApplicable(run, decision);
@@ -202,19 +200,30 @@ interface ResumeInput {
 
 type Prepared = { readonly profile?: ProfileSnapshot; readonly drift?: InputDrift; readonly resnapshot?: readonly Snapshotted[] };
 
+/** Decision 2: the run was paused while it waited for approval, and that approval is still pending on its step. */
+function waitsOnPendingApproval(r: Repos, run: RunRow): boolean {
+  const pending = r.approvals.pendingForRun(run.id);
+  if (pending === undefined) return false;
+  return r.steps.latestPerStepKey(run.id).some((s) => s.id === pending.stepRunId && s.state === 'awaiting_approval');
+}
+
 function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: EpochMs): Result<void> {
   if (run.status === 'interrupted') {
-    // F2: RECOVERY_DECIDED only when every unknown attempt has been decided (review_recovery).
-    const unknownAttempts = r.attempts.countInState(run.id, 'unknown');
-    if (unknownAttempts > 0) return err(errors.conflict({ reason: 'unknown_attempts', unknownAttempts }));
+    // Decision 1: an attempt left uncertain by the crash is already settled as an estimate; once re-queued, the loop
+    // pauses the run `unknown_outcome` on that step (retry_step / stop), never retrying it on its own.
     // A reconciled overrun (X > liability) or scope change is never acknowledged by review_recovery: `applyRunEvent`
     // applies the durable deferred pause instead (budget_overrun → acknowledge_overrun), as for a live run (BH-2, BH-6).
     applyRunEvent(r, run, { type: 'RECOVERY_DECIDED' }, now, fx);
     return ok(undefined);
   }
-  // `unknown_outcome`: only reachable once every unknown attempt is decided and no step failed — the `offered` gate
-  // (F2 truth table) refuses `resume` otherwise, before this runs.
+  // `unknown_outcome`: only reachable when no step is left to retry (e.g. reconciliation settled it) — the `offered`
+  // gate (F2 truth table) refuses `resume` otherwise, before this runs.
   if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked', 'unknown_outcome'])) return err(notApplicable(run, 'continue'));
+  if (run.pauseReason === 'user' && run.deferredPause === null && waitsOnPendingApproval(r, run)) {
+    // Decision 2: paused while awaiting approval — the approval was kept, so the run waits for it again.
+    applyRunEvent(r, run, { type: 'APPROVAL_RESUMED' }, now, fx);
+    return ok(undefined);
+  }
   if (run.pauseReason === 'rate_limited') {
     // F2: resuming from rate_limited resets the ready step's wait counter.
     for (const s of r.steps.latestPerStepKey(run.id)) {
@@ -524,92 +533,14 @@ interface DecideUnknownInput {
 }
 
 /**
- * Round-3 L2: the date a user-decided settlement of an unknown charge is booked at — when the request was sent
- * (`dispatchedAt`, else when the attempt was created). The liability it resolves was booked then, so the resolve and
- * the settle land in the same month: a decision taken weeks later never moves an old charge into the current month's
- * project spend (§9.3 month window).
+ * `runs.decideUnknown` — retired by decision 1. An uncertain outcome is settled at once as an estimate (and any legacy
+ * unknown liability is converted at engine start), so there is never a charge left to decide: the run offers
+ * `retry_step` / `stop` instead. The op stays for older renderers: NOT_FOUND for an unknown run, else always CONFLICT
+ * `decision_not_applicable` (`decide_unknown` is never in `availableActions`); nothing is written.
  */
-function chargeDateOf(a: AttemptRow): EpochMs {
-  return a.dispatchedAt ?? a.createdAt;
-}
-
-/**
- * E1 #4: on a terminal run only the liability is settled — the ledger and the attempt, never the step or the run. A
- * retry makes no sense there, so `retry_acknowledging_charge` is refused; `accept_estimated_charge` turns the unknown
- * liability into an `estimated` settled cost (it stops counting against later months); `mark_failed_keep_liability`
- * keeps it as the user chose.
- */
-function applyTerminalUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, a: AttemptRow, input: DecideUnknownInput, now: EpochMs): Result<void> {
-  if (input.decision === 'retry_acknowledging_charge') return err(notApplicable(run, input.decision));
-  if (input.decision === 'accept_estimated_charge') {
-    const liability = r.ledger.attemptBalances(a.id).unknown;
-    r.ledger.append(resolveUnknownEntries({ liability, settled: liability, certainty: 'estimated', attemptId: a.id, runId: run.id,
-      projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: chargeDateOf(a) }));
-    r.attempts.transition(a.id, ['unknown'], 'failed', { error: errors.requestOutcomeUnknown(a.id, { details: { chargeAccepted: true } }), finishedAt: now });
-  } else {
-    r.attempts.transition(a.id, ['unknown'], 'abandoned', { error: errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } }), finishedAt: now });
-  }
-  appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, decision: input.decision, runStatus: run.status });
-  return ok(undefined);
-}
-
-function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, input: DecideUnknownInput, now: EpochMs): Result<void> {
-  const a = r.attempts.find(input.attemptId);
-  if (a?.runId !== run.id) return err(errors.notFound('attempt'));
-  if (a.state !== 'unknown') return err(errors.conflict({ reason: 'attempt_not_unknown', state: a.state }));
-  // Clarification 15: decidable from any pause (deadline, user, …) or interrupted while an unknown attempt is open.
-  const refused = offered(r, run, 'decide_unknown', input.decision);
-  if (refused !== null) return err(refused);
-  if (isTerminalRunStatus(run.status)) return applyTerminalUnknownDecision(r, fx, run, a, input, now);
-  const step = r.steps.get(a.stepRunId);
-  const unknownError = errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } });
-  switch (input.decision) {
-    case 'retry_acknowledging_charge':
-      // R4-28: the liability stays; the attempt no longer prompts. The next attempt is a user_retry of this one.
-      r.attempts.transition(a.id, ['unknown'], 'abandoned', { error: unknownError, finishedAt: now });
-      if (step.state === 'unknown') applyStepEvent(r, fx, step, 'USER_RETRY', { error: null, notBeforeAt: null });
-      break;
-    case 'mark_failed_keep_liability':
-      r.attempts.transition(a.id, ['unknown'], 'abandoned', { error: unknownError, finishedAt: now });
-      if (step.state === 'unknown') applyStepEvent(r, fx, step, 'USER_ABANDON', { error: errors.requestOutcomeUnknown(a.id) });
-      break;
-    case 'accept_estimated_charge': {
-      const liability = r.ledger.attemptBalances(a.id).unknown;
-      r.ledger.append(resolveUnknownEntries({ liability, settled: liability, certainty: 'estimated', attemptId: a.id, runId: run.id,
-        projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: chargeDateOf(a) }));
-      r.attempts.transition(a.id, ['unknown'], 'failed', { error: errors.requestOutcomeUnknown(a.id, { details: { chargeAccepted: true } }), finishedAt: now });
-      if (step.state === 'unknown') applyStepEvent(r, fx, step, 'USER_ABANDON', { error: errors.requestOutcomeUnknown(a.id) });
-      break;
-    }
-  }
-  appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, decision: input.decision });
-  resumeIfUnknownsResolved(r, fx, run.id, now);
-  return ok(undefined);
-}
-
-/**
- * `runs.decideUnknown` (§4.4, §7.5) on a paused or `interrupted` run with an unresolved unknown attempt, or on a
- * terminal run (E1 #4: settles the liability only, no status change).
- */
-export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): Promise<Result<RunDetail>> {
-  const req = keyed('runs.decideUnknown', input);
-  const replay = storedFor(ctx, ctx.db.repos, req);
-  if (replay !== null) return replay.ok ? ok(runDetail(ctx, input.runId)) : replay;
-  const res = await inTx(ctx, (r, fx, now) => {
-    const again = storedFor(ctx, r, req); // E1 #7: a concurrent same-key request committed first
-    if (again !== null) return again.ok ? ok(undefined) : again;
-    const run = r.runs.get(input.runId);
-    if (run.status !== 'paused' && run.status !== 'interrupted' && !isTerminalRunStatus(run.status)) return err(notApplicable(run, input.decision));
-    const applied = applyUnknownDecision(r, fx, run, input, now);
-    if (!applied.ok) return applied;
-    remember(r, req, run.id);
-    return ok(undefined);
-  });
-  if (!res.ok) return res;
-  ctx.wake.signal();
-  // Round-3 M5: settling a liability of a FINISHED run changes what its report states: store a fresh report.
-  if (isTerminalRunStatus(ctx.db.repos.runs.get(input.runId).status)) await refreshReport(ctx, input.runId);
-  return ok(runDetail(ctx, input.runId));
+export function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): Promise<Result<RunDetail>> {
+  const run = ctx.db.repos.runs.get(input.runId); // NOT_FOUND for an unknown run
+  return Promise.resolve(err(notApplicable(run, input.decision)));
 }
 
 // ---------------------------------------------------------------- runs.retryStep
@@ -638,19 +569,34 @@ function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: R
   const step = r.steps.find(input.stepId);
   if (step?.runId !== run.id) return err(errors.notFound('step'));
   const latest = r.steps.latestFor(run.id, step.stepKey);
-  // F7: only for a FAILED step (its latest row); budget/setup pauses change profile through switch_profile.
-  if (latest?.id !== step.id || step.state !== 'failed' || snapshotOf(run).steps[step.stepKey]?.kind !== 'model') {
+  // F7: only for a FAILED step (its latest row) — or, decision 1, a step whose attempt outcome was uncertain (`unknown`,
+  // already settled as an estimate); budget/setup pauses change profile through switch_profile.
+  const uncertain = step.state === 'unknown';
+  if (latest?.id !== step.id || (step.state !== 'failed' && !uncertain) || snapshotOf(run).steps[step.stepKey]?.kind !== 'model') {
     return err(errors.conflict({ reason: 'step_not_failed', state: step.state }));
   }
-  if (r.attempts.countInState(run.id, 'unknown') > 0) return err(errors.conflict({ reason: 'unknown_attempts' }));
+  const failedRow = uncertain ? abandonUncertainStep(r, fx, step, now) : step;
   // No attempt-limit pre-check (finding 2): at `maxAttempts` the retried row reaches the F4 reserve checkpoint, which
   // pauses `limit_attempts` — from which raise_limits continues. Refusing here left no working action.
   if (profile !== null) reviseConfig(r, fx, run, step.stepKey, profile, revisionReason(run));
-  const next = r.steps.insertRetry(step, { id: ctx.ids.next('stepRun'), state: 'ready', profileName: profile?.name ?? step.profileName, createdAt: now });
+  const next = r.steps.insertRetry(failedRow, { id: ctx.ids.next('stepRun'), state: 'ready', profileName: profile?.name ?? step.profileName, createdAt: now });
   appendRunEvent(r, fx, run.id, 'step.state_changed', { stepRunId: next.id, stepKey: next.stepKey, from: null, to: 'ready', trigger: 'USER_RETRY_STEP',
     retryIndex: next.retryIndex, retryOf: step.id });
   applyRunEvent(r, run, { type: 'RESUME_RESOLVED' }, now, fx);
   return ok(undefined);
+}
+
+/**
+ * Decision 1 "retry, may incur another charge": the step's uncertain attempts (already settled as estimates) are
+ * abandoned — they no longer block the run, and a later reconciliation can still correct their cost — and the step
+ * row is closed as failed, so the retry gets its own row like any failed step. Returns the closed row.
+ */
+function abandonUncertainStep(r: Repos, fx: PostCommitEffect[], step: StepRow, now: EpochMs): StepRow {
+  for (const a of r.attempts.listForStep(step.id)) {
+    if (a.state === 'unknown') r.attempts.transition(a.id, ['unknown'], 'abandoned', { finishedAt: a.finishedAt ?? now });
+  }
+  applyStepEvent(r, fx, step, 'USER_ABANDON', { error: step.error });
+  return r.steps.get(step.id);
 }
 
 /** `runs.retryStep`: a new row (`retry_index + 1`, fresh counters) for the failed step; the failed row is kept. */

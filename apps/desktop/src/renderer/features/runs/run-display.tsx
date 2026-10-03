@@ -1,41 +1,38 @@
-import { addMicrousd } from '@relay/contracts';
-import type { CostCertainty, CostSummary, Microusd, RunSummary } from '@relay/contracts';
+import type { CostCertainty, CostSummary, RunSummary } from '@relay/contracts';
 import { Link } from 'react-router';
-import { Money, StatusBadge } from '../../components/ui';
+import { Money } from '../../components/ui';
+import { costHasEstimates, trackedTotal } from '../../lib/format/money';
 
 /** Short run label shown in lists ("Run 0024"): the id's last characters, which are unique per run. */
 export { runLabel } from '../../lib/format/labels';
 
-/** Settled total (reported + calculated + estimated). */
-function settledTotal(cost: CostSummary): Microusd {
-  return addMicrousd(cost.settledReported, cost.settledCalculated, cost.settledEstimated);
-}
-
-/** The weakest certainty present in the settled total (FR-09): any estimate makes the total an estimate. */
-function settledCertainty(cost: CostSummary): CostCertainty {
-  if (cost.settledEstimated > 0) return 'estimated';
-  if (cost.settledCalculated > 0) return 'calculated';
-  return 'reported';
+/** The weakest certainty of an exact total (FR-09): calculated when any part was calculated, else reported. */
+function exactCertainty(cost: CostSummary): CostCertainty {
+  return cost.settledCalculated > 0 ? 'calculated' : 'reported';
 }
 
 export interface RunCostProps {
   readonly cost: CostSummary;
   /** Links the amount to the run's ledger (§5.2 "every budget value links to the ledger"). */
   readonly ledgerPath?: string;
-  /** Show reserved/unknown sub-lines. */
+  /** Show the reserved sub-line. */
   readonly detailed?: boolean;
 }
 
-/** The certainty tag's class: one tone per certainty, so an unknown charge gets the unknown tone (never a default). */
+/** The certainty tag's class: one tone per certainty (never a default). */
 export function certaintyTagClass(certainty: CostCertainty): string {
   return `tag certainty-${certainty}`;
 }
 
-/** Tracked run cost with its certainty as visible text (never color alone). */
+/**
+ * Tracked run cost with its certainty as visible text (never color alone). A total that includes any estimate reads
+ * "~$0.48" with an "estimated" tag; Relay never shows a charge as unknown.
+ */
 export function RunCost({ cost, ledgerPath, detailed = false }: RunCostProps) {
-  const total = settledTotal(cost);
-  const certainty = settledCertainty(cost);
-  const amount = <Money value={total} certainty={certainty === 'estimated' ? 'estimated' : null} />;
+  const total = trackedTotal(cost);
+  const approx = costHasEstimates(cost);
+  const certainty = approx ? 'estimated' : exactCertainty(cost);
+  const amount = <Money value={total} approx={approx} />;
   return (
     <span className="inline-flex flex-col items-end gap-1">
       <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -47,18 +44,11 @@ export function RunCost({ cost, ledgerPath, detailed = false }: RunCostProps) {
             <span className="sr-only">, open the ledger</span>
           </Link>
         )}
-        {total > 0 && certainty !== 'estimated' ? (
-          <span className={certaintyTagClass(certainty)}>{certainty}</span>
-        ) : null}
+        {total > 0 ? <span className={certaintyTagClass(certainty)}>{certainty}</span> : null}
       </span>
       {detailed && cost.reserved > 0 ? (
         <span className="subtle whitespace-nowrap font-sans">
           + <Money value={cost.reserved} /> reserved
-        </span>
-      ) : null}
-      {cost.unknown > 0 ? (
-        <span className="subtle inline-flex items-center gap-1 whitespace-nowrap font-sans">
-          <StatusBadge kind="certainty" value="unknown" /> up to <Money value={cost.unknown} />
         </span>
       ) : null}
     </span>

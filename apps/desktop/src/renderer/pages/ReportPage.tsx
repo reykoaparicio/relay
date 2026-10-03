@@ -1,8 +1,8 @@
-import { useCallback, useId, useState } from 'react';
+import { useCallback, useId } from 'react';
 import { Download, SearchCode } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { findingsV1Schema, patchV1Schema, reportV1Schema } from '@relay/contracts';
-import type { ArtifactContent, ExportWhat } from '@relay/contracts';
+import type { ArtifactContent } from '@relay/contracts';
 import {
   Button,
   ButtonLink,
@@ -15,7 +15,6 @@ import {
   Skeleton,
   StatusBadge,
   Tabs,
-  useToast,
 } from '../components/ui';
 import type { Panel } from '../components/ui';
 import { toViewError } from '../api/errors';
@@ -24,16 +23,13 @@ import {
   ApprovalsSection,
   ArtifactsSection,
   CostSection,
-  ExportDialog,
   FindingsSection,
   LimitationsSection,
   RevisionsSection,
   SummarySection,
   TerminalLead,
 } from '../features/report/ReportSections';
-import { anyExportFailed, exportPartResults } from '../features/report/export-results';
-import type { ExportPartResult } from '../features/report/export-results';
-import { useArtifactExport } from '../features/run-inspector/useRunExports';
+import { useExportDialog } from '../features/report/useExportDialog';
 import { runLabel } from '../features/runs/run-display';
 import { RunSuggestionsLink } from '../features/memory/RunSuggestionsLink';
 import { href, paths } from '../features/shell/paths';
@@ -50,7 +46,6 @@ function jsonOf(content: ArtifactContent | undefined): unknown {
 export function ReportPage() {
   const { projectId = '', runId = '' } = useParams();
   const [search, setSearch] = useSearchParams();
-  const toast = useToast();
   const runQ = useRun(runId);
   const run = runQ.data;
   const reportQ = useArtifact(run?.reportArtifactId);
@@ -63,9 +58,7 @@ export function ReportPage() {
   const patchQ = useArtifact(patchId);
   const patchParsed = patchV1Schema.safeParse(jsonOf(patchQ.data?.content));
   const patch = patchParsed.success ? patchParsed.data : undefined;
-  const exporter = useArtifactExport(runId);
-  const [exportOpen, setExportOpen] = useState<ExportWhat | null>(null);
-  const [exportParts, setExportParts] = useState<readonly ExportPartResult[] | null>(null);
+  const exportDialog = useExportDialog({ runId, hasPatch: patchId !== null });
   const bannerId = useId();
   const tab = search.get('tab') === 'patch' && patchId !== null ? 'patch' : 'report';
 
@@ -85,36 +78,7 @@ export function ReportPage() {
     [setSearch],
   );
 
-  const openExport = (what: ExportWhat) => {
-    exporter.reset();
-    setExportParts(null);
-    setExportOpen(what);
-  };
-
-  // E2 #10: a partial export keeps the dialog open with per-part "Written" / "Failed" rows (a warning, not an error
-  // toast); "Retry" re-exports only the failed parts and merges into the rows. Older mains (no `written` / `failed`)
-  // fall back to `displayPaths`.
-  const doExport = (what: ExportWhat) => {
-    exporter.mutate(what, {
-      onSuccess: (res) => {
-        if (!res.exported) {
-          setExportOpen(null);
-          setExportParts(null);
-          return;
-        }
-        const rows = exportPartResults(res, exportParts ?? []);
-        // Any failed part keeps the dialog open: a retryable one offers "Retry", a permanent one is final.
-        if (rows !== null && anyExportFailed(rows)) {
-          setExportParts(rows);
-          return;
-        }
-        const savedPaths = rows === null ? res.displayPaths : rows.flatMap((r) => (r.state === 'written' ? [r.displayPath] : []));
-        setExportOpen(null);
-        setExportParts(null);
-        toast.show({ key: `export:${runId}:${what}`, title: 'Export saved', body: savedPaths.join(', '), tone: 'success' });
-      },
-    });
-  };
+  const openExport = exportDialog.open;
 
   const header = (
     <PageHeader
@@ -300,23 +264,7 @@ export function ReportPage() {
       <TerminalLead report={report} run={run} />
       {notModified}
       <Tabs label="Report sections" tabs={tabs} value={tab} onValueChange={setTab} />
-      {exportOpen === null ? null : (
-        <ExportDialog
-          open
-          onOpenChange={(open) => {
-            if (!open) {
-              setExportOpen(null);
-              setExportParts(null);
-            }
-          }}
-          hasPatch={patchId !== null}
-          initial={exportOpen}
-          pending={exporter.isPending}
-          error={exporter.error}
-          parts={exportParts}
-          onExport={doExport}
-        />
-      )}
+      {exportDialog.dialog}
     </>
   );
 }

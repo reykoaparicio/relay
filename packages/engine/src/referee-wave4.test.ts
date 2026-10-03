@@ -1,10 +1,10 @@
 // Regression tests for the Referee round-3 back-end rulings (money / reports). Each fails on the pre-fix code:
-// M5 a settlement on a finished run refreshes its report (decision and background reconcile) and emits
-// `report.created`; L2 a late decision is booked in the month of the attempt; B1 a project-allowance edit never
+// M5 a settlement on a finished run refreshes its report (background reconcile; decision 1 retired runs.decideUnknown)
+// and emits `report.created`; B1 a project-allowance edit never
 // resumes a budget_run pause it cannot have caused (null estimate keeps the pause); B2 a budget scope move keeps the
 // step estimate of the old pause detail.
 import { afterEach, describe, expect, it } from 'vitest';
-import { errors } from '@relay/contracts';
+import { computeCost, errors } from '@relay/contracts';
 import type { ReportV1, RunId } from '@relay/contracts';
 import type { ModelResult, ProviderRegistry } from '@relay/providers';
 import type { AttemptRow } from '@relay/storage';
@@ -52,22 +52,20 @@ async function newestReport(x: Harness, runId: RunId): Promise<{ id: string; rep
 
 const reportEvents = (x: Harness, runId: RunId) => x.db.repos.events.list(runId, 0, 100_000).filter((e) => e.type === 'report.created');
 
-describe('M5: a settlement on a finished run refreshes the report', () => {
-  it('runs.decideUnknown accept_estimated_charge on a cancelled run: the newest report has no open liability; report.created is emitted', async () => {
+describe('M5 + decision 1: an uncertain attempt of a finished run is an estimate in its report; a later correction refreshes the report', () => {
+  it('a cancelled run with an uncertain attempt: the report lists the estimate (estimatedCharges, ~ totals), never an unknown liability; nothing to decide', async () => {
     const { x, runId, a } = await cancelledWithUnknown({ scenario: UNKNOWN_REVIEW, monthlyAllowanceMicrousd: 100_000 });
-    const before = await newestReport(x, runId);
-    expect(before.report.unknownLiabilities).toHaveLength(1);
-    const eventsBefore = reportEvents(x, runId).length;
+    const { report } = await newestReport(x, runId);
+    const settled = x.db.repos.ledger.attemptBalances(a.id).settled;
+    expect(settled).toBeGreaterThan(0);
+    expect(report.unknownLiabilities).toEqual([]);
+    expect(report.estimatedCharges).toEqual([{ attemptId: a.id, stepKey: 'review', amountMicrousd: settled, mayNotHaveBeenCharged: false }]);
+    expect([report.totals.unknown, report.totals.hasEstimates, report.totals.settledEstimated]).toEqual([0, true, settled]);
     const acc = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'w4-term-decide-0001', runId, attemptId: a.id, decision: 'accept_estimated_charge' });
-    expect(acc.ok).toBe(true);
-    const after = await newestReport(x, runId);
-    expect(after.id).not.toBe(before.id);
-    expect(after.report.unknownLiabilities).toEqual([]);
-    expect(after.report.totals.unknown).toBe(0);
-    expect(reportEvents(x, runId).length).toBe(eventsBefore + 1);
+    expect(acc.ok ? null : acc.error.details?.['reason']).toBe('decision_not_applicable');
   });
 
-  it('background reconcile of an unknown attempt of a cancelled run refreshes the report', async () => {
+  it('background reconcile of an uncertain attempt of a cancelled run corrects the estimate (never counted twice) and refreshes the report', async () => {
     const lose = (base: ProviderRegistry): ProviderRegistry => ({
       list: () => base.list(),
       get: (id) => {
@@ -84,28 +82,21 @@ describe('M5: a settlement on a finished run refreshes the report', () => {
     });
     const { x, runId, a } = await cancelledWithUnknown({ scenario: 'reconcile-completed', providers: lose });
     const before = await newestReport(x, runId);
-    expect(before.report.unknownLiabilities).toHaveLength(1);
+    expect(before.report.estimatedCharges).toHaveLength(1);
+    const eventsBefore = reportEvents(x, runId).length;
     const out = await reconcileUnknownAttempts(x.ctx, new AbortController().signal);
     expect(out.get(a.id)).toBe('completed');
     const after = await newestReport(x, runId);
     expect(after.id).not.toBe(before.id);
-    expect(after.report.unknownLiabilities).toEqual([]);
+    expect(after.report.estimatedCharges).toEqual([]);
+    expect(reportEvents(x, runId).length).toBe(eventsBefore + 1);
+    const real = x.db.repos.attempts.get(a.id).usage;
+    const X = computeCost({ uncachedInputTokens: real?.uncachedInputTokens ?? 0, cacheReadInputTokens: real?.cacheReadInputTokens ?? 0,
+      cacheWriteInputTokens: real?.cacheWriteInputTokens ?? 0, outputTokens: real?.outputTokens ?? 0 }, a.profileSnapshot.prices).microusd;
+    expect(x.db.repos.ledger.attemptBalances(a.id)).toEqual({ reserved: 0, unknown: 0, settled: X });
+    expect(x.db.repos.ledger.settledByCertainty(runId).estimated).toBe(0);
+    expect(after.report.totals.hasEstimates).toBe(false);
     expect(x.db.repos.runs.get(runId).status).toBe('cancelled');
-  });
-});
-
-describe('L2: a late decision on an old unknown charge is booked in the month of the attempt', () => {
-  it('accepting a cancelled run unknown charge 95 days later leaves the current month untouched', async () => {
-    const { x, runId, a } = await cancelledWithUnknown({ scenario: UNKNOWN_REVIEW, monthlyAllowanceMicrousd: 100_000 });
-    x.timers.advance(95 * 24 * 3600 * 1000);
-    const acc = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'w4-term-month-0001', runId, attemptId: a.id, decision: 'accept_estimated_charge' });
-    expect(acc.ok).toBe(true);
-    const after = await x.engine.handle('relay/v1/ledger.projectSummary', { projectId: x.projectId });
-    expect(after.ok && after.data.trackedMicrousd).toBe(0);
-    const page = x.db.repos.ledger.list(runId, { limit: 100, sort: 'created_asc' });
-    const settle = (page.ok ? page.value.items : []).filter((e) => e.attemptId === a.id && (e.type === 'settle' || e.type === 'resolve_unknown'));
-    expect(settle).toHaveLength(2);
-    for (const e of settle) expect(e.createdAt).toBe(a.dispatchedAt ?? a.createdAt);
   });
 });
 

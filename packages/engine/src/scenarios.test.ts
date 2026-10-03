@@ -1,12 +1,13 @@
 // Engine-level F7 / F10 / F2 scenarios on the named fake provider scripts (04 §D7), driven tick by tick on manual
 // timers. Each scenario ends paused (never failed, R3-1) and the matching user decision resumes it.
 import { afterEach, describe, expect, it } from 'vitest';
+import { computeCost } from '@relay/contracts';
 import type { RunId, StepKey } from '@relay/contracts';
 import type { Repos } from '@relay/storage';
 import { createHarness } from './testing/harness.js';
 import type { Harness, HarnessOptions } from './testing/harness.js';
 import { drive, driveThroughApproval } from './testing/drive.js';
-import { toAttemptView } from './views.js';
+import { tick } from './runner.js';
 
 let h: Harness | undefined;
 afterEach(async () => {
@@ -68,7 +69,7 @@ describe('F7 retry scenarios (fake provider)', () => {
     expect(rowsOf(r, runId, 'review')[0]).toEqual(expect.objectContaining({ state: 'failed', transportRetriesUsed: 1 }));
     expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: 0 })); // no usage on a 5xx
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'choose_profile', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'choose_profile', 'stop', 'export_report']);
   });
 
   it('rate-limit-exhausted: waits persist on the step with not_before_at (≤ 60 s), then paused(rate_limited); resume resets the counter', async () => {
@@ -110,7 +111,7 @@ describe('F7 retry scenarios (fake provider)', () => {
     expect(ledgerTypes(r, runId).filter((e) => e.type === 'settle').slice(0, settledBefore.length).map((e) => e.deltaMicrousd)).toEqual(settledBefore);
   });
 
-  it('midstream-error: responded_partial → unknown (never auto-retried) → paused(unknown_outcome) with U = N', async () => {
+  it('midstream-error: responded_partial → uncertain (never auto-retried) → settled at once as an estimate → paused(unknown_outcome)', async () => {
     const { x, runId } = await start({ scenario: 'midstream-error' });
 
     expect(await drive(x, runId, ['paused'])).toBe('paused');
@@ -120,14 +121,29 @@ describe('F7 retry scenarios (fake provider)', () => {
     expect(r.runs.get(runId).pauseReason).toBe('unknown_outcome');
     expect(a?.state).toBe('unknown');
     expect(a?.usage?.partial).toBe(true);
-    expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: a?.reservationMicrousd }));
+    // Decision 1: input tokens of the estimate + the output streamed so far, at the attempt's prices; R back to 0, U stays 0.
+    const estimate = expectedEstimate(a!);
+    expect(estimate).toBeGreaterThan(0);
+    expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: estimate }));
+    expect(r.ledger.attemptBalances(a!.id)).toEqual({ reserved: 0, unknown: 0, settled: estimate });
+    expect(r.ledger.settledByCertainty(runId).estimated).toBe(estimate);
+    expect(a).toEqual(expect.objectContaining({ outcomeUncertain: true, mayNotHaveBeenCharged: false })); // bytes came back
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['decide_unknown', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'stop', 'export_report']);
+    expect(detail.ok && detail.data.cost.hasEstimates).toBe(true);
+    expect(detail.ok && detail.data.unresolvedAttempts).toEqual([]);
+    expect(detail.ok && detail.data.uncertainAttempts.map((v) => [v.id, v.cost, v.mayNotHaveBeenCharged])).toEqual([[a!.id, { microusd: estimate, certainty: 'estimated' }, false]]);
   });
 });
 
-describe('runs.decideUnknown (§7.5)', () => {
-  async function unknownReview() {
+/** Decision 1: the estimate of an uncertain attempt, computed independently of the engine. */
+function expectedEstimate(a: { estimate: unknown; usage: { outputTokens: number } | null; profileSnapshot: { prices: Parameters<typeof computeCost>[1] } }): number {
+  const inputTokens = (a.estimate as { inputTokens: number }).inputTokens;
+  return computeCost({ uncachedInputTokens: inputTokens, cacheReadInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: a.usage?.outputTokens ?? 0 }, a.profileSnapshot.prices).microusd;
+}
+
+describe('uncertain outcome (decision 1): estimate settled at once, retry_step or stop', () => {
+  async function uncertainReview() {
     const { x, runId } = await start({ scenario: 'midstream-error' });
     await drive(x, runId, ['paused']);
     const [a] = attemptsOf(x.db.repos, runId, 'review');
@@ -135,63 +151,42 @@ describe('runs.decideUnknown (§7.5)', () => {
     return { x, runId, a };
   }
 
-  it('retry_acknowledging_charge: attempt abandoned (liability kept), step ready, RESUME_RESOLVED; the next attempt is a user_retry of it', async () => {
-    const { x, runId, a } = await unknownReview();
+  it('retry_step ("may incur another charge"): the uncertain attempt is abandoned with its estimate kept once, a new row retries it and the run completes', async () => {
+    const { x, runId, a } = await uncertainReview();
+    const estimate = expectedEstimate(a);
+    const step = rowsOf(x.db.repos, runId, 'review')[0]!;
 
-    const res = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-01', runId, attemptId: a.id, decision: 'retry_acknowledging_charge' });
+    const res = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'retry-uncertain-01', runId, stepId: step.id });
 
     const r = x.db.repos;
     expect(res.ok && res.data.status).toBe('queued');
     expect(r.attempts.get(a.id).state).toBe('abandoned');
-    expect(r.ledger.attemptBalances(a.id).unknown).toBe(a.reservationMicrousd);
-    expect(rowsOf(r, runId, 'review')[0]?.state).toBe('ready');
-    await drive(x, runId, ['awaiting_approval']);
-    expect(attemptsOf(r, runId, 'review').at(-1)).toEqual(expect.objectContaining({ purpose: 'user_retry', retryOfAttemptId: a.id, state: 'succeeded' }));
+    expect(rowsOf(r, runId, 'review').map((s) => [s.retryIndex, s.state])).toEqual([[0, 'failed'], [1, 'ready']]);
+    expect(await drive(x, runId, ['awaiting_approval'])).toBe('awaiting_approval');
+    expect(attemptsOf(r, runId, 'review').at(-1)).toEqual(expect.objectContaining({ purpose: 'user_retry', state: 'succeeded' }));
+    // The estimate is counted exactly once; nothing is reserved or unknown after the uncertain attempt.
+    expect(r.ledger.attemptBalances(a.id)).toEqual({ reserved: 0, unknown: 0, settled: estimate });
+    expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0 }));
   });
 
-  it('mark_failed_keep_liability: attempt abandoned, step failed, run stays paused offering retry_step', async () => {
-    const { x, runId, a } = await unknownReview();
-
-    const res = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-02', runId, attemptId: a.id, decision: 'mark_failed_keep_liability' });
-
-    const r = x.db.repos;
-    expect(res.ok && res.data.status).toBe('paused');
-    expect(res.ok && res.data.availableActions).toEqual(['retry_step', 'choose_profile', 'stop']);
-    expect(r.attempts.get(a.id).state).toBe('abandoned');
-    expect(rowsOf(r, runId, 'review')[0]?.state).toBe('failed');
-    expect(r.ledger.runBalances(runId).U).toBe(a.reservationMicrousd);
+  it('never auto-retries: the loop keeps the run paused until the user decides', async () => {
+    const { x, runId } = await uncertainReview();
+    for (let i = 0; i < 5; i += 1) await tick(x.ctx);
+    expect(x.db.repos.runs.get(runId).status).toBe('paused');
+    expect(attemptsOf(x.db.repos, runId, 'review')).toHaveLength(1);
   });
 
-  it('accept_estimated_charge: resolve_unknown −N + settle +N (estimated), attempt failed(chargeAccepted), step failed', async () => {
-    const { x, runId, a } = await unknownReview();
+  it('runs.decideUnknown is retired: CONFLICT decision_not_applicable for any attempt; continue is refused', async () => {
+    const { x, runId, a } = await uncertainReview();
 
-    const res = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-03', runId, attemptId: a.id, decision: 'accept_estimated_charge' });
+    const decide = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-01', runId, attemptId: a.id, decision: 'accept_estimated_charge' });
+    const other = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-02', runId, attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ0', decision: 'accept_estimated_charge' });
+    const cont = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'resume-uncertain-01', runId, decision: { kind: 'continue' } });
 
-    const r = x.db.repos;
-    expect(res.ok).toBe(true);
-    expect(r.attempts.get(a.id).state).toBe('failed');
-    expect(r.attempts.get(a.id).error?.details).toEqual({ chargeAccepted: true });
-    expect(r.ledger.runBalances(runId)).toEqual(expect.objectContaining({ U: 0, C: a.reservationMicrousd }));
-    expect(r.ledger.settledByCertainty(runId).estimated).toBe(a.reservationMicrousd);
-    expect(ledgerTypes(r, runId).filter((e) => e.attemptId === a.id).map((e) => e.type)).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown', 'resolve_unknown', 'settle']);
-    // The attempt's own view derives certainty from its settle entries: the accepted charge is an estimate.
-    expect(toAttemptView(r.attempts.get(a.id), 'review' as StepKey, r.ledger.listForRun(runId).map((x) => x.entry)).cost).toEqual({ microusd: a.reservationMicrousd, certainty: 'estimated' });
-  });
-
-  it('rejects a second decision (CONFLICT), an unknown attempt id (NOT_FOUND), and a run that is not waiting on unknowns', async () => {
-    const { x, runId, a } = await unknownReview();
-    await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-04', runId, attemptId: a.id, decision: 'mark_failed_keep_liability' });
-
-    const again = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-05', runId, attemptId: a.id, decision: 'accept_estimated_charge' });
-    const replay = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-04', runId, attemptId: a.id, decision: 'mark_failed_keep_liability' });
-    const other = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-06', runId, attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ0', decision: 'accept_estimated_charge' });
-
-    expect(again.ok ? null : again.error.details?.['reason']).toBe('attempt_not_unknown');
-    expect(replay.ok).toBe(true);
-    expect(other.ok ? null : other.error.code).toBe('NOT_FOUND');
-    const second = await x.startRun();
-    const wrong = await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'decide-unknown-07', runId: second, attemptId: a.id, decision: 'accept_estimated_charge' });
-    expect(wrong.ok ? null : wrong.error.details?.['reason']).toBe('decision_not_applicable');
+    expect(decide.ok ? null : [decide.error.code, decide.error.details?.['reason']]).toEqual(['CONFLICT', 'decision_not_applicable']);
+    expect(other.ok ? null : other.error.details?.['reason']).toBe('decision_not_applicable');
+    expect(cont.ok ? null : cont.error.details?.['reason']).toBe('decision_not_applicable');
+    expect(x.db.repos.attempts.get(a.id).state).toBe('unknown'); // nothing changed
   });
 });
 
@@ -281,7 +276,7 @@ describe('budget pauses (F5 / F2 increaseAllowance, acknowledge_overrun)', () =>
     const r = x.db.repos;
     expect(r.runs.get(runId).pauseReason).toBe('budget_overrun');
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop', 'export_report']);
 
     const wrong = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'ack-key-0000001', runId, decision: { kind: 'continue' } });
     const ack = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'ack-key-0000002', runId, decision: { kind: 'acknowledge_overrun' } });

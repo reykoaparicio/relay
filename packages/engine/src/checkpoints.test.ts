@@ -7,6 +7,7 @@ import { FAKE_FIXTURES, createMemoryCallLog, createProviderRegistry } from '@rel
 import type { ProviderRegistry } from '@relay/providers';
 import type { Db, Repos } from '@relay/storage';
 import { onWorkStopped } from './cancellation.js';
+import { expectedEstimate } from './testing/estimates.js';
 import { executeModelAttempt } from './checkpoints.js';
 import { fromUtf8 } from './hash.js';
 import type { CrashHookCtx, EngineCtx } from './ports.js';
@@ -190,7 +191,7 @@ describe('executeModelAttempt (§7.4)', () => {
     expect(harness.db.repos.attempts.listForRun(runId).map((a) => a.state)).toEqual(['reserved']); // recovery releases it
   });
 
-  it('keeps the settlement group atomic: a throw mid step-7 leaves no partial entries and forces unknown', async () => {
+  it('keeps the settlement group atomic: a throw mid step-7 leaves no partial entries and forces an estimated settlement (decision 1)', async () => {
     const { harness, runId, stepRunId } = await readyReview();
     const db = faultyDb(harness.db, 'throwAfter', 4); // reserve, dispatching, onResponseId, settle
     const ctx: EngineCtx = { ...harness.ctx, db, hooks: { beforeReservationTx: () => { db.arm(); } } };
@@ -199,11 +200,14 @@ describe('executeModelAttempt (§7.4)', () => {
 
     const [attempt] = harness.db.repos.attempts.listForRun(runId);
     expect(attempt?.state).toBe('unknown');
-    const types = ledgerOf(harness.db.repos, runId).filter((e) => e.attemptId === attempt?.id).map((e) => e.type);
-    expect(types).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown']);
+    const types = ledgerOf(harness.db.repos, runId).filter((e) => e.attemptId === attempt?.id).map((e) => [e.type, e.certainty]);
+    expect(types).toEqual([['reserve', null], ['release', null], ['settle', 'estimated']]);
     const b = harness.db.repos.ledger.runBalances(runId);
-    expect(b.R).toBe(0);
-    expect(b.U).toBe(attempt?.reservationMicrousd);
+    expect([b.R, b.U]).toEqual([0, 0]);
+    expect(b.C).toBe(expectedEstimate(attempt!, 0)); // input of the estimate, no output streamed
+    expect(b.C).toBeLessThanOrEqual(attempt?.reservationMicrousd ?? 0);
+    expect(attempt?.outcomeUncertain).toBe(true);
+    expect(attempt?.mayNotHaveBeenCharged).toBe(false); // a response id was seen
     expect(harness.db.repos.artifacts.listForRun(runId).filter((a) => a.attemptId === attempt?.id)).toEqual([]);
     expect(harness.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
   });
@@ -238,7 +242,7 @@ describe('executeModelAttempt (§7.4)', () => {
     expect(harness.db.repos.steps.get(stepRunId).state).toBe('ready');
   });
 
-  it('records `unknown` (never dispatching) when the adapter throws', async () => {
+  it('records `unknown` (never dispatching) when the adapter throws, settled at once as an estimate of the input (decision 1)', async () => {
     const { harness, runId, stepRunId } = await readyReview({
       providers: (base) => ({ list: () => base.list(), get: (id) => ({ ...base.get(id), generate: () => Promise.reject(new Error('adapter bug')) }) }),
     });
@@ -247,7 +251,10 @@ describe('executeModelAttempt (§7.4)', () => {
 
     const [attempt] = harness.db.repos.attempts.listForRun(runId);
     expect(attempt?.state).toBe('unknown');
-    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: attempt?.reservationMicrousd }));
+    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: expectedEstimate(attempt!, 0) }));
+    // The adapter threw before any response: the request may never have reached the provider.
+    expect([attempt?.outcomeUncertain, attempt?.mayNotHaveBeenCharged]).toEqual([true, true]);
+    expect(attempt?.error?.details).toEqual({ estimatedMicrousd: expectedEstimate(attempt!, 0), mayNotHaveBeenCharged: true });
     expect(harness.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
     expect(harness.logger.entries.some((e) => e.event === 'adapter.threw')).toBe(true);
   });
@@ -323,7 +330,7 @@ describe('executeModelAttempt (§7.4)', () => {
     expect(harness.db.repos.steps.get(stepRunId).state).toBe('succeeded');
     expect(harness.db.repos.events.list(runId, 0, 200).some((e) => e.type === 'ledger.overrun')).toBe(true);
     const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop', 'export_report']);
   });
 
   it('pauses budget_run inside the reservation tx when C + R + U + N > L', async () => {
@@ -349,7 +356,7 @@ describe('executeModelAttempt (§7.4)', () => {
     expect(harness.db.repos.runs.get(runId).pauseReason).toBe('budget_project');
   });
 
-  it('cancel during a hang aborts the call: attempt unknown (never dispatching), U = N, R = 0, then cancelled', async () => {
+  it('cancel during a hang aborts the call: attempt unknown (never dispatching), settled as an estimate (U = 0, R = 0), then cancelled', async () => {
     const { harness, runId, stepRunId } = await readyReview({ scenario: 'hang' });
 
     const pending = executeModelAttempt(harness.ctx, runId, stepRunId);
@@ -360,7 +367,7 @@ describe('executeModelAttempt (§7.4)', () => {
     expect(cancel.ok && cancel.data.status).toBe('cancelling');
     const [attempt] = harness.db.repos.attempts.listForRun(runId);
     expect(attempt?.state).toBe('unknown');
-    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: attempt?.reservationMicrousd }));
+    expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: expectedEstimate(attempt!, 0) }));
     expect(harness.db.repos.runs.get(runId).status).toBe('cancelling');
     expect(harness.db.repos.steps.get(stepRunId).state).toBe('unknown'); // skipped only by the WORK_STOPPED handler
 

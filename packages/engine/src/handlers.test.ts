@@ -184,8 +184,9 @@ describe('runs + ledger read side', () => {
     const otherMonth = await x.engine.handle('relay/v1/ledger.projectSummary', { projectId: x.projectId, month: '2020-01' });
     const noProject = await x.engine.handle('relay/v1/ledger.projectSummary', { projectId: 'prj_01J9ZZZZZZZZZZZZZZZZZZZZZ0' });
 
+    expect(month.ok && month.data.hasEstimates).toBe(false); // only calculated costs so far
     expect(list.ok && list.data.items.map((r) => [r.id, r.stepProgress])).toEqual([[runId, { done: 2, total: 7 }]]);
-    expect(detail.ok && detail.data.availableActions).toEqual(['pause', 'cancel']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['pause', 'cancel', 'export_report']);
     expect(detail.ok && detail.data.steps.find((s) => s.stepKey === 'review')).toEqual(expect.objectContaining({ providerId: 'anthropic', modelId: 'claude-haiku-4-5' }));
     expect(detail.ok && detail.data.steps.find((s) => s.stepKey === 'intake')?.providerId).toBeNull();
     expect(step.ok && step.data.output?.schemaId).toBe('findings.v1');
@@ -206,16 +207,16 @@ describe('runs + ledger read side', () => {
     expect(noProject.ok ? null : noProject.error.code).toBe('NOT_FOUND');
   });
 
-  it('pause sets the durable flag on a running run (CONFLICT otherwise); the loop then pauses before the next dispatch', async () => {
+  it('pause sets the durable flag on a running run; the loop then pauses before the next dispatch (CONFLICT on a paused run)', async () => {
     const x = await harness();
     const runId = await x.startRun();
-    const queued = await x.engine.handle('relay/v1/runs.pause', { runId });
     await tick(x.ctx);
 
     const paused = await x.engine.handle('relay/v1/runs.pause', { runId });
     await tick(x.ctx);
+    const again = await x.engine.handle('relay/v1/runs.pause', { runId });
 
-    expect(queued.ok ? null : queued.error.code).toBe('CONFLICT');
+    expect(again.ok ? null : [again.error.code, again.error.details?.['reason']]).toEqual(['CONFLICT', 'run_not_running']);
     expect(paused.ok && paused.data).toEqual({ status: 'running', inFlight: 'none' });
     expect(x.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'user', pauseRequested: false }));
     const cancel = await x.engine.handle('relay/v1/runs.cancel', { runId });

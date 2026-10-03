@@ -141,7 +141,7 @@ async function pipeline(op, event, raw) {
   | `projects.createSample` | H10 copy to `userData/samples/` | `projects.createFromRoot {…, isDemo: true}` |
   | `projects.export` | `pickSaveFile('relay-project-<name>.json')`; cancel → `{exported: false}` | `projects.exportTo {projectId, runIds, destinationRealpath}` |
   | `ledger.export` | `pickSaveFile('relay-ledger-<run\|month>.csv')`; cancel → `{exported: false}` | `ledger.exportTo {…input, destinationRealpath}` |
-  | `artifacts.export` | `pickExportDir()`; cancel → `{exported: false, displayPaths: []}` | `artifacts.exportTo {runId, what, destinationRealpath}` |
+  | `artifacts.export` | `pickExportDir()`; cancel → `{exported: false, displayPaths: []}`. Founder decision 2 (2026-10-03): no run-status gate in main — a run in progress exports an interim report (built by the runner in memory) and the patch once one exists; per-part `written` / `failed` are passed through | `artifacts.exportTo {runId, what, destinationRealpath}` |
   | `artifacts.importDiff` | `pickDiffFile()` → `{text, fileName}`; cancel → `null` | `artifacts.importDiffText {projectId, text, fileName}` |
   | `providers.connect` | `vault.save(providerId, apiKey, storage)` | `providers.recordCredentialRef {providerId, storageMode, vaultFile, redactedLabel}`; if it fails, main deletes the vault file / session entry it just wrote |
   | `providers.disconnect` | `vault.remove(providerId)` | `providers.deleteCredentialRef {providerId}` |

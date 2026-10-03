@@ -20,6 +20,8 @@ import type { FormProblem } from '../common/ErrorSummary';
 import { checkAllowance, checkWhole, dollarsText, LIMIT_BOUNDS } from '../run-setup/limits';
 import { profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
 import type { ModelStepRow } from '../run-setup/model-steps';
+import { checkOutputTokens, clampOutputText, isOutputOverridden } from '../run-setup/output-limits';
+import type { StepOutputLimit } from '../run-setup/output-limits';
 import { diffSecretMessage, issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
 
 export type InputSource = 'files' | 'diff';
@@ -54,6 +56,13 @@ export interface NewRunForm {
    * records, sent as is (possibly `[]` = pinned rules only; pinned rules are always included and never sent).
    */
   readonly memoryIds: readonly string[] | null;
+  /**
+   * Decision 3: stepKey → the "Max output (tokens)" text the user typed (raw, so a partial entry is kept). A missing
+   * step, or a value equal to the step's default, sends no override.
+   */
+  readonly outputTokenTexts: Readonly<Record<string, string>>;
+  /** stepKey → why the value was changed for the user (lowered to a newly chosen model's maximum). */
+  readonly outputTokenNotes: Readonly<Record<string, string>>;
   /** Set by the first submit: goal/input errors show from then on. */
   readonly submitted: boolean;
 }
@@ -83,6 +92,8 @@ export const INITIAL_FORM: NewRunForm = {
   attemptsText: null,
   timeoutText: null,
   memoryIds: null,
+  outputTokenTexts: {},
+  outputTokenNotes: {},
   submitted: false,
 };
 
@@ -97,7 +108,16 @@ export type FormAction =
       readonly stepKey: string;
       readonly profileId: string;
       readonly receivingProviders?: readonly ProviderId[];
+      /**
+       * The most output tokens the newly chosen profile's model returns: a larger override of this step is lowered to
+       * it, with a note at the field.
+       */
+      readonly outputMax?: { readonly max: number; readonly modelName: string | null };
     }
+  /** The step's "Max output (tokens)" text as typed. */
+  | { readonly type: 'set-output-tokens'; readonly stepKey: string; readonly text: string }
+  /** Back to the default: one step, or every step when `stepKey` is absent. */
+  | { readonly type: 'reset-output-tokens'; readonly stepKey?: string }
   /**
    * The file selection (and, when given, the confirmed suspected secrets). Acknowledgements of files that are no longer
    * selected are dropped, so `acknowledgedSuspectedSecrets` stays a subset of `relPaths`.
@@ -112,12 +132,34 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       return { ...s, ...a.patch };
     case 'select-profile': {
       const receiving = a.receivingProviders;
+      const clamped =
+        a.outputMax === undefined
+          ? { text: s.outputTokenTexts[a.stepKey], note: null }
+          : clampOutputText(s.outputTokenTexts[a.stepKey], a.outputMax.max, a.outputMax.modelName);
       return {
         ...s,
         profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId },
         acknowledgedSecrets:
           receiving === undefined ? s.acknowledgedSecrets : s.acknowledgedSecrets.filter((k) => coversProviders(k, receiving)),
+        ...(clamped.note === null || clamped.text === undefined
+          ? {}
+          : {
+              outputTokenTexts: { ...s.outputTokenTexts, [a.stepKey]: clamped.text },
+              outputTokenNotes: { ...s.outputTokenNotes, [a.stepKey]: clamped.note },
+            }),
       };
+    }
+    case 'set-output-tokens':
+      return {
+        ...s,
+        outputTokenTexts: { ...s.outputTokenTexts, [a.stepKey]: a.text },
+        outputTokenNotes: omitKey(s.outputTokenNotes, a.stepKey),
+      };
+    case 'reset-output-tokens': {
+      const key = a.stepKey;
+      return key === undefined
+        ? { ...s, outputTokenTexts: {}, outputTokenNotes: {} }
+        : { ...s, outputTokenTexts: omitKey(s.outputTokenTexts, key), outputTokenNotes: omitKey(s.outputTokenNotes, key) };
     }
     case 'set-files': {
       const selected = new Set(a.files);
@@ -131,6 +173,11 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       };
     }
   }
+}
+
+function omitKey(r: Readonly<Record<string, string>>, key: string): Readonly<Record<string, string>> {
+  if (!(key in r)) return r;
+  return Object.fromEntries(Object.entries(r).filter(([k]) => k !== key));
 }
 
 /**
@@ -249,6 +296,8 @@ export const FIELD = {
   timeout: 'new-run-timeout',
   memory: 'new-run-memory',
   profile: (stepKey: string) => `new-run-profile-${stepKey}`,
+  /** A step's "Max output (tokens)" input (decision 3). */
+  maxOutput: (stepKey: string) => `new-run-max-output-${stepKey}`,
 } as const;
 
 /**
@@ -294,6 +343,8 @@ export function fieldForPath(path: string, source: InputSource = 'files', anchor
   if (path === 'input' || path.startsWith('input.')) return inputField(source);
   const profile = /^profileOverrides\.([a-z][a-z0-9_-]*)/.exec(path);
   if (profile?.[1] !== undefined) return FIELD.profile(profile[1]);
+  const output = /^outputTokenOverrides\.([a-z][a-z0-9_-]*)/.exec(path);
+  if (output?.[1] !== undefined) return FIELD.maxOutput(output[1]);
   if (path.startsWith('limitOverrides.budgetMicrousd')) return FIELD.allowance;
   if (path.startsWith('limitOverrides.maxRevisionCycles')) return FIELD.revisions;
   if (path.startsWith('limitOverrides.maxAttempts')) return FIELD.attempts;
@@ -342,7 +393,29 @@ export interface ClientCheck {
   readonly fieldErrors: Readonly<Record<string, string>>;
   readonly problems: readonly FormProblem[];
   readonly limitOverrides: InputOf<'relay/v1/runs.start'>['limitOverrides'];
+  /** Decision 3: only the steps whose valid value differs from the default; undefined when none (field omitted). */
+  readonly outputTokenOverrides: Record<string, number> | undefined;
   readonly allowance: Microusd | null;
+}
+
+/**
+ * The output-limit overrides to send and the per-step errors: a step the user changed from its default, with a whole
+ * number within its range. `limits` is keyed by the workflow's model steps in order; other steps are ignored.
+ */
+export function checkOutputOverrides(
+  texts: Readonly<Record<string, string>>,
+  limits: Readonly<Record<string, StepOutputLimit>>,
+): { readonly overrides: Record<string, number> | undefined; readonly errors: Record<string, string> } {
+  const overrides: Record<string, number> = {};
+  const errors: Record<string, string> = {};
+  for (const [stepKey, limit] of Object.entries(limits)) {
+    const text = texts[stepKey];
+    if (text === undefined || !isOutputOverridden(text, limit)) continue;
+    const checked = checkOutputTokens(text, limit);
+    if ('error' in checked) errors[FIELD.maxOutput(stepKey)] = checked.error;
+    else if (checked.value !== limit.defaultTokens) overrides[stepKey] = checked.value;
+  }
+  return { overrides: Object.keys(overrides).length === 0 ? undefined : overrides, errors };
 }
 
 /**
@@ -354,6 +427,8 @@ export function checkForm(
   texts: LimitTexts,
   d: LimitDefaults,
   fileCount: number,
+  /** Decision 3: stepKey → output limit of every model step, in step order (empty until the workflow loads). */
+  outputLimits: Readonly<Record<string, StepOutputLimit>> = {},
 ): ClientCheck {
   const errors: Record<string, string> = {};
   const goal = form.goal.trim();
@@ -373,6 +448,8 @@ export function checkForm(
   if ('error' in timeout) errors[FIELD.timeout] = timeout.error;
   const memory = memorySelectionError(form.memoryIds);
   if (memory !== null) errors[FIELD.memory] = memory;
+  const output = checkOutputOverrides(form.outputTokenTexts, outputLimits);
+  Object.assign(errors, output.errors);
 
   const overrides = {
     ...('value' in allowance && allowance.value !== d.budget ? { budgetMicrousd: allowance.value } : {}),
@@ -388,6 +465,7 @@ export function checkForm(
     FIELD.goal,
     FIELD.files,
     FIELD.diff,
+    ...Object.keys(outputLimits).map(FIELD.maxOutput),
     FIELD.allowance,
     FIELD.revisions,
     FIELD.attempts,
@@ -398,6 +476,7 @@ export function checkForm(
     fieldErrors: errors,
     problems: order.flatMap((id) => (errors[id] === undefined ? [] : [{ fieldId: id, message: errors[id] }])),
     limitOverrides: Object.keys(overrides).length === 0 ? undefined : overrides,
+    outputTokenOverrides: output.overrides,
     allowance: 'value' in allowance ? allowance.value : null,
   };
 }
@@ -442,6 +521,9 @@ export function buildStartInput(args: {
     input,
     ...(check.limitOverrides === undefined ? {} : { limitOverrides: check.limitOverrides }),
     ...(profileOverrides === undefined ? {} : { profileOverrides }),
+    // Decision 3: only the steps changed from their default; absent otherwise (the canonical key changes, so the
+    // preflight re-checks the first reservation).
+    ...(check.outputTokenOverrides === undefined ? {} : { outputTokenOverrides: check.outputTokenOverrides }),
     // Absent = every approved record (untouched picker); otherwise the explicit list, `[]` included.
     ...(form.memoryIds === null ? {} : { memoryRecordIds: [...form.memoryIds] }),
   };
@@ -604,6 +686,8 @@ export interface NewRunState {
   readonly fieldErrors: Readonly<Record<string, string>>;
   /** step key → message, for the profile table. */
   readonly profileErrors: Readonly<Record<string, string>>;
+  /** step key → message, for the table's "Max output (tokens)" inputs (decision 3). */
+  readonly outputErrors: Readonly<Record<string, string>>;
   /** A preflight failure that is not about the form (runner down, internal, conflict): an ErrorView. */
   readonly preflightSystemError: unknown;
   /** A start failure that is neither a form problem nor a budget block. */
@@ -662,6 +746,7 @@ function anchorProblems(
     FIELD.timeout,
     FIELD.memory,
     ...rows.map((r) => FIELD.profile(r.stepKey)),
+    ...rows.map((r) => FIELD.maxOutput(r.stepKey)),
   ]);
   return problems.map((p) => (p.fieldId !== null && !knownFields.has(p.fieldId) ? { ...p, fieldId: null } : p));
 }
@@ -719,6 +804,11 @@ export function deriveNewRunState(input: NewRunStateInput): NewRunState {
     const msg = fieldErrors[FIELD.profile(r.stepKey)];
     if (msg !== undefined) profileErrors[r.stepKey] = msg;
   }
+  const outputErrors: Record<string, string> = {};
+  for (const r of rows) {
+    const msg = fieldErrors[FIELD.maxOutput(r.stepKey)];
+    if (msg !== undefined) outputErrors[r.stepKey] = msg;
+  }
   const otherStartError = startError !== null && serverProblems.length === 0 && budgetFromError(startError) === null ? startError : null;
 
   const checked = freshPreflight !== undefined && freshPreflight.issues.length === 0 && freshPreflight.budget.allowed;
@@ -744,7 +834,7 @@ export function deriveNewRunState(input: NewRunStateInput): NewRunState {
         : submitKey !== null && !checked && problems.length === 0
           ? 'Checking…'
           : null;
-  const base = { budget, problems, fieldErrors, profileErrors, preflightSystemError, otherStartError, checked, checking, allPassed };
+  const base = { budget, problems, fieldErrors, profileErrors, outputErrors, preflightSystemError, otherStartError, checked, checking, allPassed };
   return {
     ...base,
     status: statusOf({ ...base, needsGoal }),

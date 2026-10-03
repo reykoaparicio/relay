@@ -30,7 +30,7 @@ export interface OverviewModel {
   readonly awaiting: RunSummary | undefined;
   /** A running run when no approval is pending. */
   readonly running: RunSummary | undefined;
-  /** Any run `interrupted` or `paused(unknown_outcome)` (RecoveryPanel). */
+  /** Any run `interrupted` or paused on a request that may not have completed (`unknown_outcome`, RecoveryPanel). */
   readonly interrupted: RunSummary | undefined;
   /** Runs paused for provider sign-in. */
   readonly authPaused: RunSummary | undefined;

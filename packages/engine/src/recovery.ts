@@ -1,13 +1,16 @@
 // 06 F9: crash recovery at engine.start(), one transaction per run.
-// created/reserved attempts → released (failed_before_dispatch, step → ready); EVERY dispatching attempt → unknown
-// with move_to_unknown N (R4-3); running → interrupted (RUNNER_LOST); cancelling → cancelled with open steps skipped.
-// Succeeded steps are never touched (FR-07). F9b: the reconcile task (after start) looks up `unknown` attempts that
-// have a provider response id on providers that support request lookup.
+// created/reserved attempts → released (failed_before_dispatch, step → ready); EVERY dispatching attempt → unknown,
+// settled at once as an ESTIMATE (decision 1: release −N + settle +estimate; never an unknown liability); running →
+// interrupted (RUNNER_LOST); cancelling → cancelled with open steps skipped. Succeeded steps are never touched
+// (FR-07). Legacy unknown liabilities are converted to estimates first (`convertLegacyUnknowns`). F9b: the reconcile
+// task (after start) looks up uncertain attempts that have a provider response id on providers that support request
+// lookup, and replaces the estimate by the real cost (a correction, never a second charge).
 import { computeCost, errors, isTerminalRunStatus, redactDeep, redactString } from '@relay/contracts';
 import type { ArtifactId, AttemptId, EpochMs, Microusd, RunId } from '@relay/contracts';
 import type { ModelRequest, NormalizedUsage, ReconciliationResult } from '@relay/providers';
 import type { AttemptRow, Repos } from '@relay/storage';
 import { resolveUnknownEntries, settlementEntries } from './budget.js';
+import { convertLegacyUnknowns, correctionEntries, persistedMayNotHaveBeenCharged, persistedOutputTokens, recordedInputTokens, settledByCertaintyOf, uncertainCost, uncertainError } from './uncertain.js';
 import type { SettleAmount } from './budget.js';
 import type { ArtifactPut } from './checkpoints.js';
 import { isJsonText, putArtifact } from './checkpoints.js';
@@ -18,7 +21,7 @@ import { refreshReport } from './report.js';
 import type { EngineCtx } from './ports.js';
 import { applyPostValidation, deferPause, isDeferrablePause } from './outcome.js';
 import type { ClassifiedOutcome, ResultFlags, Validation } from './retry.js';
-import { flagsOf, validatedOutcome } from './retry.js';
+import { flagsOf, overrunError, validatedOutcome } from './retry.js';
 import { effectiveStepSnapshot } from './snapshot.js';
 import { validateOutput } from './steps/validate-output.js';
 import { loadValidationInputs } from './steps/validation-inputs.js';
@@ -43,10 +46,20 @@ export function recoverAttempt(r: Repos, fx: PostCommitEffect[], a: AttemptRow, 
     return;
   }
   if (a.state === 'dispatching') {
-    if (!r.attempts.transition(a.id, ['dispatching'], 'unknown', { error: errors.requestOutcomeUnknown(a.id), finishedAt: now })) return;
-    r.ledger.append(settlementEntries({ ...refs, cost: { kind: 'unknown' } }));
-    if (step.state === 'executing') applyStepEvent(r, fx, step, 'OUTCOME_UNKNOWN', { error: errors.requestOutcomeUnknown(a.id) });
-    appendRunEvent(r, fx, a.runId, 'attempt.unknown', { attemptId: a.id, stepRunId: a.stepRunId, recovered: true });
+    // Decision 1: the estimate is input tokens (recorded estimate) + output observed before the crash (stream progress).
+    const out = persistedOutputTokens(r, a);
+    const cost = uncertainCost({ inputTokens: recordedInputTokens(a), outputTokens: out }, a.profileSnapshot.prices);
+    const mayNot = persistedMayNotHaveBeenCharged(a, out);
+    const error = uncertainError(a.id, cost.microusd, mayNot);
+    if (!r.attempts.transition(a.id, ['dispatching'], 'unknown', { error, finishedAt: now, outcomeUncertain: true, mayNotHaveBeenCharged: mayNot })) return;
+    r.ledger.append(settlementEntries({ ...refs, cost }));
+    if (step.state === 'executing') applyStepEvent(r, fx, step, 'OUTCOME_UNKNOWN', { error });
+    appendRunEvent(r, fx, a.runId, 'attempt.unknown', { attemptId: a.id, stepRunId: a.stepRunId, recovered: true, cost, mayNotHaveBeenCharged: mayNot });
+    // §9.5: an estimate above the reservation is an overrun like any other (applied when the run continues).
+    if (cost.microusd > N) {
+      appendRunEvent(r, fx, a.runId, 'ledger.overrun', { attemptId: a.id, stepRunId: a.stepRunId, N, X: cost.microusd });
+      deferPause(r, fx, a.runId, { type: 'BUDGET_OVERRUN', attemptId: a.id, error: overrunError(a.id, N, cost.microusd) });
+    }
   }
 }
 
@@ -87,16 +100,17 @@ function recoverRun(ctx: EngineCtx, runId: RunId, attempts: readonly AttemptRow[
 
 /**
  * F18 crash safety: a setup (`providers.test`) reservation still outstanding at start belongs to a call whose runner
- * died between the reserve and the settle tx. Whether it left is unknown, so the full amount moves to the setup
- * liability (`move_to_unknown`, like a dispatching attempt), never silently released.
+ * died between the reserve and the settle tx. Whether it left is unknown, so it is never silently released: decision 1
+ * settles it as an estimate at the reserved amount (no token count survives for a setup call; a connection test is a
+ * few tokens, so the reservation is the honest upper estimate).
  */
 export function recoverSetupReservations(ctx: EngineCtx): Microusd {
   return ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     const outstanding = r.ledger.setupBalances(0 as EpochMs, Number.MAX_SAFE_INTEGER as EpochMs).R;
     if (outstanding <= 0) return 0 as Microusd;
-    r.ledger.append(settlementEntries({ reservation: outstanding, cost: { kind: 'unknown' }, attemptId: null, runId: null, projectId: null,
-      priceCatalogVersion: null, createdAt: now, scope: 'setup' }));
+    r.ledger.append(settlementEntries({ reservation: outstanding, cost: { kind: 'known', microusd: outstanding, certainty: 'estimated' }, attemptId: null,
+      runId: null, projectId: null, priceCatalogVersion: null, createdAt: now, scope: 'setup' }));
     ctx.logger.warn('recovery.setup_reservation', { microusd: outstanding });
     return outstanding;
   });
@@ -105,6 +119,7 @@ export function recoverSetupReservations(ctx: EngineCtx): Microusd {
 /** Runs recovery for every run with an in-flight attempt or a running/cancelling status. Returns the run ids. */
 export async function recoverOnStart(ctx: EngineCtx): Promise<RunId[]> {
   const r = ctx.db.repos;
+  await convertLegacyUnknowns(ctx); // decision 1: old DBs show no unknown charges (idempotent, logged)
   recoverSetupReservations(ctx);
   const pending = r.attempts.listUnresolved().filter((a) => a.state !== 'unknown');
   const byRun = new Map<RunId, AttemptRow[]>();
@@ -160,7 +175,8 @@ export function recordedProviderOptions(a: Pick<AttemptRow, 'estimate'>): ModelR
  * under the project's provider options (an OpenAI project with `storeResponses: false` never looks up).
  */
 export function isReconcilable(ctx: Pick<EngineCtx, 'db' | 'requestLookup'>, a: AttemptRow): boolean {
-  if (a.state !== 'unknown' || a.providerResponseId === null) return false;
+  const candidate = a.state === 'unknown' || (a.state === 'abandoned' && a.outcomeUncertain);
+  if (!candidate || a.providerResponseId === null) return false;
   const options = recordedProviderOptions(a) ?? ctx.db.repos.projects.get(ctx.db.repos.runs.get(a.runId).projectId).providerPolicy.providerOptions;
   const caps = a.profileSnapshot.capabilities;
   return ctx.requestLookup === undefined ? caps.supportsRequestLookup : ctx.requestLookup(a.providerId, caps, options);
@@ -172,7 +188,8 @@ type Resolution =
 
 /**
  * The settled amount of a reconciled attempt: usage × snapshot prices (`calculated`); no usage on a failure → 0;
- * `usageKnown: false` → the full liability N (`estimated`, never $0); a price-tier mismatch → `estimated`.
+ * `usageKnown: false` → `liability` (the current estimate, or a legacy unknown liability; `estimated`, never $0); a
+ * price-tier mismatch → `estimated`.
  */
 export function reconciledAmount(res: Resolution, prices: AttemptRow['profileSnapshot']['prices'], liability: Microusd): { X: Microusd; certainty: 'calculated' | 'estimated' } {
   if (res.flags.usageKnown === false) return { X: liability, certainty: 'estimated' };
@@ -222,11 +239,44 @@ function reconciledOutcome(i: ReconcileInput): ClassifiedOutcome {
   return { ...common, ...validatedOutcome(i.validated, canonicalOk), rawUsage: i.res.rawUsage };
 }
 
+/** The attempt's current settlement in the caller's tx: a legacy unknown liability, or its (estimated) settled part. */
+function currentCharge(r: Repos, a: AttemptRow): { readonly legacyLiability: Microusd; readonly estimate: Microusd; readonly settled: Microusd } {
+  const legacyLiability = r.ledger.attemptBalances(a.id).unknown;
+  const own = settledByCertaintyOf(r.ledger.listForRun(a.runId).map((x) => x.entry), a.id);
+  return { legacyLiability, estimate: own.estimated as Microusd, settled: own.total as Microusd };
+}
+
 /**
- * One tx: resolve the unknown liability (resolve_unknown −N + settle +X), the attempt, then the SAME post-validation
- * function as the live settle (BH-6). The attempt records the classified error, so the next attempt's purpose
- * matches the counter the retry consumed (BH-5). A pause the outcome requires is deferred until the run's unknowns
- * are resolved (BH-2).
+ * The ledger move of a reconciled attempt (caller's tx). Decision 1: the estimate the attempt was settled with is
+ * replaced by the real cost through a correction group (`settle −estimate` + `settle +X`), so the estimate is never
+ * counted twice. A legacy unknown liability (data from before decision 1, normally converted at start) is resolved as
+ * before. `keep`: the provider reported a failure without usage — the estimate stays as it is.
+ */
+function settleReconciled(r: Repos, a: AttemptRow, res: Resolution, keep: boolean, now: EpochMs): { readonly cost: SettleAmount; readonly event: SettleAmount } {
+  const run = r.runs.get(a.runId);
+  const refs = { attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now };
+  const cur = currentCharge(r, a);
+  if (cur.legacyLiability > 0) {
+    if (keep) return { cost: { kind: 'unknown' }, event: { kind: 'unknown' } };
+    const { X, certainty } = reconciledAmount(res, a.profileSnapshot.prices, cur.legacyLiability);
+    r.ledger.append(resolveUnknownEntries({ ...refs, liability: cur.legacyLiability, settled: X, certainty }));
+    const cost: SettleAmount = { kind: 'known', microusd: X, certainty };
+    return { cost, event: cost };
+  }
+  const estimated: SettleAmount = { kind: 'known', microusd: cur.settled, certainty: 'estimated' };
+  // Kept: no overrun is raised again (the estimate was checked against N when it was booked).
+  if (keep) return { cost: { kind: 'unknown' }, event: estimated };
+  const { X, certainty } = reconciledAmount(res, a.profileSnapshot.prices, cur.estimate);
+  r.ledger.append(correctionEntries({ ...refs, estimate: cur.estimate, X, certainty }));
+  const cost: SettleAmount = { kind: 'known', microusd: X, certainty };
+  return { cost, event: cost };
+}
+
+/**
+ * One tx: correct the estimate (or resolve a legacy liability), the attempt, then the SAME post-validation function as
+ * the live settle (BH-6). The attempt records the classified error, so the next attempt's purpose matches the counter
+ * the retry consumed (BH-5). A pause the outcome requires is deferred until the run's uncertain attempts are resolved
+ * (BH-2). The overrun check compares the real cost with the attempt's reservation N.
  */
 function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileInput): boolean {
   const a = i.attempt;
@@ -234,32 +284,26 @@ function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileIn
   return ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     const usage = i.res.usage;
-    // A failure without known usage keeps the unknown liability (never resolved to $0): the attempt is abandoned.
-    const keepLiability = i.res.kind === 'failed' && i.res.flags.usageKnown === false;
-    const to = keepLiability ? 'abandoned' : i.res.kind === 'completed' ? 'reconciled_succeeded' : 'reconciled_failed';
+    // A failure without known usage keeps the estimate (never resolved to $0): the attempt is abandoned.
+    const keep = i.res.kind === 'failed' && i.res.flags.usageKnown === false;
+    const to = keep ? 'abandoned' : i.res.kind === 'completed' ? 'reconciled_succeeded' : 'reconciled_failed';
     const won = r.attempts.transition(a.id, ['unknown'], to, {
       usage: usage === null ? null : { ...usage }, rawUsage: i.res.kind === 'completed' ? redactDeep(i.res.rawUsage) : null, finishedAt: now,
       error: outcome.error,
     });
-    if (!won) return false; // decided by the user or reconciled elsewhere meanwhile
+    if (!won) return false; // retried by the user or reconciled elsewhere meanwhile
     const run = r.runs.get(a.runId);
-    const liability = r.ledger.attemptBalances(a.id).unknown;
-    let cost: SettleAmount = { kind: 'unknown' };
-    if (!keepLiability) {
-      const { X, certainty } = reconciledAmount(i.res, a.profileSnapshot.prices, liability);
-      r.ledger.append(resolveUnknownEntries({ liability, settled: X, certainty, attemptId: a.id, runId: a.runId,
-        projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now }));
-      cost = { kind: 'known', microusd: X, certainty };
-    }
+    const N = a.reservationMicrousd;
+    const { cost, event: settledCost } = settleReconciled(r, a, i.res, keep, now);
     for (const put of i.puts) {
       if (!put.ok) continue;
       r.artifacts.insertIfAbsent({ ...put.meta, stepRunId: a.stepRunId, attemptId: a.id });
       appendRunEvent(r, fx, a.runId, 'artifact.created', { artifactId: put.meta.id, kind: put.meta.kind, attemptId: a.id, stepRunId: a.stepRunId });
     }
-    appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: i.res.kind, liabilityKept: keepLiability, cost });
+    appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: i.res.kind, estimateKept: keep, cost: settledCost });
     const step = r.steps.get(a.stepRunId);
     const { event } = applyPostValidation(r, fx, ctx, { source: 'reconcile', stepRunId: a.stepRunId, runId: a.runId, attemptId: a.id, outcome,
-      policy: effectiveStepSnapshot(r, run, step.stepKey).retryPolicy, purpose: a.purpose, output: i.output, cost, N: liability, now });
+      policy: effectiveStepSnapshot(r, run, step.stepKey).retryPolicy, purpose: a.purpose, output: i.output, cost, N, now });
     if (isDeferrablePause(event)) {
       // A running run (e.g. resumed meanwhile) takes the pause now, exactly like a live settle; otherwise it is
       // stored durably and applied by the next event that would let the run continue (clarification 14).
@@ -272,7 +316,35 @@ function commitReconciled(ctx: EngineCtx, fx: PostCommitEffect[], i: ReconcileIn
   });
 }
 
+/**
+ * Decision 1: an uncertain attempt the user already retried (`abandoned`) can only have its COST corrected — its
+ * step moved on, so no output, step or run change. Skipped once nothing estimated is left (already corrected).
+ */
+function commitCostCorrection(ctx: EngineCtx, fx: PostCommitEffect[], a: AttemptRow, res: Resolution): boolean {
+  return ctx.db.tx('immediate', (r) => {
+    const now = ctx.clock.now();
+    const cur = currentCharge(r, a);
+    if (cur.legacyLiability > 0 || cur.estimate <= 0) return false;
+    if (res.kind === 'failed' && res.flags.usageKnown === false) return false; // nothing better than the estimate
+    const { X, certainty } = reconciledAmount(res, a.profileSnapshot.prices, cur.estimate);
+    const run = r.runs.get(a.runId);
+    r.ledger.append(correctionEntries({ attemptId: a.id, runId: a.runId, projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now,
+      estimate: cur.estimate, X, certainty }));
+    if (res.usage !== null) r.attempts.transition(a.id, ['abandoned'], 'abandoned', { usage: { ...res.usage } });
+    appendRunEvent(r, fx, a.runId, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, reconciled: res.kind, correctionOnly: true,
+      cost: { kind: 'known', microusd: X, certainty } });
+    return true;
+  });
+}
+
 async function settleResolution(ctx: EngineCtx, attempt: AttemptRow, res: Resolution): Promise<void> {
+  if (attempt.state === 'abandoned') {
+    const fx: PostCommitEffect[] = [];
+    const corrected = commitCostCorrection(ctx, fx, attempt, res);
+    await runEffects(ctx, fx);
+    if (corrected && isTerminalRunStatus(ctx.db.repos.runs.get(attempt.runId).status)) await refreshReport(ctx, attempt.runId);
+    return;
+  }
   const run = ctx.db.repos.runs.get(attempt.runId);
   const step = ctx.db.repos.steps.get(attempt.stepRunId);
   const puts: ArtifactPut[] = [];
@@ -334,10 +406,19 @@ export async function reconcileAttempt(ctx: EngineCtx, attempt: AttemptRow, sign
   }
 }
 
-/** F9b: reconciles every eligible unknown attempt (sequentially). Never throws; failures are logged. */
+/**
+ * An `abandoned` uncertain attempt is looked up only while its estimate is still uncorrected (a corrected one never
+ * costs another provider lookup at the next start). `unknown` attempts always qualify.
+ */
+function stillToCorrect(ctx: Pick<EngineCtx, 'db'>, a: AttemptRow): boolean {
+  if (a.state !== 'abandoned') return true;
+  return settledByCertaintyOf(ctx.db.repos.ledger.listForRun(a.runId).map((x) => x.entry), a.id).estimated > 0;
+}
+
+/** F9b: reconciles every eligible uncertain attempt (sequentially). Never throws; failures are logged. */
 export async function reconcileUnknownAttempts(ctx: EngineCtx, signal: AbortSignal): Promise<Map<AttemptId, ReconcileOutcome>> {
   const out = new Map<AttemptId, ReconcileOutcome>();
-  for (const a of ctx.db.repos.attempts.listUnresolved().filter((a) => isReconcilable(ctx, a))) {
+  for (const a of ctx.db.repos.attempts.listReconcileCandidates().filter((a) => isReconcilable(ctx, a) && stillToCorrect(ctx, a))) {
     if (signal.aborted) break;
     try {
       out.set(a.id, await reconcileAttempt(ctx, a, signal));

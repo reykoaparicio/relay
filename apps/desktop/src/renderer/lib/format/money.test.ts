@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { usd } from '@relay/contracts';
 import type { Microusd } from '@relay/contracts';
-import { formatMoney, formatMoneyPair, formatSumPart, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
+import { costHasEstimates, estimatedPart, formatMoney, formatMoneyApprox, formatMoneyPair, formatSumPart, formatUsdAtPrecision, isEstimate, moneyColumnPrecision, sumConsistentPrecision, trackedTotal } from './money';
 
 const m = (n: number) => n as Microusd;
 
@@ -44,9 +44,11 @@ describe('formatMoney', () => {
     expect(formatMoney(m(-9_999))).toBe('-$0.01');
   });
 
-  it('labels estimated and unknown amounts in the visible text', () => {
-    expect(formatMoney(m(480_000), 'estimated')).toBe('≈ $0.48 est.');
-    expect(formatMoney(m(480_000), 'unknown')).toBe('$0.48 unknown');
+  it('labels estimated amounts "~$0.48 (estimated)" and never shows "unknown" (decision 1)', () => {
+    expect(formatMoney(m(480_000), 'estimated')).toBe('~$0.48 (estimated)');
+    // A legacy not-confirmed amount is an estimate too.
+    expect(formatMoney(m(480_000), 'unknown')).toBe('~$0.48 (estimated)');
+    expect(formatMoney(m(30_000), 'estimated')).toBe('~$0.03 (estimated)');
     expect(formatMoney(m(480_000), 'reported')).toBe('$0.48');
     expect(formatMoney(m(480_000), 'calculated')).toBe('$0.48');
   });
@@ -92,7 +94,7 @@ describe('moneyColumnPrecision (one rule per column)', () => {
 
   it('keeps the true inequality for amounts below $0.0001 and the certainty text at 4 dp', () => {
     expect(formatMoney(m(50), null, { precision: 4 })).toBe('< $0.0001');
-    expect(formatMoney(m(4_200), 'estimated', { precision: 4 })).toBe('≈ $0.0042 est.');
+    expect(formatMoney(m(4_200), 'estimated', { precision: 4 })).toBe('~$0.0042 (estimated)');
     expect(formatMoney(m(-20_000), null, { precision: 4 })).toBe('-$0.0200');
   });
 });
@@ -120,5 +122,41 @@ describe('sumConsistentPrecision', () => {
     expect(formatSumPart(0.4, 6)).toBe('< $0.000001');
     expect(formatSumPart(-0.4, 6)).toBe('> -$0.000001');
     expect(formatSumPart(0, 2)).toBe('$0.00');
+  });
+});
+
+describe('estimates (decision 1: "~", never "unknown")', () => {
+  const parts = { settledReported: 400_000, settledCalculated: 0, settledEstimated: 0, unknown: 0, hasEstimates: false };
+
+  it('formatMoneyApprox prefixes "~" only for a total that includes an estimate', () => {
+    expect(formatMoneyApprox(m(480_000), true)).toBe('~$0.48');
+    expect(formatMoneyApprox(m(480_000), false)).toBe('$0.48');
+    expect(formatMoneyApprox(m(4_200), true)).toBe('~$0.0042');
+  });
+
+  it('isEstimate covers estimated and the legacy not-confirmed certainty', () => {
+    expect(isEstimate('estimated')).toBe(true);
+    expect(isEstimate('unknown')).toBe(true);
+    expect(isEstimate('reported')).toBe(false);
+    expect(isEstimate(null)).toBe(false);
+  });
+
+  it('costHasEstimates follows hasEstimates, an estimated part, or a legacy amount', () => {
+    expect(costHasEstimates(parts)).toBe(false);
+    expect(costHasEstimates({ ...parts, hasEstimates: true })).toBe(true);
+    expect(costHasEstimates({ ...parts, settledEstimated: 1 })).toBe(true);
+    expect(costHasEstimates({ ...parts, unknown: 1 })).toBe(true);
+  });
+
+  it('trackedTotal and estimatedPart count a legacy not-confirmed amount as an estimate', () => {
+    const legacy = { ...parts, settledEstimated: 100_000, unknown: 620_000 };
+    expect(trackedTotal(legacy)).toBe(1_120_000);
+    expect(estimatedPart(legacy)).toBe(720_000);
+  });
+
+  it('no formatter ever writes "unknown"', () => {
+    for (const c of ['reported', 'calculated', 'estimated', 'unknown'] as const) {
+      expect(formatMoney(m(620_000), c)).not.toMatch(/unknown/i);
+    }
   });
 });

@@ -88,7 +88,7 @@ describe('BH-1: a responded non-retryable provider error pauses as provider_unav
     const run = x.db.repos.runs.get(runId);
     const review = x.db.repos.steps.latestFor(runId, REVIEW);
     expect([run.pauseReason, run.statusDetail?.code, review?.state]).toEqual(['provider_unavailable', error.code, 'failed']);
-    expect(await actionsOf(x, runId)).toEqual(['retry_step', 'choose_profile', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['retry_step', 'choose_profile', 'stop', 'export_report']);
     const retried = await x.engine.handle('relay/v1/runs.retryStep', { idempotencyKey: 'bh1-retry-step-01', runId, stepId: review?.id ?? '' });
     expect(retried.ok && retried.data.status).toBe('queued');
     expect(await driveThroughApproval(x, runId, ['completed', 'paused'])).toBe('completed');
@@ -188,7 +188,8 @@ const PAUSE_CASES: Record<PauseReason, PauseCase> = {
     setup: failReview(errors.modelUnsupported()), act: retryReview },
   model_refused: { action: 'retry_step', event: { type: 'MODEL_REFUSED', error: errors.modelRefused() },
     setup: failReview(errors.modelRefused()), act: retryReview },
-  unknown_outcome: { action: 'decide_unknown', event: { type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: E },
+  // Decision 1: the uncertain attempt is already settled as an estimate; "retry (may incur another charge)".
+  unknown_outcome: { action: 'retry_step', event: { type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: E },
     setup: (x, runId) => {
       x.db.tx('immediate', (r) => {
         const run = r.runs.get(runId);
@@ -202,8 +203,7 @@ const PAUSE_CASES: Record<PauseReason, PauseCase> = {
         r.steps.transition(s.id, [s.state], 'unknown', {});
       });
     },
-    act: (x, runId) => x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'inv-decide-key-01', runId,
-      attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1', decision: 'retry_acknowledging_charge' }) },
+    act: retryReview },
 };
 
 describe('F2 invariant: every paused state has a non-stop action that leads to RESUME_RESOLVED', () => {
@@ -244,12 +244,12 @@ describe('BH-2: a reconciled overrun (X > liability) pauses budget_overrun and n
     const run = x.db.repos.runs.get(runId);
     expect([run.status, run.pauseReason]).toEqual(['paused', 'budget_overrun']);
     expect(x.db.repos.ledger.attemptBalances(a?.id ?? ('' as never)).settled).toBeGreaterThan(a?.reservationMicrousd ?? 0);
-    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop']);
+    expect(await actionsOf(x, runId)).toEqual(['acknowledge_overrun', 'increase_allowance', 'stop', 'export_report']);
     const ack = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'bh2-ack-overrun-1', runId, decision: { kind: 'acknowledge_overrun' } });
     expect(ack.ok && ack.data.status).toBe('queued');
   });
 
-  it('an overrun reconciled while another unknown remains is applied when the last one is decided (no RESUME_RESOLVED)', async () => {
+  it('an overrun reconciled while another uncertain attempt remains is applied when the user continues (no RESUME_RESOLVED)', async () => {
     const x = await harness({ scenario: LOOKUP, providers: adapters(loseFirst('review'), overrun) });
     const runId = await x.startRun();
     expect(await drive(x, runId, ['paused'])).toBe('paused');
@@ -262,8 +262,11 @@ describe('BH-2: a reconciled overrun (X > liability) pauses budget_overrun and n
     });
 
     await reconcileUnknownAttempts(x.ctx, new AbortController().signal);
-    expect(x.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome'); // one unknown left
-    await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'bh2-decide-key-01', runId, attemptId: second, decision: 'mark_failed_keep_liability' });
+    expect(x.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome'); // one uncertain attempt left
+    // Decision 1: nothing to decide; the review step succeeded by reconciliation, so `resume` is the way out — and the
+    // deferred overrun replaces it.
+    expect(await actionsOf(x, runId)).toEqual(['resume', 'stop', 'export_report']);
+    await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'bh2-continue-key-1', runId, decision: { kind: 'continue' } });
 
     expect(x.db.repos.runs.get(runId)).toEqual(expect.objectContaining({ status: 'paused', pauseReason: 'budget_overrun' }));
   });
@@ -271,21 +274,22 @@ describe('BH-2: a reconciled overrun (X > liability) pauses budget_overrun and n
 
 // ---------------------------------------------------------------- BH-3
 
-describe('BH-3: REQUEST_OUTCOME_UNKNOWN from a connection test is setup liability in ANY phase', () => {
-  it('a gateway answer (phase responded) moves the full N to unknown, certainty unknown', async () => {
+describe('BH-3 + decision 1: REQUEST_OUTCOME_UNKNOWN from a connection test is an estimated setup charge in ANY phase', () => {
+  it('a gateway answer (phase responded) settles an estimate at once (never an unknown liability)', async () => {
     const x = await harness({ providers: wrapAdapters({ testConnection: () =>
       Promise.resolve({ kind: 'error', error: errors.requestOutcomeUnknown('att_01J9ZZZZZZZZZZZZZZZZZZZZZ3' as never), phase: 'responded' }) }) });
 
     const res = await x.engine.handle('relay/v1/providers.test', { providerId: 'anthropic' });
 
-    expect(res.ok && [res.data.ok, res.data.certainty]).toEqual([false, 'unknown']);
+    expect(res.ok && [res.data.ok, res.data.certainty]).toEqual([false, 'estimated']);
     const b = x.db.repos.ledger.setupBalances(0 as never, Number.MAX_SAFE_INTEGER as never);
-    expect([b.R, b.U, b.C]).toEqual([0, res.ok ? res.data.costMicrousd : -1, 0]);
-    expect(b.U).toBeGreaterThan(0);
-    const prices = { input: microusd(1), output: microusd(1), cacheRead: microusd(1), cacheWrite: microusd(1) };
+    expect([b.R, b.U, b.C]).toEqual([0, 0, res.ok ? res.data.costMicrousd : -1]);
+    expect(b.C).toBeGreaterThan(0);
+    const prices = { input: microusd(1_000_000), output: microusd(2_000_000), cacheRead: microusd(1), cacheWrite: microusd(1) };
     for (const phase of ['not_sent', 'responded'] as const) {
-      expect(setupCharge({ kind: 'error', error: errors.requestOutcomeUnknown('x' as never), phase, usage: usage(1) }, false, { prices }, microusd(9)))
-        .toEqual({ kind: 'unknown' });
+      // input tokens of the estimate (3) + output observed (usage(1) → 1 output token): 3 × $1/M + 1 × $2/M
+      expect(setupCharge({ kind: 'error', error: errors.requestOutcomeUnknown('x' as never), phase, usage: usage(1) }, false, { prices }, microusd(9), 3))
+        .toEqual({ kind: 'known', microusd: 5, certainty: 'estimated' });
     }
   });
 });
@@ -432,7 +436,7 @@ describe('BH-6: the reconcile path applies the F10 scope rule exactly like the l
     expect([run.status, run.pauseReason, run.statusDetail?.code, run.statusDetail?.details?.['reason']]).toEqual(['paused', 'approval_stale', 'APPROVAL_STALE', 'scope_changed']);
     expect(x.db.repos.approvals.get(approval?.id ?? ('' as never))?.invalidatedReason).toBe('scope_changed');
     expect(x.db.repos.steps.latestFor(runId, IMPLEMENT)).toEqual(expect.objectContaining({ state: 'ready', schemaRepairsUsed: 0 }));
-    expect(await actionsOf(x, runId)).toEqual(['resnapshot_and_replan', 'stop']); // E1 #8: scope change ≠ project change
+    expect(await actionsOf(x, runId)).toEqual(['resnapshot_and_replan', 'stop', 'export_report', 'export_patch']); // E1 #8: scope change ≠ project change
   });
 });
 

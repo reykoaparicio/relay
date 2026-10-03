@@ -98,11 +98,11 @@ export const ERROR_DEFINITIONS = {
   },
   REQUEST_OUTCOME_UNKNOWN: {
     retryable: false,
-    nextAction: 'decide_unknown',
-    alternatives: [],
+    nextAction: 'retry_step',
+    alternatives: ['stop'],
     httpStatus: 409,
     userMessage:
-      'Relay cannot tell whether the provider finished this request. Decide how to handle the possible charge.',
+      'Relay cannot tell whether the provider finished this request. Its cost was counted as an estimate. Retry the step (this may incur another charge) or stop the run.',
   },
   ARTIFACT_WRITE_FAILED: {
     retryable: true,

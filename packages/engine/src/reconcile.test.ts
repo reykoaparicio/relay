@@ -1,6 +1,7 @@
 // F9b: the reconcile task — only `unknown` attempts with a provider response id whose provider supports request
 // lookup; completed / failed with usage / failed without usage / in_progress (3 re-polls over 30 s) / not_found.
 import { afterEach, describe, expect, it } from 'vitest';
+import { expectedEstimate } from './testing/estimates.js';
 import { errors } from '@relay/contracts';
 import type { RunId } from '@relay/contracts';
 import type { FakeReconcileAnswer, FakeScenario, ModelResult, ProviderRegistry, ReconciliationResult } from '@relay/providers';
@@ -57,7 +58,7 @@ const types = (r: Repos, runId: RunId, attemptId: string) => {
 };
 
 describe('F9b reconcile task', () => {
-  it('reconcile-completed: resolve_unknown −N + settle +X (calculated), attempt reconciled_succeeded, step succeeded with no new call; the run resumes', async () => {
+  it('reconcile-completed: the estimate is corrected (settle −E + settle +X calculated, never counted twice), attempt reconciled_succeeded, step succeeded with no new call; the run resumes', async () => {
     const { x, runId, a } = await unknownReview({ scenario: 'reconcile-completed', providers: loseReviewAnswer() });
     const calls = x.callLog.entries().length;
 
@@ -68,10 +69,16 @@ describe('F9b reconcile task', () => {
     expect(r.attempts.get(a.id).state).toBe('reconciled_succeeded');
     const X = r.ledger.attemptBalances(a.id).settled;
     expect(X).toBeGreaterThan(0);
+    const E = expectedEstimate(a, 0);
     expect(types(r, runId, a.id)).toEqual([
-      ['reserve', 'reserved', a.reservationMicrousd, null], ['move_to_unknown', 'reserved', 0 - a.reservationMicrousd, null],
-      ['move_to_unknown', 'unknown', a.reservationMicrousd, 'unknown'], ['resolve_unknown', 'unknown', 0 - a.reservationMicrousd, null], ['settle', 'settled', X, 'calculated'],
+      ['reserve', 'reserved', a.reservationMicrousd, null], ['release', 'reserved', 0 - a.reservationMicrousd, null],
+      ['settle', 'settled', E, 'estimated'], ['settle', 'settled', 0 - E, 'estimated'], ['settle', 'settled', X, 'calculated'],
     ]);
+    expect(r.ledger.attemptBalances(a.id)).toEqual({ reserved: 0, unknown: 0, settled: X });
+    expect(r.ledger.settledByCertainty(runId).estimated).toBe(0);
+    const view = await x.engine.handle('relay/v1/runs.get', { runId });
+    expect(view.ok && view.data.attempts?.find((v) => v.id === a.id)?.cost).toEqual({ microusd: X, certainty: 'calculated' });
+    expect(view.ok && view.data.uncertainAttempts).toEqual([]);
     expect(r.steps.get(a.stepRunId)).toEqual(expect.objectContaining({ state: 'succeeded', outcome: 'findings' }));
     expect(r.artifacts.listForRun(runId, ['findings', 'raw_response']).filter((art) => art.attemptId === a.id)).toHaveLength(2);
     expect(x.callLog.entries()).toHaveLength(calls); // no new generate call
@@ -134,17 +141,18 @@ describe('F9b reconcile task', () => {
     expect(r.runs.get(runId).status).toBe('queued');
   });
 
-  it('failed without usage: settle +0 (calculated); a spent transport budget fails the step (run stays paused, retry_step offered)', async () => {
+  it('failed without usage: the estimate is corrected to 0 (calculated); a spent transport budget fails the step (run stays paused, retry_step offered)', async () => {
     const { x, runId, a } = await unknownReview({ scenario: lookupScenario(['failed']), providers: loseReviewAnswer() });
     x.db.tx('immediate', (r) => r.steps.transition(a.stepRunId, ['unknown'], 'unknown', { transportRetriesUsed: 1 }));
 
     await reconcileUnknownAttempts(x.ctx, new AbortController().signal);
 
     const r = x.db.repos;
-    expect(types(r, runId, a.id).slice(-2)).toEqual([['resolve_unknown', 'unknown', 0 - a.reservationMicrousd, null], ['settle', 'settled', 0, 'calculated']]);
+    expect(types(r, runId, a.id).slice(-2)).toEqual([['settle', 'settled', 0 - expectedEstimate(a, 0), 'estimated'], ['settle', 'settled', 0, 'calculated']]);
+    expect(r.ledger.attemptBalances(a.id)).toEqual({ reserved: 0, unknown: 0, settled: 0 });
     expect(r.steps.get(a.stepRunId).state).toBe('failed');
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && [detail.data.status, detail.data.availableActions]).toEqual(['paused', ['retry_step', 'choose_profile', 'stop']]);
+    expect(detail.ok && [detail.data.status, detail.data.availableActions]).toEqual(['paused', ['retry_step', 'stop', 'export_report']]);
   });
 
   it('not_found and missing lookup support leave the attempt unknown; an unknown attempt of an interrupted run stays interrupted', async () => {
@@ -173,7 +181,7 @@ describe('F9b reconcile task', () => {
     expect(isReconcilable(x.ctx, recorded(true))).toBe(true); // the recorded value wins
   });
 
-  it('usageKnown=false: completed settles the full N as estimated; failed keeps the unknown liability (attempt abandoned)', async () => {
+  it('usageKnown=false: completed keeps the estimate (still estimated, no correction); failed keeps the estimate too (attempt abandoned)', async () => {
     const withFlag = (kind: 'completed' | 'failed') => (base: ProviderRegistry) => ({
       reconcile: async (ids: { providerResponseId: string }, c: { apiKey: string; signal: AbortSignal }): Promise<ReconciliationResult> => {
         const res = await base.get('anthropic').reconcile?.(ids, c);
@@ -183,14 +191,15 @@ describe('F9b reconcile task', () => {
     });
     const done = await unknownReview({ scenario: lookupScenario(['completed']), providers: loseReviewAnswer(withFlag('completed')) });
     await reconcileUnknownAttempts(done.x.ctx, new AbortController().signal);
-    expect(done.x.db.repos.ledger.settledByCertainty(done.runId).estimated).toBe(done.a.reservationMicrousd);
+    expect(done.x.db.repos.ledger.settledByCertainty(done.runId).estimated).toBe(expectedEstimate(done.a, 0));
+    expect(done.x.db.repos.ledger.attemptBalances(done.a.id)).toEqual({ reserved: 0, unknown: 0, settled: expectedEstimate(done.a, 0) });
     await done.x.cleanup();
     h = undefined;
 
     const failed = await unknownReview({ scenario: lookupScenario(['failed'], { outputTokens: 5 }), providers: loseReviewAnswer(withFlag('failed')) });
     await reconcileUnknownAttempts(failed.x.ctx, new AbortController().signal);
     expect(failed.x.db.repos.attempts.get(failed.a.id).state).toBe('abandoned');
-    expect(failed.x.db.repos.ledger.attemptBalances(failed.a.id)).toEqual(expect.objectContaining({ unknown: failed.a.reservationMicrousd, settled: 0 }));
+    expect(failed.x.db.repos.ledger.attemptBalances(failed.a.id)).toEqual({ reserved: 0, unknown: 0, settled: expectedEstimate(failed.a, 0) });
   });
 
   it('reconciledAmount prices usage, falls back to N when usage is unknown, and marks a price-tier mismatch estimated', () => {

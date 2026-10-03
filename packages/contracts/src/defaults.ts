@@ -63,6 +63,12 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = {
 /** Hard ceiling for a profile's `maxOutputTokens` (02 §B2 `modelParamsSchema`). */
 export const MAX_OUTPUT_TOKENS_CEILING = 128_000;
 
+/**
+ * Decision 3: the smallest per-step output limit a user can set on the New run screen (`runs.start` /
+ * `runs.preflight` `outputTokenOverrides`); the largest is the chosen model's catalog `maxOutputTokens`.
+ */
+export const MIN_OUTPUT_TOKEN_OVERRIDE = 256;
+
 /** 02 §B0: idempotency keys are remembered for 24 h. */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 

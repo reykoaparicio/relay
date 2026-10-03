@@ -17,6 +17,10 @@ const windowSql = (scopeFilter: string): string => `SELECT
   COALESCE(SUM(CASE WHEN bucket = 'unknown' THEN delta_microusd END), 0) AS u
   FROM ledger_entries WHERE ${scopeFilter}`;
 const PROJECT_WINDOW_SQL = windowSql("scope = 'run' AND project_id = ?3");
+/** Net settled amount still certainty `estimated` in a project month (corrections net an estimate out). */
+const PROJECT_WINDOW_ESTIMATED_SQL = `SELECT COALESCE(SUM(delta_microusd), 0) AS e FROM ledger_entries
+  WHERE scope = 'run' AND project_id = ?3 AND bucket = 'settled' AND certainty = 'estimated'
+  AND created_at >= ?1 AND created_at < ?2`;
 const SETUP_WINDOW_SQL = windowSql("scope = 'setup'");
 
 const listSql = (sort: 'created_desc' | 'created_asc', withCursor: boolean): string =>
@@ -95,6 +99,9 @@ export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo 
     projectMonthBalances(projectId: ProjectId, monthStartMs, monthEndMs) {
       return readWindow(driver.prepare(PROJECT_WINDOW_SQL).get(monthStartMs, monthEndMs, projectId));
     },
+    projectMonthEstimated(projectId: ProjectId, monthStartMs, monthEndMs) {
+      return new RowReader('ledger_entries', driver.prepare(PROJECT_WINDOW_ESTIMATED_SQL).get(monthStartMs, monthEndMs, projectId), 'e').money('e');
+    },
     setupBalances(monthStartMs, monthEndMs) {
       return readWindow(driver.prepare(SETUP_WINDOW_SQL).get(monthStartMs, monthEndMs));
     },
@@ -110,6 +117,18 @@ export function createLedgerRepo(driver: SqlDriver, deps: RepoDeps): LedgerRepo 
         .get(attemptId);
       const r = new RowReader('ledger_entries', row, 'reserved');
       return { reserved: r.money('reserved'), unknown: r.money('unknown'), settled: r.money('settled') };
+    },
+    openUnknownLiabilities() {
+      return driver
+        .prepare(
+          `SELECT attempt_id, SUM(delta_microusd) AS u, MIN(created_at) AS first_at FROM ledger_entries
+           WHERE bucket = 'unknown' GROUP BY attempt_id HAVING SUM(delta_microusd) > 0 ORDER BY first_at, attempt_id`,
+        )
+        .all()
+        .map((row) => {
+          const r = new RowReader('ledger_entries', row, 'u');
+          return { attemptId: r.idN('attempt_id', 'attempt'), microusd: r.money('u') };
+        });
     },
     list,
     runCosts(runId) {

@@ -4,6 +4,32 @@ Spec: §6.3, §6.4, §7.7, §8.3, §9.2, §10.2, §12.2, §12.4, §12.5, §12.6 
 
 Files (exclusive): `packages/contracts/src/**`
 
+## Founder decisions (2026-10-03) — contract changes (supersede the older text below where they differ)
+
+- **Decision 1 — "unknown" is no longer a user-visible state.** An uncertain outcome is settled at once as an
+  `estimated` charge (06). `AttemptView.cost.certainty` is `'estimated'` for it, and `AttemptView` gains
+  `mayNotHaveBeenCharged: boolean` (show the note "may not have been charged"). `CostSummary` gains
+  `hasEstimates: boolean` (= `settledEstimated > 0`; totals display with "~"); `unknown` stays and is always 0 for new
+  data. `RunDetail.unresolvedAttempts` stays (empty for new data); new `RunDetail.uncertainAttempts: AttemptView[]`
+  (attempts settled as estimates because their outcome was uncertain, still uncorrected) for the recovery panel.
+  `report.v1`: `unknownLiabilities` becomes optional (always `[]` now); new optional
+  `estimatedCharges: { attemptId, stepKey, amountMicrousd, mayNotHaveBeenCharged }[]`; `totals.hasEstimates` is derived
+  for reports stored before it existed. Markdown: "~$X (estimated)" + the note; totals with estimates marked "~". The
+  `ledger.exportTo` CSV keeps the certainty column (`estimated`). `paused(unknown_outcome)` offers only `retry_step` and
+  `stop`; `decide_unknown` (kept in `RUN_ACTIONS` / `RUN_ACTION_OPS` for compatibility) is never offered and
+  `runs.decideUnknown` answers `CONFLICT decision_not_applicable`. `REQUEST_OUTCOME_UNKNOWN`'s next action is
+  `retry_step` (alternative `stop`).
+- **Decision 2 — Pause and Export while in progress.** `pause` in `queued`, `running`, `awaiting_approval`
+  (`runs.pause` pauses a queued / awaiting-approval run at once; a pending approval is kept and `resume` returns to
+  it). `export_report` (+ `export_patch` when a patch exists) in every status; `artifacts.export` / `artifacts.exportTo`
+  accept non-terminal runs and write an interim report ("In progress — exported <time>; N of M steps finished"),
+  per-part `written` / `failed` unchanged.
+- **Decision 3 — per-step output limits.** `RunStartInput.outputTokenOverrides?: Partial<Record<StepKey, number>>`
+  (`outputTokenOverridesSchema`: integers `MIN_OUTPUT_TOKEN_OVERRIDE` (256) .. `MAX_OUTPUT_TOKENS_CEILING`; the engine
+  also enforces ≤ the chosen model's catalog `maxOutputTokens` and refuses unknown / non-model step keys:
+  `VALIDATION_FAILED` at `outputTokenOverrides.<stepKey>`). `runs.preflight` output gains
+  `stepLimits: { stepKey, defaultMaxOutputTokens, minMaxOutputTokens: 256, modelMaxOutputTokens }[]`.
+
 `@relay/contracts` is the **only** package every layer may import (§13.4). It has **zero** runtime dependencies besides `zod`. It contains no Node or Electron APIs and no I/O.
 
 Besides the IPC surface, contracts owns every shape that crosses a package boundary: primitives and enums, domain DTOs and views, the **step output schemas** (`findings.v1`, `plan.v1`, `patch.v1`, `review.v1`, `report.v1`), the **context manifest** schema, the model catalog/capability/price schemas, and the ledger balance/breakdown schemas. Templates (07) re-export the output schemas and add the strict JSON-schema conversion. Engine, providers, storage, desktop, and renderer import these types from here and never redefine them.
@@ -190,7 +216,7 @@ export const PAUSE_REASONS = ['budget_run','budget_project','user','auth_require
   'setup_blocked','approval_stale','deadline','limit_attempts','unknown_outcome',
   'output_invalid','provider_unavailable','budget_overrun','model_refused'] as const;
 export const pauseReasonSchema = z.enum(PAUSE_REASONS);
-// 'unknown_outcome'      a live call's result is ambiguous (§7.5) → waits for runs.decideUnknown
+// 'unknown_outcome'      a live call's result is ambiguous (§7.5) → settled as an estimate; retry_step / stop (decision 1)
 // 'output_invalid'       schema-repair budget exhausted → step failed, run recoverable (§17.1 "step stays unresolved", FR-12)
 // 'provider_unavailable' transport retry exhausted → step failed, run recoverable
 // 'budget_overrun'       actual cost > reservation (§9.5 "block additional work") → needs explicit acknowledgement
@@ -901,16 +927,16 @@ Legend: **Q** = query, **C** = command, **Idem** = requires `idempotencyKey`, **
 #### runs
 | Channel | K | Route | Input | Output | Errors |
 |---|---|---|---|---|---|
-| `runs.preflight` | Q | runner | `RunStartInput` minus `idempotencyKey` | `{ inputSummary: { files, bytes, estimatedInputTokens, memoryRecords: MemoryRef[], providersReceivingContext }, firstReservation: { N, basis }, budget: BudgetBreakdown, issues: ValidationIssue[] }` — drives `new-run.html` states. Budget, credential and context-size problems are `issues`, not errors | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `NOT_FOUND`, `CONFLICT` (archived project) |
-| `runs.start` | C Idem | runner | `RunStartInput = { idempotencyKey, projectId, workflowId, workflowVersion, goal (1..2000), input: RunInput, limitOverrides?: Partial<RunLimits>, profileOverrides?: Record<StepKey, ProfileId>, memoryRecordIds?: MemoryId[] }` (B2 `runStartInputSchema`; each override profile must be permitted for the project) | `{ runId, status }` (§12.5) | all preflight errors, `VALIDATION_FAILED` |
+| `runs.preflight` | Q | runner | `RunStartInput` minus `idempotencyKey` | `{ inputSummary: { files, bytes, estimatedInputTokens, memoryRecords: MemoryRef[], providersReceivingContext }, firstReservation: { N, basis }, budget: BudgetBreakdown, issues: ValidationIssue[], stepLimits: { stepKey, defaultMaxOutputTokens, minMaxOutputTokens: 256, modelMaxOutputTokens }[] }` — drives `new-run.html` states (decision 3: the per-step output-limit boxes; `firstReservation` reflects `outputTokenOverrides`). Budget, credential and context-size problems are `issues`, not errors | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `NOT_FOUND`, `CONFLICT` (archived project) |
+| `runs.start` | C Idem | runner | `RunStartInput = { idempotencyKey, projectId, workflowId, workflowVersion, goal (1..2000), input: RunInput, limitOverrides?: Partial<RunLimits>, profileOverrides?: Record<StepKey, ProfileId>, outputTokenOverrides?: Partial<Record<StepKey, number>> (decision 3), memoryRecordIds?: MemoryId[] }` (B2 `runStartInputSchema`; each override profile must be permitted for the project) | `{ runId, status }` (§12.5) | all preflight errors, `VALIDATION_FAILED` |
 | `runs.list` | Q | runner | `{ projectId, status?: RunStatus[], sort?: 'created_desc'\|'created_asc', limit?: ≤100 (default 25), cursor? }` | `{ items: RunSummary[], nextCursor }` | — |
 | `runs.get` | Q | runner | `{ runId }` | `RunDetail` | `NOT_FOUND` |
 | `runs.getStep` | Q | runner | `{ runId, stepId: StepRunId }` | `StepDetail` (output, manifest, attempts, events) | `NOT_FOUND` |
-| `runs.pause` | C | runner | `{ runId }` | `{ status, inFlight: 'none'\|'waiting'\|'unknown' }` (§12.5) | `CONFLICT` (terminal) |
+| `runs.pause` | C | runner | `{ runId }` — decision 2: queued / running / awaiting_approval | `{ status, inFlight: 'none'\|'waiting'\|'unknown' }` (§12.5; `paused`/`none` at once for queued and awaiting_approval) | `CONFLICT` (any other status) |
 | `runs.resume` | C Idem | runner | `{ idempotencyKey, runId, decision: RecoveryDecision }` | `{ status } \| error` (§12.5 "queued state or blocking reason"). Idempotent for **every** `RecoveryDecision` kind (`continue`, `use_preserved_snapshot`, `resnapshot_and_replan`, `switch_profile`, `raise_limits`, `acknowledge_overrun`): a repeated key returns the stored result and never re-applies the decision (e.g. `raise_limits` does not raise twice or write a second config revision) | `AUTH_REQUIRED`, `VALIDATION_FAILED`, `CONFLICT`, `NOT_FOUND`, `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `ARTIFACT_WRITE_FAILED` (re-snapshot) |
 | `runs.cancel` | C | runner | `{ runId }` | `{ status: 'cancelling'\|'cancelled', unresolvedCharges: { attemptId, liabilityMicrousd }[] }` (§12.5, FR-11) | `CONFLICT` |
 | `runs.increaseAllowance` | C Idem | runner | `{ idempotencyKey, runId, newAllowanceMicrousd }` | `{ cost: CostSummary, status: RunStatus }` (writes an `allowance_change` ledger entry; models cannot call this, §9.4). On a `paused(budget_run \| budget_overrun)` run whose next admission now passes, the engine resumes it (paused → queued) | `VALIDATION_FAILED` |
-| `runs.decideUnknown` | C Idem | runner | `{ idempotencyKey, runId, attemptId, decision: 'retry_acknowledging_charge'\|'mark_failed_keep_liability'\|'accept_estimated_charge' }` | `RunDetail` (§4.4, §7.5) | `CONFLICT` |
+| `runs.decideUnknown` | C Idem | runner | `{ idempotencyKey, runId, attemptId, decision: 'retry_acknowledging_charge'\|'mark_failed_keep_liability'\|'accept_estimated_charge' }` | retired by decision 1: always `CONFLICT decision_not_applicable` (kept for older renderers) | `CONFLICT`, `NOT_FOUND` |
 | `runs.retryStep` | C Idem | runner | `{ idempotencyKey, runId, stepId: StepRunId, profileId?: ProfileId }` — the blocked step. A `failed` step gets a new step row (`retryIndex + 1`, fresh retry counters); a `ready`/`pending` step blocked by budget or setup keeps its row. A `profileId` must be permitted and creates a recorded configuration revision (§4.3). On a paused run this resumes it (paused → queued) | `RunDetail` | `MODEL_UNSUPPORTED`, `PERMISSION_DENIED`, `CONFLICT`, `NOT_FOUND` (attempt limit and budget are checked at the reserve checkpoint, which pauses the run) |
 | `runs.events` | Q | runner | `{ runId, afterSeq: number, limit?: ≤500 }` | `{ items: RunEvent[], nextCursor }` (§12.5 "ordered redacted events") | — |
 
@@ -940,7 +966,7 @@ Legend: **Q** = query, **C** = command, **Idem** = requires `idempotencyKey`, **
 | `reconnect_provider` | navigate to Settings → Providers → `providers.connect`, then `resume` | not a run op itself |
 | `resnapshot_and_replan` | `runs.resume { decision: { kind: 'resnapshot_and_replan' } }` | |
 | `use_preserved_snapshot` | `runs.resume { decision: { kind: 'use_preserved_snapshot' } }` | skips the stale check for this run |
-| `decide_unknown` | `runs.decideUnknown { attemptId, decision }` | one per unresolved attempt |
+| `decide_unknown` | `runs.decideUnknown { attemptId, decision }` | never offered since decision 1 (kept for compatibility) |
 | `review_recovery` | `runs.resume { decision: RecoveryDecision }` | interrupted run; UI shows the recovery review first |
 | `export_report` | `artifacts.export { what: 'report' }` | |
 | `export_patch` | `artifacts.export { what: 'patch' }` | only if a patch artifact exists |
@@ -987,7 +1013,7 @@ P0 lifecycle note (§10.4): `draft` is not persisted (it is unsaved form state),
 |---|---|---|---|---|---|
 | `artifacts.get` | Q | runner | `{ artifactId, maxBytes?: ≤2 MiB }` | `{ meta: ArtifactMeta, content: { kind: 'json', value } \| { kind: 'text', text, truncated: boolean } }` | `NOT_FOUND` (`details.purged = true` for a purged file) |
 | `artifacts.importDiff` | C | main+runner | `{ projectId }` → main opens a file dialog (.diff/.patch, ≤ 1 MiB), reads the text → `artifacts.importDiffText` | `{ artifactId, files: string[], parseWarnings } \| null` (ADR-015) | `VALIDATION_FAILED`, `PERMISSION_DENIED`, `NOT_FOUND`, `ARTIFACT_WRITE_FAILED` |
-| `artifacts.export` | C | main+runner | `{ runId, what: 'report'\|'patch'\|'both' }` → main shows a save dialog → `artifacts.exportTo`; **refuses destinations inside, or containing, any project root** (FR-10) | `{ exported: boolean, displayPaths: string[] }` | `ARTIFACT_WRITE_FAILED`, `PERMISSION_DENIED` |
+| `artifacts.export` | C | main+runner | `{ runId, what: 'report'\|'patch'\|'both' }` → main shows a save dialog → `artifacts.exportTo`; **refuses destinations inside, or containing, any project root** (FR-10). Decision 2: any run status — a non-terminal run gets an interim report (never stored) and the patch once one exists | `{ exported: boolean, displayPaths: string[] }` | `ARTIFACT_WRITE_FAILED`, `PERMISSION_DENIED` |
 
 #### ledger
 | Channel | K | Route | Input | Output | Errors |

@@ -258,6 +258,7 @@ describe('fake provider: FAKE_SCENARIOS', () => {
     ['refused', [['review', 'initial', 'refused'], ['review', 'user_retry', 'success:findings']]],
     ['unknown-outcome', [['review', 'initial', 'success:findings'], ['plan', 'initial', 'success:plan'], ['implement', 'initial', 'error:REQUEST_OUTCOME_UNKNOWN:sent_no_response'], ['implement', 'user_retry', 'success:patch']]],
     ['midstream-error', [['review', 'initial', 'error:REQUEST_OUTCOME_UNKNOWN:responded_partial'], ['review', 'user_retry', 'success:findings']]],
+    ['unknown-before-response', [['review', 'initial', 'success:findings'], ['plan', 'initial', 'success:plan'], ['implement', 'initial', 'error:REQUEST_OUTCOME_UNKNOWN:sent_no_response'], ['implement', 'user_retry', 'success:patch']]],
     ['crash-after-dispatch-plan', [['review', 'initial', 'success:findings'], ['plan', 'initial', 'error:REQUEST_OUTCOME_UNKNOWN:sent_no_response'], ['plan', 'initial', 'success:plan']]],
     ['reconcile-completed', [['review', 'initial', 'success:findings'], ['implement', 'initial', 'success:patch']]],
     ['reconcile-slow', [['implement', 'initial', 'error:REQUEST_OUTCOME_UNKNOWN:sent_no_response']]],
@@ -282,6 +283,17 @@ describe('fake provider: FAKE_SCENARIOS', () => {
     for (const [stepKey, purpose] of calls) outcomes.push(outcomeOf(await gen(provider, req(stepKey, purpose))));
 
     expect(outcomes).toEqual(calls.map(([, , e]) => e));
+  });
+
+  it('unknown-before-response resets before any response byte: no response id is reported (decision 1), unlike unknown-outcome', async () => {
+    const seen: string[] = [];
+    const hooks: GenerateHooks = { onResponseId: (ids) => seen.push(ids.providerResponseId ?? '') };
+    const before = await gen(make('unknown-before-response').provider, req('implement'), hooks);
+    expect(before.kind === 'error' && [before.phase, before.providerResponseId]).toEqual(['sent_no_response', undefined]);
+    expect(seen).toEqual([]);
+    const after = await gen(make('unknown-outcome').provider, req('implement'), hooks);
+    expect(after.kind === 'error' && after.providerResponseId).toMatch(/^fake_resp_|.+/);
+    expect(seen).toHaveLength(1);
   });
 
   it('budget-exhaustion reports its large usage on every call', async () => {

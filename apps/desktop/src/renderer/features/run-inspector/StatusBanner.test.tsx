@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { RunDetail, RunEvent } from '@relay/contracts';
-import { appError, attempt, runDetail } from '../../components/ui/test-fixtures';
+import { appError, attempt, runDetail, step } from '../../components/ui/test-fixtures';
 import { renderWithProviders } from '../../components/ui/test-utils';
 import { hashMapDetail } from './inspector-model';
 import { StatusBanner } from './StatusBanner';
@@ -170,21 +170,24 @@ describe('StatusBanner step names (stepMeta)', () => {
   });
 });
 
-describe('StatusBanner unknown request facts (E1)', () => {
-  it('cancelled with an unknown request: the request id is copyable and the step uses its display name', () => {
+describe('StatusBanner uncertain request facts (E1)', () => {
+  it('cancelled with an uncertain request: the request id is copyable and the step uses its display name', () => {
     renderBanner(
       runDetail({
         status: 'cancelled',
         pauseReason: null,
-        unresolvedAttempts: [attempt(1, { stepKey: 'implement', state: 'unknown', cost: { microusd: 620_000, certainty: 'unknown' }, providerRequestId: 'req_xyz' })],
-        availableActions: ['decide_unknown'],
+        uncertainAttempts: [
+          attempt(1, { stepKey: 'implement', state: 'unknown', cost: { microusd: 620_000, certainty: 'estimated' }, providerRequestId: 'req_xyz', mayNotHaveBeenCharged: false }),
+        ],
+        availableActions: ['export_report'],
         stepMeta: [{ stepKey: 'implement', name: 'Write the fix', instructionVersion: 'implementer.v1' }],
       }),
     );
-    const list = screen.getByRole('list', { name: 'Requests with an unknown outcome' });
-    expect(within(list).getByText(/Write the fix · attempt 1: liability/)).toBeInTheDocument();
+    const list = screen.getByRole('list', { name: 'Requests that may not have completed' });
+    expect(within(list).getByText(/Write the fix · attempt 1: counted as/)).toHaveTextContent('~$0.62 (estimated)');
     expect(within(list).getByText('req_xyz')).toBeInTheDocument();
     expect(within(list).getByRole('button', { name: 'Copy provider request id of Write the fix · attempt 1' })).toBeInTheDocument();
+    expect(screen.getByTestId('status-banner')).not.toHaveTextContent(/unknown/i);
   });
 
   it('a request without an id says so', () => {
@@ -192,12 +195,90 @@ describe('StatusBanner unknown request facts (E1)', () => {
       runDetail({
         status: 'paused',
         pauseReason: 'unknown_outcome',
-        unresolvedAttempts: [attempt(1, { state: 'unknown', cost: null, providerRequestId: null })],
-        availableActions: ['decide_unknown', 'stop'],
+        uncertainAttempts: [attempt(1, { state: 'unknown', cost: null, providerRequestId: null })],
+        availableActions: ['retry_step', 'stop'],
       }),
     );
-    const list = screen.getByRole('list', { name: 'Requests with an unknown outcome' });
+    const list = screen.getByRole('list', { name: 'Requests that may not have completed' });
     expect(within(list).getByText('No request id was recorded')).toBeInTheDocument();
-    expect(within(list).getByText(/liability amount not known/)).toBeInTheDocument();
+    expect(within(list).getByText(/no amount recorded/)).toBeInTheDocument();
   });
 });
+
+describe('StatusBanner decision 1: a request that may not have completed', () => {
+  const uncertain = (may: boolean) =>
+    attempt(2, { stepKey: 'implement', state: 'unknown', cost: { microusd: 30_000, certainty: 'estimated' }, mayNotHaveBeenCharged: may, providerRequestId: null });
+
+  it('unknown_outcome pause: plain explanation with the estimate and the note, Retry step and Stop only', () => {
+    renderBanner(
+      runDetail({ status: 'paused', pauseReason: 'unknown_outcome', uncertainAttempts: [uncertain(true)], availableActions: ['retry_step', 'stop', 'export_report'] }),
+    );
+    const banner = screen.getByTestId('status-banner');
+    expect(screen.getByTestId('uncertain-outcome')).toHaveTextContent(
+      'The last request may or may not have completed. Relay counted ~$0.03 (estimated) toward the budget, may not have been charged. Retry the step (this may charge again) or stop.',
+    );
+    expect(within(banner).getAllByRole('button').filter((b) => !/Copy/.test(b.textContent)).map((b) => b.textContent)).toEqual(['Retry step', 'Stop run']);
+    expect(banner).not.toHaveTextContent(/unknown/i);
+    expect(within(banner).queryByRole('button', { name: /decide/i })).toBeNull();
+  });
+
+  it('leaves out the note when the request reached the provider', () => {
+    renderBanner(runDetail({ status: 'paused', pauseReason: 'unknown_outcome', uncertainAttempts: [uncertain(false)], availableActions: ['retry_step', 'stop'] }));
+    expect(screen.getByTestId('uncertain-outcome')).toHaveTextContent('Relay counted ~$0.03 (estimated) toward the budget. Retry the step');
+    expect(screen.getByTestId('uncertain-outcome')).not.toHaveTextContent('may not have been charged');
+  });
+
+  it('paused(unknown_outcome) with no step left to retry offers Resume and says so', () => {
+    renderBanner(runDetail({ status: 'paused', pauseReason: 'unknown_outcome', uncertainAttempts: [uncertain(false)], availableActions: ['resume', 'stop'] }));
+    expect(screen.getByTestId('uncertain-outcome')).toHaveTextContent('Resume continues the run');
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
+  });
+
+  it('interrupted with an uncertain request uses the same wording', () => {
+    renderBanner(runDetail({ status: 'interrupted', uncertainAttempts: [uncertain(true)], availableActions: ['review_recovery', 'stop'] }));
+    expect(screen.getByTestId('uncertain-outcome')).toHaveTextContent(
+      'The last request may or may not have completed. Relay counted ~$0.03 (estimated) toward the budget, may not have been charged.',
+    );
+    expect(screen.getByTestId('status-banner')).not.toHaveTextContent(/unknown/i);
+  });
+});
+
+describe('StatusBanner decision 2: pause', () => {
+  it('a user pause names the step it resumes from and offers Resume', () => {
+    renderBanner(
+      runDetail({
+        status: 'paused',
+        pauseReason: 'user',
+        uncertainAttempts: [],
+        steps: [step(1), step(2, { stepKey: 'plan', state: 'ready' })],
+        availableActions: ['resume', 'stop', 'export_report'],
+      }),
+    );
+    expect(screen.getByText('Paused by you — resumes from Plan a fix; nothing is lost')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeEnabled();
+  });
+
+  it('says "Pausing after the current request…" while the pause waits for the in-flight request', () => {
+    renderWithProviders(
+      <MemoryRouter>
+        <StatusBanner
+          run={runDetail({ status: 'running', pauseReason: null, uncertainAttempts: [], availableActions: ['pause', 'cancel', 'export_report'] })}
+          projectId="prj_1"
+          events={[]}
+          onAction={() => undefined}
+          onRecoveryAction={() => undefined}
+          pending={null}
+          busy={false}
+          pausing
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Pausing after the current request…')).toBeInTheDocument();
+  });
+
+  it('shows nothing for a running run that is not pausing', () => {
+    renderBanner(runDetail({ status: 'running', pauseReason: null, uncertainAttempts: [], availableActions: ['pause', 'cancel'] }));
+    expect(screen.queryByTestId('status-banner')).toBeNull();
+  });
+});
+

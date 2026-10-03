@@ -5566,6 +5566,18 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
         "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     },
+    "outputTokenOverrides": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 256,
+        "maximum": 128000
+      }
+    },
     "memoryRecordIds": {
       "maxItems": 50,
       "type": "array",
@@ -5770,13 +5782,46 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
           "code"
         ]
       }
+    },
+    "stepLimits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stepKey": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "defaultMaxOutputTokens": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "minMaxOutputTokens": {
+            "type": "number",
+            "const": 256
+          },
+          "modelMaxOutputTokens": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "stepKey",
+          "defaultMaxOutputTokens",
+          "minMaxOutputTokens",
+          "modelMaxOutputTokens"
+        ]
+      }
     }
   },
   "required": [
     "inputSummary",
     "firstReservation",
     "budget",
-    "issues"
+    "issues",
+    "stepLimits"
   ]
 }
 ```
@@ -5924,6 +5969,18 @@ Channel `relay/v1/runs.start` · command · route `runner`
       "additionalProperties": {
         "type": "string",
         "pattern": "^prf_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      }
+    },
+    "outputTokenOverrides": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 256,
+        "maximum": 128000
       }
     },
     "memoryRecordIds": {
@@ -6184,6 +6241,9 @@ Channel `relay/v1/runs.list` · query · route `runner`
               },
               "overrun": {
                 "type": "boolean"
+              },
+              "hasEstimates": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -6194,7 +6254,8 @@ Channel `relay/v1/runs.list` · query · route `runner`
               "reserved",
               "unknown",
               "remaining",
-              "overrun"
+              "overrun",
+              "hasEstimates"
             ]
           },
           "createdAt": {
@@ -6418,6 +6479,9 @@ Channel `relay/v1/runs.get` · query · route `runner`
         },
         "overrun": {
           "type": "boolean"
+        },
+        "hasEstimates": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -6428,7 +6492,8 @@ Channel `relay/v1/runs.get` · query · route `runner`
         "reserved",
         "unknown",
         "remaining",
-        "overrun"
+        "overrun",
+        "hasEstimates"
       ]
     },
     "createdAt": {
@@ -7064,6 +7129,9 @@ Channel `relay/v1/runs.get` · query · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -7081,7 +7149,214 @@ Channel `relay/v1/runs.get` · query · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
+        ]
+      }
+    },
+    "uncertainAttempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepRunId": {
+            "type": "string",
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepKey": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "seq": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "transport_retry",
+              "schema_repair",
+              "user_retry",
+              "reconcile"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "created",
+              "reserved",
+              "dispatching",
+              "succeeded",
+              "failed_before_dispatch",
+              "failed",
+              "unknown",
+              "reconciled_succeeded",
+              "reconciled_failed",
+              "abandoned"
+            ]
+          },
+          "providerId": {
+            "type": "string",
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "fake"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "uncachedInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheReadInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheWriteInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "outputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reasoningTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "partial": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "uncachedInputTokens",
+                  "cacheReadInputTokens",
+                  "cacheWriteInputTokens",
+                  "outputTokens"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "microusd": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "certainty": {
+                    "type": "string",
+                    "enum": [
+                      "reported",
+                      "calculated",
+                      "estimated",
+                      "unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "microusd",
+                  "certainty"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerLatencyMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "appElapsedMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerRequestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "stepRunId",
+          "stepKey",
+          "seq",
+          "purpose",
+          "state",
+          "providerId",
+          "modelId",
+          "usage",
+          "cost",
+          "providerLatencyMs",
+          "appElapsedMs",
+          "providerRequestId",
+          "startedAt",
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -7442,6 +7717,9 @@ Channel `relay/v1/runs.get` · query · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -7459,7 +7737,8 @@ Channel `relay/v1/runs.get` · query · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -7607,6 +7886,7 @@ Channel `relay/v1/runs.get` · query · route `runner`
     "steps",
     "pendingApproval",
     "unresolvedAttempts",
+    "uncertainAttempts",
     "executionMsUsed",
     "revisionCycle",
     "statusDetail",
@@ -8740,6 +9020,9 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                         },
                         "overrun": {
                           "type": "boolean"
+                        },
+                        "hasEstimates": {
+                          "type": "boolean"
                         }
                       },
                       "required": [
@@ -8750,7 +9033,8 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                         "reserved",
                         "unknown",
                         "remaining",
-                        "overrun"
+                        "overrun",
+                        "hasEstimates"
                       ]
                     },
                     "unknownLiabilities": {
@@ -8784,6 +9068,36 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                           "stepKey",
                           "liabilityMicrousd",
                           "state"
+                        ]
+                      }
+                    },
+                    "estimatedCharges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "attemptId": {
+                            "type": "string",
+                            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+                          },
+                          "stepKey": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+                          },
+                          "amountMicrousd": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "mayNotHaveBeenCharged": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "attemptId",
+                          "stepKey",
+                          "amountMicrousd",
+                          "mayNotHaveBeenCharged"
                         ]
                       }
                     },
@@ -9036,7 +9350,6 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                     "workflow",
                     "steps",
                     "totals",
-                    "unknownLiabilities",
                     "artifacts",
                     "limitations",
                     "snapshotUsed",
@@ -9530,6 +9843,9 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -9547,7 +9863,8 @@ Channel `relay/v1/runs.getStep` · query · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -9991,6 +10308,9 @@ Channel `relay/v1/runs.increaseAllowance` · command · route `runner`
         },
         "overrun": {
           "type": "boolean"
+        },
+        "hasEstimates": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -10001,7 +10321,8 @@ Channel `relay/v1/runs.increaseAllowance` · command · route `runner`
         "reserved",
         "unknown",
         "remaining",
-        "overrun"
+        "overrun",
+        "hasEstimates"
       ]
     },
     "status": {
@@ -10273,6 +10594,9 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
         },
         "overrun": {
           "type": "boolean"
+        },
+        "hasEstimates": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -10283,7 +10607,8 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
         "reserved",
         "unknown",
         "remaining",
-        "overrun"
+        "overrun",
+        "hasEstimates"
       ]
     },
     "createdAt": {
@@ -10919,6 +11244,9 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -10936,7 +11264,214 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
+        ]
+      }
+    },
+    "uncertainAttempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepRunId": {
+            "type": "string",
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepKey": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "seq": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "transport_retry",
+              "schema_repair",
+              "user_retry",
+              "reconcile"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "created",
+              "reserved",
+              "dispatching",
+              "succeeded",
+              "failed_before_dispatch",
+              "failed",
+              "unknown",
+              "reconciled_succeeded",
+              "reconciled_failed",
+              "abandoned"
+            ]
+          },
+          "providerId": {
+            "type": "string",
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "fake"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "uncachedInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheReadInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheWriteInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "outputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reasoningTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "partial": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "uncachedInputTokens",
+                  "cacheReadInputTokens",
+                  "cacheWriteInputTokens",
+                  "outputTokens"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "microusd": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "certainty": {
+                    "type": "string",
+                    "enum": [
+                      "reported",
+                      "calculated",
+                      "estimated",
+                      "unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "microusd",
+                  "certainty"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerLatencyMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "appElapsedMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerRequestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "stepRunId",
+          "stepKey",
+          "seq",
+          "purpose",
+          "state",
+          "providerId",
+          "modelId",
+          "usage",
+          "cost",
+          "providerLatencyMs",
+          "appElapsedMs",
+          "providerRequestId",
+          "startedAt",
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -11297,6 +11832,9 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -11314,7 +11852,8 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -11462,6 +12001,7 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
     "steps",
     "pendingApproval",
     "unresolvedAttempts",
+    "uncertainAttempts",
     "executionMsUsed",
     "revisionCycle",
     "statusDetail",
@@ -11648,6 +12188,9 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
         },
         "overrun": {
           "type": "boolean"
+        },
+        "hasEstimates": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -11658,7 +12201,8 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
         "reserved",
         "unknown",
         "remaining",
-        "overrun"
+        "overrun",
+        "hasEstimates"
       ]
     },
     "createdAt": {
@@ -12294,6 +12838,9 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -12311,7 +12858,214 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
+        ]
+      }
+    },
+    "uncertainAttempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepRunId": {
+            "type": "string",
+            "pattern": "^stp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "stepKey": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "seq": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "initial",
+              "transport_retry",
+              "schema_repair",
+              "user_retry",
+              "reconcile"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "created",
+              "reserved",
+              "dispatching",
+              "succeeded",
+              "failed_before_dispatch",
+              "failed",
+              "unknown",
+              "reconciled_succeeded",
+              "reconciled_failed",
+              "abandoned"
+            ]
+          },
+          "providerId": {
+            "type": "string",
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "fake"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "uncachedInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheReadInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "cacheWriteInputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "outputTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reasoningTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "partial": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "uncachedInputTokens",
+                  "cacheReadInputTokens",
+                  "cacheWriteInputTokens",
+                  "outputTokens"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "microusd": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "certainty": {
+                    "type": "string",
+                    "enum": [
+                      "reported",
+                      "calculated",
+                      "estimated",
+                      "unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "microusd",
+                  "certainty"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerLatencyMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "appElapsedMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providerRequestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "stepRunId",
+          "stepKey",
+          "seq",
+          "purpose",
+          "state",
+          "providerId",
+          "modelId",
+          "usage",
+          "cost",
+          "providerLatencyMs",
+          "appElapsedMs",
+          "providerRequestId",
+          "startedAt",
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -12672,6 +13426,9 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
                 "type": "null"
               }
             ]
+          },
+          "mayNotHaveBeenCharged": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -12689,7 +13446,8 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
           "appElapsedMs",
           "providerRequestId",
           "startedAt",
-          "finishedAt"
+          "finishedAt",
+          "mayNotHaveBeenCharged"
         ]
       }
     },
@@ -12837,6 +13595,7 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
     "steps",
     "pendingApproval",
     "unresolvedAttempts",
+    "uncertainAttempts",
     "executionMsUsed",
     "revisionCycle",
     "statusDetail",
@@ -17174,6 +17933,9 @@ Channel `relay/v1/ledger.runSummary` · query · route `runner`
     "overrun": {
       "type": "boolean"
     },
+    "hasEstimates": {
+      "type": "boolean"
+    },
     "byStep": {
       "type": "array",
       "items": {
@@ -17223,6 +17985,9 @@ Channel `relay/v1/ledger.runSummary` · query · route `runner`
               },
               "overrun": {
                 "type": "boolean"
+              },
+              "hasEstimates": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -17233,7 +17998,8 @@ Channel `relay/v1/ledger.runSummary` · query · route `runner`
               "reserved",
               "unknown",
               "remaining",
-              "overrun"
+              "overrun",
+              "hasEstimates"
             ]
           }
         },
@@ -17253,6 +18019,7 @@ Channel `relay/v1/ledger.runSummary` · query · route `runner`
     "unknown",
     "remaining",
     "overrun",
+    "hasEstimates",
     "byStep"
   ]
 }

@@ -132,7 +132,7 @@ export function DiagnosticsSection() {
             ? RUNNER_DOWN_UNKNOWN
             : d.unresolvedAttempts === 0
             ? 'None'
-            : `${String(d.unresolvedAttempts)} with an unknown outcome · decide them from the run inspector`,
+            : `${String(d.unresolvedAttempts)} that may not have completed · each is counted as an estimated charge`,
       },
       {
         id: 'mode',

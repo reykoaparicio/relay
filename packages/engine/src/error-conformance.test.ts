@@ -97,7 +97,7 @@ const CASES: readonly Case[] = [
     before: (w) => call(w, 'relay/v1/runs.increaseAllowance', { idempotencyKey: 'conf-allow-key-0002', runId: w.runId, newAllowanceMicrousd: 10_000_000 }),
   },
   { name: 'decide unknown: unknown run', channel: 'relay/v1/runs.decideUnknown', input: () => ({ idempotencyKey: 'conf-unknown-key-01', runId: missing.run, attemptId: missing.attempt, decision: 'accept_estimated_charge' }), expected: 'NOT_FOUND' },
-  { name: 'decide unknown: no such unknown attempt', channel: 'relay/v1/runs.decideUnknown', input: (w) => ({ idempotencyKey: 'conf-unknown-key-02', runId: w.runId, attemptId: missing.attempt, decision: 'accept_estimated_charge' }), expected: 'CONFLICT' },
+  { name: 'decide unknown: retired (decision 1), any attempt', channel: 'relay/v1/runs.decideUnknown', input: (w) => ({ idempotencyKey: 'conf-unknown-key-02', runId: w.runId, attemptId: missing.attempt, decision: 'accept_estimated_charge' }), expected: 'CONFLICT' },
   { name: 'retry step: unknown', channel: 'relay/v1/runs.retryStep', input: () => ({ idempotencyKey: 'conf-retry-key-0001', runId: missing.run, stepId: missing.step }), expected: 'NOT_FOUND' },
   { name: 'retry step: not failed', channel: 'relay/v1/runs.retryStep', input: (w) => ({ idempotencyKey: 'conf-retry-key-0002', runId: w.runId, stepId: w.stepId }), expected: 'CONFLICT' },
   { name: 'events: unknown run', channel: 'relay/v1/runs.events', input: () => ({ runId: missing.run, afterSeq: 0 }), expected: null },

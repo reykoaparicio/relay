@@ -49,9 +49,27 @@ describe('BudgetLedger per-step table', () => {
       .getAllByRole('columnheader')
       .filter((h) => table.contains(h))
       .map((h) => h.textContent);
-    expect(headers).toEqual(['Step', 'Settled', 'Estimated', 'Reserved', 'Unknown']);
+    expect(headers).toEqual(['Step', 'Settled', 'Estimated', 'Reserved']);
     const settled = screen.getAllByRole('row').filter((r) => table.contains(r)).slice(1).map((r) => r.querySelectorAll('td')[0]?.textContent);
     // "$0.0042" over "$0.0200": not "$0.0042" over "$0.02".
     expect(settled).toEqual(['$0.0042', '$0.0200']);
+  });
+});
+
+describe('BudgetLedger estimates (decision 1)', () => {
+  it('shows the estimated row as "~$X (estimated)", a "~" tracked total and remaining, and no "Unknown" row', () => {
+    render(<BudgetLedger cost={costSummary()} />);
+
+    expect(screen.getByRole('row', { name: /Estimated/ })).toHaveTextContent('~$0.12 (estimated)');
+    expect(screen.getByRole('row', { name: /Tracked total/ })).toHaveTextContent('~$0.60');
+    expect(screen.getByRole('row', { name: /Remaining/ })).toHaveTextContent('~$1.30');
+    expect(screen.queryByText(/unknown/i)).toBeNull();
+  });
+
+  it('reads exact totals without "~" when nothing is estimated', () => {
+    render(<BudgetLedger cost={costSummary({ settledEstimated: 0, hasEstimates: false, remaining: 1_420_000 })} />);
+
+    expect(screen.getByRole('row', { name: /Tracked total/ })).toHaveTextContent('$0.48');
+    expect(screen.getByRole('row', { name: /Tracked total/ })).not.toHaveTextContent('~');
   });
 });

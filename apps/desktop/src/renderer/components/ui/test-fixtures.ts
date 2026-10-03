@@ -52,9 +52,10 @@ export function costSummary(overrides: Partial<Record<keyof CostSummary, number 
     settledCalculated: 80_000,
     settledEstimated: 120_000,
     reserved: 1_100_000,
-    unknown: 50_000,
-    remaining: 1_250_000,
+    unknown: 0,
+    remaining: 1_300_000,
     overrun: false,
+    hasEstimates: true,
     ...overrides,
   });
 }
@@ -132,6 +133,7 @@ export function attempt(n: number, overrides: Record<string, unknown> = {}): Att
     providerRequestId: 'req_123',
     startedAt: T0,
     finishedAt: T0 + 43_500,
+    mayNotHaveBeenCharged: false,
     ...overrides,
   });
 }
@@ -249,12 +251,15 @@ export function runDetail(overrides: Record<string, unknown> = {}): RunDetail {
     contextHash: fakeSha('c0ffee'),
     steps: [step(1), step(2, { stepKey: 'plan', state: 'unknown' })],
     pendingApproval: null,
-    unresolvedAttempts: [attempt(2, { state: 'unknown', cost: { microusd: 900_000, certainty: 'unknown' } })],
+    unresolvedAttempts: [],
+    uncertainAttempts: [
+      attempt(2, { state: 'unknown', cost: { microusd: 900_000, certainty: 'estimated' }, mayNotHaveBeenCharged: true }),
+    ],
     executionMsUsed: 60_000,
     revisionCycle: 0,
     statusDetail: null,
     reportArtifactId: null,
-    availableActions: ['review_recovery', 'decide_unknown', 'stop'],
+    availableActions: ['review_recovery', 'stop'],
     ...overrides,
   });
 }

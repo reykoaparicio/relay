@@ -1,15 +1,11 @@
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import type { RunAction } from '@relay/contracts';
 import { attempt, runDetail } from '../test-fixtures';
 import { axe, describeViolations, renderWithProviders } from '../test-utils';
 import { RecoveryPanel } from './RecoveryPanel';
-
-/** The accept decision names its amount ("Accept $0.39 as the charge"). */
-const ACCEPT = /^Accept \$[\d.,]+ as the charge$/;
 
 describe('RecoveryPanel', () => {
   it('keeps focus in the panel (not <body>) after confirming a destructive action @a11y', async () => {
@@ -43,86 +39,36 @@ describe('RecoveryPanel', () => {
     expect(screen.getByText('Interrupted')).toBeInTheDocument();
   });
 
-  const twoUnknown = () =>
+  const twoUncertain = () =>
     runDetail({
-      unresolvedAttempts: [
-        attempt(2, { stepKey: 'patch', state: 'unknown', cost: { microusd: 620_000, certainty: 'unknown' } }),
-        attempt(3, { stepKey: 'review', state: 'unknown', cost: null }),
+      uncertainAttempts: [
+        attempt(2, { stepKey: 'patch', state: 'unknown', cost: { microusd: 620_000, certainty: 'estimated' }, mayNotHaveBeenCharged: true }),
+        attempt(3, { stepKey: 'review', state: 'unknown', cost: { microusd: 30_000, certainty: 'estimated' }, mayNotHaveBeenCharged: false }),
       ],
     });
 
-  it('offers the three decisions on each unresolved attempt row and reports which attempt was decided', async () => {
-    const user = userEvent.setup();
-    const onDecide = vi.fn();
-    const run = twoUnknown();
-    render(<RecoveryPanel run={run} onDecide={onDecide} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />);
+  it('lists each request that may not have completed with its estimate, and the note only where it applies (decision 1)', () => {
+    render(<RecoveryPanel run={twoUncertain()} onDecide={() => undefined} />);
 
-    const first = screen.getByRole('group', { name: /attempt 2/ });
-    const retry = within(first).getByRole('button', { name: /may incur another charge/ });
-    expect(retry).toHaveTextContent('Retry (may incur another charge)');
-    expect(within(first).getByRole('button', { name: 'Mark as failed without retry' })).toBeVisible();
-    expect(within(first).getByRole('button', { name: ACCEPT })).toBeVisible();
-    // The single "Decide on unknown charge" button is replaced by the rows.
-    expect(screen.queryByRole('button', { name: 'Decide on unknown charge' })).toBeNull();
-
-    await user.click(within(first).getByRole('button', { name: 'Mark as failed without retry' }));
-    expect(onDecide).toHaveBeenLastCalledWith('decide_unknown', { attemptId: run.unresolvedAttempts[0]?.id, decision: 'mark_failed_keep_liability' });
-
-    const second = screen.getByRole('group', { name: /attempt 3/ });
-    await user.click(within(second).getByRole('button', { name: /may incur another charge/ }));
-    expect(onDecide).toHaveBeenLastCalledWith('decide_unknown', { attemptId: run.unresolvedAttempts[1]?.id, decision: 'retry_acknowledging_charge' });
+    expect(screen.getByText('Requests that may not have completed')).toBeVisible();
+    const rows = screen.getAllByRole('listitem');
+    expect(rows[0]).toHaveTextContent('Counted toward the budget: ~$0.62 (estimated) · may not have been charged');
+    expect(rows[1]).toHaveTextContent('Counted toward the budget: ~$0.03 (estimated)');
+    expect(rows[1]).not.toHaveTextContent('may not have been charged');
+    expect(document.body).not.toHaveTextContent(/unknown/i);
   });
 
-  it('does not offer "accept the estimated charge" when the attempt has no amount', () => {
-    render(<RecoveryPanel run={twoUnknown()} onDecide={() => undefined} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />);
-
-    const second = screen.getByRole('group', { name: /attempt 3/ });
-    expect(within(second).queryByRole('button', { name: ACCEPT })).toBeNull();
-    expect(within(second).getAllByRole('button')).toHaveLength(2);
-  });
-
-  it('shows pending on the chosen row decision and disables every other button', async () => {
-    const user = userEvent.setup();
-    function Harness() {
-      const [pending, setPending] = useState<RunAction | null>(null);
-      return <RecoveryPanel run={twoUnknown()} onDecide={(a) => { setPending(a); }} pendingAction={pending} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />;
-    }
-    render(<Harness />);
-
-    const first = screen.getByRole('group', { name: /attempt 2/ });
-    await user.click(within(first).getByRole('button', { name: ACCEPT }));
-
-    expect(within(first).getByRole('button', { name: ACCEPT })).toHaveAttribute('aria-busy', 'true');
-    expect(within(first).getByRole('button', { name: /may incur another charge/ })).toBeDisabled();
-    expect(within(first).getByRole('button', { name: /may incur another charge/ })).not.toHaveAttribute('aria-busy');
-    expect(screen.getByRole('button', { name: 'Stop run' })).toBeDisabled();
-    // Focus never drops to <body> when the clicked button turns disabled.
-    expect(document.activeElement).not.toBe(document.body);
-  });
-
-  it('limits the offered decisions with attemptDecisions', () => {
-    render(<RecoveryPanel run={twoUnknown()} onDecide={() => undefined} attemptDecisions={['retry_acknowledging_charge', 'mark_failed_keep_liability']} />);
-
-    expect(screen.queryByRole('button', { name: ACCEPT })).toBeNull();
-    expect(screen.getAllByRole('button', { name: /may incur another charge/ })).toHaveLength(2);
-  });
-
-  it('keeps the single "Decide on unknown charge" action by default (existing callers)', async () => {
-    const user = userEvent.setup();
-    const onDecide = vi.fn();
-    render(<RecoveryPanel run={runDetail()} onDecide={onDecide} />);
+  it('offers no per-request decision and never a "decide" action, even if a legacy server lists one', () => {
+    render(<RecoveryPanel run={runDetail({ ...twoUncertain(), availableActions: ['decide_unknown', 'review_recovery', 'stop'] })} onDecide={() => undefined} />);
 
     expect(screen.queryByRole('group')).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Decide on unknown charge' }));
-    expect(onDecide).toHaveBeenCalledWith('decide_unknown');
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Continue from last checkpoint', 'Stop run']);
   });
 
-  it('shows no decision buttons on attempt rows when decide_unknown is not available', () => {
-    render(<RecoveryPanel run={runDetail({ availableActions: ['review_recovery', 'stop'] })} onDecide={() => undefined} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />);
+  it('can leave the request list to its host (the inspector banner lists them with request facts)', () => {
+    render(<RecoveryPanel run={twoUncertain()} onDecide={() => undefined} showRequests={false} />);
 
-    expect(screen.getByText('Requests with an unknown outcome')).toBeVisible();
-    expect(screen.queryByRole('group')).toBeNull();
-    expect(screen.queryByRole('button', { name: /may incur another charge/ })).toBeNull();
+    expect(screen.queryByText('Requests that may not have completed')).toBeNull();
   });
 
   it('calls a plain (action) => void handler with the action for non-attempt buttons', async () => {
@@ -134,8 +80,8 @@ describe('RecoveryPanel', () => {
     expect(onDecide).toHaveBeenCalledWith('review_recovery');
   });
 
-  it('has no axe violations with per-attempt decision rows @a11y', async () => {
-    const { baseElement } = renderWithProviders(<main><RecoveryPanel run={twoUnknown()} onDecide={() => undefined} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} /></main>);
+  it('has no axe violations with request rows @a11y', async () => {
+    const { baseElement } = renderWithProviders(<main><RecoveryPanel run={twoUncertain()} onDecide={() => undefined} /></main>);
 
     expect(describeViolations(await axe(baseElement))).toEqual([]);
   });

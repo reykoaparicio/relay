@@ -1,7 +1,18 @@
 // 06 F15: `runs.start` / `runs.preflight` — the FR-03 snapshot service. Async resolution happens BEFORE the
 // transaction (R4-29); the transaction inserts the run, the step rows (synthetic intake/finalize included), the
 // `allowance_set` ledger entry, the idempotency key, and `run.created`.
-import { DEFAULT_LIMITS, RESERVED_STEP_KEYS, err, errors, microusd, ok, runLimitsSchema, toValidationIssues } from '@relay/contracts';
+import {
+  DEFAULT_LIMITS,
+  MAX_OUTPUT_TOKENS_CEILING,
+  MIN_OUTPUT_TOKEN_OVERRIDE,
+  RESERVED_STEP_KEYS,
+  err,
+  errors,
+  microusd,
+  ok,
+  runLimitsSchema,
+  toValidationIssues,
+} from '@relay/contracts';
 import type {
   AppError,
   EpochMs,
@@ -43,6 +54,9 @@ import { acknowledgedSuspectedSecrets, diffReferencedPaths } from './steps/intak
 /** Parsed `runs.start` input (the IPC schema output). */
 export type StartInput = Omit<RunStartInput, 'idempotencyKey'> & { readonly idempotencyKey?: string };
 
+/** Decision 3: one model step's output-limit box (`runs.preflight` `stepLimits`). */
+type StepLimit = RunPreflight['stepLimits'][number];
+
 /** Everything resolved before the transaction. */
 interface PreparedRun {
   readonly project: ProjectRow;
@@ -50,14 +64,49 @@ interface PreparedRun {
   readonly snapshot: RunSnapshot;
   readonly limits: RunLimits;
   readonly stepKeys: readonly StepKey[];
+  /** Decision 3: per model step (resolved profiles only), in spec order. */
+  readonly stepLimits: readonly StepLimit[];
+}
+
+/**
+ * Decision 3: the most output tokens the profile's model returns — the catalog's `maxOutputTokens` and the adapter's
+ * live capability (the stricter when both are known), else the global ceiling.
+ */
+export function modelOutputCap(r: Repos, profile: Pick<ProfileSnapshot, 'providerId' | 'modelId' | 'capabilities'>): number {
+  const catalog = r.catalog.get(profile.providerId, profile.modelId)?.capabilities.maxOutputTokens;
+  const caps = [catalog, profile.capabilities.maxOutputTokens, MAX_OUTPUT_TOKENS_CEILING].filter((n): n is number => n !== undefined);
+  return Math.min(...caps);
+}
+
+/**
+ * Decision 3: a step's default output limit when the user sets none. Order: the workflow step's own `maxOutputTokens`,
+ * else the profile's `maxOutputTokens`; either is clamped to the model cap (never above what the model returns).
+ */
+export function defaultOutputTokens(stepMax: number | undefined, profileMax: number, modelCap: number): number {
+  return Math.min(stepMax ?? profileMax, modelCap);
 }
 
 const OP = 'runs.start';
 const INTAKE = RESERVED_STEP_KEYS[0] as StepKey;
 const FINALIZE = RESERVED_STEP_KEYS[1] as StepKey;
 
-export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKey: StepKey, ref: ModelProfile | undefined): Promise<Result<ProfileSnapshot>> {
-  if (ref === undefined) return err(errors.notFound('profile', {}, { details: { stepKey } }));
+/**
+ * Decision 3: the profile with its `maxOutputTokens` clamped to the model cap — a profile asking for more output than
+ * its model returns is a sensible default once clamped, not an unsupported profile.
+ */
+function clampedProfile<P extends Pick<ModelProfile, 'params'>>(p: P, cap: number | undefined): P {
+  return cap === undefined || p.params.maxOutputTokens <= cap ? p : { ...p, params: { ...p.params, maxOutputTokens: cap } };
+}
+
+/** The model cap known before the profile is resolved (catalog entry, live capabilities), or undefined. */
+function knownCap(entry: { readonly capabilities: { readonly maxOutputTokens?: number | undefined } } | undefined, live: { readonly maxOutputTokens?: number | undefined } | undefined): number | undefined {
+  const caps = [entry?.capabilities.maxOutputTokens, live?.maxOutputTokens].filter((n): n is number => n !== undefined);
+  return caps.length === 0 ? undefined : Math.min(...caps);
+}
+
+export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKey: StepKey, given: ModelProfile | undefined): Promise<Result<ProfileSnapshot>> {
+  if (given === undefined) return err(errors.notFound('profile', {}, { details: { stepKey } }));
+  let ref = given;
   if (!project.providerPolicy.allowedProviderIds.includes(ref.providerId)) {
     return err(errors.permissionDenied('provider_not_allowed', { details: { stepKey, providerId: ref.providerId } }));
   }
@@ -65,6 +114,7 @@ export async function resolveProfile(ctx: EngineCtx, project: ProjectRow, stepKe
   if (!live.ok && !isModelRejected(live)) return live; // no adapter
   // A model the adapter does not serve is checked with no catalog entry: checkProfile's model_unknown.
   const entry = live.ok ? ctx.db.repos.catalog.get(ref.providerId, ref.modelId) : undefined;
+  ref = clampedProfile(ref, knownCap(entry, live.ok ? live.value : undefined)); // decision 3: clamp, never refuse
   const checked = checkProfile(ref, entry, live.ok ? live.value : undefined);
   if (!checked.ok) return checked;
   if (entry === undefined || !live.ok) return err(errors.modelUnsupported({ providerId: ref.providerId, modelId: ref.modelId })); // narrowed above
@@ -91,13 +141,24 @@ function limitsFor(spec: WorkflowSpec, overrides: StartInput['limitOverrides']):
  * The run snapshot. `lenient` (preflight only): a model step whose profile cannot be resolved is left out instead of
  * failing, so preflight can report it as an issue ({@link profileIssues}) next to everything else.
  */
-async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: WorkflowVersionRow, input: StartInput, lenient = false): Promise<Result<RunSnapshot>> {
+async function buildSnapshot(
+  ctx: EngineCtx,
+  project: ProjectRow,
+  version: WorkflowVersionRow,
+  input: StartInput,
+  lenient = false,
+): Promise<Result<{ snapshot: RunSnapshot; stepLimits: StepLimit[] }>> {
   const spec = version.spec;
   const overrides = input.profileOverrides ?? {};
+  const outputOverrides: Readonly<Partial<Record<string, number>>> = input.outputTokenOverrides ?? {};
   const modelKeys = new Set(spec.steps.filter((s) => s.kind === 'model').map((s) => s.id));
   for (const key of Object.keys(overrides)) {
     if (!modelKeys.has(key as StepKey)) return err(validationError(`profileOverrides.${key}`, 'Not a model step of this workflow.', 'unknown_step'));
   }
+  for (const key of Object.keys(outputOverrides)) {
+    if (!modelKeys.has(key as StepKey)) return err(validationError(`outputTokenOverrides.${key}`, 'Not a model step of this workflow.', 'unknown_step'));
+  }
+  const stepLimits: StepLimit[] = [];
   const steps: Partial<Record<StepKey, StepSnapshot>> = { [INTAKE]: { kind: 'intake', dependsOn: [] } };
   for (const s of spec.steps) {
     const dependsOn = s.dependsOn.length === 0 ? [INTAKE] : [...s.dependsOn];
@@ -108,22 +169,33 @@ async function buildSnapshot(ctx: EngineCtx, project: ProjectRow, version: Workf
     const profile = await resolveProfile(ctx, project, s.id, profileRef(ctx.db.repos, s.id, s.profile, overrides));
     if (!profile.ok && lenient) continue;
     if (!profile.ok) return profile;
+    // Decision 3: the user's override (checked against THIS step's model, so a profile change re-checks it), else the
+    // default (workflow step setting → profile → model cap).
+    const modelMax = modelOutputCap(ctx.db.repos, profile.value);
+    const fallback = defaultOutputTokens(s.maxOutputTokens, profile.value.params.maxOutputTokens, modelMax);
+    const override = outputOverrides[s.id];
+    if (override !== undefined && override > modelMax) {
+      return err(validationError(`outputTokenOverrides.${s.id}`, `This model returns at most ${String(modelMax)} output tokens.`, 'above_model_max'));
+    }
+    stepLimits.push({ stepKey: s.id, defaultMaxOutputTokens: fallback, minMaxOutputTokens: MIN_OUTPUT_TOKEN_OVERRIDE, modelMaxOutputTokens: modelMax });
     const snap: ModelStepSnapshot = {
       kind: 'model', role: s.role, profile: profile.value, outputSchema: s.outputSchema, outputKind: outputKindOf(s.outputSchema),
-      instructionVersion: s.instructionVersion, maxOutputTokens: s.maxOutputTokens ?? profile.value.params.maxOutputTokens,
+      instructionVersion: s.instructionVersion, maxOutputTokens: override ?? fallback,
       retryPolicy: s.retryPolicy, memoryScope: s.memoryScope, dependsOn,
     };
     steps[s.id] = snap;
   }
   const last = spec.steps.at(-1)?.id ?? INTAKE;
   steps[FINALIZE] = { kind: 'finalize', dependsOn: [last] };
-  return ok({
+  const snapshot: RunSnapshot = {
     steps,
     workflowContentHash: version.contentHash,
     catalogVersion: ctx.db.repos.catalog.latestVersion() ?? '',
     // Absent ≠ empty (BH-2): null = every approved record (§4.5 default), [] = pinned rules only.
     memoryIncludeIds: input.memoryRecordIds === undefined ? null : [...input.memoryRecordIds],
-  });
+    ...(input.outputTokenOverrides === undefined ? {} : { outputTokenOverrides: { ...input.outputTokenOverrides } }),
+  };
+  return ok({ snapshot, stepLimits });
 }
 
 function checkInput(r: Repos, input: StartInput): AppError | null {
@@ -145,10 +217,10 @@ async function prepareRun(ctx: EngineCtx, input: StartInput, o: { readonly lenie
   if (inputError !== null) return err(inputError);
   const limits = limitsFor(version.spec, input.limitOverrides);
   if (!limits.ok) return limits;
-  const snapshot = await buildSnapshot(ctx, project, version, input, o.lenient ?? false);
-  if (!snapshot.ok) return snapshot;
+  const built = await buildSnapshot(ctx, project, version, input, o.lenient ?? false);
+  if (!built.ok) return built;
   const stepKeys = [INTAKE, ...version.spec.steps.map((s) => s.id), FINALIZE];
-  return ok({ project, version, snapshot: snapshot.value, limits: limits.value, stepKeys });
+  return ok({ project, version, snapshot: built.value.snapshot, limits: limits.value, stepKeys, stepLimits: built.value.stepLimits });
 }
 
 function stepRows(ctx: EngineCtx, runId: RunId, p: PreparedRun, now: EpochMs): StepInsert[] {
@@ -306,6 +378,7 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     firstReservation: { N, basis },
     budget,
     issues: [...issues.map(toPreflightIssue), ...secretIssues],
+    stepLimits: [...p.stepLimits],
   });
 }
 
@@ -345,8 +418,11 @@ async function profileIssues(ctx: EngineCtx, p: PreparedRun, input: StartInput):
     }
     const live = await liveCapabilities(ctx, ref.providerId, ref.modelId);
     const rejected = isModelRejected(live); // the adapter does not serve the model: checkProfile's model_unknown, once
-    issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile: ref, capabilities: live.ok ? live.value : undefined,
-      catalogEntry: rejected ? undefined : r.catalog.get(ref.providerId, ref.modelId), hasCredential: r.credentials.get(ref.providerId) !== undefined }));
+    const catalogEntry = rejected ? undefined : r.catalog.get(ref.providerId, ref.modelId);
+    // Decision 3: a profile output allowance above the model cap is clamped (a default), not an issue.
+    const profile = clampedProfile(ref, knownCap(catalogEntry, live.ok ? live.value : undefined));
+    issues.push(...checkStepReadiness(p.project.providerPolicy.allowedProviderIds, { stepKey: s.id, profile, capabilities: live.ok ? live.value : undefined,
+      catalogEntry, hasCredential: r.credentials.get(ref.providerId) !== undefined }));
     // Fail closed (provider-lookup.ts): capabilities that cannot be read are an issue, never a catalog guess.
     if (!live.ok && !rejected) issues.push({ stepKey: s.id, reason: 'setup_blocked', code: 'no_adapter', error: live.error });
   }

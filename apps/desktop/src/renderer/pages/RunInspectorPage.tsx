@@ -17,7 +17,7 @@ import {
   useToast,
   usePageFocusRescue,
 } from '../components/ui';
-import type { ApprovalDecisionInput, RecoveryDecisionDetail } from '../components/ui';
+import type { ApprovalDecisionInput } from '../components/ui';
 import { isAppErrorException } from '../api/client';
 import { toViewError } from '../api/errors';
 import { RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS, statusPresentation } from '../lib/format';
@@ -25,6 +25,7 @@ import { runLabel } from '../features/runs/run-display';
 import { href, paths } from '../features/shell/paths';
 import { ActionErrorNotice } from '../features/run-inspector/ActionErrorNotice';
 import { exportToast } from '../features/run-inspector/export-toast';
+import { interimExportNote, useExportDialog } from '../features/report/useExportDialog';
 import { InspectorDialogs, useInspectorDialogs } from '../features/run-inspector/InspectorDialogs';
 import {
   APPROVAL_ACTIONS,
@@ -32,6 +33,7 @@ import {
   defaultStep,
   HEADER_ACTIONS,
   instructionVersionOf,
+  isFinishedRun,
   isLatestRow,
   latestRowOf,
   overrunStep,
@@ -94,7 +96,7 @@ export function RunInspectorPage() {
   const artifactExport = useArtifactExport(runId);
   const ledgerExport = useLedgerExport(runId);
   const dialogs = useInspectorDialogs();
-  const { openDialog, askConfirm, chooseUnknown } = dialogs;
+  const { openDialog, askConfirm } = dialogs;
   const [lastAction, setLastAction] = useState<RunAction | null>(null);
   const tab = parseInspectorTab(search.get('tab'));
   // B1: permitted profiles come from the LOADED project's provider allowlist; until it loads, nothing is offered.
@@ -194,13 +196,36 @@ export function RunInspectorPage() {
     [artifactExport, runId, toast],
   );
 
+  // Export while the run is in progress (an interim report): the export dialog says what it includes so far.
+  const inProgress = run !== undefined && !isFinishedRun(run);
+  const exportDialog = useExportDialog({
+    runId,
+    hasPatch: run?.availableActions.includes('export_patch') ?? false,
+    progressNote: run !== undefined && inProgress ? interimExportNote(run.stepProgress) : undefined,
+  });
+  const openExportDialog = exportDialog.open;
+
+  // A pause requested while a request is in flight takes effect after it: "Pausing after the current request…" shows
+  // until the run's status changes (B: a user pause resumes exactly where it stopped).
+  const [pauseRequest, setPauseRequest] = useState<{ readonly runId: string; readonly status: RunDetail['status'] } | null>(null);
+  const pausing = pauseRequest !== null && run !== undefined && pauseRequest.runId === run.id && pauseRequest.status === run.status;
+  // Once the status moved on, the request is spent (adjusted during render, not in an effect): a later return to the
+  // same status never shows "Pausing…" again.
+  if (pauseRequest !== null && !pausing && run !== undefined) setPauseRequest(null);
+
   /** A user chose `action`. `confirmed` = a confirmation already happened (RecoveryPanel's own dialog). */
   const trigger = useCallback(
-    (action: RunAction, confirmed = false, detail?: RecoveryDecisionDetail) => {
+    (action: RunAction, confirmed = false) => {
       if (run === undefined) return;
       actions.clearError();
       switch (action) {
-        case 'pause':
+        case 'pause': {
+          const from = run.status;
+          void dispatch({ action, runId: run.id }).then((ok) => {
+            if (ok) setPauseRequest({ runId: run.id, status: from });
+          });
+          return;
+        }
         case 'resume':
         case 'acknowledge_overrun':
         case 'resnapshot_and_replan':
@@ -234,18 +259,13 @@ export function RunInspectorPage() {
           openDialog('limits');
           return;
         case 'decide_unknown':
-          // A RecoveryPanel row names the attempt and decision: confirm it, then decide exactly that attempt.
-          if (detail?.attemptId !== undefined && detail.decision !== undefined) {
-            chooseUnknown({ attemptId: detail.attemptId, decision: detail.decision });
-          } else {
-            openDialog('unknown');
-          }
+          // No longer offered: a request that may not have completed is counted as an estimate (nothing to decide).
           return;
         case 'export_report':
-          runExport('report', action);
-          return;
         case 'export_patch':
-          runExport('patch', action);
+          // An in-progress run exports through the dialog (interim report: what it includes so far).
+          if (!isFinishedRun(run)) openExportDialog(action === 'export_patch' ? 'patch' : 'report');
+          else runExport(action === 'export_patch' ? 'patch' : 'report', action);
           return;
         case 'approve':
         case 'request_revision':
@@ -256,13 +276,13 @@ export function RunInspectorPage() {
         }
       }
     },
-    [actions, askConfirm, chooseProfileBlocked, chooseUnknown, dispatch, openDialog, run, runExport, selectStep],
+    [actions, askConfirm, chooseProfileBlocked, dispatch, openDialog, openExportDialog, run, runExport, selectStep],
   );
 
   /** The RecoveryPanel confirmed the decision itself. */
   const onRecoveryAction = useCallback(
-    (action: RunAction, detail?: RecoveryDecisionDetail) => {
-      trigger(action, true, detail);
+    (action: RunAction) => {
+      trigger(action, true);
     },
     [trigger],
   );
@@ -336,7 +356,19 @@ export function RunInspectorPage() {
         { label: r === undefined ? 'Run' : `${runLabel(r.id)} · ${r.workflow.name} v${String(r.workflow.version)}` },
       ]}
       status={r === undefined ? undefined : <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} />}
-      actions={r === undefined ? undefined : <HeaderActions run={r} projectId={projectId} onAction={trigger} pending={actions.pending} busy={actions.busy} exporting={artifactExport.isPending ? lastAction : null} />}
+      actions={
+        r === undefined ? undefined : (
+          <HeaderActions
+            run={r}
+            projectId={projectId}
+            onAction={trigger}
+            pending={actions.pending}
+            busy={actions.busy}
+            exporting={artifactExport.isPending ? lastAction : null}
+            pausing={pausing}
+          />
+        )
+      }
     />
   );
 
@@ -430,6 +462,7 @@ export function RunInspectorPage() {
             onRecoveryAction={onRecoveryAction}
             pending={actions.pending}
             busy={actions.busy}
+            pausing={pausing}
             {...(disabledReasons === undefined ? {} : { disabledReasons })}
           />
           <ActionErrorNotice error={generalError} />
@@ -480,6 +513,7 @@ export function RunInspectorPage() {
         dispatch={dispatch}
         submitDialog={submitDialog}
       />
+      {exportDialog.dialog}
     </StreamProgressContext.Provider>
   );
 }
@@ -491,7 +525,10 @@ const HEADER_ICONS: Partial<Record<RunAction, typeof Pause>> = {
   export_patch: Download,
 };
 
-/** Header buttons: only the header actions present in `availableActions`, plus a link to the report. */
+/**
+ * Header buttons: only the header actions present in `availableActions`, plus a link to the report. While the run is in
+ * progress, its exports are one "Export…" button (the dialog offers report and patch, and says what is included so far).
+ */
 function HeaderActions({
   run,
   projectId,
@@ -499,6 +536,7 @@ function HeaderActions({
   pending,
   busy,
   exporting,
+  pausing,
 }: {
   readonly run: RunDetail;
   readonly projectId: string;
@@ -506,8 +544,10 @@ function HeaderActions({
   readonly pending: RunAction | null;
   readonly busy: boolean;
   readonly exporting: RunAction | null;
+  readonly pausing: boolean;
 }) {
-  const list = run.availableActions.filter((a) => HEADER_ACTIONS.has(a));
+  const inProgress = !isFinishedRun(run);
+  const list = run.availableActions.filter((a) => HEADER_ACTIONS.has(a) && !(inProgress && a === 'export_patch'));
   return (
     <>
       {run.reportArtifactId === null ? null : (
@@ -518,15 +558,15 @@ function HeaderActions({
       {list.map((a) => (
         <Button
           key={a}
-          variant={a === 'cancel' ? 'danger' : a === 'export_report' ? 'primary' : 'secondary'}
+          variant={a === 'cancel' ? 'danger' : a === 'export_report' && !inProgress ? 'primary' : 'secondary'}
           icon={HEADER_ICONS[a] ?? Download}
-          pending={pending === a || exporting === a}
-          disabled={busy && pending !== a}
+          pending={pending === a || exporting === a || (a === 'pause' && pausing)}
+          disabled={(busy && pending !== a) || (a === 'pause' && pausing)}
           onClick={() => {
             onAction(a);
           }}
         >
-          {RUN_ACTION_LABELS[a]}
+          {a === 'export_report' && inProgress ? 'Export…' : a === 'pause' && pausing ? 'Pausing…' : RUN_ACTION_LABELS[a]}
         </Button>
       ))}
     </>

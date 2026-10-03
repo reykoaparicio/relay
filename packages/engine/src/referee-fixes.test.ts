@@ -117,17 +117,19 @@ describe('B3: settlement is CAS-first and stops after the lease is released', ()
     harness.timers.advance(1);
     await stopping;
     const b = createEngineFromContext(createEngineContext({ ...harness.ctx }));
-    await b.start(); // lease → recovery: dispatching → unknown (move_to_unknown N), running → interrupted
+    await b.start(); // lease → recovery: dispatching → unknown, settled at once as an estimate (decision 1), running → interrupted
     release(); // the old loop's provider call now returns a normal success
     await harness.waitFor(() => harness.logger.entries.some((e) => e.event === 'attempt.settle_skipped'));
 
     const [attempt] = harness.db.repos.attempts.listForRun(runId);
     expect(attempt?.state).toBe('unknown');
     const entries = ledgerOf(harness.db.repos, runId).filter((e) => e.attemptId === attempt?.id);
-    expect(entries.map((e) => e.type)).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown']); // settled exactly once
+    expect(entries.map((e) => [e.type, e.certainty])).toEqual([['reserve', null], ['release', null], ['settle', 'estimated']]); // settled exactly once
     const bal = harness.db.repos.ledger.runBalances(runId);
     expect(bal.R).toBe(0);
-    expect(bal.U).toBe(attempt?.reservationMicrousd);
+    expect(bal.U).toBe(0);
+    expect(bal.C).toBeGreaterThan(0);
+    expect(bal.C).toBeLessThanOrEqual(attempt?.reservationMicrousd ?? 0);
     expect(harness.db.repos.runs.get(runId).status).toBe('interrupted');
     const stoppingB = b.stop({ graceMs: 0 });
     harness.timers.advance(1);

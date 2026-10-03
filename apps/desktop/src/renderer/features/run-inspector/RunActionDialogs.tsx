@@ -1,23 +1,15 @@
 // Dialogs that collect the parameters of a run action (10 J2 action→op table): increase allowance, edit project
-// allowance, choose profile, raise limits, and the unknown-outcome decision. Each one only builds a
+// allowance, choose profile, and raise limits. Each one only builds a
 // `RunActionRequest`; the page dispatches it through `useRunActions` (the single action→op mapping).
 import { useId, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { RUN_LIMIT_MAXIMUMS } from '@relay/contracts';
 import type { Microusd, ProfileOption, ProfileWithWarnings, ProjectDetail, RunDetail, StepView } from '@relay/contracts';
-import { Dialog, DialogFooter, Field, Money, MoneyInput, NumberInput, RadioGroup, Select } from '../../components/ui';
-import {
-  formatDuration,
-  formatMoney,
-  PROVIDER_LABELS,
-  UNKNOWN_OUTCOME_DECISION_HINTS,
-  UNKNOWN_OUTCOME_DECISION_LABELS,
-} from '../../lib/format';
-import type { UnknownOutcomeDecision } from '../../lib/format';
+import { Dialog, DialogFooter, Field, Money, MoneyInput, NumberInput, Select } from '../../components/ui';
+import { formatDuration, formatMoney, PROVIDER_LABELS } from '../../lib/format';
 import { dollarsText } from '../run-setup/limits';
 import { ActionErrorNotice } from './ActionErrorNotice';
-import { isFinishedRun, stepTitle, unknownDecisionsFor } from './inspector-model';
-import { RequestFacts } from './RequestFacts';
+import { stepTitle } from './inspector-model';
 
 interface BaseDialogProps {
   readonly open: boolean;
@@ -377,87 +369,6 @@ export function RaiseLimitsDialog({ open, onOpenChange, pending, error, run, onS
           )}
         </Field>
         {submitted && nothing ? <p className="error">Raise at least one limit.</p> : null}
-        <ActionErrorNotice error={error} />
-      </ActionForm>
-    </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-
-export interface DecideUnknownDialogProps extends BaseDialogProps {
-  readonly run: RunDetail;
-  readonly onSubmit: (attemptId: string, decision: UnknownOutcomeDecision) => void;
-}
-
-/** `decide_unknown` → `runs.decideUnknown`, one decision per unresolved attempt. */
-export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, onSubmit, returnFocusFallback }: DecideUnknownDialogProps) {
-  const formId = useId();
-  const [attemptChoice, setAttemptChoice] = useState('');
-  const [decision, setDecision] = useState<UnknownOutcomeDecision | null>(null);
-  const attempts = run.unresolvedAttempts;
-  // A finished run can only settle the charge: no retry is offered (§4.4).
-  const decisions = unknownDecisionsFor(run);
-  const attemptId = attemptChoice === '' ? (attempts[0]?.id ?? '') : attemptChoice;
-  const attempt = attempts.find((x) => x.id === attemptId);
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={onOpenChange}
-      {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
-      title="Decide on the unknown request"
-      description="Relay cannot confirm whether the provider processed this request. Choose how to record it."
-      footer={
-        <DialogFooter
-          formId={formId}
-          primaryLabel="Continue with selected option"
-          pending={pending}
-          primaryDisabled={decision === null || attempt === undefined}
-        />
-      }
-    >
-      <ActionForm
-        id={formId}
-        onSubmit={() => {
-          if (decision !== null && attempt !== undefined) onSubmit(attempt.id, decision);
-        }}
-      >
-        {attempts.length === 0 ? <p>No request is waiting for a decision.</p> : null}
-        {attempts.length > 1 ? (
-          <Field label="Request">
-            {(control) => (
-              <Select
-                {...control}
-                value={attemptId}
-                onValueChange={setAttemptChoice}
-                options={attempts.map((x) => ({ value: x.id, label: `${stepTitle(x, run.stepMeta)} · attempt ${String(x.seq)}` }))}
-              />
-            )}
-          </Field>
-        ) : null}
-        {attempt === undefined ? null : (
-          <div className="stack" style={{ gap: 4 }}>
-            <p>
-              {stepTitle(attempt, run.stepMeta)} · attempt {attempt.seq}: possible charge{' '}
-              {attempt.cost === null ? 'not known' : <Money value={attempt.cost.microusd} certainty={attempt.cost.certainty} />}{' '}
-              (liability kept until you decide).
-            </p>
-            <RequestFacts attempt={attempt} label={`${stepTitle(attempt, run.stepMeta)} · attempt ${String(attempt.seq)}`} />
-          </div>
-        )}
-        {isFinishedRun(run) ? (
-          <p className="subtle">The run has ended, so the request cannot be retried; choose how to record its charge.</p>
-        ) : null}
-        <RadioGroup<UnknownOutcomeDecision>
-          legend="Recovery options"
-          value={decision}
-          onValueChange={setDecision}
-          options={decisions.map((d) => ({
-            value: d,
-            label: UNKNOWN_OUTCOME_DECISION_LABELS[d],
-            description: UNKNOWN_OUTCOME_DECISION_HINTS[d],
-          }))}
-        />
         <ActionErrorNotice error={error} />
       </ActionForm>
     </Dialog>

@@ -78,7 +78,10 @@ describe('RunsPage', () => {
     renderApp(RUNS, { scenario: 'interrupted' });
     const table = await screen.findByRole('table');
     expect(within(table).getAllByText('reported').length).toBeGreaterThan(0);
-    expect(within(table).getAllByText('Unknown charge').length).toBeGreaterThan(0);
+    // Decision 1: a total that includes an estimate reads "~$…" with an "estimated" tag; never "unknown".
+    expect(within(table).getAllByText('estimated').length).toBeGreaterThan(0);
+    expect(within(table).getAllByText(/^~\$/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('main')).not.toHaveTextContent(/unknown/i);
     for (const link of within(table).getAllByRole('link', { name: /open the ledger/ })) {
       expect(link.getAttribute('href')).toMatch(/\?tab=ledger$/);
     }

@@ -102,7 +102,8 @@ describe('SettingsPage (J10 M1 sections)', () => {
     expect(await within(section).findByText('Healthy')).toBeInTheDocument();
     expect(within(section).getByText('Runner heartbeat')).toBeInTheDocument();
     expect(within(section).getByText(/Version 1 · current/)).toBeInTheDocument();
-    expect(within(section).getByText(/1 with an unknown outcome/)).toBeInTheDocument();
+    // Decision 1: an uncertain request is settled as an estimate at once, so nothing is left unresolved.
+    expect(within(section).getByText('Unresolved calls').nextElementSibling ?? within(section).getByText('Unresolved calls').parentElement).toHaveTextContent('None');
     expect(within(section).getByText(/Fake providers · scenario interrupted/)).toBeInTheDocument();
     expect(within(section).getByText('0.1.0')).toBeInTheDocument();
     expect(within(section).getByText('dev-fake')).toBeInTheDocument();

@@ -135,6 +135,12 @@ export interface RunSnapshot {
    * `[]` = pinned user_rules only, a list = pinned user_rules + those records.
    */
   readonly memoryIncludeIds: readonly MemoryId[] | null;
+  /**
+   * Decision 3: the per-step output limits the user set on the New run screen (`RunStartInput.outputTokenOverrides`),
+   * kept for audit. Each model step's effective limit is its `maxOutputTokens` (override, else the default:
+   * workflow step setting → profile → clamped to the model cap). Absent in runs started before decision 3.
+   */
+  readonly outputTokenOverrides?: Readonly<Partial<Record<StepKey, number>>> | undefined;
 }
 
 /** 07 G1 input. */

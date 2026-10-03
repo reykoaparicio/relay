@@ -12,10 +12,10 @@ const META = stepMetaSchema.array().parse([
 ]);
 
 describe('step names come from the workflow (stepMeta)', () => {
-  it('RecoveryPanel: last completed step and unknown-outcome rows', () => {
+  it('RecoveryPanel: last completed step and the rows of requests that may not have completed', () => {
     const run = runDetail({
       stepMeta: META,
-      unresolvedAttempts: [attempt(2, { stepKey: 'plan', state: 'unknown', cost: { microusd: 900_000, certainty: 'unknown' } })],
+      uncertainAttempts: [attempt(2, { stepKey: 'plan', state: 'unknown', cost: { microusd: 900_000, certainty: 'estimated' } })],
     });
     render(<RecoveryPanel run={run} onDecide={() => undefined} />);
     expect(screen.getByText('Audit the handlers')).toBeInTheDocument();

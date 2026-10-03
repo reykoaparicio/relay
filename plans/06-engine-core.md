@@ -4,6 +4,44 @@ Spec: §4.2–4.4, §6.4, §6.5, §7.2–7.7, §9.1–9.5, §11.1–11.3, FR-02/
 
 Files (exclusive): `packages/engine/src/{index,runtime,seed,report,setup-calls,profiles,runner,run-machine,step-machine,checkpoints,budget,policy,retry,recovery,cancellation,deadline,revision,approvals,approval-binding,outcome,run-start,run-actions,services,ports,clock,snapshot,views,workflows,settings,hash,log-safe,export-handlers,memory-handlers}.ts` (+ their `.test.ts`, and the cross-cutting `referee-*.test.ts`, `readiness.test.ts`, `report-markdown.test.ts`, `scenarios.test.ts`, `engine.test.ts`, `interrupted-overrun.test.ts`, `views-overrun.test.ts`, `reconcile.test.ts`), `packages/engine/src/steps/**` (`intake`, `approval`, `finalize`, `local`, `validate-output`, `validation-inputs`), `packages/engine/src/testing/**` (`crash-hooks.ts`, `harness.ts`, `manual-timers.ts`, `drive.ts`). *(Updated wave 4 to the files that exist: the services split into `run-start` (F15), `run-actions` (decisions), `workflows`/`profiles` (F14), `views` (DTOs), `export-handlers`, and `memory-handlers` (the `memory.*` IPC handlers over G's `memory.ts`).)*
 
+## Founder decisions (2026-10-03) — supersede the older text below where they differ
+
+1. **No "unknown" charges.** An attempt whose outcome becomes uncertain (live classify, a deadline/cancel abort after
+   dispatch, an adapter throw, a mid-stream failure without final usage, crash recovery `dispatching → unknown`) is
+   settled **at once** as a charge with certainty `estimated` (`uncertain.ts`): `release −N` + `settle +E`, where
+   `E = computeCost({ input: the attempt's estimate inputTokens (provider count when obtained, else local), output:
+   output tokens observed so far (stream progress / partial usage, 0 if none) }, attempt prices)` (mulDivCeil per
+   category). R is back to 0 for the attempt; U stays 0 for new data (the bucket is kept for history). E > N is an
+   overrun like any other. The attempt keeps dispatch state `unknown` (reconcile needs it) and records
+   `outcome_uncertain = 1` and `may_not_have_been_charged` (phase `not_sent` / `sent_no_response` with no response id,
+   no first byte and no output observed) — migration 0005. "Unknown" is **no longer a user-visible state**: views show
+   `~$X (estimated)`, totals with an estimate show `~` (`CostSummary.hasEstimates`), plus the note "may not have been
+   charged". The run pauses `unknown_outcome` (name kept) and offers **only `retry_step` and `stop`** (+ export);
+   `decide_unknown` is never offered and `runs.decideUnknown` answers `CONFLICT decision_not_applicable`. Never
+   auto-retried. `runs.retryStep` accepts a step whose latest row is `unknown`: its uncertain attempts → `abandoned`
+   (estimate kept once), the row → `failed` (USER_ABANDON), a new row `retry_index + 1`. **Corrections:** when F9b later
+   learns the real usage, a correction group `settle −E (estimated)` + `settle +X (reported/calculated)` replaces the
+   estimate (never counted twice); an `abandoned` uncertain attempt gets a cost-only correction (no step/run effect) and
+   is not looked up again once corrected; a terminal run's report is refreshed. **Existing data:** at engine start
+   (`recoverOnStart` → `convertLegacyUnknowns`) every open `unknown` liability becomes `resolve_unknown −U` +
+   `settle +E (estimated)` booked at the attempt's `dispatchedAt ?? createdAt`; idempotent, logged
+   (`recovery.unknown_converted`); the setup scope's legacy liability (and an orphaned setup reservation) settles as
+   an estimate at its amount. Admission `C + R + U + N ≤ L` is unchanged.
+2. **Pause and Export while in progress.** `pause` is offered in `queued`, `running` and `awaiting_approval`.
+   `running`: the durable `pause_requested` flag pauses at the next checkpoint (the in-flight call completes and
+   settles). `queued` / `awaiting_approval`: `USER_PAUSE` applies at once (new F2 rows); a pending approval stays
+   pending and `resume` (`continue`) returns the run to `awaiting_approval` (new event `APPROVAL_RESUMED`, paused →
+   awaiting_approval). `export_report` (+ `export_patch` once a patch artifact exists) is offered in **every** status;
+   a non-terminal run exports an interim report built in memory (never stored as its report artifact):
+   "In progress — exported <time>; N of M steps finished", finished step outputs, costs so far (~ for estimates),
+   approvals so far.
+3. **Per-step output limits.** `runs.start` / `runs.preflight` accept `outputTokenOverrides` (256 ≤ n ≤ the chosen
+   profile's model `maxOutputTokens`; unknown or non-model step keys → `VALIDATION_FAILED` at
+   `outputTokenOverrides.<stepKey>`). Default per step: the workflow step's `maxOutputTokens` → else the profile's →
+   clamped to the model cap (a profile above its model's cap is clamped, no longer MODEL_UNSUPPORTED). The effective
+   value is the step snapshot's `maxOutputTokens` (request max + reservation N); the overrides are also recorded as
+   `snapshot.outputTokenOverrides`. Preflight returns `stepLimits` and a first reservation that reflects them.
+
 G owns `context.ts`, `prompt-render.ts`, `memory.ts`, `memory-retrieval.ts`, `token-budget.ts`, and `manifest.ts` in the same directory. F reaches them only through `ports.ts`.
 
 **No Electron and no `node:sqlite` imports (lint gate).** Storage, providers, and tools are imported as **types only**, and their implementations are injected. The single exception is `src/runtime.ts`, the Electron-free composition root (F16), which value-imports `@relay/storage`, `@relay/providers`, `@relay/tools`, and `@relay/templates` (ESLint override in 01, which also covers `*.test.ts` and `src/testing/**`). `seed.ts` receives the catalog and templates as arguments, so it stays type-only.
@@ -125,7 +163,7 @@ export function applyRunEvent(r: Repos, run: RunRow, ev: RunMachineEvent, now: E
 `applyRunEvent` computes `transitionRun`, then does a CAS `runs.updateStatus(id, [run.status], to, { pauseReason, statusDetail: ev.error ?? null, endedAt })`. In the same transaction it:
 - calls `runs.enterRunning(id, now)` when `to === 'running'` and `runs.leaveRunning(id, now)` when leaving `running` (F12 accrual); for `RUNNER_LOST` the segment closes at `min(ev.lastAliveAt, now)`, never at `now` (ruling B1);
 - asserts (invariant) that no other run is `running` or `cancelling` when `to === 'running'` (§9.1 concurrency 1, ruling B2);
-- clears `pause_requested` on `USER_PAUSE`, `RESUME_RESOLVED`, and every terminal transition;
+- clears `pause_requested` on `USER_PAUSE`, `RESUME_RESOLVED`, `APPROVAL_RESUMED`, and every terminal transition;
 - appends `run.status_changed`.
 
 It pushes post-commit effects into `fx` (arm/disarm the deadline timer, wake the loop, emit the push event, generate the report on a terminal transition). The caller runs them with `await runEffects(ctx, fx)` after the transaction commits, so no effect runs for a rolled-back transition. It returns `false` if the CAS lost (the caller re-reads).
@@ -142,6 +180,9 @@ Transition table (every row is one `it()` in `run-machine.test.ts`; all other pa
 | running | BUDGET_BLOCKED | paused | budget_run / budget_project |
 | running | BUDGET_OVERRUN | paused | budget_overrun |
 | running | USER_PAUSE | paused | user (takes effect **before the next dispatch**; the in-flight call completes) |
+| queued | USER_PAUSE | paused | user (decision 2: at once, nothing in flight) |
+| awaiting_approval | USER_PAUSE | paused | user (decision 2: the pending approval stays pending) |
+| paused | APPROVAL_RESUMED | awaiting_approval | – (decision 2: `resume` of `paused(user)` whose approval step still waits on a pending approval) |
 | running | AUTH_FAILED | paused | auth_required |
 | running | RATE_LIMIT_EXHAUSTED | paused | rate_limited |
 | running | APPROVAL_STALE | paused | approval_stale |
@@ -184,29 +225,31 @@ Run status `failed` is reachable **only** through `UNRECOVERABLE` (invariant vio
 - `runs.decideUnknown` on `paused(unknown_outcome)` when the last unknown attempt of the run is decided **and** its step went back to `ready` (`retry_acknowledging_charge`) **and** no reconciled outcome deferred a pause (clarification 14; F9b auto-resume follows the same rule). On any other pause reason (clarification 15) deciding the unknowns never resumes the run: it keeps waiting for that reason's own decision.
 - `runs.resume({kind:'resnapshot_and_replan' | 'use_preserved_snapshot'})` on `paused(approval_stale)`. `use_preserved_snapshot` appends a `run.snapshot_preserved` event in the same transaction (F6 reads it to skip the input-hash comparison).
 
-`RECOVERY_DECIDED` is emitted by `runs.resume` (the `review_recovery` action) on `interrupted`, and only when the run has no attempt in state `unknown` (else `CONFLICT` with `details.unknownAttempts`).
+`RECOVERY_DECIDED` is emitted by `runs.resume` (the `review_recovery` action) on `interrupted`. Decision 1: an attempt left uncertain by the crash is already settled as an estimate, so `review_recovery` is always accepted; the loop then pauses the run `unknown_outcome` on that step (retry_step / stop).
 
 `allowedRunActions` truth table (drives `RunDetail.availableActions`; the UI renders only these; the 02 action→op table maps each action to its IPC op). **The decision ops enforce the same function** (Referee wave 3, finding 1b): `runs.resume` (`continue` → `resume`, or `review_recovery` on `interrupted`; `switch_profile` → `choose_profile`; the other kinds by name), `runs.retryStep` (`retry_step`, or `choose_profile` with a `profileId`), and `runs.decideUnknown` (`decide_unknown`) refuse an action not listed for the run's current state with `CONFLICT { reason: 'decision_not_applicable' }`, so the UI and the server cannot disagree (e.g. `switch_profile` on `paused(unknown_outcome)` while an unknown attempt is open is refused).
 
 | Status | Actions |
 |---|---|
-| queued | cancel |
+| queued | pause, cancel (decision 2) |
 | running | pause, cancel |
-| awaiting_approval | approve, request_revision, reject, cancel |
+| awaiting_approval | approve, request_revision, reject, pause, cancel (decision 2) |
 | paused (budget_run) | increase_allowance, choose_profile, stop |
 | paused (budget_project) | edit_project_allowance, choose_profile, stop |
 | paused (budget_overrun) | acknowledge_overrun, increase_allowance, stop |
 | paused (limit_attempts / deadline) | raise_limits, stop |
 | paused (output_invalid / provider_unavailable / model_refused) | retry_step, choose_profile, stop |
 | paused (setup_blocked) | resume, choose_profile, stop |
-| paused (unknown_outcome) | decide_unknown (retry_acknowledging_charge / mark_failed_keep_liability / accept_estimated_charge), stop. Once `unknownAttempts = 0` and `hasFailedStep`: retry_step, choose_profile, stop. Once `unknownAttempts = 0` and **no** failed step (wave 4): resume, stop (`runs.resume { kind: 'continue' }` → RESUME_RESOLVED) |
+| paused (unknown_outcome) | decision 1: retry_step ("retry, may incur another charge"), stop — while a step's latest row is `failed` or `unknown` (`hasRetryableStep`); otherwise (e.g. reconciliation settled it) resume, stop |
 | paused (auth_required) | reconnect_provider, resume, stop |
 | paused (user / rate_limited) | resume, stop |
 | paused (approval_stale) | resnapshot_and_replan, use_preserved_snapshot, stop |
-| interrupted | review_recovery, decide_unknown (only if `unknownAttempts > 0`), stop |
-| paused (any other reason) with `unknownAttempts > 0` | that reason's actions, then decide_unknown, then stop (clarification 15) |
+| interrupted | review_recovery, stop |
 | cancelling | – |
 | terminal (completed / incomplete / cancelled / failed) | export_report, export_patch (only if `hasPatchArtifact`) |
+| **every** status (decision 2) | the actions above, then export_report, then export_patch (only if a patch artifact exists). A non-terminal run exports an interim report |
+
+`decide_unknown` (decision 1) is never offered in any state; clarifications 15 and 16 below are historical.
 
 **Clarifications of §7.2** (each is logged in 14 as a spec clarification; `run-machine.test.ts` has one `it()` per item):
 
@@ -549,7 +592,7 @@ Retry limits are read from the **step snapshot's `retryPolicy`** (`transport`, `
 | Other known provider errors with phase `responded` (non-retryable 4xx, **including** MODEL_UNSUPPORTED from 400/404/422 and CONTEXT_TOO_LARGE from 413) | none | – | `failed` | `TRANSPORT_EXHAUSTED` → `paused(provider_unavailable)`: retry_step / choose_profile (→ `runs.retryStep { profileId }` on the failed step) / stop (ruling BH-1) |
 | `RATE_LIMITED` (incl. 529) | rate_limit | `rateLimitWaits` (default 3) | `ready`, same purpose as the rate-limited attempt, `not_before_at = now + min(retryAfterMs ?? 2 s, 60 s)`; exhausted → stays `ready` | `RATE_LIMIT_EXHAUSTED` → `paused(rate_limited)` |
 | `AUTH_REQUIRED` (401/403, or no credential) | none | – | `ready` | `AUTH_FAILED` → `paused(auth_required)` immediately |
-| `REQUEST_OUTCOME_UNKNOWN`: phase `sent_no_response` or `responded_partial` (incl. a mid-stream SSE error or a connection drop, 04 R3-6), abort after dispatch, or an adapter throw | none | **never auto-retried** | `unknown`; attempt `unknown`; `move_to_unknown` N | `UNKNOWN_OUTCOME` → `paused(unknown_outcome)`. Waits for `runs.decideUnknown` (§7.5, §7.6). `interrupted` is reserved for a lost runner (F9) |
+| `REQUEST_OUTCOME_UNKNOWN`: phase `sent_no_response` or `responded_partial` (incl. a mid-stream SSE error or a connection drop, 04 R3-6), abort after dispatch, or an adapter throw | none | **never auto-retried** | `unknown`; attempt `unknown` (+ `outcome_uncertain`, `may_not_have_been_charged`); decision 1: `release −N` + `settle +E (estimated)` | `UNKNOWN_OUTCOME` → `paused(unknown_outcome)` (BUDGET_OVERRUN first when E > N). Waits for the user's `retry_step` or `stop` (§7.5, §7.6). `interrupted` is reserved for a lost runner (F9) |
 | `truncated`, Zod-invalid, or semantically invalid output (`OUTPUT_INVALID`) | schema_repair | `schemaRepair` (default 1) | `ready`, purpose `schema_repair` (the prompt appends the validation issues, 07 §G3 repair block); exhausted → `failed` | `OUTPUT_INVALID_EXHAUSTED` → `paused(output_invalid)` |
 | `refused` | none | – | `failed` with `MODEL_REFUSED` | `MODEL_REFUSED` → `paused(model_refused)` |
 | `MODEL_UNSUPPORTED`, `CONTEXT_TOO_LARGE`, `PERMISSION_DENIED` (policy / context assembly, **before any attempt**) | none | – | `ready` (never dispatched) | `SETUP_BLOCKED` → `paused(setup_blocked)`. `setup_blocked` is only for these pre-dispatch configuration problems (BH-1); a failed step is never paused `setup_blocked` (`runs.retryStep` still accepts one left so by an earlier build) |
@@ -560,14 +603,14 @@ A transport retry is allowed **only** when the phase is `not_sent`, or when the 
 
 **Exhausted retries pause the run, never fail it (R3-1).** The step goes → `failed`, and the run → `paused(output_invalid | provider_unavailable)`. The user then chooses `retry_step`, `choose_profile`, or `stop`.
 
-**`runs.retryStep({ runId, stepId, profileId? })`** is allowed **only when the step's latest row is `failed`**: on `paused(output_invalid | provider_unavailable | model_refused)`, and on `paused(unknown_outcome)` once no unknown attempt remains and the step is `failed`. Any other step state → `CONFLICT`. Budget and setup pauses (step still `ready`) change profile through `runs.resume({ kind: 'switch_profile' })` instead. In one transaction it:
+**`runs.retryStep({ runId, stepId, profileId? })`** is allowed **only when the step's latest row is `failed`** — or, decision 1, `unknown` (an uncertain outcome already settled as an estimate: its `unknown` attempts → `abandoned`, the row → `failed` by USER_ABANDON, then the steps below): on `paused(output_invalid | provider_unavailable | model_refused | unknown_outcome)`. Any other step state → `CONFLICT`. Budget and setup pauses (step still `ready`) change profile through `runs.resume({ kind: 'switch_profile' })` instead. In one transaction it:
 1. validates `profileId` when given. The profile must be permitted: its provider ∈ project policy and `checkProfile` passes against the snapshot capabilities resolved **before** the tx. On success it appends `run_config_revisions` (reason `model_refused` or `user_switch`) and emits `run.config_revised` (R3-13). The effective profile is the latest revision, and historical attempts and ledger entries are never rewritten.
 2. inserts a new step row with `retry_index + 1`, state `ready`, and fresh counters (R4-20). The first attempt on that new row uses purpose `user_retry` (`nextPurpose` returns `user_retry` for a row with `retry_index > 0` and no attempts yet).
 3. applies `RESUME_RESOLVED`.
 
 It has no attempt-limit pre-check (Referee wave 3, finding 2: refusing there left `paused(output_invalid | provider_unavailable | model_refused)` with no working action at `attemptCount = maxAttempts`). The new row is dispatched like any other, and the F4 step-2 checkpoint pauses `limit_attempts`; `raise_limits` continues from there.
 
-**Unknown decisions (`runs.decideUnknown`)**, allowed on `paused(unknown_outcome)` and `interrupted`:
+**Unknown decisions (`runs.decideUnknown`) — retired by decision 1** (always `CONFLICT decision_not_applicable`; NOT_FOUND for an unknown run). Historical behaviour, kept for reference:
 - `retry_acknowledging_charge`: the old attempt → `abandoned` (liability kept, R4-28), and the step `unknown → ready` (next purpose `user_retry`, `retry_of_attempt_id` = the old attempt).
 - `mark_failed_keep_liability`: the attempt → `abandoned`, and the step → `failed`.
 - `accept_estimated_charge`: `resolve_unknown −N` plus `settle +N (estimated)`, the attempt → `failed` (`details.chargeAccepted = true`), and the step → `failed`.
@@ -655,7 +698,7 @@ The run stays `interrupted` until the user chooses `runs.resume` (`review_recove
 
   Then the **WORK_STOPPED handler** (`onWorkStopped`, run by the loop once no attempt is in flight) runs **after** settlement. In one tx it sets all non-terminal steps → `skipped` (unknown steps included; their attempts keep the liability), and applies `WORK_STOPPED` → `cancelled`. The report follows (F17). **No new step is dispatched after the cancel request** (the F4 step-2 and step-3 transactions re-read the run status). After cancellation the run's R = 0.
 - `runs.cancel` returns `unresolvedCharges`, which lists every attempt with unknown liability.
-- `runs.pause` sets the durable **`runs.pause_requested`** column and, after commit, **wakes the loop** (ruling B9: a backoff `wait_until` or idle sleep ends immediately; every loop sleep is interruptible by the wake signal) (`RunRepo.setPauseRequested(id, true)`, 03 R2-12). The loop checks it at the top of every iteration, and the F4 step-2 tx checks it before every reservation, applying `USER_PAUSE` → `paused(user)`. An in-flight call completes normally first. The response `inFlight` is `'waiting'` when `hasInFlight(runId)`, else `'none'`. The flag is cleared by `applyRunEvent` on `USER_PAUSE`, `RESUME_RESOLVED`, and terminal transitions.
+- Decision 2: on a `queued` or `awaiting_approval` run `runs.pause` applies `USER_PAUSE` at once (`inFlight: 'none'`); every other non-running status → `CONFLICT run_not_running`. On a `running` run it sets the durable **`runs.pause_requested`** column and, after commit, **wakes the loop** (ruling B9: a backoff `wait_until` or idle sleep ends immediately; every loop sleep is interruptible by the wake signal) (`RunRepo.setPauseRequested(id, true)`, 03 R2-12). The loop checks it at the top of every iteration, and the F4 step-2 tx checks it before every reservation, applying `USER_PAUSE` → `paused(user)`. An in-flight call completes normally first. The response `inFlight` is `'waiting'` when `hasInFlight(runId)`, else `'none'`. The flag is cleared by `applyRunEvent` on `USER_PAUSE`, `RESUME_RESOLVED`, and terminal transitions.
 
 ## F12: Deadline (`src/deadline.ts`) — §9.1 "elapsed execution time"
 

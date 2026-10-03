@@ -1,5 +1,5 @@
-export { formatMoney, formatMoneyPair, formatSumPart, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
-export type { FormatMoneyOptions, MoneyPrecision } from './money';
+export { costHasEstimates, estimatedPart, formatMoney, formatMoneyApprox, formatMoneyPair, formatSumPart, formatUsdAtPrecision, isEstimate, moneyColumnPrecision, sumConsistentPrecision, trackedTotal } from './money';
+export type { EstimateParts, FormatMoneyOptions, MoneyPrecision } from './money';
 export { formatTokens, formatTokensExact } from './tokens';
 export { formatHash } from './hash';
 export { formatBytes } from './bytes';
@@ -14,8 +14,6 @@ export {
   RUN_ACTION_LABELS,
   RUN_ACTION_DONE_LABELS,
   DESTRUCTIVE_RUN_ACTIONS,
-  UNKNOWN_OUTCOME_DECISION_LABELS,
-  UNKNOWN_OUTCOME_DECISION_HINTS,
 } from './actions';
-export type { UnknownOutcomeDecision } from './actions';
 export { APPROVAL_DECISION_LABELS, PROVIDER_LABELS, MEMORY_TYPE_LABELS, ATTEMPT_PURPOSE_LABELS, EXCLUSION_REASON_LABELS, STEP_TITLES, runLabel, stepKeyLabel, stepName } from './labels';
+export { mayNotHaveBeenCharged, uncertainAmount, uncertainAttemptsOf } from './uncertain';

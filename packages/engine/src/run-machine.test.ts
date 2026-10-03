@@ -14,6 +14,7 @@ const SAMPLES: Record<RunMachineEventType, RunMachineEvent> = {
   CHECKS_PASSED: { type: 'CHECKS_PASSED' },
   SETUP_BLOCKED: { type: 'SETUP_BLOCKED', reason: 'setup_blocked', error: E },
   PLAN_READY: { type: 'PLAN_READY', approvalId: 'apr_01J9ZZZZZZZZZZZZZZZZZZZZZ0' as ApprovalId },
+  APPROVAL_RESUMED: { type: 'APPROVAL_RESUMED' },
   APPROVED_MATCHING: { type: 'APPROVED_MATCHING' },
   REJECTED: { type: 'REJECTED' },
   REVISION_REQUESTED: { type: 'REVISION_REQUESTED' },
@@ -52,6 +53,9 @@ const TABLE: readonly Row[] = [
   ['queued', SAMPLES.CANCEL_REQUESTED, 'cancelled', null],
   ['queued', SAMPLES.BUDGET_OVERRUN, 'paused', 'budget_overrun'], // clarification 14 (deferred while queued)
   ['queued', SAMPLES.APPROVAL_STALE, 'paused', 'approval_stale'],
+  ['queued', SAMPLES.USER_PAUSE, 'paused', 'user'], // decision 2: pauses at once (nothing in flight)
+  ['awaiting_approval', SAMPLES.USER_PAUSE, 'paused', 'user'], // decision 2: the approval stays pending
+  ['paused', SAMPLES.APPROVAL_RESUMED, 'awaiting_approval', null], // decision 2: resume back to the pending approval
   ['running', SAMPLES.PLAN_READY, 'awaiting_approval', null],
   ['running', sb('setup_blocked'), 'paused', 'setup_blocked'],
   ['running', sb('auth_required'), 'paused', 'auth_required'],
@@ -200,65 +204,75 @@ describe('§7.2 clarifications (one it() each)', () => {
 describe('allowedRunActions truth table', () => {
   const none = { unknownAttempts: 0, hasFailedStep: false, hasPatchArtifact: false };
   const paused = (reason: PauseReason) => ({ status: 'paused' as const, pauseReason: reason });
+  // Decision 2: an export is offered in every state (an interim report while the run is in progress).
+  const X = ['export_report'] as const;
   const EXPECTED: Record<PauseReason, readonly string[]> = {
-    budget_run: ['increase_allowance', 'choose_profile', 'stop'],
-    budget_project: ['edit_project_allowance', 'choose_profile', 'stop'],
-    budget_overrun: ['acknowledge_overrun', 'increase_allowance', 'stop'],
-    limit_attempts: ['raise_limits', 'stop'],
-    deadline: ['raise_limits', 'stop'],
-    output_invalid: ['retry_step', 'choose_profile', 'stop'],
-    provider_unavailable: ['retry_step', 'choose_profile', 'stop'],
-    model_refused: ['retry_step', 'choose_profile', 'stop'],
-    setup_blocked: ['resume', 'choose_profile', 'stop'],
-    unknown_outcome: ['resume', 'stop'],
-    auth_required: ['reconnect_provider', 'resume', 'stop'],
-    user: ['resume', 'stop'],
-    rate_limited: ['resume', 'stop'],
-    approval_stale: ['resnapshot_and_replan', 'use_preserved_snapshot', 'stop'],
+    budget_run: ['increase_allowance', 'choose_profile', 'stop', ...X],
+    budget_project: ['edit_project_allowance', 'choose_profile', 'stop', ...X],
+    budget_overrun: ['acknowledge_overrun', 'increase_allowance', 'stop', ...X],
+    limit_attempts: ['raise_limits', 'stop', ...X],
+    deadline: ['raise_limits', 'stop', ...X],
+    output_invalid: ['retry_step', 'choose_profile', 'stop', ...X],
+    provider_unavailable: ['retry_step', 'choose_profile', 'stop', ...X],
+    model_refused: ['retry_step', 'choose_profile', 'stop', ...X],
+    setup_blocked: ['resume', 'choose_profile', 'stop', ...X],
+    unknown_outcome: ['retry_step', 'stop', ...X], // decision 1: only "retry (may incur another charge)" and stop
+    auth_required: ['reconnect_provider', 'resume', 'stop', ...X],
+    user: ['resume', 'stop', ...X],
+    rate_limited: ['resume', 'stop', ...X],
+    approval_stale: ['resnapshot_and_replan', 'use_preserved_snapshot', 'stop', ...X],
   };
 
   it.each(PAUSE_REASONS.map((r) => [r]))('paused(%s)', (reason) => {
     expect(allowedRunActions(paused(reason), none)).toEqual(EXPECTED[reason]);
   });
 
-  it('offers at least one non-stop action for every pause reason and every unknown/failed combination (no exception)', () => {
+  it('offers at least one non-stop, non-export action for every pause reason and every legacy-unknown/failed combination (no exception)', () => {
     for (const reason of PAUSE_REASONS) {
-      for (const facts of [none, { ...none, unknownAttempts: 1 }, { ...none, hasFailedStep: true }, { ...none, unknownAttempts: 1, hasFailedStep: true }]) {
-        expect(allowedRunActions(paused(reason), facts).some((a) => a !== 'stop'), `${reason} ${JSON.stringify(facts)}`).toBe(true);
+      for (const facts of [none, { ...none, unknownAttempts: 1 }, { ...none, hasFailedStep: true }, { ...none, unknownAttempts: 1, hasFailedStep: true },
+        { ...none, hasRetryableStep: false }]) {
+        const acts = allowedRunActions(paused(reason), facts);
+        expect(acts.some((a) => a !== 'stop' && a !== 'export_report' && a !== 'export_patch'), `${reason} ${JSON.stringify(facts)}`).toBe(true);
       }
     }
   });
 
   it('E1 #8: budget pauses with a failed step offer retry_step; auth_required without a credential ref offers no resume', () => {
-    expect(allowedRunActions(paused('budget_run'), { ...none, hasFailedStep: true })).toEqual(['increase_allowance', 'retry_step', 'choose_profile', 'stop']);
-    expect(allowedRunActions(paused('budget_project'), { ...none, hasFailedStep: true })).toEqual(['edit_project_allowance', 'retry_step', 'choose_profile', 'stop']);
-    expect(allowedRunActions(paused('auth_required'), { ...none, missingCredential: true })).toEqual(['reconnect_provider', 'stop']);
-    expect(allowedRunActions(paused('auth_required'), none)).toEqual(['reconnect_provider', 'resume', 'stop']);
-    expect(allowedRunActions(paused('approval_stale'), { ...none, preservableSnapshot: false })).toEqual(['resnapshot_and_replan', 'stop']);
-    expect(allowedRunActions(paused('output_invalid'), { ...none, hasFailedStep: true, hasProfileOptions: false })).toEqual(['retry_step', 'stop']);
-    expect(allowedRunActions(paused('budget_run'), { ...none, hasProfileOptions: false })).toEqual(['increase_allowance', 'stop']);
+    expect(allowedRunActions(paused('budget_run'), { ...none, hasFailedStep: true })).toEqual(['increase_allowance', 'retry_step', 'choose_profile', 'stop', ...X]);
+    expect(allowedRunActions(paused('budget_project'), { ...none, hasFailedStep: true })).toEqual(['edit_project_allowance', 'retry_step', 'choose_profile', 'stop', ...X]);
+    expect(allowedRunActions(paused('auth_required'), { ...none, missingCredential: true })).toEqual(['reconnect_provider', 'stop', ...X]);
+    expect(allowedRunActions(paused('auth_required'), none)).toEqual(['reconnect_provider', 'resume', 'stop', ...X]);
+    expect(allowedRunActions(paused('approval_stale'), { ...none, preservableSnapshot: false })).toEqual(['resnapshot_and_replan', 'stop', ...X]);
+    expect(allowedRunActions(paused('output_invalid'), { ...none, hasFailedStep: true, hasProfileOptions: false })).toEqual(['retry_step', 'stop', ...X]);
+    expect(allowedRunActions(paused('budget_run'), { ...none, hasProfileOptions: false })).toEqual(['increase_allowance', 'stop', ...X]);
   });
 
-  it('offers decide_unknown only while unknown attempts remain, then retry_step once the step failed', () => {
-    expect(allowedRunActions(paused('unknown_outcome'), { ...none, unknownAttempts: 2 })).toEqual(['decide_unknown', 'stop']);
-    expect(allowedRunActions(paused('unknown_outcome'), { ...none, hasFailedStep: true })).toEqual(['retry_step', 'choose_profile', 'stop']);
+  it('decision 1: decide_unknown is never offered; unknown_outcome offers retry_step + stop, or resume once nothing is left to retry', () => {
+    for (const status of RUN_STATUSES) {
+      for (const reason of [null, ...PAUSE_REASONS]) {
+        const run = { status, pauseReason: status === 'paused' ? reason : null };
+        expect(allowedRunActions(run, { ...none, unknownAttempts: 3, hasFailedStep: true })).not.toContain('decide_unknown');
+      }
+    }
+    expect(allowedRunActions(paused('unknown_outcome'), { ...none, hasRetryableStep: true })).toEqual(['retry_step', 'stop', ...X]);
+    expect(allowedRunActions(paused('unknown_outcome'), { ...none, hasRetryableStep: false })).toEqual(['resume', 'stop', ...X]);
   });
 
-  it('maps every non-paused status', () => {
+  it('maps every non-paused status (decision 2: pause while queued / running / awaiting approval; export in every state)', () => {
     const at = (status: RunStatus, f = none) => allowedRunActions({ status, pauseReason: null }, f);
-    expect(at('queued')).toEqual(['cancel']);
-    expect(at('running')).toEqual(['pause', 'cancel']);
-    expect(at('awaiting_approval')).toEqual(['approve', 'request_revision', 'reject', 'cancel']);
-    expect(at('interrupted')).toEqual(['review_recovery', 'stop']);
-    // E1 #8: review_recovery is only offered once every unknown attempt is decided (it always failed before that).
-    expect(at('interrupted', { ...none, unknownAttempts: 1 })).toEqual(['decide_unknown', 'stop']);
-    expect(at('cancelling')).toEqual([]);
-    expect(at('paused')).toEqual(['stop']);
+    expect(at('queued')).toEqual(['pause', 'cancel', ...X]);
+    expect(at('running')).toEqual(['pause', 'cancel', ...X]);
+    expect(at('running', { ...none, hasPatchArtifact: true })).toEqual(['pause', 'cancel', 'export_report', 'export_patch']);
+    expect(at('awaiting_approval')).toEqual(['approve', 'request_revision', 'reject', 'pause', 'cancel', ...X]);
+    expect(at('interrupted')).toEqual(['review_recovery', 'stop', ...X]);
+    // Decision 1: an uncertain attempt left by a crash is already settled; review_recovery is always offered.
+    expect(at('interrupted', { ...none, unknownAttempts: 1 })).toEqual(['review_recovery', 'stop', ...X]);
+    expect(at('cancelling')).toEqual([...X]);
+    expect(at('paused')).toEqual(['stop', ...X]);
     for (const s of ['completed', 'incomplete', 'cancelled', 'failed'] as const) {
       expect(at(s)).toEqual(['export_report']);
       expect(at(s, { ...none, hasPatchArtifact: true })).toEqual(['export_report', 'export_patch']);
-      // E1 #4: an unknown charge left on a finished run stays decidable (settle only).
-      expect(at(s, { ...none, unknownAttempts: 1 })).toEqual(['decide_unknown', 'export_report']);
+      expect(at(s, { ...none, unknownAttempts: 1 })).toEqual(['export_report']);
     }
   });
 });

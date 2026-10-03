@@ -1,6 +1,6 @@
 // Pure view-model helpers of the run inspector (10 J8). Nothing here decides which actions are allowed: buttons come
 // only from `RunDetail.availableActions` (06 F2); these helpers only pick what to show.
-import { budgetBreakdownSchema, UNKNOWN_OUTCOME_DECISIONS, validationIssueSchema } from '@relay/contracts';
+import { budgetBreakdownSchema, validationIssueSchema } from '@relay/contracts';
 import type {
   AppError,
   BudgetBreakdown,
@@ -14,8 +14,8 @@ import type {
   StepView,
   ValidationIssue,
 } from '@relay/contracts';
-import { statusPresentation, stepName } from '../../lib/format';
-import type { StatusPresentation, UnknownOutcomeDecision } from '../../lib/format';
+import { statusPresentation, stepName, uncertainAttemptsOf } from '../../lib/format';
+import type { StatusPresentation } from '../../lib/format';
 
 /** Tabs of the selected step panel (`?tab=`). `budget` / `summary` exist as tabs only below 1280 px. */
 export const PRIMARY_TABS = ['output', 'context', 'attempts', 'events', 'ledger'] as const;
@@ -44,11 +44,11 @@ export function instructionVersionOf(run: Pick<RunDetail, 'stepMeta'>, stepKey: 
 }
 
 /**
- * The step that was in flight when an interrupted (or unknown-outcome) run stopped: the step of its first unresolved
- * attempt, else the first step left executing / unknown / failed.
+ * The step that was in flight when an interrupted run (or one paused on a request that may not have completed) stopped:
+ * the step of its first uncertain attempt, else the first step left executing / not confirmed / failed.
  */
-export function interruptedStep(run: Pick<RunDetail, 'steps' | 'unresolvedAttempts'>): StepView | undefined {
-  const unresolved = run.unresolvedAttempts[0];
+export function interruptedStep(run: Pick<RunDetail, 'steps' | 'uncertainAttempts' | 'unresolvedAttempts'>): StepView | undefined {
+  const unresolved = uncertainAttemptsOf(run)[0];
   const byAttempt = unresolved === undefined ? undefined : run.steps.find((s) => s.id === unresolved.stepRunId);
   return byAttempt ?? run.steps.find((s) => s.state === 'unknown' || s.state === 'executing' || s.state === 'failed');
 }
@@ -209,17 +209,6 @@ export function isFinishedRun(run: Pick<RunDetail, 'status'>): boolean {
   return TERMINAL_RUN_STATUSES.has(run.status);
 }
 
-/** Decisions of an unknown request on a finished run (no retry). */
-const FINISHED_RUN_DECISIONS: readonly UnknownOutcomeDecision[] = ['accept_estimated_charge', 'mark_failed_keep_liability'];
-
-/**
- * The unknown-outcome decisions offered for `run` (§4.4): all of them while the run can continue; on a finished run
- * only settling the left-over charge (accept the estimate, or mark failed and keep the liability), never a retry.
- */
-export function unknownDecisionsFor(run: Pick<RunDetail, 'status'>): readonly UnknownOutcomeDecision[] {
-  return isFinishedRun(run) ? FINISHED_RUN_DECISIONS : UNKNOWN_OUTCOME_DECISIONS;
-}
-
 const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([
   'awaiting_approval',
   'executing',
@@ -276,11 +265,19 @@ function pauseStepOf(run: RunDetail, latest: readonly StepView[]): StepView | un
 }
 
 /**
- * The step a pause is about (retry / choose profile target): the latest failed row, else the next step that has not
- * run (budget, setup, auth pauses happen before dispatch), else the latest unknown row.
+ * The step a pause is about (retry / choose profile target): for a request that may not have completed, that request's
+ * step; else the latest failed row, else the next step that has not run (budget, setup, auth pauses happen before
+ * dispatch), else the latest row whose outcome was not confirmed.
  */
 export function blockedStep(run: RunDetail): StepView | undefined {
   const latest = run.steps.filter((s) => isLatestRow(s, run.steps));
+  // A request that may not have completed: Retry step is about that request's step (its latest row), never the next
+  // step that has not run.
+  if (run.status === 'paused' && run.pauseReason === 'unknown_outcome') {
+    const uncertain = uncertainAttemptsOf(run)[0];
+    const row = uncertain === undefined ? undefined : latestRowOf(run.steps, uncertain.stepKey);
+    if (row !== undefined) return row;
+  }
   return (
     [...latest].reverse().find((s) => s.state === 'failed') ??
     (run.status === 'paused' ? pauseStepOf(run, latest) : undefined) ??
@@ -361,7 +358,7 @@ const BLOCKED_BY: Readonly<Record<PauseReason, string>> = {
   output_invalid: 'invalid output',
   provider_unavailable: 'provider unavailable',
   model_refused: 'model declined',
-  unknown_outcome: 'unknown outcome',
+  unknown_outcome: 'request may not have completed',
 };
 
 /**

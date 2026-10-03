@@ -9,6 +9,7 @@ import { createHarness, sleep } from '../helpers/engine-harness.js';
 import type { Harness } from '../helpers/engine-harness.js';
 import { createManualClock } from '../helpers/manual-clock.js';
 import { FIXTURES_DIR, cleanupTempDirs } from '../helpers/temp-dirs.js';
+import { expectedEstimate } from './uncertain-estimate.js';
 
 let h: Harness | undefined;
 afterEach(async () => {
@@ -141,7 +142,7 @@ describe('failure modes @m3', () => {
   });
 
   describe('#midstream', () => {
-    it('midstream-error → attempt unknown (REQUEST_OUTCOME_UNKNOWN, responded_partial), move_to_unknown N, paused(unknown_outcome), no automatic retry @m3', async () => {
+    it('midstream-error → attempt uncertain (REQUEST_OUTCOME_UNKNOWN, responded_partial), settled at once as an estimate (input + streamed output), paused(unknown_outcome) offering retry_step / stop, no automatic retry @m3', async () => {
       h = await createHarness({ scenario: 'midstream-error' });
       const runId = await h.startRun();
 
@@ -155,8 +156,13 @@ describe('failure modes @m3', () => {
       expect(a?.error?.code).toBe('REQUEST_OUTCOME_UNKNOWN');
       expect(a?.usage?.partial).toBe(true); // responded_partial: partial usage recorded (the phase itself is not persisted)
       const entries = h.db.repos.ledger.list(runId, { limit: 100, sort: 'created_asc' });
-      expect(entries.ok && entries.value.items.filter((e) => e.attemptId === a!.id).map((e) => e.type)).toEqual(['reserve', 'move_to_unknown', 'move_to_unknown']);
-      expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: a!.reservationMicrousd }));
+      expect(entries.ok && entries.value.items.filter((e) => e.attemptId === a!.id).map((e) => [e.type, e.certainty])).toEqual([['reserve', null], ['release', null], ['settle', 'estimated']]);
+      const E = expectedEstimate(a!); // partial usage: the output streamed before the failure
+      expect(a!.usage!.outputTokens).toBeGreaterThan(0);
+      expect(h.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: 0, C: E }));
+      expect([a!.outcomeUncertain, a!.mayNotHaveBeenCharged]).toEqual([true, false]);
+      const detail = await h.call('relay/v1/runs.get', { runId });
+      expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'stop', 'export_report']);
       expect(h.calls({ runId })).toHaveLength(1); // never auto-retried
     });
   });

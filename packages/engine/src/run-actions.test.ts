@@ -54,10 +54,10 @@ describe('runs.resume continue', () => {
     expect(ok.ok && ok.data.status).toBe('queued');
   });
 
-  it('paused(unknown_outcome) with every unknown decided and no failed step offers resume → queued; refused while an unknown is open', async () => {
+  it('paused(unknown_outcome) with no step left to retry (e.g. reconciled meanwhile) offers resume → queued', async () => {
     const { x, runId } = await runWith({ type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: errors.requestOutcomeUnknown('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never) });
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['resume', 'stop']); // zero unknown attempts, nothing failed
+    expect(detail.ok && detail.data.availableActions).toEqual(['resume', 'stop', 'export_report']); // nothing uncertain or failed
 
     const res = await resume(x, runId, 'continue-unk-0001', { kind: 'continue' });
 
@@ -66,7 +66,7 @@ describe('runs.resume continue', () => {
     expect(x.db.repos.runs.get(runId).status).toBe('running');
   });
 
-  it('paused(unknown_outcome) with an open unknown attempt refuses continue (decide_unknown first)', async () => {
+  it('paused(unknown_outcome) with the uncertain step still open refuses continue (decision 1: retry_step or stop only)', async () => {
     const { x, runId } = await runWith({ type: 'UNKNOWN_OUTCOME', attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, error: errors.requestOutcomeUnknown('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never) });
     x.db.tx('immediate', (r) => {
       const run = r.runs.get(runId);
@@ -78,11 +78,14 @@ describe('runs.resume continue', () => {
         modelId: snap.profile.modelId, profileSnapshot: snap.profile, requestFingerprint: 'f'.repeat(64), state: 'reserved', reservationMicrousd: 10,
         priceCatalogVersion: snap.profile.priceCatalogVersion, createdAt: x.clock.now() });
       r.attempts.transition('att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, ['reserved'], 'unknown', {});
+      r.steps.transition(s.id, [s.state], 'unknown', {});
     });
 
     const res = await resume(x, runId, 'continue-unk-0002', { kind: 'continue' });
+    const detail = await x.engine.handle('relay/v1/runs.get', { runId });
 
     expect(res.ok ? null : res.error.details?.['reason']).toBe('decision_not_applicable');
+    expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'stop', 'export_report']);
   });
 
   it('is CONFLICT for pause reasons that need another decision, and for a running run', async () => {
@@ -97,18 +100,18 @@ describe('runs.resume continue', () => {
     for (const res of [running, invalid, ack, raise, replan]) expect(res.ok ? null : res.error.details?.['reason']).toBe('decision_not_applicable');
   });
 
-  it('review_recovery on interrupted: CONFLICT while an attempt is unknown, RECOVERY_DECIDED once none is', async () => {
+  it('review_recovery on interrupted: RECOVERY_DECIDED', async () => {
     const { x, runId } = await runWith({ type: 'RUNNER_LOST' });
     expect(x.db.repos.runs.get(runId).status).toBe('interrupted');
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['review_recovery', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['review_recovery', 'stop', 'export_report']);
 
     const res = await resume(x, runId, 'recovery-key-0001', { kind: 'continue' });
 
     expect(res.ok && res.data.status).toBe('queued');
   });
 
-  it('review_recovery with an unknown attempt → CONFLICT (not offered, E1 #8); decide it first', async () => {
+  it('decision 1: review_recovery with an uncertain attempt is accepted; the loop then pauses unknown_outcome (retry_step / stop), never retrying it', async () => {
     const x = await createHarness({ scenario: 'midstream-error' });
     h = x;
     const runId = await x.startRun();
@@ -118,13 +121,13 @@ describe('runs.resume continue', () => {
     });
 
     const res = await resume(x, runId, 'recovery-key-0002', { kind: 'continue' });
-    const [a] = x.db.repos.attempts.listForRun(runId);
-    await x.engine.handle('relay/v1/runs.decideUnknown', { idempotencyKey: 'recovery-decide-1', runId, attemptId: a?.id ?? '', decision: 'retry_acknowledging_charge' });
-    expect(x.db.repos.runs.get(runId).status).toBe('interrupted');
-    const after = await resume(x, runId, 'recovery-key-0003', { kind: 'continue' });
+    expect(res.ok && res.data.status).toBe('queued');
+    expect(await drive(x, runId, ['paused'])).toBe('paused');
 
-    expect(res.ok ? null : [res.error.code, res.error.details?.['reason']]).toEqual(['CONFLICT', 'decision_not_applicable']);
-    expect(after.ok && after.data.status).toBe('queued'); // deciding on an interrupted run never auto-resumes (§4.4)
+    const detail = await x.engine.handle('relay/v1/runs.get', { runId });
+    expect(x.db.repos.runs.get(runId).pauseReason).toBe('unknown_outcome');
+    expect(detail.ok && detail.data.availableActions).toEqual(['retry_step', 'stop', 'export_report']);
+    expect(x.db.repos.attempts.listForRun(runId)).toHaveLength(1); // no automatic retry
   });
 });
 

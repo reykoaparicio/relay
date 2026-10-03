@@ -1,7 +1,7 @@
 // 06 F1 run read/command handlers: `runs.getStep` (no full RunDetail; the run's ledger read once and grouped per
 // attempt; events filtered in SQL), `runs.cancel`, `runs.pause`, `ledger.runSummary`, and the ledger-view step keys.
 import { err, errors, ok } from '@relay/contracts';
-import type { ArtifactId, Result, RunId, StepDetail, StepKey } from '@relay/contracts';
+import type { ArtifactId, Result, RunId, RunStatus, StepDetail, StepKey } from '@relay/contracts';
 import type { LedgerEntryRow, Repos } from '@relay/storage';
 import type { ParsedInputOf } from './handler-types.js';
 import { fromUtf8 } from './hash.js';
@@ -85,13 +85,26 @@ export async function cancelRun(ctx: EngineCtx, runId: RunId) {
   return ok({ status: res.value, unresolvedCharges });
 }
 
-export function pauseRun(ctx: EngineCtx, runId: RunId) {
-  const res = ctx.db.txResult('immediate', (r) => {
+/**
+ * `runs.pause` (decision 2). A running run sets the durable `pause_requested` flag: the loop pauses it at the next
+ * checkpoint (before the next reservation), so a call in flight completes and settles normally (`inFlight: 'waiting'`).
+ * A queued or awaiting-approval run has nothing in flight and pauses at once (`paused(user)`); a pending approval stays
+ * pending, and `resume` returns the run to awaiting_approval. Any other status is CONFLICT `run_not_running`.
+ */
+export async function pauseRun(ctx: EngineCtx, runId: RunId) {
+  const fx: PostCommitEffect[] = [];
+  type Paused = { status: RunStatus; inFlight: 'none' | 'waiting' };
+  const res = ctx.db.txResult('immediate', (r): Result<Paused> => {
     const run = r.runs.get(runId);
+    if (run.status === 'queued' || run.status === 'awaiting_approval') {
+      applyRunEvent(r, run, { type: 'USER_PAUSE' }, ctx.clock.now(), fx);
+      return ok({ status: r.runs.get(runId).status, inFlight: 'none' as const });
+    }
     if (run.status !== 'running') return err(errors.conflict({ reason: 'run_not_running', status: run.status }));
     r.runs.setPauseRequested(runId, true);
     return ok({ status: run.status, inFlight: ctx.cancellation.hasInFlight(runId) ? ('waiting' as const) : ('none' as const) });
   });
+  if (res.ok) await runEffects(ctx, fx);
   // B9: wake the loop (after commit) so a backoff / idle sleep ends now and the next iteration applies USER_PAUSE.
   if (res.ok) ctx.wake.signal();
   return res;

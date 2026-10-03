@@ -2,7 +2,7 @@ import { useId } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, Box, Plug, ShieldCheck } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
-import { addMicrousd } from '@relay/contracts';
+import { microusd } from '@relay/contracts';
 import type { OutputOf, ProjectDetail, RunAction, RunDetail, RunSummary, WorkflowLimits } from '@relay/contracts';
 import {
   BudgetMeter,
@@ -22,7 +22,7 @@ import {
   StatusBadge,
   StatTile,
 } from '../../components/ui';
-import { formatMonth, statusPresentation } from '../../lib/format';
+import { formatMonth, mayNotHaveBeenCharged, statusPresentation, uncertainAmount, uncertainAttemptsOf } from '../../lib/format';
 import { call } from '../../api/client';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
@@ -61,6 +61,7 @@ export interface OverviewStatsProps {
 
 /** Active runs · Usage tracked by Relay · Project memory (§5.2). */
 export function OverviewStats({ project, activeCount, activeCapped = false, activeHint, tracked, latestRunId, now }: OverviewStatsProps) {
+  const approx = tracked !== undefined && projectHasEstimates(tracked);
   const suggestions = project.stats.suggestions;
   const approved = project.stats.approvedMemory;
   return (
@@ -73,7 +74,13 @@ export function OverviewStats({ project, activeCount, activeCapped = false, acti
       <StatTile
         label="Usage tracked by Relay"
         labelAside={formatMonth(now)}
-        value={tracked === undefined ? '…' : <Money value={tracked.trackedMicrousd} />}
+        value={
+          tracked === undefined ? (
+            '…'
+          ) : (
+            <Money value={microusd(tracked.trackedMicrousd + tracked.unknownMicrousd)} approx={approx} />
+          )
+        }
         hint={
           <>
             {tracked === undefined || tracked.reservedMicrousd === 0 ? (
@@ -83,11 +90,7 @@ export function OverviewStats({ project, activeCount, activeCapped = false, acti
                 <Money value={tracked.reservedMicrousd} /> reserved in flight
               </>
             )}
-            {tracked !== undefined && tracked.unknownMicrousd > 0 ? (
-              <>
-                {' '}· <Money value={tracked.unknownMicrousd} certainty="unknown" /> unresolved
-              </>
-            ) : null}
+            {approx ? <> · includes estimates (~)</> : null}
             <span className="mt-1 block">Only calls made through Relay. Your provider account bill may be higher.</span>
           </>
         }
@@ -116,18 +119,25 @@ export function OverviewStats({ project, activeCount, activeCapped = false, acti
 // ---------------------------------------------------------------------------------------------------------------
 // Banners
 
+/** The project usage tile includes an estimate (decision 1), or a legacy not-confirmed amount is counted in. */
+function projectHasEstimates(t: OutputOf<'relay/v1/ledger.projectSummary'>): boolean {
+  return t.hasEstimates || t.unknownMicrousd > 0;
+}
+
 export function InterruptedBanner({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
   // E2: an interrupted run's cause follows how the previous session ended (clean quit vs the runner stopped).
   const lastShutdown = useAppInfo().data?.lastShutdown;
   const interruptionTime = useStatusChangedAt(run.id, 'interrupted', run.status === 'interrupted');
   const interruptedAt = interruptedStep(run);
-  const liability = addMicrousd(...run.unresolvedAttempts.flatMap((a) => (a.cost === null ? [] : [a.cost.microusd])));
-  const unknownStep = run.unresolvedAttempts[0]?.stepRunId ?? interruptedAt?.id;
+  const uncertain = uncertainAttemptsOf(run);
+  const estimate = microusd(uncertainAmount(uncertain));
+  const maybe = uncertain.some(mayNotHaveBeenCharged);
+  const uncertainStep = uncertain[0]?.stepRunId ?? interruptedAt?.id;
   const title =
     run.status === 'interrupted'
       ? `${runLabel(run.id)} was interrupted`
-      : `${runLabel(run.id)} is paused: unknown request outcome`;
+      : `${runLabel(run.id)} is paused: the last request may not have completed`;
   return (
     <InlineAlert
       tone="warning"
@@ -137,24 +147,25 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
           as={Link}
           variant="primary"
           icon={ArrowRight}
-          to={paths.run(projectId, run.id, unknownStep === undefined ? {} : { step: unknownStep })}
+          to={paths.run(projectId, run.id, uncertainStep === undefined ? {} : { step: uncertainStep })}
         >
           Review recovery options
         </ButtonLink>
       }
     >
       <p>
-        {run.status === 'interrupted' ? INTERRUPTION_LEAD[interruptionCauseOf(lastShutdown, interruptionTime)] : 'Relay lost track of the request while '}
+        {run.status === 'interrupted' ? INTERRUPTION_LEAD[interruptionCauseOf(lastShutdown, interruptionTime)] : 'Relay could not confirm the request sent while '}
         <b>{interruptedAt === undefined ? 'a step' : stepTitle(interruptedAt, run.stepMeta)}</b> was running. The last completed step is{' '}
         <b>{lastDone === undefined ? 'none yet' : stepTitle(lastDone, run.stepMeta)}</b>. Completed outputs are intact and
         will not be re-run automatically.
       </p>
-      {run.unresolvedAttempts.length > 0 ? (
-        <p className="inline-flex flex-wrap items-center gap-2">
-          <StatusBadge kind="certainty" value="unknown" />
-          {run.unresolvedAttempts.length} unresolved request{run.unresolvedAttempts.length === 1 ? '' : 's'} may already
-          have incurred a charge. Up to <Money value={liability} certainty="unknown" /> is held as unresolved
-          liability until you decide.
+      {uncertain.length > 0 ? (
+        <p data-testid="uncertain-outcome">
+          The last request may or may not have completed. Relay counted <Money value={estimate} certainty="estimated" />{' '}
+          toward the budget{maybe ? <span className="subtle">, may not have been charged</span> : null}.{' '}
+          {run.availableActions.includes('retry_step')
+            ? 'Retry the step (this may charge again) or stop.'
+            : 'Continue from the last checkpoint (the step runs again and may charge again) or stop.'}
         </p>
       ) : null}
     </InlineAlert>
@@ -302,7 +313,8 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
 }
 
 /**
- * A paused run waiting for the user (any pause reason other than unknown outcome, which gets the RecoveryPanel): the
+ * A paused run waiting for the user (any pause reason other than a request that may not have completed, which gets the
+ * RecoveryPanel): the
  * pause label, what it means, and a link to the step it is blocked on.
  */
 export function PausedAttentionCard({
@@ -352,17 +364,17 @@ export function PausedAttentionCard({
   );
 }
 
-/** Interrupted or unknown-outcome run: RecoveryPanel (§4.4). Decisions that need the inspector go there. */
+/** Interrupted run, or one paused on a request that may not have completed: RecoveryPanel (§4.4). */
 export function RecoveryAttention({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const navigate = useNavigate();
   const actions = useRunActions({ runId: run.id, projectId });
   const onDecide = (action: RunAction) => {
-    const stepId = run.unresolvedAttempts[0]?.stepRunId;
+    const stepId = uncertainAttemptsOf(run)[0]?.stepRunId;
     if (action === 'stop' || action === 'cancel' || action === 'review_recovery') {
       void actions.dispatch({ action, runId: run.id });
       return;
     }
-    // decide_unknown (3 choices), retry_step, choose_profile need the step context of the inspector.
+    // retry_step and choose_profile need the step context of the inspector.
     void navigate(paths.run(projectId, run.id, stepId === undefined ? {} : { step: stepId }));
   };
   return (

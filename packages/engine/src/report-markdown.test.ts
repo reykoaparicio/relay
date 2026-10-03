@@ -2,7 +2,7 @@
 // this text; approvals and revision cycles are part of it, and free text (goal, notes, limitations, profile names)
 // cannot open Markdown structure of its own.
 import { describe, expect, it } from 'vitest';
-import { reportV1Schema } from '@relay/contracts';
+import { microusd, reportV1Schema } from '@relay/contracts';
 import type { ReportV1 } from '@relay/contracts';
 import { renderReportMarkdown } from './report.js';
 
@@ -23,8 +23,10 @@ const FIXED_REPORT = {
       cost: { settledMicrousd: 1_000_000, certainty: 'estimated', unknownMicrousd: 250_000 } },
   ],
   totals: { allowance: 3_000_000, settledReported: 0, settledCalculated: 12_345, settledEstimated: 1_000_000, reserved: 0, unknown: 250_000,
-    remaining: 1_737_655, overrun: false },
+    remaining: 1_737_655, overrun: false, hasEstimates: true },
+  // Legacy (pre-decision-1) liability: still rendered for an old report.
   unknownLiabilities: [{ attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ0', stepKey: 'implement', liabilityMicrousd: 250_000, state: 'abandoned' }],
+  estimatedCharges: [{ attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1', stepKey: 'implement', amountMicrousd: 1_000_000, mayNotHaveBeenCharged: true }],
   artifacts: { findings: 'art_01J9ZZZZZZZZZZZZZZZZZZZZZ0', plan: 'art_01J9ZZZZZZZZZZZZZZZZZZZZZ1', patch: null, review: 'art_01J9ZZZZZZZZZZZZZZZZZZZZZ2' },
   limitations: ['The patch was not applied.', 'Tests were not run.\nTwo lines.'],
   snapshotUsed: true,
@@ -56,21 +58,30 @@ const EXPECTED = [
   '',
   '## Steps',
   '',
-  '| Step | Revision | Retry | State | Profile | Model | Instructions | Settled (USD) | Certainty | Unknown (USD) |',
-  '|---|---|---|---|---|---|---|---|---|---|',
-  '| Find defects (review) | 0 | 0 | succeeded | Economy | anthropic/claude-haiku-4-5 | reviewer.v2 | 0.012345 | calculated | 0.000000 |',
-  '| approve | 1 | 0 | succeeded | — | — | — | 0.000000 | calculated | 0.000000 |',
-  '| implement | 2 | 1 | failed | Capable \\| big | anthropic/claude-opus-5-5 | — | 1.000000 | estimated | 0.250000 |',
+  '| Step | Revision | Retry | State | Profile | Model | Instructions | Cost (USD) | Certainty |',
+  '|---|---|---|---|---|---|---|---|---|',
+  '| Find defects (review) | 0 | 0 | succeeded | Economy | anthropic/claude-haiku-4-5 | reviewer.v2 | $0.012345 | calculated |',
+  '| approve | 1 | 0 | succeeded | — | — | — | $0.000000 | calculated |',
+  '| implement | 2 | 1 | failed | Capable \\| big | anthropic/claude-opus-5-5 | — | ~$1.000000 (estimated) + up to $0.250000 unknown | estimated |',
   '',
   '## Cost (tracked by Relay)',
   '',
   '- Run allowance: $3.000000',
+  '- Total so far: ~$1.012345 (includes estimates)',
   '- Settled, provider-reported: $0.000000',
   '- Settled, calculated from usage: $0.012345',
-  '- Settled, estimated: $1.000000',
+  '- Settled, estimated: ~$1.000000',
   '- Still reserved: $0.000000',
   '- Unknown charges: $0.250000',
-  '- Remaining: $1.737655',
+  '- Remaining: ~$1.737655',
+  '',
+  '## Estimated charges',
+  '',
+  '- implement attempt att_01J9ZZZZZZZZZZZZZZZZZZZZZ1: ~$1.000000 (estimated) — the outcome was uncertain; may not have been charged',
+  '',
+  '## Unknown charges',
+  '',
+  '- implement attempt att_01J9ZZZZZZZZZZZZZZZZZZZZZ0 (abandoned): up to $0.250000 may have been charged',
   '',
   '## Approvals',
   '',
@@ -84,10 +95,6 @@ const EXPECTED = [
   '- Quality revision cycles: 2 of 2',
   '- Plan revisions (requested changes or re-plans): 1',
   '- Ended incomplete because the revision limit was reached',
-  '',
-  '## Unknown charges',
-  '',
-  '- implement attempt att_01J9ZZZZZZZZZZZZZZZZZZZZZ0 (abandoned): up to $0.250000 may have been charged',
   '',
   '## Artifacts',
   '',
@@ -124,6 +131,41 @@ describe('renderReportMarkdown (F17 snapshot)', () => {
     const md = renderReportMarkdown({ ...FIXED_REPORT, status: 'completed', approvals: [], revisions: { cycles: 0, maxCycles: 2, planRevisions: 0, incompleteCause: null } });
 
     expect(md).toContain('## Approvals\n\nNo approval was requested.\n');
-    expect(md).toContain('- Quality revision cycles: 0 of 2\n- Plan revisions (requested changes or re-plans): 0\n\n## Unknown charges');
+    expect(md).toContain('- Quality revision cycles: 0 of 2\n- Plan revisions (requested changes or re-plans): 0\n\n## Artifacts');
+  });
+
+  it('decision 1: without estimates no "~" appears; without a legacy liability there is no "Unknown charges" section or line', () => {
+    const exact = { ...FIXED_REPORT, totals: { ...FIXED_REPORT.totals, settledEstimated: microusd(0), unknown: microusd(0), hasEstimates: false },
+      steps: FIXED_REPORT.steps.map((s) => ({ ...s, cost: { ...s.cost, certainty: 'calculated' as const, unknownMicrousd: microusd(0) } })), unknownLiabilities: [], estimatedCharges: [] };
+    const md = renderReportMarkdown(exact);
+
+    expect(md).not.toContain('~');
+    expect(md).not.toContain('Unknown charges');
+    expect(md).toContain('- Total so far: $0.012345\n');
+    expect(md).toContain('## Estimated charges\n\nNone.\n');
+    const legacy: Record<string, unknown> = { ...exact };
+    delete legacy['unknownLiabilities'];
+    delete legacy['estimatedCharges'];
+    expect(renderReportMarkdown(reportV1Schema.parse(legacy))).toContain('## Estimated charges\n\nNone.\n');
+  });
+
+  it('decision 1: an estimate the request may have reached the provider for has no "may not have been charged" note', () => {
+    const md = renderReportMarkdown({ ...FIXED_REPORT, estimatedCharges: [{ attemptId: 'att_01J9ZZZZZZZZZZZZZZZZZZZZZ1' as never, stepKey: 'implement' as never, amountMicrousd: 30_000 as never, mayNotHaveBeenCharged: false }] });
+
+    expect(md).toContain('- implement attempt att_01J9ZZZZZZZZZZZZZZZZZZZZZ1: ~$0.030000 (estimated) — the outcome was uncertain\n');
+  });
+
+  it('decision 2: an interim report says "In progress — exported <time>; N of M steps finished" and lists the finished step outputs (fence-safe)', () => {
+    const md = renderReportMarkdown({ ...FIXED_REPORT, status: 'running' }, {
+      exportedAt: Date.UTC(2026, 9, 2, 9, 30, 0), stepsFinished: 3, stepsTotal: 7,
+      outputs: [{ stepKey: 'review' as never, kind: 'findings', artifactId: 'art_01J9ZZZZZZZZZZZZZZZZZZZZZ0' as never, json: '{"summary":"has ``` fences"}' }],
+    });
+
+    expect(md.split('\n').slice(0, 5)).toEqual([
+      '# Relay run report (in progress) — run_01J9ZZZZZZZZZZZZZZZZZZZZZ0', '', '> In progress — exported 2026-10-02T09:30:00.000Z; 3 of 7 steps finished', '', '- Status: running',
+    ]);
+    expect(md).toContain('## Finished step outputs\n\n### review — findings (art_01J9ZZZZZZZZZZZZZZZZZZZZZ0)\n\n````json\n{\n  "summary": "has ``` fences"\n}\n````\n');
+    expect(renderReportMarkdown({ ...FIXED_REPORT, status: 'queued' }, { exportedAt: 0, stepsFinished: 0, stepsTotal: 7, outputs: [] }))
+      .toContain('## Finished step outputs\n\nNo step has finished with an output yet.\n\n## Artifacts');
   });
 });
