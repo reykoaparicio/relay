@@ -31,8 +31,11 @@ import {
   SummarySection,
   TerminalLead,
 } from '../features/report/ReportSections';
+import { exportPartResults, retryWhatOf } from '../features/report/export-results';
+import type { ExportPartResult } from '../features/report/export-results';
 import { useArtifactExport } from '../features/run-inspector/useRunExports';
 import { runLabel } from '../features/runs/run-display';
+import { RunSuggestionsLink } from '../features/memory/RunSuggestionsLink';
 import { href, paths } from '../features/shell/paths';
 import { useArtifact } from '../hooks/useArtifact';
 import { useNavPerf } from '../hooks/useNavPerf';
@@ -62,6 +65,7 @@ export function ReportPage() {
   const patch = patchParsed.success ? patchParsed.data : undefined;
   const exporter = useArtifactExport(runId);
   const [exportOpen, setExportOpen] = useState<ExportWhat | null>(null);
+  const [exportParts, setExportParts] = useState<readonly ExportPartResult[] | null>(null);
   const bannerId = useId();
   const tab = search.get('tab') === 'patch' && patchId !== null ? 'patch' : 'report';
 
@@ -83,16 +87,30 @@ export function ReportPage() {
 
   const openExport = (what: ExportWhat) => {
     exporter.reset();
+    setExportParts(null);
     setExportOpen(what);
   };
 
+  // E2 #10: a partial export keeps the dialog open with per-part "Written" / "Failed" rows (a warning, not an error
+  // toast); "Retry" re-exports only the failed parts and merges into the rows. Older mains (no `written` / `failed`)
+  // fall back to `displayPaths`.
   const doExport = (what: ExportWhat) => {
     exporter.mutate(what, {
       onSuccess: (res) => {
-        setExportOpen(null);
-        if (res.exported) {
-          toast.show({ key: `export:${runId}:${what}`, title: 'Export saved', body: res.displayPaths.join(', '), tone: 'success' });
+        if (!res.exported) {
+          setExportOpen(null);
+          setExportParts(null);
+          return;
         }
+        const rows = exportPartResults(res, exportParts ?? []);
+        if (rows !== null && retryWhatOf(rows) !== null) {
+          setExportParts(rows);
+          return;
+        }
+        const savedPaths = rows === null ? res.displayPaths : rows.flatMap((r) => (r.state === 'written' ? [r.displayPath] : []));
+        setExportOpen(null);
+        setExportParts(null);
+        toast.show({ key: `export:${runId}:${what}`, title: 'Export saved', body: savedPaths.join(', '), tone: 'success' });
       },
     });
   };
@@ -122,7 +140,7 @@ export function ReportPage() {
                 openExport('report');
               }}
             >
-              Export…
+              Export run…
             </Button>
           )}
         </>
@@ -191,14 +209,14 @@ export function ReportPage() {
 
   const reportContent = (
     <div className="stack">
-      <SummarySection report={report} run={run} />
+      <SummarySection report={report} run={run} after={<RunSuggestionsLink projectId={projectId} runId={runId} />} />
       <FindingsSection findings={findings} error={findingsQ.error} hasFindings={report.artifacts.findings !== null} />
-      <div className="grid grid-cols-2 items-start gap-5 max-[1024px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-5 max-[1024px]:grid-cols-1">
         <ApprovalsSection report={report} />
         <RevisionsSection report={report} />
       </div>
       <LimitationsSection report={report} />
-      <div className="grid grid-cols-2 items-start gap-5 max-[1024px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-5 max-[1024px]:grid-cols-1">
         <CostSection report={report} />
         <ArtifactsSection
           report={report}
@@ -278,12 +296,16 @@ export function ReportPage() {
         <ExportDialog
           open
           onOpenChange={(open) => {
-            if (!open) setExportOpen(null);
+            if (!open) {
+              setExportOpen(null);
+              setExportParts(null);
+            }
           }}
           hasPatch={patchId !== null}
           initial={exportOpen}
           pending={exporter.isPending}
           error={exporter.error}
+          parts={exportParts}
           onExport={doExport}
         />
       )}

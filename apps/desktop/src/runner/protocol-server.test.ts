@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CorrelationId } from '@relay/contracts';
+import type { CorrelationId, RunId } from '@relay/contracts';
 import { createProtocolServer } from './protocol-server.js';
 import type { RunnerPortLike, ServedRuntime } from './protocol-server.js';
 
@@ -153,5 +153,41 @@ describe('runner protocol server (H7)', () => {
     expect(port.sent[0]).toEqual({ kind: 'event', event: { type: 'providers.changed' } });
     expect(port.sent[1]).toEqual({ kind: 'ready', schemaVersion: 1, pid: 7 });
     expect(port.sent[2]).toMatchObject({ kind: 'heartbeat', activeRunId: null });
+  });
+
+  it('heartbeats carry the run whose request may be in flight (from forwarded run.status events)', async () => {
+    vi.useFakeTimers();
+    const { port, server } = setup();
+    const RUN = 'run_01J0000000000000000000000A' as RunId;
+    server.sendReady(1);
+
+    server.sendEvent({ type: 'run.status', runId: RUN, status: 'running', pauseReason: null, seq: 1 });
+    await vi.advanceTimersByTimeAsync(2_000);
+    server.sendEvent({ type: 'run.status', runId: RUN, status: 'paused', pauseReason: 'user', seq: 2 });
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    const beats = port.sent.filter((m) => (m as { kind: string }).kind === 'heartbeat') as { activeRunId: unknown }[];
+    expect(beats.map((b) => b.activeRunId)).toEqual([RUN, null]);
+    expect(server.activeRunId()).toBeNull();
+  });
+
+  it('sendFatal carries a reason when given (and omits it otherwise)', () => {
+    const { port, server } = setup();
+
+    server.sendFatal('DATABASE_UNAVAILABLE', 'The database file is damaged.', 'db_corrupt');
+    server.sendFatal('INTERNAL', 'boom');
+
+    expect(port.sent).toEqual([
+      { kind: 'fatal', code: 'DATABASE_UNAVAILABLE', message: 'The database file is damaged.', reason: 'db_corrupt' },
+      { kind: 'fatal', code: 'INTERNAL', message: 'boom' },
+    ]);
+  });
+
+  it('sendMaintenanceResult posts a validated maintenance.result', () => {
+    const { port, server } = setup();
+
+    server.sendMaintenanceResult('restore_latest_backup', { ok: true, restored: false, restoredFromDisplayPath: null, backupCreatedAt: null, previousMovedToDisplayPath: null });
+
+    expect(port.sent).toEqual([{ kind: 'maintenance.result', task: 'restore_latest_backup', result: { ok: true, restored: false, restoredFromDisplayPath: null, backupCreatedAt: null, previousMovedToDisplayPath: null } }]);
   });
 });

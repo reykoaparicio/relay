@@ -120,7 +120,7 @@ describe('SettingsPage (J10 M1 sections)', () => {
 
   // ----- Referee regressions -----
 
-  it('B5: a disconnect error next action routes (Restart runner → diagnostics) and never re-sends', async () => {
+  it('B5: a disconnect error next action restarts the runner in place (app.restartRunner) and never re-sends', async () => {
     const user = userEvent.setup();
     const { bridge, router } = renderApp('/settings/providers', { scenario: 'awaiting-approval' });
     const anthropic = await providersReady();
@@ -130,8 +130,9 @@ describe('SettingsPage (J10 M1 sections)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Remove key' }));
     await user.click(await within(dialog).findByRole('button', { name: 'Restart runner' }));
     await waitFor(() => {
-      expect(router.state.location.pathname).toBe('/settings/diagnostics');
+      expect(bridge.callsTo('relay/v1/app.restartRunner')).toHaveLength(1);
     });
+    expect(router.state.location.pathname).toBe('/settings/providers');
     expect(bridge.callsTo('relay/v1/providers.disconnect')).toHaveLength(1);
   });
 
@@ -189,7 +190,8 @@ describe('SettingsPage (J10 M1 sections)', () => {
     const banner = (await screen.findByText('OpenAI rejected the stored key')).closest('.banner');
     expect(banner).not.toBeNull();
     expect(banner).not.toHaveTextContent(/Nothing was sent/);
-    expect(banner).toHaveTextContent(/small test request/);
+    // auth-failed: the key was rejected during a run (lastTest.source 'run').
+    expect(banner).toHaveTextContent(/The key was rejected during a run/);
   });
 });
 

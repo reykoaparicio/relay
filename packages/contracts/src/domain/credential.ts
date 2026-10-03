@@ -24,6 +24,12 @@ export const credentialRefSchema = z.object({
 /** Credential reference. */
 export type CredentialRef = z.infer<typeof credentialRefSchema>;
 
+/** Where a provider's last test result came from (Settings connection test, or an AUTH_REQUIRED during a run). */
+export const PROVIDER_TEST_SOURCES = ['connection_test', 'run'] as const;
+export const providerTestSourceSchema = z.enum(PROVIDER_TEST_SOURCES);
+/** Provider test source. */
+export type ProviderTestSource = z.infer<typeof providerTestSourceSchema>;
+
 /** Provider connection state shown in Settings → Providers (FR-02: redacted only). */
 export const providerStatusSchema = z.object({
   providerId: providerIdSchema,
@@ -31,7 +37,9 @@ export const providerStatusSchema = z.object({
   connected: z.boolean(),
   storage: z.enum(['os_protected', 'session', 'none']),
   redactedLabel: z.string().max(REDACTED_LABEL_MAX).nullable(),
-  lastTest: z.object({ at: epochMsSchema, ok: z.boolean(), code: errorCodeSchema.optional() }).nullable(),
+  lastTest: z
+    .object({ at: epochMsSchema, ok: z.boolean(), code: errorCodeSchema.optional(), source: providerTestSourceSchema.optional() })
+    .nullable(),
 });
 /** Provider status. */
 export type ProviderStatus = z.infer<typeof providerStatusSchema>;

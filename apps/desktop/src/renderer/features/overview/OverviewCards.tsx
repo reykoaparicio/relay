@@ -22,11 +22,14 @@ import {
   StatusBadge,
   StatTile,
 } from '../../components/ui';
-import { formatMonth, stepKeyLabel } from '../../lib/format';
+import { formatMonth, statusPresentation, stepKeyLabel } from '../../lib/format';
+import { call } from '../../api/client';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { RUNS_MAX_PAGE } from '../../hooks/useRuns';
+import { useAppInfo } from '../../hooks/useAppInfo';
+import { defaultStep, INTERRUPTION_LEAD, interruptedStep, interruptionCauseOf, stepTitle } from '../run-inspector/inspector-model';
 import { useRunActions } from '../run-inspector/useRunActions';
 import { runLabel, RunCost } from '../runs/run-display';
 import { href, paths } from '../shell/paths';
@@ -114,9 +117,11 @@ export function OverviewStats({ project, activeCount, activeCapped = false, acti
 
 export function InterruptedBanner({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
-  const stuck = run.steps.find((s) => s.state === 'unknown' || s.state === 'executing' || s.state === 'failed');
+  // E2: an interrupted run's cause follows how the previous session ended (clean quit vs the runner stopped).
+  const lastShutdown = useAppInfo().data?.lastShutdown;
+  const interruptedAt = interruptedStep(run);
   const liability = addMicrousd(...run.unresolvedAttempts.flatMap((a) => (a.cost === null ? [] : [a.cost.microusd])));
-  const unknownStep = run.unresolvedAttempts[0]?.stepRunId ?? stuck?.id;
+  const unknownStep = run.unresolvedAttempts[0]?.stepRunId ?? interruptedAt?.id;
   const title =
     run.status === 'interrupted'
       ? `${runLabel(run.id)} was interrupted`
@@ -137,16 +142,16 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
       }
     >
       <p>
-        {run.status === 'interrupted' ? 'Relay closed while ' : 'Relay lost track of the request while '}
-        <b>{stuck === undefined ? 'a step' : stepKeyLabel(stuck.stepKey)}</b> was running. The last completed step is{' '}
-        <b>{lastDone === undefined ? 'none yet' : stepKeyLabel(lastDone.stepKey)}</b>. Completed outputs are intact and
+        {run.status === 'interrupted' ? INTERRUPTION_LEAD[interruptionCauseOf(lastShutdown)] : 'Relay lost track of the request while '}
+        <b>{interruptedAt === undefined ? 'a step' : stepTitle(interruptedAt, run.stepMeta)}</b> was running. The last completed step is{' '}
+        <b>{lastDone === undefined ? 'none yet' : stepTitle(lastDone, run.stepMeta)}</b>. Completed outputs are intact and
         will not be re-run automatically.
       </p>
       {run.unresolvedAttempts.length > 0 ? (
         <p className="inline-flex flex-wrap items-center gap-2">
           <StatusBadge kind="certainty" value="unknown" />
           {run.unresolvedAttempts.length} unresolved request{run.unresolvedAttempts.length === 1 ? '' : 's'} may already
-          have incurred a charge. Up to <Money value={liability} certainty="estimated" /> is held as unresolved
+          have incurred a charge. Up to <Money value={liability} certainty="unknown" /> is held as unresolved
           liability until you decide.
         </p>
       ) : null}
@@ -154,27 +159,45 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
   );
 }
 
-export function ProviderBanner({ provider }: { readonly provider: DisconnectedProvider }) {
+export function ProviderBanner({ projectId, provider }: { readonly projectId: string; readonly provider: DisconnectedProvider }) {
+  const key = provider.redactedLabel === null ? null : <span className="mono">{provider.redactedLabel}</span>;
   return (
     <InlineAlert
       tone="danger"
-      title={`Authentication failed for ${provider.displayName}`}
+      title={
+        provider.source === 'run'
+          ? `${provider.displayName} sign-in needed: a run is paused`
+          : `Authentication failed for ${provider.displayName}`
+      }
       actions={
         <>
           <ButtonLink as={Link} variant="danger" icon={Plug} to={paths.settings('providers')}>
             Reconnect {provider.displayName}
           </ButtonLink>
-          <ButtonLink as={Link} variant="ghost" to={paths.settings('providers')}>
-            Open provider settings
-          </ButtonLink>
+          {provider.source === 'run' && provider.runId !== undefined ? (
+            <ButtonLink as={Link} variant="ghost" to={paths.run(projectId, provider.runId)}>
+              Open {runLabel(provider.runId).toLowerCase()}
+            </ButtonLink>
+          ) : (
+            <ButtonLink as={Link} variant="ghost" to={paths.settings('providers')}>
+              Open provider settings
+            </ButtonLink>
+          )}
         </>
       }
     >
-      <p>
-        The stored key {provider.redactedLabel === null ? null : <span className="mono">{provider.redactedLabel}</span>} was
-        rejected during the last connection test (<span className="mono">AUTH_REQUIRED</span>). Workflows that use{' '}
-        {provider.displayName} cannot start until it is reconnected. No requests were sent with this key.
-      </p>
+      {provider.source === 'run' && provider.runId !== undefined ? (
+        <p>
+          {runLabel(provider.runId)} paused because {provider.displayName} rejected the stored key {key}. Reconnect the
+          provider, then resume the run; it continues from its last completed step. No charge is expected for the
+          refused request.
+        </p>
+      ) : (
+        <p>
+          The stored key {key} was rejected during the last connection test. Workflows that use {provider.displayName}{' '}
+          cannot start until it is reconnected. No requests were sent with this key.
+        </p>
+      )}
     </InlineAlert>
   );
 }
@@ -276,6 +299,57 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
   );
 }
 
+/**
+ * A paused run waiting for the user (any pause reason other than unknown outcome, which gets the RecoveryPanel): the
+ * pause label, what it means, and a link to the step it is blocked on.
+ */
+export function PausedAttentionCard({
+  projectId,
+  run,
+  otherPaused,
+}: {
+  readonly projectId: string;
+  readonly run: RunDetail;
+  /** Other paused runs not shown in this card. */
+  readonly otherPaused: number;
+}) {
+  const titleId = useId();
+  const presentation = statusPresentation('run', run.status, run.pauseReason);
+  const step = defaultStep(run);
+  return (
+    <Card labelledBy={titleId}>
+      <CardHeader
+        title="Needs your attention"
+        titleId={titleId}
+        actions={<StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} />}
+      />
+      <div className="stack">
+        <AttentionTitle run={run} />
+        <p>
+          <b>{presentation.label}.</b>{' '}
+          {presentation.detail === undefined ? null : `${presentation.detail}.`}
+          {step === undefined ? null : (
+            <>
+              {' '}Blocked at <b>{stepKeyLabel(step.stepKey)}</b>.
+            </>
+          )}
+        </p>
+        <SafeNote />
+      </div>
+      <div className="row">
+        <ButtonLink as={Link} variant="primary" to={paths.run(projectId, run.id, step === undefined ? {} : { step: step.id })}>
+          {step === undefined ? 'Open run' : 'Open blocked step'}
+        </ButtonLink>
+        {otherPaused > 0 ? (
+          <Link to={paths.runs(projectId, 'paused')}>
+            {otherPaused} more paused run{otherPaused === 1 ? '' : 's'}
+          </Link>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
 /** Interrupted or unknown-outcome run: RecoveryPanel (§4.4). Decisions that need the inspector go there. */
 export function RecoveryAttention({ projectId, run }: { readonly projectId: string; readonly run: RunDetail }) {
   const navigate = useNavigate();
@@ -306,36 +380,47 @@ export function StartCard({ project, templateVersion }: { readonly project: Proj
   const sample = useIdempotentMutation('relay/v1/projects.createSample', {
     onSuccess: (created) => {
       void queryClient.invalidateQueries({ queryKey: qk.projects() });
-      void queryClient.invalidateQueries({ queryKey: qk.settings() });
-      void navigate(paths.overview(created.id));
+      // The sample becomes the active project (the Settings fallback and the next launch open it).
+      void call('relay/v1/app.updateSettings', { activeProjectId: created.id })
+        .catch(() => undefined)
+        .then(() => {
+          void queryClient.invalidateQueries({ queryKey: qk.settings() });
+          void navigate(paths.overview(created.id));
+        });
     },
   });
+  // Already in the sample: offering it again would only reopen this project.
+  const offerSample = !project.isDemo;
   return (
     <Card labelledBy={titleId}>
       <CardHeader title="Start your first run" titleId={titleId} />
       <p className="muted">
-        {project.name} has no runs yet. Try the built-in sample first, or run the template against files from this
-        project.
+        {project.name} has no runs yet.{' '}
+        {offerSample
+          ? 'Try the built-in sample first, or run the template against files from this project.'
+          : 'Run the template against the sample files: it reviews a prepared change and proposes a fix.'}
       </p>
-      <div className="grid grid-cols-2 gap-4 max-[1100px]:grid-cols-1">
-        <div className="stack rounded-md border border-border bg-surface-raised p-4">
-          <strong>Try the sample project</strong>
-          <p className="subtle">A small fictional API with a prepared change. Nothing on your computer is modified.</p>
-          <div>
-            <Button
-              icon={Box}
-              pending={sample.isPending}
-              onClick={() => {
-                sample.mutate({});
-              }}
-            >
-              Try the sample project
-            </Button>
+      <div className={offerSample ? 'grid grid-cols-2 gap-4 max-[1100px]:grid-cols-1' : 'grid gap-4'}>
+        {offerSample ? (
+          <div className="stack rounded-md border border-border bg-surface-raised p-4">
+            <strong>Try the sample project</strong>
+            <p className="subtle">A small fictional API with a prepared change. Nothing on your computer is modified.</p>
+            <div>
+              <Button
+                icon={Box}
+                pending={sample.isPending}
+                onClick={() => {
+                  sample.mutate({});
+                }}
+              >
+                Try the sample project
+              </Button>
+            </div>
+            {sample.error === undefined || sample.error === null ? null : (
+              <ErrorView live="assertive" error={toViewError(sample.error)} onAction={() => { sample.mutate({}); }} />
+            )}
           </div>
-          {sample.error === undefined || sample.error === null ? null : (
-            <ErrorView live="assertive" error={toViewError(sample.error)} onAction={() => { sample.mutate({}); }} />
-          )}
-        </div>
+        ) : null}
         <div className="stack rounded-md border border-border bg-surface-raised p-4">
           <strong>
             Review &amp; propose a fix {templateVersion === null ? null : <span className="tag">v{templateVersion}</span>}
@@ -442,7 +527,20 @@ export function RecentRunsCard({ project, runs, now }: { readonly project: Proje
           emptyState={<p className="muted">No runs yet. Runs you start appear here with their status and tracked cost.</p>}
           columns={[
             { key: 'run', header: 'Run', nowrap: true, cell: (r) => <span className="mono">{runLabel(r.id)}</span> },
-            { key: 'goal', header: 'Goal', minWidth: '10rem', cell: (r) => r.goal },
+            {
+              key: 'goal',
+              header: 'Goal',
+              minWidth: '10rem',
+              // When it started sits under the goal: the Overview column is narrow at 1280 px (no sideways scroll).
+              cell: (r) => (
+                <span className="stack" style={{ gap: 0 }}>
+                  <span>{r.goal}</span>
+                  <span className="subtle small">
+                    Started <RelativeTime epochMs={r.createdAt} now={now} />
+                  </span>
+                </span>
+              ),
+            },
             { key: 'status', header: 'Status', nowrap: true, cell: (r) => <StatusBadge kind="run" value={r.status} pauseReason={r.pauseReason} /> },
             {
               key: 'cost',
@@ -450,7 +548,7 @@ export function RecentRunsCard({ project, runs, now }: { readonly project: Proje
               numeric: true,
               cell: (r) => <RunCost cost={r.cost} ledgerPath={paths.run(project.id, r.id, { tab: 'ledger' })} />,
             },
-            { key: 'started', header: 'Started', nowrap: true, cell: (r) => <span className="subtle"><RelativeTime epochMs={r.createdAt} now={now} /></span> },
+
           ]}
         />
       )}

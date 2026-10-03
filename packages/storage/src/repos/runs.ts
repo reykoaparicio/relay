@@ -202,6 +202,11 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
     },
     get,
     find,
+    findByIdempotencyKey(key) {
+      // `runs.idempotency_key` is UNIQUE (0001), so its implicit index serves this one-row lookup.
+      const row = driver.prepare('SELECT * FROM runs WHERE idempotency_key = ?').get(key);
+      return row === undefined ? undefined : mapRun(row);
+    },
     list,
     updateStatus,
     nextQueued() {
@@ -221,6 +226,12 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
         )
         .all(JSON.stringify(TERMINAL_RUN_STATUSES))
         .map(mapRun);
+    },
+    listTerminalIdsForProject(projectId) {
+      return driver
+        .prepare('SELECT id FROM runs WHERE project_id = ?1 AND status IN (SELECT value FROM json_each(?2)) ORDER BY created_at, id')
+        .all(projectId, JSON.stringify(TERMINAL_RUN_STATUSES))
+        .map((r) => new RowReader('runs', r).as('id', idSchema('run')));
     },
     incrementAttemptCount(id) {
       touch('UPDATE runs SET attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?', deps.clock.now(), id);
@@ -276,6 +287,19 @@ export function createRunRepo(driver: SqlDriver, deps: RepoDeps): RunRepo {
           stmt.run(runId, f.relPath, f.sha256, f.artifactId, f.sizeBytes, f.capturedAt);
         }
       });
+    },
+    latestProjectInputFiles(projectId, limit) {
+      // The newest captured hash per path over the project's runs (E2 #7 root re-point verification).
+      return driver
+        .prepare(
+          `SELECT f.* FROM run_input_files f JOIN runs r ON r.id = f.run_id
+            WHERE r.project_id = ?1
+              AND f.captured_at = (SELECT MAX(g.captured_at) FROM run_input_files g JOIN runs q ON q.id = g.run_id
+                                    WHERE q.project_id = ?1 AND g.rel_path = f.rel_path)
+            GROUP BY f.rel_path ORDER BY f.captured_at DESC, f.rel_path LIMIT ?2`,
+        )
+        .all(projectId, limit)
+        .map(mapInputFile);
     },
     inputFiles(runId) {
       return driver.prepare('SELECT * FROM run_input_files WHERE run_id = ? ORDER BY rel_path').all(runId).map(mapInputFile);

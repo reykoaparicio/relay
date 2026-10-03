@@ -1,5 +1,6 @@
 import { Link } from 'react-router';
-import type { CapabilityWarning } from '@relay/contracts';
+import type { CapabilityWarning, ProviderId } from '@relay/contracts';
+import { PROVIDER_LABELS } from '../../lib/format';
 import type { ProfileUse } from '../../hooks/useWorkflow';
 import { paths } from '../shell/paths';
 
@@ -19,14 +20,22 @@ export function UsageList({ usage, projectId }: { readonly usage: readonly Profi
   );
 }
 
-/** A profile's capability warnings as text (or "OK"). The engine decides them; nothing is re-checked here. */
-export function WarningList({ warnings }: { readonly warnings: readonly CapabilityWarning[] }) {
+/** A profile's capability warnings in plain words (or "OK"). The engine decides them; nothing is re-checked here. */
+export function WarningList({ warnings, providerId }: { readonly warnings: readonly CapabilityWarning[]; readonly providerId?: ProviderId }) {
   if (warnings.length === 0) return <span className="badge success">OK</span>;
+  const provider = providerId === undefined ? 'the provider' : PROVIDER_LABELS[providerId];
   return (
     <ul className="small" style={{ margin: 0, paddingLeft: 16 }}>
       {warnings.map((w, i) => (
-        <li key={`${w.code}:${String(i)}`}>
-          {w.message} <code>{w.code}</code>
+        <li key={`${w.code}:${String(i)}`} title={w.code}>
+          {w.code === 'missing_credential' ? (
+            <>
+              No API key is connected for {provider}.{' '}
+              <Link to={paths.settings('providers')}>Connect {provider}</Link>
+            </>
+          ) : (
+            w.message
+          )}
         </li>
       ))}
     </ul>

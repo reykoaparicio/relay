@@ -21,14 +21,15 @@ import {
   parseImportedDiff,
   readSelected,
   scanProject,
+  unacknowledgedSuspectedSecret,
   writeExportFile,
 } from '@relay/tools';
 import type { ArtifactStore } from '@relay/tools';
-import { globalTimers } from './clock.js';
+import { globalTimers, systemMonotonic } from './clock.js';
 import { createContextAssembler } from './context.js';
 import { logSafe } from './log-safe.js';
 import { createMemoryService } from './memory.js';
-import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, ExportPort, Logger, ProjectFsPort, Timers } from './ports.js';
+import type { BackupPort, CredentialResolver, EngineApi, EngineTestHooks, ExportPort, Logger, MonotonicClock, ProjectFsPort, Timers } from './ports.js';
 import { createEngine } from './runner.js';
 import { seedDatabase } from './seed.js';
 
@@ -44,6 +45,11 @@ export interface RuntimeOptions {
   readonly hooks?: EngineTestHooks;
   readonly callLog?: FakeCallLog;
   readonly clock?: Clock;
+  /**
+   * Monotonic clock for running segments (E1). Default: `performance.now()` with the system clock; none when a custom
+   * `clock` is injected (a manual test clock and a real monotonic clock would disagree).
+   */
+  readonly monotonic?: MonotonicClock;
   readonly fakeCapabilityOverrides?: Partial<ModelCapabilities>;
   readonly emit?: (e: PushEvent) => void;
   readonly logger?: Logger;
@@ -81,6 +87,7 @@ export function createProjectFs(userDataDir: string): ProjectFsPort {
     scan: (root, opts) => scanProject(root, opts),
     parseDiff: (text) => parseImportedDiff(text),
     checkDiffPaths: (root, diff, opts) => checkDiffPaths(root, diff, opts),
+    suspectedSecret: (file, acknowledged) => unacknowledgedSuspectedSecret(file, acknowledged),
   };
 }
 
@@ -122,6 +129,7 @@ export function createBackupPort(o: { db: Db; userDataDir: string; clock: Clock;
  */
 export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const clock = o.clock ?? systemClock;
+  const monotonic = o.monotonic ?? (o.clock === undefined ? systemMonotonic : undefined);
   const ids = createIdGen(clock, (n) => new Uint8Array(randomBytes(n)));
   const logger = o.logger ?? createStderrLogger();
   const timers = o.timers ?? globalTimers;
@@ -148,7 +156,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     const maintenance = createMaintenance({ db, artifacts, clock });
     const engine = createEngine({
       db, providers, projectFs, artifacts, context, memory, templates, credentials: o.credentials, maintenance, clock, ids, logger,
-      emit, timers, hooks: o.hooks, idleMs: o.idleMs,
+      emit, timers, hooks: o.hooks, idleMs: o.idleMs, monotonic,
       diagnostics: { dbSizeBytes: () => statSync(dbPath).size },
       requestLookup: supportsRequestLookupFor,
       connectionTestRequest,

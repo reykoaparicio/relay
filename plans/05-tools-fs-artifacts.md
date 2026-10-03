@@ -193,3 +193,16 @@ writeExportFile(destinationRealpath: string, name: string, bytes: Uint8Array, pr
 - [ ] Secret-class files are unreadable through every entry point (scan, read, diff intake, snapshot)
 - [ ] After intake, no content read goes to the live project disk; only `hashFiles` touches it (stale check)
 - [ ] Apart from the `put` write protocol and `sweepOrphans` (row-less files only), `purge` is the only code that chmods or unlinks a stored artifact
+
+## Addendum E2 (file-tool fixes, 2026-10-02)
+
+- A missing / moved project root is `PROJECT_ROOT_MISSING` (open, scan); `projects.relocateRoot` re-points it after
+  verifying the hashes of previously used files (or an explicit confirm).
+- A selected file that exists but cannot be read is `PERMISSION_DENIED` `unreadable` naming the relPath; the preview
+  lists such entries in `unreadable`.
+- Hard links (`nlink > 1`) are refused: scan exclusion `hard_link`, read denial `hard_link` (audit F5).
+- Content check (`detectSuspectedSecret`, shared redaction rules + `looksLikeSecret`): the preview flags
+  `suspectedSecret` + label + line; `readSelected({ secretCheck })` (intake) refuses unacknowledged hits with
+  `PERMISSION_DENIED` `suspected_secret`.
+- Exports write a hidden temp file and publish it with an exclusive link (copy fallback), so a failure never leaves a
+  0-byte file; `exportArtifacts` and `artifacts.exportTo` report per part (`written` / `failed`).

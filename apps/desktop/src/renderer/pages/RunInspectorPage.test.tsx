@@ -72,7 +72,7 @@ const STATES: readonly StateCase[] = [
   { state: 'budget-overrun', scenario: 'budget-overrun', banner: /The last call cost \$0\.71, more than the \$0\.62 reserved/ },
   { state: 'unknown-outcome', scenario: 'unknown-outcome', banner: 'The request may have been sent; its charge is unknown', proof: 'Recovery' },
   { state: 'schema-invalid', scenario: 'schema-invalid', banner: null, proof: 'The output did not match patch.v1' },
-  { state: 'output-invalid', scenario: 'output-invalid', banner: 'The output did not match patch.v1', proof: /Repair attempts used: 1 of 1/ },
+  { state: 'output-invalid', scenario: 'output-invalid', banner: 'Produce patch returned output in the wrong format', proof: /repair attempts used: 1 of 1/ },
   { state: 'provider-unavailable', scenario: 'provider-unavailable', banner: 'The provider did not respond after a retry' },
   { state: 'provider-unavailable (setup)', scenario: 'setup-blocked', banner: 'A setup check failed before the step could start' },
   { state: 'refused', scenario: 'refused', banner: 'The model declined this step' },
@@ -111,7 +111,9 @@ describe('RunInspectorPage', () => {
     if (run.availableActions.includes('approve')) await within(await screen.findByRole('region', { name: 'Proposed plan' })).findByRole('button', { name: 'Approve plan' });
     for (const action of RUN_ACTIONS) {
       // With unresolved attempts, the RecoveryPanel offers decide_unknown per attempt (one button per decision).
-      const perAttempt = action === 'decide_unknown' && run.unresolvedAttempts.length > 0;
+      // A finished run settles a left-over unknown charge from the banner's single button (no per-attempt rows).
+      const finished = ['completed', 'incomplete', 'cancelled', 'failed'].includes(run.status);
+      const perAttempt = action === 'decide_unknown' && run.unresolvedAttempts.length > 0 && !finished;
       const found = controls(perAttempt ? UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge : CONTROL_NAME[action]);
       if (run.availableActions.includes(action)) expect(found.length, `${action} should be shown`).toBeGreaterThan(0);
       else expect(found, `${action} must not be shown`).toHaveLength(0);
@@ -123,7 +125,7 @@ describe('RunInspectorPage', () => {
     const { router } = open('queued-auth-required');
     await ready();
     expect(screen.getByRole('heading', { level: 2, name: 'Plan a fix' })).toBeInTheDocument();
-    expect(screen.getByText('Needed by: Plan')).toBeInTheDocument();
+    expect(screen.getByText('Needed by: Plan a fix')).toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Attempts' }));
     expect(await screen.findByText('No attempts yet. Nothing has been sent to a provider.')).toBeInTheDocument();
     await user.click(within(screen.getByTestId('status-banner')).getByRole('link', { name: 'Reconnect provider' }));
@@ -132,17 +134,15 @@ describe('RunInspectorPage', () => {
     });
   });
 
-  it('queued auth_required: Resume while the key is still missing shows AUTH_REQUIRED and keeps the run paused', async () => {
-    const user = userEvent.setup();
-    const { bridge, run } = open('queued-auth-required');
+  it('queued auth_required: Resume stays disabled while the key is still missing, with the reason shown', async () => {
+    const { bridge } = open('queued-auth-required');
     await ready();
-    await user.click(within(screen.getByTestId('status-banner')).getByRole('button', { name: 'Resume' }));
+    const resume = within(screen.getByTestId('status-banner')).getByRole('button', { name: 'Resume' });
     await waitFor(() => {
-      expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(1);
+      expect(resume).toBeDisabled();
     });
-    expect(bridge.callsTo('relay/v1/runs.resume')[0]?.input).toMatchObject({ runId: run.id, decision: { kind: 'continue' } });
-    expect(bridge.world.runs[0]?.status).toBe('paused');
-    expect(await screen.findByText(/AUTH_REQUIRED/)).toBeInTheDocument();
+    expect(resume).toHaveAccessibleDescription(/Resume is unavailable: connect OpenAI in Settings → Providers first/);
+    expect(bridge.callsTo('relay/v1/runs.resume')).toHaveLength(0);
   });
 
   it('queued setup_blocked: Choose profile targets the step named by the readiness issue', async () => {
@@ -320,8 +320,12 @@ describe('RunInspectorPage', () => {
     const { bridge, run } = open('refused');
     await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
     const select = await screen.findByRole('combobox', { name: 'Profile' });
-    const options = within(select).getAllByRole('option').map((o) => o.textContent);
-    expect(options.some((o) => o.startsWith('Capable'))).toBe(false); // the current profile is not offered
+    // The current profile is listed for comparison, marked "(current)", and cannot be chosen again.
+    const current = within(select).getAllByRole('option').filter((o) => o.textContent.startsWith('Capable'));
+    expect(current).toHaveLength(1);
+    expect(current[0]).toBeDisabled();
+    expect(current[0]?.textContent).toMatch(/\(current\)$/);
+    expect((select as HTMLSelectElement).value).not.toBe(current[0]?.getAttribute('value'));
     await userEvent.click(screen.getByRole('button', { name: 'Retry step with this profile' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/runs.retryStep')).toHaveLength(1);
@@ -398,7 +402,7 @@ describe('RunInspectorPage', () => {
     const headers = within(table).getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers).toEqual(['Created', 'Step', 'Attempt', 'Type', 'Bucket', 'Delta', 'Certainty', 'Price catalog']);
     expect(within(table).getAllByRole('row').length - 1).toBe(bridge.world.ledger.get(run.id)?.length);
-    await userEvent.click(screen.getByRole('button', { name: 'Export ledger (CSV)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Export ledger (CSV)…' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/ledger.export')).toHaveLength(1);
     });
@@ -558,23 +562,23 @@ describe('RunInspectorPage regressions', () => {
     const { router } = renderApp(`${P}/runs/${run.id}?step=${old.id}&tab=events`, { bridge });
     const own = await screen.findByRole('list', { name: 'Events for this step' });
     await waitFor(() => {
-      expect(within(own).getAllByText('attempt.settled').length).toBeGreaterThan(0);
+      expect(within(own).getAllByTitle(/^attempt\.settled · /).length).toBeGreaterThan(0);
     });
-    expect(within(own).queryByText('attempt.dispatching')).not.toBeInTheDocument();
-    expect(within(own).queryByText('artifact.write_failed')).not.toBeInTheDocument();
-    expect(within(own).queryByText('error.recorded')).not.toBeInTheDocument();
+    expect(within(own).queryByTitle(/^attempt\.dispatching · /)).not.toBeInTheDocument();
+    expect(within(own).queryByTitle(/^artifact\.write_failed · /)).not.toBeInTheDocument();
+    expect(within(own).queryByTitle(/^error\.recorded · /)).not.toBeInTheDocument();
     const legacy = screen.getByRole('list', { name: 'Run-level events' });
-    expect(within(legacy).getByText('error.recorded')).toBeInTheDocument();
+    expect(within(legacy).getByTitle(/^error\.recorded · /)).toBeInTheDocument();
 
     await act(async () => {
       await router.navigate(`${P}/runs/${run.id}?step=${newer.id}&tab=events`);
     });
     const newerList = await screen.findByRole('list', { name: 'Events for this step' });
     await waitFor(() => {
-      expect(within(newerList).getByText('attempt.dispatching')).toBeInTheDocument();
+      expect(within(newerList).getByTitle(/^attempt\.dispatching · /)).toBeInTheDocument();
     });
-    expect(within(newerList).getByText('artifact.write_failed')).toBeInTheDocument(); // stepRunIds[] (revision events)
-    expect(within(newerList).queryByText('attempt.settled')).not.toBeInTheDocument();
+    expect(within(newerList).getByTitle(/^artifact\.write_failed · /)).toBeInTheDocument(); // stepRunIds[] (revision events)
+    expect(within(newerList).queryByTitle(/^attempt\.settled · /)).not.toBeInTheDocument();
   });
 
   it('B3: after Retry step the selection (and ?step=) moves to the newer row of the step', async () => {
@@ -731,5 +735,209 @@ describe('RunInspectorPage live announcements (A11Y-01)', () => {
 
     expect(announced).toEqual(['Run status: Paused by you.']);
     expect(otherLiveText()).not.toMatch(/Paused/);
+  });
+});
+
+/** Replaces the focus run of `bridge` (before render) with `patch` applied. */
+function patchRun(bridge: FakeBridge, patch: (run: RunDetail) => Partial<RunDetail>): RunDetail {
+  const run = focusRun(bridge);
+  const next = { ...run, ...patch(run) };
+  bridge.world.runs[0] = next;
+  return next;
+}
+
+/** Gives steps display names through `RunDetail.stepMeta` (E1). */
+function nameSteps(bridge: FakeBridge, names: Readonly<Record<string, string>>): RunDetail {
+  return patchRun(bridge, (run) => ({
+    stepMeta: (run.stepMeta ?? []).map((m) => ({ ...m, name: names[m.stepKey] ?? m.name })),
+  }));
+}
+
+function stepOf(run: RunDetail, stepKey: string): StepView {
+  const step = run.steps.find((s) => s.stepKey === stepKey);
+  if (step === undefined) throw new Error(`no ${stepKey} step`);
+  return step;
+}
+
+describe('RunInspectorPage E1 run-level fields', () => {
+  it('Attempts tab: "This step / Whole run" toggle lists every attempt of the run', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = nameSteps(bridge, { review: 'Code review' });
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'implement').id}&tab=attempts`, { bridge });
+    const group = await screen.findByRole('group', { name: 'Attempts to show' });
+    expect(within(group).getByRole('button', { name: 'This step' })).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByRole('table', { name: 'Attempts for Produce patch' })).toBeInTheDocument();
+    await userEvent.click(within(group).getByRole('button', { name: 'Whole run' }));
+    const table = screen.getByRole('table', { name: 'Attempts for the whole run, oldest first' });
+    expect(within(table).getAllByRole('row')).toHaveLength((run.attempts?.length ?? 0) + 1);
+    // The run-level view names each attempt's step (display name from stepMeta).
+    expect(within(table).getByText('Code review · Initial')).toBeInTheDocument();
+  });
+
+  it('Attempts tab: a step with no attempts opens on the whole run', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = focusRun(bridge);
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'approve').id}&tab=attempts`, { bridge });
+    expect(await screen.findByRole('table', { name: 'Attempts for the whole run, oldest first' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Whole run' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/has no attempts yet, so every attempt of the run is shown/)).toBeInTheDocument();
+  });
+
+  it('Attempts tab: an older runner without RunDetail.attempts shows the step table and no toggle', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = patchRun(bridge, () => ({ attempts: undefined }));
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'implement').id}&tab=attempts`, { bridge });
+    expect(await screen.findByRole('table', { name: 'Attempts for Produce patch' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Attempts to show' })).not.toBeInTheDocument();
+  });
+
+  it('Context tab: a step without a manifest shows the latest context of the run, fetched and schema-checked', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = nameSteps(bridge, { verify: 'Final check' });
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'approve').id}&tab=context`, { bridge });
+    expect(await screen.findByRole('heading', { name: 'Latest context sent (step Final check)' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.get').map((c) => c.input)).toContainEqual({ artifactId: run.latestManifest?.artifactId });
+    });
+    expect((await screen.findAllByText('Selected by you', {}, { timeout: 3000 })).length).toBeGreaterThan(0);
+  });
+
+  it('Context tab: a purged or missing latest manifest is explained, not an error', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = focusRun(bridge);
+    bridge.failNext('relay/v1/artifacts.get', errors.notFound('artifact'));
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'approve').id}&tab=context`, { bridge });
+    expect(await screen.findByText(/This manifest is no longer stored/)).toBeInTheDocument();
+  });
+
+  it('Choose profile: each option shows "reserves ≈ $X" and the current profile is marked', async () => {
+    open('budget-paused');
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    const select = await screen.findByRole('combobox', { name: 'Profile' });
+    const options = within(select).getAllByRole('option');
+    expect(options.length).toBeGreaterThan(1);
+    for (const o of options) expect(o.textContent).toMatch(/ · reserves ≈ \$\d+\.\d\d/);
+    const current = options.filter((o) => o.textContent.endsWith('(current)'));
+    expect(current).toHaveLength(1);
+    expect(current[0]).toBeDisabled();
+  });
+
+  it('Choose profile: a never-estimated step says "reserves at least ≈ $X"', async () => {
+    open('choose-profile-minimum');
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    const select = await screen.findByRole('combobox', { name: 'Profile' });
+    for (const o of within(select).getAllByRole('option')) expect(o.textContent).toMatch(/reserves at least ≈ \$\d/);
+  });
+
+  it('Choose profile: without profileOptions the permitted profiles are listed as before', async () => {
+    const bridge = createFakeBridge('budget-paused');
+    const run = patchRun(bridge, () => ({ profileOptions: [] }));
+    renderApp(`${P}/runs/${run.id}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose another profile' }));
+    const select = await screen.findByRole('combobox', { name: 'Profile' });
+    for (const o of within(select).getAllByRole('option')) expect(o.textContent).not.toMatch(/reserves/);
+  });
+
+  it('stepMeta: display names in the timeline and step header, with the instruction version', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = nameSteps(bridge, { implement: 'Write the fix' });
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'implement').id}`, { bridge });
+    expect(await screen.findByRole('heading', { level: 2, name: 'Write the fix' })).toBeInTheDocument();
+    const timeline = screen.getByRole('list', { name: 'Run steps' });
+    expect(within(timeline).getByText('Write the fix')).toBeInTheDocument();
+    expect(within(timeline).getByText('Review input')).toBeInTheDocument(); // unnamed steps keep the key label
+    expect(screen.getByTestId('step-instruction-version')).toHaveTextContent('Instructions implementer.v1');
+  });
+});
+
+describe('RunInspectorPage unknown requests', () => {
+  it('unknown-outcome: the request facts show the dispatch time and that no request id was recorded', async () => {
+    const { run } = open('unknown-outcome');
+    const banner = await screen.findByTestId('status-banner');
+    const facts = within(banner).getByRole('list', { name: 'Requests with an unknown outcome' });
+    expect(within(facts).getByText('No request id was recorded')).toBeInTheDocument();
+    const sent = within(facts).getByText('Sent').nextElementSibling?.querySelector('time');
+    expect(sent).toHaveAttribute('dateTime', new Date(run.unresolvedAttempts[0]?.startedAt ?? 0).toISOString());
+  });
+
+  it('unknown-outcome: a recorded provider request id is shown and copyable', async () => {
+    const bridge = createFakeBridge('unknown-outcome');
+    const run = patchRun(bridge, (r) => ({
+      unresolvedAttempts: r.unresolvedAttempts.map((a) => ({ ...a, providerRequestId: 'req_01JABCDEF' })),
+    }));
+    renderApp(`${P}/runs/${run.id}`, { bridge });
+    const banner = await screen.findByTestId('status-banner');
+    expect(within(banner).getByText('req_01JABCDEF')).toBeInTheDocument();
+    expect(within(banner).getByRole('button', { name: /Copy provider request id of Produce patch · attempt 1/ })).toBeInTheDocument();
+  });
+
+  it('cancelled (finished) run: "Decide on unknown charge" offers only accepting the estimate or marking failed', async () => {
+    const { run } = open('cancelled');
+    expect(run.unresolvedAttempts.length).toBeGreaterThan(0);
+    await userEvent.click(await screen.findByRole('button', { name: 'Decide on unknown charge' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Decide on the unknown request' });
+    const radios = within(dialog).getAllByRole('radio');
+    expect(radios.map((r) => r.getAttribute('value'))).toEqual(['accept_estimated_charge', 'mark_failed_keep_liability']);
+    expect(within(dialog).queryByText(UNKNOWN_OUTCOME_DECISION_LABELS.retry_acknowledging_charge)).not.toBeInTheDocument();
+    expect(within(dialog).getByText('No request id was recorded')).toBeInTheDocument();
+  });
+});
+
+describe('RunInspectorPage interrupted wording (AppInfo.lastShutdown)', () => {
+  it('interrupted (crash): the background runner stopped responding while the step was running', async () => {
+    open('interrupted');
+    const banner = await screen.findByTestId('status-banner');
+    await waitFor(() => {
+      expect(banner).toHaveTextContent(/The background runner stopped responding while Produce patch was running\./);
+    });
+  });
+
+  it('interrupted-quit (clean): Relay was closed while the step was running', async () => {
+    open('interrupted-quit');
+    const banner = await screen.findByTestId('status-banner');
+    await waitFor(() => {
+      expect(banner).toHaveTextContent(/Relay was closed while Produce patch was running\./);
+    });
+  });
+
+  it('no shutdown record: a neutral cause', async () => {
+    const bridge = createFakeBridge('interrupted');
+    bridge.world.info = { ...bridge.world.info, lastShutdown: null };
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    const banner = await screen.findByTestId('status-banner');
+    await waitFor(() => {
+      expect(banner).toHaveTextContent(/Relay stopped while Produce patch was running\./);
+    });
+  });
+});
+
+describe('RunInspectorPage exports', () => {
+  it('a part that failed to export is a warning naming the reason, not a success toast', async () => {
+    const bridge = createFakeBridge('completed');
+    const invoke = bridge.invoke.bind(bridge);
+    bridge.invoke = (async (channel: string, input: unknown) => {
+      if (channel !== 'relay/v1/artifacts.export') return invoke(channel as never, input as never);
+      await invoke(channel as never, input as never);
+      return {
+        ok: true,
+        data: {
+          exported: true,
+          displayPaths: ['~/Downloads/report.md'],
+          written: [{ what: 'report', displayPath: '~/Downloads/report.md' }],
+          failed: [{ what: 'patch', code: 'ARTIFACT_WRITE_FAILED', userMessage: 'The folder may be read-only.' }],
+        },
+      };
+    }) as typeof bridge.invoke;
+    renderApp(`${P}/runs/${focusRun(bridge).id}`, { bridge });
+    await userEvent.click(await screen.findByRole('button', { name: RUN_ACTION_LABELS.export_report }));
+    expect(await screen.findByText('Export partly saved')).toBeInTheDocument();
+    expect(screen.getByText(/Patch not saved: The folder may be read-only\./)).toBeInTheDocument();
+    expect(screen.queryByText('Export saved')).not.toBeInTheDocument();
+  });
+
+  it('a full export is a success toast', async () => {
+    open('completed');
+    await userEvent.click(await screen.findByRole('button', { name: RUN_ACTION_LABELS.export_report }));
+    expect(await screen.findByText('Export saved')).toBeInTheDocument();
   });
 });

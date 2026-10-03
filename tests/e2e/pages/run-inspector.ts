@@ -179,22 +179,20 @@ export class RunInspector {
   }
 
   /**
-   * Provider latency and app time of the selected step's last attempt, read from their two separately labelled
-   * columns ("Provider time", "App time").
+   * Provider latency and app time of the selected step's last attempt, read from its "Timing" details (two separately
+   * labelled values, "Provider time" and "App time").
    */
   async attemptTimings(): Promise<{ providerLatency: string; appTime: string }> {
     const table = await this.attemptsTable();
-    const headers = (await table.getByRole('columnheader').allTextContents()).map((h) => h.trim());
-    const p = headers.indexOf('Provider time');
-    const a = headers.indexOf('App time');
-    if (p < 0 || a < 0) throw new Error(`timing columns missing: ${headers.join(' | ')}`);
     const row = table
       .getByRole('row')
       .filter({ has: this.page.getByRole('cell') })
       .last();
-    // Direct children only (a cell's own content may hold nested roles).
-    const cells = (await row.locator(':scope > th, :scope > td').allTextContents()).map((c) => c.trim());
-    return { providerLatency: cells[p] ?? '', appTime: cells[a] ?? '' };
+    const details = row.locator('details', { hasText: 'Timing' });
+    if (!(await details.evaluate((d) => (d as HTMLDetailsElement).open))) await details.getByText('Timing').click();
+    const value = async (term: string) =>
+      ((await details.getByRole('term').filter({ hasText: term }).locator('xpath=following-sibling::dd[1]').textContent()) ?? '').trim();
+    return { providerLatency: await value('Provider time'), appTime: await value('App time') };
   }
 
   // ---- approval ------------------------------------------------------------------------------------------------------

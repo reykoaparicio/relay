@@ -35,6 +35,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
   const [scope, setScope] = useState<ScopeChoice>('all');
   const [pinned, setPinned] = useState(false);
   const [review, setReview] = useState('');
+  const [expiry, setExpiry] = useState('');
   const [sourcePath, setSourcePath] = useState('');
   const [submitted, setSubmitted] = useState(false);
   // After a success the dialog starts over: an empty form, no error, and a new intent (a fresh idempotency key).
@@ -45,10 +46,13 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
   });
 
   const reviewAt = parseDateInput(review);
+  const expiresAt = parseDateInput(expiry);
   const local: Record<string, string> = {};
   if (title.trim() === '') local[MEMORY_FIELD.title] = 'Enter a short title.';
   if (content.trim() === '') local[MEMORY_FIELD.content] = 'Enter the rule or decision.';
   if (reviewAt === undefined) local[MEMORY_FIELD.reviewAt] = 'Enter a date like 2026-12-31, or leave it empty.';
+  if (expiresAt === undefined) local[MEMORY_FIELD.expiresAt] = 'Enter a date like 2026-12-31, or leave it empty.';
+  else if (expiresAt !== null && expiresAt <= Date.now()) local[MEMORY_FIELD.expiresAt] = 'Choose a date in the future.';
   if (type === 'source_reference' && sourcePath.trim() === '') local[SOURCE_FIELD] = 'Enter the project-relative path of the file.';
   const server: Record<string, string> = {};
   for (const issue of validationIssuesOf(create.error)) {
@@ -67,6 +71,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
     setScope('all');
     setPinned(false);
     setReview('');
+    setExpiry('');
     setSourcePath('');
     setSubmitted(false);
   }
@@ -89,7 +94,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
         onSubmit={(e) => {
           e.preventDefault();
           setSubmitted(true);
-          if (Object.keys(local).length > 0 || reviewAt === undefined) return;
+          if (Object.keys(local).length > 0 || reviewAt === undefined || expiresAt === undefined) return;
           create.mutate({
             projectId,
             type,
@@ -98,6 +103,7 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
             scope: scopeFromChoice(scope),
             ...(pinned ? { pinned: true } : {}),
             ...(reviewAt === null ? {} : { reviewAt }),
+            ...(expiresAt === null ? {} : { expiresAt }),
             ...(type === 'source_reference' ? { sourceFile: { relPath: sourcePath.trim() } } : {}),
           });
         }}
@@ -166,6 +172,14 @@ export function AddRuleDialog({ projectId, open, onOpenChange, onCreated, titleO
           error={errorOf(MEMORY_FIELD.reviewAt)}
         >
           {(control) => <DateInput {...control} value={review} onValueChange={setReview} />}
+        </Field>
+        <Field
+          label="Expiry date (optional)"
+          id={MEMORY_FIELD.expiresAt}
+          hint="From this date runs no longer include the rule; it stays in history. Leave empty to keep it until you archive it."
+          error={errorOf(MEMORY_FIELD.expiresAt)}
+        >
+          {(control) => <DateInput {...control} value={expiry} onValueChange={setExpiry} />}
         </Field>
         <Checkbox label="Pin: always include this rule in runs within its scope" checked={pinned} onCheckedChange={setPinned} />
         {unmappedError === null ? null : (

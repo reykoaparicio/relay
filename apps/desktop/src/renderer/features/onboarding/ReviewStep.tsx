@@ -1,6 +1,5 @@
 import { useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { INPUT_CAPS } from '@relay/contracts';
 import { useNavigate } from 'react-router';
 import {
   BudgetBreakdownTable,
@@ -21,12 +20,23 @@ import { usePreview } from '../../hooks/usePreview';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useWorkflow } from '../../hooks/useWorkflow';
 import { useNextAction } from '../common/useNextAction';
-import { budgetFromError } from '../new-run/new-run-model';
+import { FilePicker } from '../new-run/FilePicker';
+import {
+  acknowledgedFor,
+  budgetFromError,
+  defaultFiles,
+  deniedSecretMessage,
+  deniedSecretsOf,
+  fileCheckboxIds,
+} from '../new-run/new-run-model';
+import { appErrorOf } from '../../api/errors';
+import { PROVIDER_LABELS } from '../../lib/format';
 import { paths } from '../shell/paths';
 import { checkAllowance, checkWhole, LIMIT_BOUNDS } from '../run-setup/limits';
 import { modelSteps, profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
 import { issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
-import { PreflightSummary, ProvidersReceiving } from '../run-setup/PreflightSummary';
+import { PreflightSummary, ProvidersReceiving, rolesByProvider } from '../run-setup/PreflightSummary';
+import { useProviders } from '../../hooks/useProviders';
 import { MissingPrerequisite } from './RuleTemplateSteps';
 import { StepFrame } from './StepFrame';
 import type { StepProps } from './StepFrame';
@@ -44,12 +54,19 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const preview = usePreview(project === null ? null : { projectId: project.id });
   const workflow = useWorkflow(wf?.id, wf?.version);
   const profiles = useProfiles();
+  const providers = useProviders();
   const goal = state.goal ?? (project?.isSample === true ? SAMPLE_GOAL : '');
   const debouncedGoal = useDebouncedValue(goal.trim(), 400);
 
   const allowance = checkAllowance(state.allowanceText ?? '3.00');
   const cycles = checkWhole(state.revisionText ?? '2', LIMIT_BOUNDS.maxRevisionCycles);
-  const relPaths = (preview.data?.included ?? []).slice(0, INPUT_CAPS.maxFiles).map((f) => f.relPath);
+  // Every included file except suspected secrets (E2 #11) until the user narrows the selection (New run's FilePicker:
+  // see and narrow the input); a suspected secret is added only by a confirmed tick.
+  const [chosenFiles, setChosenFiles] = useState<readonly string[] | null>(null);
+  const [acknowledged, setAcknowledged] = useState<readonly string[]>([]);
+  const relPaths = [...(chosenFiles ?? defaultFiles(preview.data))];
+  const acked = acknowledgedFor(relPaths, acknowledged);
+  const checkboxIds = fileCheckboxIds(preview.data);
   const rows =
     workflow.data === undefined || profiles.data === undefined ? [] : modelSteps(workflow.data.spec, profiles.data);
   const overrides =
@@ -63,7 +80,11 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
           projectId: project.id,
           workflowId: wf.id,
           workflowVersion: wf.version,
-          input: { kind: 'files' as const, relPaths },
+          input: {
+            kind: 'files' as const,
+            relPaths,
+            ...(acked.length === 0 ? {} : { acknowledgedSuspectedSecrets: acked }),
+          },
           limitOverrides: {
             ...('value' in allowance ? { budgetMicrousd: allowance.value } : {}),
             ...('value' in cycles ? { maxRevisionCycles: cycles.value } : {}),
@@ -100,6 +121,26 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
       })();
     },
   });
+  /** Focus a file's checkbox (a suspected-secret problem links back to it). */
+  const focusFile = (relPath: string | undefined) => {
+    const id = relPath === undefined ? undefined : checkboxIds.get(relPath);
+    if (id !== undefined) document.getElementById(id)?.focus();
+  };
+  const goToFile = (relPath: string | undefined) =>
+    relPath === undefined || !checkboxIds.has(relPath) ? null : (
+      <>
+        {' '}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            focusFile(relPath);
+          }}
+        >
+          Go to file
+        </Button>
+      </>
+    );
   const focusGoal = () => {
     document.getElementById('onboarding-goal')?.focus();
   };
@@ -125,10 +166,6 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
     edit_goal: focusGoal,
     reload: () => void preflight.refetch(),
     wait: () => void preflight.refetch(),
-  });
-  const onPreviewErrorAction = useNextAction({
-    reload: () => void preview.refetch(),
-    wait: () => void preview.refetch(),
   });
 
   if (project === null)
@@ -162,6 +199,11 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const settledCheck = matches && !preflight.isFetching && !preflight.isPlaceholderData;
   const fresh = settledCheck && preflight.isSuccess ? preflight.data : undefined;
   const pf = preflight.data;
+  // Who would receive a confirmed suspected secret: the checked run's providers, else the steps' providers.
+  const providerNames = (
+    pf?.inputSummary.providersReceivingContext ?? [...rolesByProvider(rows, state.profileSelection, profiles.data).keys()]
+  ).map((id) => PROVIDER_LABELS[id]);
+  const deniedSecrets = deniedSecretsOf(appErrorOf(start.error));
   const budgetError = budgetFromError(preflight.error);
   const budget = budgetError ?? (pf !== undefined && !pf.budget.allowed ? pf.budget : null);
   const blocked = budget !== null;
@@ -178,7 +220,9 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   const disabledReason = blocked
     ? 'Blocked by the run allowance. Go back and raise it.'
     : base === null
-      ? 'Waiting for the file preview.'
+      ? preview.data !== undefined && relPaths.length === 0
+        ? 'Select at least one file.'
+        : 'Waiting for the file preview.'
       : preflightFailed
         ? 'The run check failed. Retry it above.'
         : issues.length > 0 && settledCheck
@@ -217,10 +261,20 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
           />
         )}
       </Field>
+      <FilePicker
+        preview={preview.data}
+        error={preview.error}
+        onRetry={() => void preview.refetch()}
+        selected={relPaths}
+        acknowledged={acked}
+        providerNames={providerNames}
+        onChange={(next, ack) => {
+          setChosenFiles(next);
+          setAcknowledged(ack);
+        }}
+        fieldError={showErrors && preview.data !== undefined && relPaths.length === 0 ? 'Select at least one file.' : undefined}
+      />
       <h3>Input summary</h3>
-      {preview.error === null ? null : (
-        <ErrorView error={toViewError(preview.error)} onAction={onPreviewErrorAction} />
-      )}
       {preflight.error === null ? null : budgetError !== null ? (
         <InlineAlert
           tone="warning"
@@ -283,6 +337,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
                     <li key={`${i.path}:${i.code}`}>
                       {issueMessage(i, providerId, row === undefined ? null : ROLE_LABELS[row.role])}{' '}
                       <code className="small">{i.code}</code>
+                      {goToFile(fileOfIssuePath(i.path, preflightRelPaths(preflightInput)))}
                     </li>
                   );
                 })}
@@ -308,15 +363,42 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
             </InlineAlert>
           ) : null}
           <h3>Providers receiving data</h3>
-          <ProvidersReceiving preflight={pf} footnote="Excluded files such as .env are never sent." />
+          <ProvidersReceiving
+            preflight={pf}
+            roles={rolesByProvider(rows, state.profileSelection, profiles.data)}
+            statuses={providers.data}
+            footnote="Excluded files such as .env are never sent."
+          />
         </div>
       )}
       <p className="small">
         Relay will pause for your approval before drafting a patch. No project files will be modified.
       </p>
-      {start.error === null || start.error === undefined ? null : (
+      {start.error === null || start.error === undefined ? null : deniedSecrets.length > 0 ? (
+        <InlineAlert tone="danger" title="Relay did not start the run">
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {deniedSecrets.map((d) => (
+              <li key={d.relPath}>
+                {deniedSecretMessage(d)} <code className="small">suspected_secret</code>
+                {goToFile(d.relPath)}
+              </li>
+            ))}
+          </ul>
+        </InlineAlert>
+      ) : (
         <ErrorView live="assertive" error={toViewError(start.error)} onAction={onStartErrorAction} />
       )}
     </StepFrame>
   );
+}
+
+/** The `relPaths` of the checked input, else []. */
+function preflightRelPaths(input: { readonly input: { readonly relPaths: readonly string[] } } | null): readonly string[] {
+  return input?.input.relPaths ?? [];
+}
+
+/** The file an `input.relPaths.<i>` issue path names, else undefined. */
+function fileOfIssuePath(path: string, relPaths: readonly string[]): string | undefined {
+  const m = /^input\.relPaths\.(\d+)/.exec(path);
+  return m?.[1] === undefined ? undefined : relPaths[Number(m[1])];
 }

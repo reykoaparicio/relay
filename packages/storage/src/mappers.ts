@@ -27,6 +27,7 @@ import {
   pauseReasonSchema,
   profileSnapshotSchema,
   providerIdSchema,
+  providerTestSourceSchema,
   providerOptionsSchema,
   relPathSchema,
   runEventTypeSchema,
@@ -262,7 +263,7 @@ export function mapCredentialRef(row: unknown): CredentialRefRow {
     redactedLabel: r.text('redacted_label'),
     createdAt: r.ms('created_at'),
     updatedAt: r.ms('updated_at'),
-    lastTest: at === null ? null : { at, ok: ok ?? false, code: r.textN('last_test_code') },
+    lastTest: at === null ? null : { at, ok: ok ?? false, code: r.textN('last_test_code'), source: r.asN('last_test_source', providerTestSourceSchema) },
   });
 }
 

@@ -66,7 +66,7 @@ describe('ContextManifestView (§5.4 Context used)', () => {
     expect(valueOf('Providers receiving this context')).toBe('none');
     expect(screen.getByText('No project files in this context.')).toBeInTheDocument();
     expect(rowsOf('Memory in this context')[0]?.[3]).toBe('Omitted, stale source');
-    expect(rowsOf('Upstream artifacts')[0]?.slice(0, 2)).toEqual(['Review', 'findings.v1']);
+    expect(rowsOf('Upstream artifacts')[0]?.slice(0, 2)).toEqual(['Review input', 'findings.v1']);
     expect(screen.queryByRole('heading', { name: 'Left out' })).not.toBeInTheDocument();
   });
 });

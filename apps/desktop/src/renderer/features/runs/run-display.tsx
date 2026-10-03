@@ -4,9 +4,7 @@ import { Link } from 'react-router';
 import { Money, StatusBadge } from '../../components/ui';
 
 /** Short run label shown in lists ("Run 0024"): the id's last characters, which are unique per run. */
-export function runLabel(runId: string): string {
-  return `Run ${runId.slice(-4)}`;
-}
+export { runLabel } from '../../lib/format/labels';
 
 /** Settled total (reported + calculated + estimated). */
 function settledTotal(cost: CostSummary): Microusd {

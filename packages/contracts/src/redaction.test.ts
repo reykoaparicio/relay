@@ -71,9 +71,15 @@ describe('redactString', () => {
 
   it('keeps every sk- pattern anchored with the lookbehind', () => {
     const skPatterns = SECRET_PATTERNS.filter((p) => p.source.includes('sk-'));
+    // Specific prefixes may also follow a `\n`/`\t`/`\r` or `%XX` escape (audit F3); the generic rule may not.
+    const escBoundary = String.raw`(?:(?<![A-Za-z0-9])|(?<=\\[nrt]|%[0-9A-Fa-f]{2}))`;
+    const generic = skPatterns.filter((p) => p.source.startsWith('(?<![A-Za-z0-9])sk-['));
 
     expect(skPatterns).toHaveLength(5);
-    for (const p of skPatterns) expect(p.source.startsWith('(?<![A-Za-z0-9])')).toBe(true);
+    expect(generic).toHaveLength(1);
+    for (const p of skPatterns) {
+      expect(p.source.startsWith('(?<![A-Za-z0-9])') || p.source.startsWith(escBoundary)).toBe(true);
+    }
   });
 });
 
@@ -155,6 +161,57 @@ describe('redactString: escaped JSON (B3)', () => {
     expect(redactString(String.raw`{\"authorization\":\"a1b2c3d4e5f6g7h8i9j0\"}`)).toBe(
       String.raw`{\"authorization\":\"[REDACTED:…i9j0]\"}`,
     );
+  });
+});
+
+describe('redactString: keys after \\n / \\t / \\r escapes and %XX URL encodings (audit F3)', () => {
+  const OPENAI_PROJ_LONG = `${SK}proj-AbCdEf0123456789_-ghIJklMNopQRstUV`;
+
+  it.each([
+    ['JSON \\n before an Anthropic key', JSON.stringify({ error: { message: `Key rejected:\n${ANTHROPIC}` } }), ANTHROPIC],
+    ['JSON \\n before a Gemini key', JSON.stringify({ text: `config:\n${GEMINI}` }), GEMINI],
+    ['JSON \\t before an OpenAI project key', JSON.stringify({ t: `k\t${OPENAI_PROJ_LONG}` }), OPENAI_PROJ_LONG],
+    ['JSON \\r before an OpenAI service-account key', JSON.stringify({ t: `x\r${OPENAI_SVC}` }), OPENAI_SVC],
+    ['JSON \\n before an Anthropic admin key', JSON.stringify({ t: `x\n${ANTHROPIC_ADMIN}` }), ANTHROPIC_ADMIN],
+    ['JSON \\n before another Anthropic key', JSON.stringify({ t: `x\n${ANTHROPIC_OTHER}` }), ANTHROPIC_OTHER],
+    ['JSON \\n before a GitHub token', JSON.stringify({ t: `token:\n${GH_PAT}` }), GH_PAT],
+    ['JSON \\t before a fine-grained GitHub token', JSON.stringify({ t: `t\t${GH_FINE}` }), GH_FINE],
+    ['NDJSON in stderr', String.raw`{"level":"error","msg":"auth\n` + `${GEMINI}"}`, GEMINI],
+    ['URL-encoded JSON (%22)', `payload=%7B%22apiKey%22%3A%22${ANTHROPIC}%22%7D`, ANTHROPIC],
+    ['URL-encoded JSON, lowercase hex', `p=%7b%22k%22%3a%22${OPENAI_PROJECT}%22%7d`, OPENAI_PROJECT],
+    ['URL-encoded space before a GitHub token', `q=token%20${GH_SERVER}`, GH_SERVER],
+    ['URL-encoded colon before a Gemini key', `q=k%3A${GEMINI}`, GEMINI],
+  ])('redacts and detects: %s', (_name, text, key) => {
+    const out = redactString(text);
+
+    expect(out).not.toContain(key);
+    expect(out).toContain(`[REDACTED:`);
+    expect(out).toContain(`${key.startsWith(SK) ? SK : ''}…${key.slice(-4)}]`);
+    expect(redactString(out)).toBe(out);
+    expect(looksLikeSecret(text)).toBe(true);
+  });
+
+  it('keeps the surrounding escape sequence intact', () => {
+    expect(redactString(`"a\\n${ANTHROPIC}"`)).toBe('"a\\n[REDACTED:sk-…a1F9]"');
+    expect(redactString(`%22${GEMINI}%22`)).toBe(`%22[REDACTED:…${GEMINI.slice(-4)}]%22`);
+  });
+
+  it.each([
+    // The generic sk- rule keeps its plain left boundary: a letter/digit before it still blocks it, escape or not.
+    ['generic sk- after %2D', `x%2D${GENERIC}`],
+    ['generic sk- after \\n', `x\\n${GENERIC}`],
+    ['generic sk- after \\t', `x\\t${GENERIC}`],
+    // Specific prefixes inside words (no escape before the letter) are still not keys.
+    ['Anthropic prefix inside a word', `task${ANTHROPIC}`],
+    ['Gemini prefix inside a word', `m${GEMINI}`],
+    ['GitHub prefix inside a word', `x${GH_PAT}`],
+    // A backslash before some other letter, or a partial %X escape, is not an escape boundary.
+    ['backslash-x before a key', `\\x${OPENAI_PROJECT}`],
+    ['backslash-b before a key', `\\b${GH_PAT}`],
+    ['single hex digit after %', `%2${ANTHROPIC}`],
+    ['non-hex %XX', `%2G${GEMINI}`],
+  ])('does not redact: %s', (_name, text) => {
+    expect(redactString(text)).toBe(text);
   });
 });
 

@@ -32,7 +32,6 @@ import type { MemoryTab } from '../features/shell/paths';
 import { useMemoryList } from '../hooks/useMemoryList';
 import { useMemoryRecord } from '../hooks/useMemoryRecord';
 import { useNavPerf } from '../hooks/useNavPerf';
-import { NOW_IDLE_INTERVAL_MS, useNow } from '../hooks/useNow';
 import { useProject } from '../hooks/useProject';
 
 /** The open conflict panel: A and B (a suggestion is always A), and whether it came from "Combine with existing…". */
@@ -79,7 +78,6 @@ export function MemoryPage() {
   const archivedQ = useMemoryList(projectId, 'archived', { enabled: archivedSeen || mutations.archive.isSuccess });
   const lists = { approved: approvedQ, suggested: suggestedQ, archived: archivedQ } as const;
   const current = lists[tab];
-  const now = useNow(NOW_IDLE_INTERVAL_MS);
   const [addOpen, setAddOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -276,7 +274,7 @@ export function MemoryPage() {
           <MemoryDetail
             projectId={projectId}
             record={record}
-            now={now}
+            errorCommand={commandError === null ? null : command}
             headingRef={detailHeading}
             pending={commandPending}
             error={commandError}
@@ -311,7 +309,7 @@ export function MemoryPage() {
             onConfirmAccurate={() => {
               setCommand('confirm');
               mutations.update.mutate(
-                { recordId: record.id, expectedRevision: record.currentRevision, reviewAt: Date.now() },
+                { recordId: record.id, expectedRevision: record.currentRevision, confirmCurrent: true },
                 {
                   onSuccess: () => {
                     toast.show({ key: `memory:reviewed:${record.id}`, title: 'Confirmed still accurate', tone: 'success' });

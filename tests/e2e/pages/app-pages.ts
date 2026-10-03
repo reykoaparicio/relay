@@ -242,9 +242,9 @@ export class Settings {
     return this.page.getByRole('main').getByRole('combobox', { name: 'Project', exact: true });
   }
 
-  /** "Acts on project …" note shown when Settings fell back to the active project (no `?project=`). */
+  /** "Project: X (the active project) (change)": shown when Settings fell back to the active project (no `?project=`). */
   fallbackProjectNote(): Locator {
-    return this.page.getByRole('main').locator('.banner').filter({ hasText: /^Acts on project “/ });
+    return this.page.getByRole('main').getByText('(the active project)');
   }
 
   // ---- Projects ----------------------------------------------------------------------------------------------------

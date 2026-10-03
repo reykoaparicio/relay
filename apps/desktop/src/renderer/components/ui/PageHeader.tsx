@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 export interface Breadcrumb {
   readonly label: string;
   readonly href?: string;
+  /** Secondary detail in a tooltip (e.g. the project's full folder path behind "Local project"). */
+  readonly title?: string;
 }
 
 export interface PageHeaderProps {
@@ -26,9 +28,13 @@ export function PageHeader({ title, breadcrumbs = [], status, actions }: PageHea
               {breadcrumbs.map((b, i) => (
                 <li key={`${b.label}-${String(i)}`}>
                   {b.href === undefined ? (
-                    <span aria-current={i === breadcrumbs.length - 1 ? 'page' : undefined}>{b.label}</span>
+                    <span aria-current={i === breadcrumbs.length - 1 ? 'page' : undefined} title={b.title}>
+                      {b.label}
+                    </span>
                   ) : (
-                    <a href={b.href}>{b.label}</a>
+                    <a href={b.href} title={b.title}>
+                      {b.label}
+                    </a>
                   )}
                 </li>
               ))}

@@ -67,9 +67,11 @@ describe('push-sync', () => {
       vi.advanceTimersByTime(PUSH_INVALIDATE_DEBOUNCE_MS);
 
       const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
+      // The month's tracked cost ("Usage tracked by Relay") follows the status change too.
       expect(lists().map((c) => c[0]?.queryKey)).toEqual([
         ['runs', run.projectId],
         ['project', run.projectId],
+        ['project-cost', run.projectId],
       ]);
       expect(keys).not.toContainEqual(['runs']);
       // No page shows the detail: it is only marked stale (refetched on its next mount), never fetched by the push.
@@ -91,7 +93,7 @@ describe('push-sync', () => {
       bridge.emit({ type: 'run.status', runId: idSchema('run').parse('run_00000000000000000000099999'), status: 'completed', pauseReason: null, seq: 1 });
       vi.advanceTimersByTime(PUSH_INVALIDATE_DEBOUNCE_MS);
 
-      expect(spy.mock.calls.filter((c) => c[0]?.refetchType !== 'none').map((c) => c[0]?.queryKey)).toEqual([['runs'], ['project']]);
+      expect(spy.mock.calls.filter((c) => c[0]?.refetchType !== 'none').map((c) => c[0]?.queryKey)).toEqual([['runs'], ['project'], ['project-cost']]);
       stop();
     } finally {
       vi.useRealTimers();

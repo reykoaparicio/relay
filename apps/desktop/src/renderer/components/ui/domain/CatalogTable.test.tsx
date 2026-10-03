@@ -1,28 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { capabilityWarning, catalogModel } from '../test-fixtures';
 import { CatalogTable } from './CatalogTable';
 
 const CAPABILITY_HEADERS = ['Structured output', 'Streaming', 'Tools', 'Request lookup', 'Token counting'];
 
-function columnIndex(table: HTMLElement, header: string): number {
-  return within(table).getAllByRole('columnheader').findIndex((th) => th.textContent === header);
-}
-
 describe('CatalogTable', () => {
   const entry = catalogModel();
 
-  it('shows visible Yes/No text in every capability cell', () => {
+  it('shows visible Yes/No text for every capability in the row details, and supported ones in the table', async () => {
     render(<CatalogTable entries={[entry]} catalogVersion="2026-09-30" />);
     const table = screen.getByRole('table');
-    const cells = within(table).getAllByRole('row')[1]!.querySelectorAll('th, td');
-
+    await userEvent.click(within(table).getByText('Details'));
     for (const header of CAPABILITY_HEADERS) {
-      const text = cells[columnIndex(table, header)]?.textContent;
+      const text = within(table).getByText(header, { selector: 'dt' }).nextElementSibling?.textContent;
       expect(text === 'Yes' || text === 'No').toBe(true);
     }
-    expect(cells[columnIndex(table, 'Tools')]).toHaveTextContent('No');
-    expect(cells[columnIndex(table, 'Structured output')]).toHaveTextContent('Yes');
+    expect(within(table).getByText('Tools', { selector: 'dt' }).nextElementSibling).toHaveTextContent('No');
+    expect(within(table).getByText('Structured output', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Yes');
+    // The table itself keeps 7 columns at most: model, provider, capabilities, input/output price (+ profile checks).
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+      'Model',
+      'Provider',
+      'Capabilities',
+      'Input / MTok',
+      'Output / MTok',
+    ]);
   });
 
   it('formats prices per MTok with Money', () => {
@@ -35,8 +39,9 @@ describe('CatalogTable', () => {
     expect(row).toHaveTextContent('$6.25');
   });
 
-  it('renders the source URL as text with a copy button and no external link', () => {
+  it('renders the source URL as text with a copy button and no external link', async () => {
     const { container } = render(<CatalogTable entries={[entry]} catalogVersion="2026-09-30" />);
+    await userEvent.click(screen.getByText('Details'));
 
     expect(screen.getByText('https://example.com/pricing')).toBeVisible();
     expect(screen.getByRole('button', { name: /Copy source URL/ })).toBeInTheDocument();

@@ -141,7 +141,7 @@ export function ProfilesSection() {
       </p>
       {saved === null ? null : (
         <InlineAlert tone={saved.warnings.length === 0 ? 'success' : 'warning'} live="polite" title={`Saved “${saved.profile.name}” (revision ${String(saved.profile.revision)})`}>
-          {saved.warnings.length === 0 ? <p>No capability warnings.</p> : <WarningList warnings={saved.warnings} />}
+          {saved.warnings.length === 0 ? <p>No capability warnings.</p> : <WarningList warnings={saved.warnings} providerId={saved.profile.providerId} />}
         </InlineAlert>
       )}
       {body}

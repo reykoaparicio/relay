@@ -31,7 +31,7 @@ import { MutationError } from '../features/common/MutationError';
 import { useRetryAction } from '../features/common/useNextAction';
 import { paths } from '../features/shell/paths';
 import { LimitsCard, StepDetail, StepList } from '../features/workflow-editor/WorkflowEditorPanels';
-import { buildPatch, changedFields, initialForm, issueTarget, rebaseForm } from '../features/workflow-editor/workflow-form';
+import { buildPatch, changedFields, followSavedPrompts, initialForm, issueTarget, rebaseForm } from '../features/workflow-editor/workflow-form';
 import type { WorkflowForm } from '../features/workflow-editor/workflow-form';
 import { useIdempotentMutation } from '../hooks/useIdempotentMutation';
 import { useNavPerf } from '../hooks/useNavPerf';
@@ -148,8 +148,10 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
     onSuccess: (saved) => {
       queryClient.setQueryData(qk.workflow(summary.id, 'draft'), saved);
       void queryClient.invalidateQueries({ queryKey: qk.workflows() });
-      // The form holds the saved values: the saved draft is the new base.
-      editing.markSaved(saved);
+      // The form holds the saved values: the saved draft is the new base. An edited published prompt was saved under
+      // the next instruction version (reviewer.v1 → reviewer.v2): the form follows the saved draft's prompt keys.
+      const prevBase = editing.base;
+      editing.markSaved(saved, (current) => followSavedPrompts(prevBase, saved, current));
       setTriedSave(false);
     },
     onError: (e) => {
@@ -224,6 +226,16 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
   };
 
   const latest = summary.latestValidatedVersion;
+  // Published instruction versions (E1): those the latest validated version carries. Editing one creates the next vN.
+  const validatedQ = useWorkflow(summary.id, view.status === 'draft' ? latest : null);
+  const publishedPrompts: ReadonlySet<string> | null =
+    view.status === 'validated'
+      ? new Set(Object.keys(view.prompts))
+      : latest === null
+        ? new Set()
+        : validatedQ.data === undefined
+          ? null
+          : new Set(Object.keys(validatedQ.data.prompts));
   const nextVersion = (latest ?? 0) + 1;
   const busy = save.isPending || validate.isPending || publish.isPending;
   const canEdit = Object.entries(view.editable).some(([k, v]) => k !== 'structure' && v);
@@ -461,6 +473,7 @@ function WorkflowEditor({ projectId, summary, view, profiles }: WorkflowEditorPr
             profiles={profiles}
             errors={fieldErrors}
             showPrompt={showPrompt}
+            publishedPrompts={publishedPrompts}
             onShowPrompt={setShowPrompt}
             onChange={setForm}
           />

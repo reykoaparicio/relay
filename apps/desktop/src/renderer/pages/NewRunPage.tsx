@@ -2,14 +2,16 @@ import { useEffect, useMemo, useReducer, useState } from 'react';
 import type { SyntheticEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router';
-import { assertNever, INPUT_CAPS } from '@relay/contracts';
+import { assertNever } from '@relay/contracts';
 import { ButtonLink, ErrorView, InlineAlert, PageHeader, Skeleton, useLiveRegion } from '../components/ui';
 import { call } from '../api/client';
-import { toViewError } from '../api/errors';
+import { isProjectRootMissing, toViewError } from '../api/errors';
+import { ProjectRootMissing } from '../features/projects/ProjectRootMissing';
 import { qk } from '../api/keys';
 import { ErrorSummary } from '../features/common/ErrorSummary';
 import { useNextAction, useRetryAction } from '../features/common/useNextAction';
 import { BudgetBlockedPanel } from '../features/new-run/BudgetBlockedPanel';
+import { clearNewRunDraft, loadNewRunDraft, saveNewRunDraft } from '../features/new-run/new-run-draft';
 import {
   GoalInputCard,
   InputSummaryCard,
@@ -19,12 +21,15 @@ import {
   StartPanel,
   WorkflowCard,
 } from '../features/new-run/NewRunCards';
+import { UnreadableFileActions } from '../features/new-run/UnreadableFileActions';
 import {
   budgetFromError,
   buildStartInput,
   checkForm,
+  defaultFiles,
   deriveNewRunState,
   FIELD,
+  fileCheckboxIds,
   formReducer,
   INITIAL_FORM,
   limitDefaults,
@@ -32,6 +37,7 @@ import {
 } from '../features/new-run/new-run-model';
 import type { NewRunState } from '../features/new-run/new-run-model';
 import { modelSteps } from '../features/run-setup/model-steps';
+import { rolesByProvider } from '../features/run-setup/PreflightSummary';
 import { prefetchRunInspector } from '../features/shell/prefetch';
 import { href, paths } from '../features/shell/paths';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -44,6 +50,7 @@ import { useProfiles } from '../hooks/useProfiles';
 import { useProject } from '../hooks/useProject';
 import { useProviders } from '../hooks/useProviders';
 import { useWorkflow, useWorkflows } from '../hooks/useWorkflow';
+import { PROVIDER_LABELS } from '../lib/format';
 
 /** Preflight recomputes 400 ms after the last change (10 J7). */
 const PREFLIGHT_DEBOUNCE_MS = 400;
@@ -57,7 +64,11 @@ export function NewRunPage() {
   }, []);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [form, dispatch] = useReducer(formReducer, INITIAL_FORM);
+  // A draft of this project's form comes back after a trip elsewhere (e.g. Settings to raise the monthly allowance).
+  const [form, dispatch] = useReducer(formReducer, projectId, (id: string) => loadNewRunDraft(id) ?? INITIAL_FORM);
+  useEffect(() => {
+    saveNewRunDraft(projectId, form);
+  }, [projectId, form]);
 
   const project = useProject(projectId);
   const preview = usePreview(projectId === '' ? null : { projectId });
@@ -76,8 +87,8 @@ export function NewRunPage() {
     () => (spec === undefined || profiles.data === undefined ? [] : modelSteps(spec, profiles.data)),
     [spec, profiles.data],
   );
-  const files =
-    form.files ?? (preview.data?.included ?? []).slice(0, INPUT_CAPS.maxFiles).map((f) => f.relPath);
+  // Untouched: every included file except suspected secrets (E2 #11), up to the cap.
+  const files = form.files ?? defaultFiles(preview.data);
   const check = checkForm(form, texts, defaults, files.length);
   const wfVersion = wfSummary?.latestValidatedVersion ?? null;
   const wfRef =
@@ -99,6 +110,12 @@ export function NewRunPage() {
   const settled = useDebouncedValue(draftKey ?? '', PREFLIGHT_DEBOUNCE_MS);
   const preflight = usePreflight(settled === '' ? null : settled);
   const pf = preflight.data;
+  // `input.relPaths.<i>` preflight issues index the checked input's files: read them from the key it ran for.
+  const settledFiles = useMemo(() => relPathsOfKey(settled), [settled]);
+  const checkboxIds = useMemo(() => fileCheckboxIds(preview.data), [preview.data]);
+  // Who would receive a confirmed suspected secret: the checked run's providers, else the workflow's step providers.
+  const roles = rolesByProvider(rows, form.profileSelection, profiles.data);
+  const providerNames = (pf?.inputSummary.providersReceivingContext ?? [...roles.keys()]).map((id) => PROVIDER_LABELS[id]);
 
   const importDiff = useMutation({
     mutationFn: () => call('relay/v1/artifacts.importDiff', { projectId }),
@@ -122,6 +139,7 @@ export function NewRunPage() {
       }
     },
     onSuccess: (res) => {
+      clearNewRunDraft(projectId);
       void queryClient.invalidateQueries({ queryKey: ['runs', projectId] });
       void queryClient.invalidateQueries({ queryKey: qk.project(projectId) });
       void navigate(paths.run(projectId, res.runId));
@@ -152,6 +170,18 @@ export function NewRunPage() {
     startError: start.error,
     failedKey: failedInput,
     connectProviderAction: <Link to={paths.settings('providers')}>Connect provider</Link>,
+    fileAnchors: { relPaths: settledFiles, ids: checkboxIds },
+    unreadableAction: (relPath) =>
+      project.data === undefined ? undefined : (
+        <UnreadableFileActions
+          project={project.data}
+          relPath={relPath}
+          onDeselect={() => {
+            start.newIntent();
+            dispatch({ type: 'set-files', files: files.filter((p) => p !== relPath) });
+          }}
+        />
+      ),
   });
   const { budget, problems, fieldErrors, preflightSystemError } = state;
   const onSubmit = (e: SyntheticEvent) => {
@@ -242,6 +272,15 @@ export function NewRunPage() {
       </>
     );
   }
+  // E2 #7: the project folder was moved, renamed, or deleted — nothing can be previewed or started until it is found.
+  if (isProjectRootMissing(preview.error) || isProjectRootMissing(preflight.error) || isProjectRootMissing(start.error)) {
+    return (
+      <>
+        {header}
+        <ProjectRootMissing project={project.data} />
+      </>
+    );
+  }
   if (wfSummary === undefined) {
     return (
       <>
@@ -261,12 +300,23 @@ export function NewRunPage() {
         {budget === null ? null : (
           <BudgetBlockedPanel
             budget={budget}
-            projectId={projectId}
+            project={project.data}
+            rows={rows}
+            profiles={profiles.data}
+            selection={form.profileSelection}
+            onSelectProfile={(stepKey, profileId) => {
+              start.newIntent();
+              dispatch({ type: 'select-profile', stepKey, profileId });
+            }}
+            onProjectAllowanceSaved={() => {
+              start.newIntent();
+              void queryClient.invalidateQueries({ queryKey: qk.project(projectId) });
+              void queryClient.invalidateQueries({ queryKey: ['preflight'] });
+            }}
             onSetAllowance={(text) => {
               start.newIntent();
               dispatch({ type: 'patch', patch: { allowanceText: text } });
             }}
-            onChooseProfile={focusFirstProfile}
           />
         )}
         <div className="grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] items-start gap-5 max-[1100px]:grid-cols-1">
@@ -279,6 +329,7 @@ export function NewRunPage() {
               preview={{ data: preview.data, error: preview.error, refetch: () => void preview.refetch() }}
               importDiff={{ isPending: importDiff.isPending, error: importDiff.error, start: () => { importDiff.mutate(); } }}
               onImportErrorAction={onImportErrorAction}
+              providerNames={providerNames}
             />
             <WorkflowCard
               projectId={projectId}
@@ -312,7 +363,13 @@ export function NewRunPage() {
               onRetry={() => void preflight.refetch()}
               onErrorAction={onErrorAction}
             />
-            <ProvidersCard preflight={pf} systemError={preflightSystemError} />
+            <ProvidersCard
+              preflight={pf}
+              systemError={preflightSystemError}
+              inputKind={form.source === 'diff' ? 'diff' : 'files'}
+              roles={roles}
+              statuses={providers.data}
+            />
             <p className="small">No project files will be modified. Output is a proposed patch.</p>
             <StartPanel
               pending={start.isPending}
@@ -327,6 +384,18 @@ export function NewRunPage() {
       </form>
     </>
   );
+}
+
+/** The `input.relPaths` of a preflight key (`canonicalJson` of the checked input), else []. */
+function relPathsOfKey(key: string): readonly string[] {
+  if (key === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(key);
+    const input = (parsed as { input?: { relPaths?: unknown } } | null)?.input;
+    return Array.isArray(input?.relPaths) ? input.relPaths.filter((p): p is string => typeof p === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The header sentence for the derived state (validation-errors / budget-blocked / ready / checking). */
@@ -348,6 +417,8 @@ function NewRunStatusText({ state }: { readonly state: NewRunState }) {
           {problems.length === 1 ? 's' : ''} starting this run.
         </span>
       );
+    case 'needs_goal':
+      return <span>Checks passed. Enter a goal to start.</span>;
     case 'ready':
       return <span>All checks passed. Ready to start.</span>;
     case 'checking':

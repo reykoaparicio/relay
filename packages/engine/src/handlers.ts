@@ -4,6 +4,7 @@
 // live in project-handlers.ts / run-handlers.ts; the export/import, memory, and run-action handlers in their modules.
 import { ARTIFACT_INLINE_MAX_BYTES, PROVIDER_IDS, err, errors, ok } from '@relay/contracts';
 import type {
+  AppSettings,
   ArtifactContent,
   ArtifactMeta,
   CredentialRef,
@@ -25,12 +26,13 @@ import { recordResult, storedResult } from './idempotency.js';
 import * as memoryOps from './memory-handlers.js';
 import type { EngineCtx } from './ports.js';
 import { deleteProfile, profilesWithWarnings, upsertProfile } from './profiles.js';
-import { archiveProject, createFromRoot, previewRoot, projectDetail, updateProject } from './project-handlers.js';
+import { archiveProject, createFromRoot, previewRoot, projectDetail, relocateRoot, unarchiveProject, updateProject } from './project-handlers.js';
 import { decideUnknown, increaseAllowance, resumeRun, retryStep } from './run-actions.js';
 import { attemptStepKeys, cancelRun, pauseRun, runSummaryCost, stepDetail } from './run-handlers.js';
 import { preflightRun, startRun } from './run-start.js';
 import { SETTINGS_KEY, readSettings } from './settings.js';
 import { testProviderConnection } from './setup-calls.js';
+import { logSafe } from './log-safe.js';
 import { toLedgerEntryView, toRunDetail, toRunSummary } from './views.js';
 import { publishWorkflow, saveDraft, toWorkflowView, validateWorkflow } from './workflows.js';
 
@@ -65,7 +67,12 @@ function providerStatus(r: Repos, providerId: ProviderId): ProviderStatus {
     connected: ref !== undefined,
     storage: ref?.storageMode ?? 'none',
     redactedLabel: ref?.redactedLabel ?? null,
-    lastTest: test === null ? null : { at: test.at, ok: test.ok, ...(code === null || code === undefined ? {} : { code: code as NonNullable<ProviderStatus['lastTest']>['code'] & string }) },
+    // `source` (0004) tells a failed Settings connection test apart from an AUTH_REQUIRED during a run; null = recorded before 0004.
+    lastTest: test === null ? null : {
+      at: test.at, ok: test.ok,
+      ...(code === null || code === undefined ? {} : { code: code as NonNullable<ProviderStatus['lastTest']>['code'] & string }),
+      ...(test.source === null ? {} : { source: test.source }),
+    },
   };
 }
 
@@ -79,12 +86,43 @@ function diagnostics(ctx: EngineCtx) {
   const r = ctx.db.repos;
   return ok({
     runner: { state: 'ready' as const, pid: process.pid, lastHeartbeatAt: ctx.clock.now(), restarts: 0 },
-    db: { schemaVersion: ctx.db.schemaVersion(), migrationsPending: 0, sizeBytes: ctx.diagnostics?.dbSizeBytes() ?? 0 },
+    // E2 #5: the database file AND its WAL (an injected probe, if any, is only a fallback for Db fakes without one).
+    db: { schemaVersion: ctx.db.schemaVersion(), migrationsPending: 0, sizeBytes: dbSizeBytes(ctx) },
     unresolvedAttempts: r.attempts.listUnresolved().filter((a) => a.state === 'unknown').length,
     secureStorage: { available: false, backend: 'runner' }, // main owns secure storage and overrides this half
     catalog: { version: r.catalog.latestVersion(), models: r.catalog.list().length },
     prompts: { loaded: new Set(ctx.templates.seedVersions().flatMap((s) => Object.keys(s.promptsJson))).size },
   });
+}
+
+function dbSizeBytes(ctx: EngineCtx): number {
+  const own = typeof ctx.db.sizeBytes === 'function' ? ctx.db.sizeBytes() : 0;
+  return own > 0 ? own : (ctx.diagnostics?.dbSizeBytes() ?? 0);
+}
+
+/**
+ * `app.updateSettings`. Lowering `rawResponseRetentionDays` runs the raw-response retention sweep right away (E2 #19)
+ * instead of waiting up to 24 h for the next scheduled sweep; a sweep failure is logged, never fails the update.
+ */
+async function updateSettings(ctx: EngineCtx, patch: ParsedInputOf<'relay/v1/app.updateSettings'>): Promise<Result<AppSettings>> {
+  const before = readSettings(ctx.db.repos).rawResponseRetentionDays;
+  const res = ctx.db.txResult('immediate', (tx) => {
+    if (patch.activeProjectId !== undefined && patch.activeProjectId !== null && tx.projects.find(patch.activeProjectId) === undefined) {
+      return err(errors.validationFailed([{ path: 'activeProjectId', message: 'Unknown project.', code: 'unknown_project' }]));
+    }
+    const next = { ...readSettings(tx), ...patch };
+    tx.settings.set(SETTINGS_KEY, next);
+    return ok(readSettings(tx));
+  });
+  if (res.ok && res.value.rawResponseRetentionDays < before) {
+    try {
+      await ctx.maintenance.sweepRawResponses(ctx.clock.now(), res.value.rawResponseRetentionDays);
+      ctx.logger.info('retention.swept_on_settings_change', { retentionDays: res.value.rawResponseRetentionDays });
+    } catch (e) {
+      ctx.logger.warn('retention.sweep_failed', { err: logSafe(e) });
+    }
+  }
+  return res;
 }
 
 /** Artifact row → ArtifactMeta DTO (no absolute paths). */
@@ -145,20 +183,14 @@ export function createHandlers(ctx: EngineCtx): HandlerTable {
     'relay/v1/app.getDiagnostics': () => sync(() => diagnostics(ctx)),
     'relay/v1/app.createBackup': (input) => createBackupOp(ctx, input),
     'relay/v1/app.getSettings': () => sync(() => ok(readSettings(r))),
-    'relay/v1/app.updateSettings': (patch) =>
-      sync(() => ctx.db.txResult('immediate', (tx) => {
-        if (patch.activeProjectId !== undefined && patch.activeProjectId !== null && tx.projects.find(patch.activeProjectId) === undefined) {
-          return err(errors.validationFailed([{ path: 'activeProjectId', message: 'Unknown project.', code: 'unknown_project' }]));
-        }
-        const next = { ...readSettings(tx), ...patch };
-        tx.settings.set(SETTINGS_KEY, next);
-        return ok(readSettings(tx));
-      })),
+    'relay/v1/app.updateSettings': (patch) => updateSettings(ctx, patch),
     // projects
     'relay/v1/projects.list': (input) => sync(() => ok([...r.projects.list({ includeArchived: input.includeArchived ?? false })])),
     'relay/v1/projects.get': (input) => sync(() => projectDetail(ctx, input.projectId)),
     'relay/v1/projects.update': (input) => updateProject(ctx, input),
     'relay/v1/projects.archive': (input) => sync(() => archiveProject(ctx, input.projectId)),
+    'relay/v1/projects.unarchive': (input) => sync(() => unarchiveProject(ctx, input.projectId)),
+    'relay/v1/projects.relocateRoot': (input) => relocateRoot(ctx, input),
     'relay/v1/projects.createFromRoot': (input) => createFromRoot(ctx, input),
     'relay/v1/projects.previewRoot': (input) => previewRoot(ctx, input),
     'relay/v1/projects.exportTo': (input) => exportProject(ctx, input),

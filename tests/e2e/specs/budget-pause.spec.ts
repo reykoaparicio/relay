@@ -25,7 +25,8 @@ test.describe('budget pause', { tag: '@m4' }, () => {
     await expect(banner).toContainText('Nothing was sent to the provider.');
     const arith = banner.getByRole('table', { name: /Admission check/ });
     await expect(arith.getByRole('row', { name: /Run allowance/ })).toContainText('$0.10');
-    const total = dollars(await arith.getByRole('row', { name: /C \+ R \+ U \+ N/ }).textContent());
+    // The amount cell (the row header also says by how much the total exceeds L).
+    const total = dollars(await arith.getByRole('row', { name: /C \+ R \+ U \+ N/ }).getByRole('cell').last().textContent());
     expect(total).toBeGreaterThan(0.1);
     await expect(banner.getByText(/> \$0\.10\d* → blocked/)).toBeVisible();
 

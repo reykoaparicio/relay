@@ -1,6 +1,6 @@
 // Global push handler (10 J2): keeps cached queries in step with main/runner push events.
 //   run.status        → updates cached run summaries/details in place, then (debounced) refreshes that project's run
-//                       lists and stats, and the run detail if a page shows it and nothing refetched it meanwhile
+//                       lists, stats and tracked month cost, and the run detail if a page shows it and nothing refetched it meanwhile
 //   memory.changed    → invalidates that project's memory lists and its records
 //   providers.changed → invalidates providers
 //   runner.state      → reported to the shell banner
@@ -72,9 +72,15 @@ function cachedProjectOf(queryClient: QueryClient, runId: string): string | unde
  */
 function refreshRunDetail(queryClient: QueryClient, runId: string): void {
   const query = queryClient.getQueryCache().find({ queryKey: qk.run(runId), exact: true });
-  if (query === undefined || query.getObserversCount() === 0) return;
-  if (!query.state.isInvalidated || query.state.fetchStatus !== 'idle') return;
-  void queryClient.refetchQueries({ queryKey: qk.run(runId), exact: true, type: 'active' }, { cancelRefetch: false });
+  if (query !== undefined && query.getObserversCount() > 0 && query.state.isInvalidated && query.state.fetchStatus === 'idle') {
+    void queryClient.refetchQueries({ queryKey: qk.run(runId), exact: true, type: 'active' }, { cancelRefetch: false });
+  }
+  // Step details (output, issues, the approval a step waits on) follow the same rule: a second window that shows the
+  // run without streaming it must not keep an approval card for a step that has moved on.
+  for (const step of queryClient.getQueryCache().findAll({ queryKey: ['step', runId] })) {
+    if (step.getObserversCount() === 0 || !step.state.isInvalidated || step.state.fetchStatus !== 'idle') continue;
+    void queryClient.refetchQueries({ queryKey: step.queryKey, exact: true, type: 'active' }, { cancelRefetch: false });
+  }
 }
 
 /**
@@ -132,17 +138,21 @@ function applyRunStatus(queryClient: QueryClient, e: RunStatusPush, later: Inval
   // (Overview) gets it refetched at the end of the burst; an open inspector has refreshed it through useRunEvents by
   // then, and is left alone.
   void queryClient.invalidateQueries({ queryKey: qk.run(e.runId), exact: true, refetchType: 'none' });
+  void queryClient.invalidateQueries({ queryKey: ['step', e.runId], refetchType: 'none' });
   later.addRun(e.runId);
   // Status filters and project stats (active run, counts) depend on the status: refresh them in the background,
   // only for the run's project when the cache knows it.
   const projectId = cachedProjectOf(queryClient, e.runId);
+  // The month's tracked cost ("Usage tracked by Relay") moves with every settle/overrun a status change follows.
   if (projectId === undefined) {
     later.add(['runs']);
     later.add(['project']);
+    later.add(['project-cost']);
     return;
   }
   later.add(['runs', projectId]);
   later.add(qk.project(projectId));
+  later.add(qk.projectCost(projectId));
 }
 
 /** The project a cached memory record belongs to (`memory.get` data), if it is loaded. */

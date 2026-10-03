@@ -56,11 +56,15 @@ function setup(runnerReplies: Record<string, unknown> = {}) {
   const deps: CompositeDeps = {
     runner: { request } as unknown as CompositeDeps['runner'],
     dialogs, vault, samples,
-    supervisorState: () => ({ state: 'ready', restarts: 0, pid: 42, lastHeartbeatAt: epochMs(5) }),
+    supervisorState: () => ({ state: 'ready', restarts: 0, pid: 42, lastHeartbeatAt: epochMs(5), lastFatal: null, activeRunId: null }),
     appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
     homeDir: HOME,
     clock: { now: () => epochMs(1_700_000_000_000) },
-    writeTextFile: vi.fn(() => Promise.resolve()),
+    writeNewTextFile: vi.fn((p: string) => Promise.resolve(p)),
+    dbFile: `${HOME}/Library/Application Support/Relay/relay.sqlite`,
+    fileSize: vi.fn((p: string) => Promise.resolve(p.endsWith('-wal') ? 4096 : p.endsWith('.sqlite') ? 1_000_000 : null)),
+    loggingDegraded: () => false,
+    lastShutdown: () => null,
     notifyProvidersChanged: vi.fn(),
   };
   return { h: withErrorConformance(createCompositeHandlers(deps)), deps, request, dialogs, vault, setSelected: (v: boolean) => (selected = v) };
@@ -104,6 +108,25 @@ describe('composite handlers (H4)', () => {
     await h['relay/v1/projects.create']({ idempotencyKey: 'key-0000000001', selectionId: SEL, name: 'App', allowedProviderIds: [] });
 
     expect(dialogs.consumeSelection).not.toHaveBeenCalled();
+  });
+
+  it('projects.relocate resolves the selection, calls relocateRoot, keeps the token on an unverified-root CONFLICT, consumes it on success', async () => {
+    const verification = { checkedFiles: 3, matchedFiles: 1, mismatched: ['a.ts', 'b.ts'] };
+    const conflict = { ok: false, error: errors.conflict({ reason: 'root_unverified', verification }) };
+    const { h, request, dialogs } = setup({ 'relay/v1/projects.relocateRoot': conflict });
+
+    const first = await h['relay/v1/projects.relocate']({ projectId: PRJ, selectionId: SEL } as never);
+
+    expect(request).toHaveBeenCalledExactlyOnceWith('relay/v1/projects.relocateRoot', { projectId: PRJ, rootRealpath: `${HOME}/code/app`, rootDisplayPath: '~/code/app' });
+    expect(!first.ok && first.error.code).toBe('CONFLICT');
+    expect(dialogs.consumeSelection).not.toHaveBeenCalled();
+
+    request.mockResolvedValueOnce({ ok: true, data: { project: { id: PRJ }, verification } });
+    const second = await h['relay/v1/projects.relocate']({ projectId: PRJ, selectionId: SEL, confirm: true } as never);
+
+    expect(request).toHaveBeenLastCalledWith('relay/v1/projects.relocateRoot', expect.objectContaining({ confirm: true }));
+    expect(second.ok).toBe(true);
+    expect(dialogs.consumeSelection).toHaveBeenCalledExactlyOnceWith(SEL);
   });
 
   it('projects.previewFiles resolves the selection without consuming it', async () => {
@@ -206,7 +229,7 @@ describe('composite handlers (H4)', () => {
 
     const r = await h['relay/v1/app.getDiagnostics']({});
 
-    expect(r.ok && r.data.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0 });
+    expect(r.ok && r.data.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0, lastFatal: null });
     expect(r.ok && r.data.secureStorage).toEqual({ available: true, backend: 'keychain' });
   });
 });
@@ -226,7 +249,7 @@ describe('composite handlers: diagnostics export, sample project, preview by pro
       'relay/v1/runs.get': { ok: true, data: { id: RUN, statusDetail: { userMessage: `Auth failed for Bearer ${FAKE_KEY}` }, apiKey: FAKE_KEY } },
     });
     const r = await h['relay/v1/app.exportDiagnostics']({ includeRunIds: [RUN] } as never);
-    const written = vi.mocked(deps.writeTextFile).mock.calls.map((c) => c[1]);
+    const written = vi.mocked(deps.writeNewTextFile).mock.calls.map((c) => c[1]);
 
     expect(r).toEqual({ ok: true, data: { exported: true, displayPath: '~/exports/relay-diagnostics-2023-11-14.json' } });
     expect(written).toHaveLength(1);
@@ -236,7 +259,7 @@ describe('composite handlers: diagnostics export, sample project, preview by pro
     expect(text).toContain('[REDACTED:sk-…cdef]');
     const parsed = JSON.parse(text) as { runs: Record<string, unknown>[]; diagnostics: { runner: unknown } };
     expect(parsed.runs[0]).not.toHaveProperty('apiKey');
-    expect(parsed.diagnostics.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0 });
+    expect(parsed.diagnostics.runner).toEqual({ state: 'ready', pid: 42, lastHeartbeatAt: 5, restarts: 0, lastFatal: null });
   });
 
   it('app.exportDiagnostics: a cancelled save dialog writes nothing', async () => {
@@ -253,38 +276,117 @@ describe('composite handlers: diagnostics export, sample project, preview by pro
       rootRealpath: `${HOME}/Documents/Relay Samples/sample-api-1`, rootDisplayPath: '~/Documents/Relay Samples/sample-api-1', name: 'Sample API',
       exclusions: [], allowedProviderIds: ['anthropic' as const], monthlyAllowanceMicrousd: 20_000_000,
     };
-    const request = vi.fn((_c: string, input: unknown) => Promise.resolve({ ok: true, data: { id: PRJ, ...(input as object) } }));
+    const request = vi.fn((c: string, input: unknown) =>
+      Promise.resolve(c === 'relay/v1/projects.list' ? { ok: true, data: [] } : { ok: true, data: { id: PRJ, ...(input as object) } }));
     const copySample = vi.fn(() => Promise.resolve(ok({ realpath: createInput.rootRealpath, createInput })));
     const h = createCompositeHandlers({
       runner: { request } as unknown as CompositeDeps['runner'],
       dialogs: {} as DialogService, vault: {} as CredentialVault, samples: { copySample },
-      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      supervisorState: () => ({ state: 'ready', restarts: 0, lastFatal: null, activeRunId: null }),
       appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
-      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeNewTextFile: (p) => Promise.resolve(p), dbFile: '/ud/relay.sqlite', fileSize: () => Promise.resolve(null), loggingDegraded: () => false, lastShutdown: () => null, notifyProvidersChanged: () => undefined,
     });
 
     const r = await h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000001' });
 
     expect(copySample).toHaveBeenCalledExactlyOnceWith('key-0000000001');
-    expect(request).toHaveBeenCalledExactlyOnceWith('relay/v1/projects.createFromRoot', { idempotencyKey: 'key-0000000001', ...createInput, isDemo: true });
+    expect(request).toHaveBeenCalledWith('relay/v1/projects.list', {});
+    expect(request).toHaveBeenLastCalledWith('relay/v1/projects.createFromRoot', { idempotencyKey: 'key-0000000001', ...createInput, isDemo: true });
+    expect(request).toHaveBeenCalledTimes(2);
     expect(r.ok && (r.data as { isDemo?: boolean }).isDemo).toBe(true);
   });
 
   it('projects.createSample: a failed copy never reaches the runner', async () => {
-    const request = vi.fn();
+    const request = vi.fn((c: string) => Promise.resolve(c === 'relay/v1/projects.list' ? { ok: true, data: [] } : { ok: false, error: errors.conflict() }));
     const h = createCompositeHandlers({
-      runner: { request },
+      runner: { request } as unknown as CompositeDeps['runner'],
       dialogs: {} as DialogService, vault: {} as CredentialVault,
       samples: { copySample: () => Promise.resolve(err(errors.artifactWriteFailed())) },
-      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      supervisorState: () => ({ state: 'ready', restarts: 0, lastFatal: null, activeRunId: null }),
       appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
-      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeNewTextFile: (p) => Promise.resolve(p), dbFile: '/ud/relay.sqlite', fileSize: () => Promise.resolve(null), loggingDegraded: () => false, lastShutdown: () => null, notifyProvidersChanged: () => undefined,
     });
 
     const r = await h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000001' });
 
     expect(!r.ok && r.error.code).toBe('ARTIFACT_WRITE_FAILED');
-    expect(request).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalledWith('relay/v1/projects.createFromRoot', expect.anything());
+  });
+
+  it('projects.createSample returns the existing (non-archived) sample instead of copying it again — also for two quick clicks', async () => {
+    const sample = { id: PRJ, name: 'Sample API', isDemo: true, archivedAt: null };
+    const projects: unknown[] = [{ id: 'prj_01J0000000000000000000000B', isDemo: true, archivedAt: 5 }, { id: 'prj_01J0000000000000000000000C', isDemo: false, archivedAt: null }];
+    const request = vi.fn((c: string) => {
+      if (c === 'relay/v1/projects.list') return Promise.resolve({ ok: true, data: [...projects] });
+      projects.push(sample); // createFromRoot registers the sample
+      return Promise.resolve({ ok: true, data: sample });
+    });
+    const copySample = vi.fn(() => Promise.resolve(ok({ realpath: '/s', createInput: { rootRealpath: '/s', rootDisplayPath: '/s', name: 'Sample API', exclusions: [], allowedProviderIds: [], monthlyAllowanceMicrousd: null } })));
+    const { deps } = setup();
+    const h = createCompositeHandlers({ ...deps, runner: { request } as unknown as CompositeDeps['runner'], samples: { copySample } });
+
+    const [a, b] = await Promise.all([
+      h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000001' }),
+      h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000002' }),
+    ]);
+    const c = await h['relay/v1/projects.createSample']({ idempotencyKey: 'key-0000000003' });
+
+    expect(copySample).toHaveBeenCalledOnce(); // the archived demo and the non-demo project were not reused
+    expect([a, b, c].map((r) => r.ok && r.data.id)).toEqual([PRJ, PRJ, PRJ]);
+  });
+
+  it('app.getDiagnostics with the runner down reports lastFatal, the DB display path and the on-disk size (incl. -wal)', async () => {
+    const { deps } = setup({ 'relay/v1/app.getDiagnostics': { ok: false, error: errors.runnerUnavailable() } });
+    const lastFatal = { code: 'DATABASE_UNAVAILABLE' as const, reason: 'db_corrupt', message: 'database disk image is malformed', at: epochMs(9) };
+    const h = createCompositeHandlers({
+      ...deps, loggingDegraded: () => true, lastShutdown: () => ({ clean: false, at: epochMs(3), runActive: false }),
+      supervisorState: () => ({ state: 'unavailable', restarts: 0, lastFatal, activeRunId: null }),
+    });
+
+    const r = await h['relay/v1/app.getDiagnostics']({});
+
+    expect(r.ok && r.data.runner.lastFatal).toEqual(lastFatal);
+    expect(r.ok && r.data.db).toEqual({ schemaVersion: 0, migrationsPending: 0, sizeBytes: 1_004_096, displayPath: '~/Library/Application Support/Relay/relay.sqlite' });
+    expect(r.ok && r.data.loggingDegraded).toBe(true);
+    expect(r.ok && r.data.lastShutdown).toEqual({ clean: false, at: 3, runActive: false });
+    expect(getOperation('relay/v1/app.getDiagnostics')?.output.safeParse(r.ok && r.data).success).toBe(true);
+  });
+
+  it('app.getDiagnostics with a live runner replaces its DB size with the on-disk size and adds the display path', async () => {
+    const { h } = setup({
+      'relay/v1/app.getDiagnostics': {
+        ok: true, data: { db: { schemaVersion: 7, migrationsPending: 0, sizeBytes: 1 }, unresolvedAttempts: 0, catalog: { version: 'c1', models: 3 }, prompts: { loaded: 4 } },
+      },
+    });
+
+    const r = await h['relay/v1/app.getDiagnostics']({});
+
+    expect(r.ok && r.data.db).toEqual({ schemaVersion: 7, migrationsPending: 0, sizeBytes: 1_004_096, displayPath: '~/Library/Application Support/Relay/relay.sqlite' });
+  });
+
+  it('app.exportDiagnostics reports the path actually written (a taken name got a suffix)', async () => {
+    const { deps } = setup({ 'relay/v1/app.getDiagnostics': { ok: false, error: errors.runnerUnavailable() } });
+    const h = createCompositeHandlers({ ...deps, writeNewTextFile: (p) => Promise.resolve(p.replace(/\.json$/, ' (2).json')) });
+
+    const r = await h['relay/v1/app.exportDiagnostics']({});
+
+    expect(r).toEqual({ ok: true, data: { exported: true, displayPath: '~/exports/relay-diagnostics-2023-11-14 (2).json' } });
+  });
+
+  it('artifacts.export passes a partial export through: written parts as display paths, failed parts as-is', async () => {
+    const { h } = setup({
+      'relay/v1/artifacts.exportTo': {
+        ok: true,
+        data: { writtenRealpaths: [`${HOME}/exports/report.md`], written: [{ what: 'report', realpath: `${HOME}/exports/report.md` }], failed: [{ what: 'patch', code: 'ARTIFACT_WRITE_FAILED' }] },
+      },
+    });
+
+    const r = await h['relay/v1/artifacts.export']({ runId: RUN, what: 'both' } as never);
+
+    expect(r).toEqual({
+      ok: true,
+      data: { exported: true, displayPaths: ['~/exports/report.md'], written: [{ what: 'report', displayPath: '~/exports/report.md' }], failed: [{ what: 'patch', code: 'ARTIFACT_WRITE_FAILED' }] },
+    });
   });
 
   it('projects.previewFiles {projectId} previews the registered project without touching selections', async () => {
@@ -346,9 +448,9 @@ describe('providers.connect with a real vault (F5 regressions)', () => {
     const h = createCompositeHandlers({
       runner, vault,
       dialogs: {} as DialogService, samples: {} as SampleService,
-      supervisorState: () => ({ state: 'ready', restarts: 0 }),
+      supervisorState: () => ({ state: 'ready', restarts: 0, lastFatal: null, activeRunId: null }),
       appInfo: () => ({ version: '0', buildId: 'dev', electron: '44', node: '24', platform: 'darwin', userDataDisplayPath: '~', isPackaged: false, providerMode: 'fake', fakeScenario: null }),
-      homeDir: HOME, clock: { now: () => epochMs(0) }, writeTextFile: () => Promise.resolve(), notifyProvidersChanged: () => undefined,
+      homeDir: HOME, clock: { now: () => epochMs(0) }, writeNewTextFile: (p) => Promise.resolve(p), dbFile: '/ud/relay.sqlite', fileSize: () => Promise.resolve(null), loggingDegraded: () => false, lastShutdown: () => null, notifyProvidersChanged: () => undefined,
     });
     return { h, vault, refs };
   }

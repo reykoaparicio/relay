@@ -39,6 +39,7 @@ import type {
   Project,
   ProjectId,
   ProviderId,
+  ProviderTestSource,
   ProviderPolicy,
   RelPath,
   Result,
@@ -133,6 +134,16 @@ export interface ProjectRepo {
   update(id: ProjectId, patch: ProjectPatch, expectedUpdatedAt: EpochMs): Result<ProjectRow>;
   /** Sets `archived_at`; `updated_at` strictly increases (so a stale `update` CAS conflicts). False if absent/archived. */
   archive(id: ProjectId): boolean;
+  /**
+   * Clears `archived_at` (E2 #18). NOT_FOUND; CONFLICT `not_archived`, or `root_already_used` when another active
+   * project now uses the same folder (projects_root_active_uq).
+   */
+  unarchive(id: ProjectId): Result<ProjectRow>;
+  /**
+   * Re-points the project's root folder (E2 #7, after a move / rename). The caller verifies the new folder first.
+   * NOT_FOUND; CONFLICT when archived, on a stale `expectedUpdatedAt`, or `root_already_used` by another active project.
+   */
+  setRoot(id: ProjectId, root: { readonly rootRealpath: string; readonly rootDisplayPath: string }, expectedUpdatedAt?: EpochMs): Result<ProjectRow>;
   stats(id: ProjectId, monthStart: EpochMs): ProjectStats;
 }
 
@@ -144,7 +155,8 @@ export interface SettingsRepo {
 
 /** §12.2 credential reference plus the last connection test (no raw credential, ever). */
 export interface CredentialRefRow extends Readonly<CredentialRef> {
-  readonly lastTest: { readonly at: EpochMs; readonly ok: boolean; readonly code: string | null } | null;
+  /** `source` is null for results recorded before migration 0004. */
+  readonly lastTest: { readonly at: EpochMs; readonly ok: boolean; readonly code: string | null; readonly source: ProviderTestSource | null } | null;
 }
 
 export interface CredentialRefUpsert {
@@ -161,7 +173,8 @@ export interface CredentialRefRepo {
   get(providerId: ProviderId): CredentialRefRow | undefined;
   list(): readonly CredentialRefRow[];
   delete(providerId: ProviderId): boolean;
-  recordTest(providerId: ProviderId, ok: boolean, code: ErrorCode | null, at: EpochMs): boolean;
+  /** Records a provider test result and where it came from (`connection_test` from Settings, `run` from a run's auth failure). */
+  recordTest(providerId: ProviderId, ok: boolean, code: ErrorCode | null, at: EpochMs, source: ProviderTestSource): boolean;
 }
 
 // ---------------------------------------------------------------- catalog & profiles
@@ -430,6 +443,8 @@ export interface RunRepo {
   /** @throws RelayError NOT_FOUND */
   get(id: RunId): RunRow;
   find(id: RunId): RunRow | undefined;
+  /** The run created with `runs.start` idempotency key `key` (UNIQUE for ever, unlike the 24 h idempotency record). One indexed statement. */
+  findByIdempotencyKey(key: string): RunRow | undefined;
   /** Keyset pagination on (created_at, id). A cursor from another sort → VALIDATION_FAILED. */
   list(q: RunListQuery): Result<Page<RunRow>>;
   /** Compare-and-set: `UPDATE … WHERE id = ? AND status IN (from)`. Returns whether the row changed. */
@@ -438,6 +453,8 @@ export interface RunRepo {
   listActive(): readonly RunRow[];
   /** Terminal runs (completed / incomplete / cancelled / failed) with no `report` artifact row (06 F17 crash-safety), oldest first. */
   listTerminalWithoutReport(): readonly RunRow[];
+  /** Ids of the project's ended runs (completed / incomplete / cancelled / failed), oldest first (E2 #14 purge). */
+  listTerminalIdsForProject(projectId: ProjectId): readonly RunId[];
   incrementAttemptCount(id: RunId): void;
   setRevisionCycle(id: RunId, cycle: number): void;
   /** Sets (or clears with null) the durable deferred pause (06 F2 clarification 14). */
@@ -457,6 +474,8 @@ export interface RunRepo {
    */
   replaceInputFiles(runId: RunId, files: readonly RunInputFile[]): void;
   inputFiles(runId: RunId): readonly RunInputFile[];
+  /** The newest captured `run_input_files` row per relPath across the project's runs, newest first, at most `limit`. */
+  latestProjectInputFiles(projectId: ProjectId, limit: number): readonly RunInputFile[];
   /** ≤ 6 statements. @throws RelayError NOT_FOUND */
   getInspectorProjection(runId: RunId): InspectorProjection;
   /** {@link list} with each row's summary aggregates: 4 statements per page whatever its size (no per-run projection). */
@@ -931,6 +950,10 @@ export interface MemoryRepo {
   setAttributes(id: MemoryId, patch: MemoryAttributesPatch, at: EpochMs): void;
   /** Number of run snapshots that hold a copy of the record (`memory.delete` → `retainedInRunSnapshots`). */
   countRunSnapshots(recordId: MemoryId): number;
+  /** Run snapshots per revision of the record (E2 #17 history). */
+  countRunSnapshotsByRevision(recordId: MemoryId): ReadonlyMap<number, number>;
+  /** Latest `created_at` of `event` per record (one statement; E2 #16 `lastReviewedAt`). */
+  lastEventAt(recordIds: readonly MemoryId[], event: MemoryEventType): ReadonlyMap<MemoryId, EpochMs>;
   recordEvent(e: MemoryEventInsert): MemoryEventRow;
   snapshotForRun(runId: RunId, rows: readonly Omit<RunMemorySnapshotRow, 'runId'>[]): void;
   runSnapshot(runId: RunId): readonly RunMemorySnapshotRow[];
@@ -1042,5 +1065,14 @@ export interface Db {
   backupTo(dest: string): Promise<void>;
   /** Highest applied migration version. */
   schemaVersion(): number;
+  /** Bytes on disk of the database file plus its `-wal` (E2 #5). */
+  sizeBytes(): number;
+  /**
+   * Rolling automatic backup (E2 #4, storage `autoBackup`) into `<userData>/backups-auto/`: DB-only, atomic, pruned to
+   * the newest 5. Taken when `force`
+   * (clean shutdown) or when the newest automatic backup is older than a day; null when none was due or the Db was
+   * created without a backups dir.
+   */
+  autoBackup(opts?: { readonly force?: boolean }): Promise<{ readonly dir: string; readonly createdAt: number; readonly sizeBytes: number } | null>;
   close(): void;
 }

@@ -19,8 +19,8 @@ test.describe('pause states', { tag: '@m4' }, () => {
       await startRunViaNewRun(page, GOAL);
       const inspector = new RunInspector(page);
       await inspector.waitForStatus("Paused: output didn't match schema");
-      await expect(inspector.banner()).toContainText(/The output did not match/);
-      await expect(inspector.banner()).toContainText('The step failed and the run is paused.');
+      await expect(inspector.banner()).toContainText(/returned output in the wrong format/);
+      await expect(inspector.banner()).toContainText(/repair attempts used: \d+ of \d+/);
       await inspector.expectActions(['Retry step', 'Choose another profile', 'Stop run']);
       expect((await callLog()).filter((c) => c.stepKey === 'review').map((c) => c.purpose)).toEqual([
         'initial',
@@ -55,7 +55,8 @@ test.describe('pause states', { tag: '@m4' }, () => {
       const actual = dollars(await banner.getByRole('definition').nth(1).textContent());
       expect(actual).toBeGreaterThan(reserved);
       await expect(banner.getByRole('term').nth(0)).toHaveText('Reserved');
-      await expect(banner.getByRole('term').nth(1)).toHaveText('Reported by provider');
+      // The actual amount is labelled by its certainty, as in the Budget card (never a fixed "Reported by provider").
+      await expect(banner.getByRole('term').nth(1)).toHaveText(/^(Reported by provider|Calculated from usage|Estimated|Unknown charge)$/);
 
       await inspector.acknowledgeOverrun();
       await inspector.expectAwaitingApproval();

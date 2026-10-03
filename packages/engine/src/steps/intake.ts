@@ -18,15 +18,32 @@ import { blockRun, commitIfReady, setupBlocked } from './local.js';
 export type Snapshotted = { readonly file: SelectedFile; readonly ref: InputFileRef };
 
 /**
+ * The run input's explicit acknowledgement of suspected-secret files (E2 #11; `RunInput.acknowledgedSuspectedSecrets`).
+ * Used by BOTH preflight and intake (with the shared tools `unacknowledgedSuspectedSecret` predicate) so they agree.
+ * Read defensively so an input without the field means "none acknowledged". Only a `files` input can acknowledge: a
+ * `diff` input never can, so a suspected secret in a file its diff references always blocks the run (fail closed).
+ */
+export function acknowledgedSuspectedSecrets(input: RunRow['input']): string[] {
+  if (input.kind !== 'files') return [];
+  const v: unknown = (input as { readonly acknowledgedSuspectedSecrets?: unknown }).acknowledgedSuspectedSecrets;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/**
  * Reads `relPaths` from the project root ONCE and snapshots their bytes as `input_file` artifacts (reusing this run's
- * existing snapshot per sha). Used by intake and by `resnapshot_and_replan` (06 F10).
+ * existing snapshot per sha). Used by intake and by `resnapshot_and_replan` (06 F10). A file whose content looks like a
+ * credential is refused (PERMISSION_DENIED `suspected_secret`, E2 #11) unless the run input acknowledges it. A missing
+ * project folder is PROJECT_ROOT_MISSING (E2 #7); an unreadable file PERMISSION_DENIED `unreadable` naming it (E2 #8).
  */
 export async function snapshotSelectedFiles(ctx: EngineCtx, runId: RunId, relPaths: readonly string[]): Promise<Snapshotted[] | { error: AppError }> {
   const run = ctx.db.repos.runs.get(runId);
   const project = ctx.db.repos.projects.getWithRoot(run.projectId);
   const root = await ctx.projectFs.openRoot(project.rootRealpath);
   if (!root.ok) return { error: root.error };
-  const read = await ctx.projectFs.readSelected(root.value, relPaths, { exclusions: project.exclusions });
+  const read = await ctx.projectFs.readSelected(root.value, relPaths, {
+    exclusions: project.exclusions,
+    secretCheck: { acknowledged: acknowledgedSuspectedSecrets(run.input) },
+  });
   if (!read.ok) return { error: read.error };
   const files = read.value.files;
   // An intake retry reuses the snapshots already committed for this run (one input_file artifact per unique sha).

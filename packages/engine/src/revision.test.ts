@@ -124,12 +124,12 @@ describe('F10 revision loop (fake scenarios)', () => {
     expect(r.approvals.get(approval?.payload['approvalId'] as never)?.invalidatedReason).toBe('scope_changed');
     expect(rows(r, runId, 'implement').at(-1)?.state).toBe('ready');
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['resnapshot_and_replan', 'use_preserved_snapshot', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['resnapshot_and_replan', 'stop']); // E1 #8: not a project change
 
     const preserved = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'preserve-key-0001', runId, decision: { kind: 'use_preserved_snapshot' } });
     const replan = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'replan-key-000001', runId, decision: { kind: 'resnapshot_and_replan' } });
 
-    expect(preserved.ok ? null : preserved.error.details?.['reason']).toBe('not_a_project_change');
+    expect(preserved.ok ? null : preserved.error.details?.['reason']).toBe('decision_not_applicable');
     expect(replan.ok && replan.data.status).toBe('queued');
     expect(rows(r, runId, 'plan').map((s) => [s.revisionIndex, s.state])).toEqual([[0, 'succeeded'], [1, 'pending']]);
     expect(rows(r, runId, 'implement').at(-2)?.state).toBe('skipped');

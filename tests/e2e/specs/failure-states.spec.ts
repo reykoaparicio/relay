@@ -25,8 +25,9 @@ test.describe('failure states', { tag: '@m4' }, () => {
       await expect(inspector.timelineStep('Review input')).toContainText('Done');
       const rows = await inspector.attemptRows();
       await expect(rows).toHaveCount(2);
-      await expect(rows.nth(0)).toContainText('Review · Initial');
-      await expect(rows.nth(1)).toContainText('Review · Schema repair');
+      // The Attempts tab is per step: the Step column names the purpose only ("Initial", "Repair").
+      await expect(rows.nth(0)).toContainText('Initial');
+      await expect(rows.nth(1)).toContainText('Repair');
       await expect(rows.nth(1)).toContainText('Succeeded');
       const review = (await callLog()).filter((c) => c.stepKey === 'review').map((c) => c.purpose);
       expect(review).toEqual(['initial', 'schema_repair']);

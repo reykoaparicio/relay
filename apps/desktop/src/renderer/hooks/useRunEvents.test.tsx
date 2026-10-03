@@ -180,7 +180,10 @@ describe('useRunEvents (gapless contract, 02 §B5)', () => {
       const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
       expect(keys).toContainEqual(['run', run.id]);
       expect(keys).toContainEqual(['ledger', run.id]);
-      expect(spy).toHaveBeenCalledTimes(3); // run, ledger, step — once for both events
+      // A ledger event also refreshes the project's month cost ("Usage tracked by Relay"), once.
+      // (the run detail is not cached here, so every project's month cost is refreshed: ['project-cost']).
+      expect(keys.some((k) => Array.isArray(k) && k[0] === 'project-cost')).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(4); // run, ledger, step, project cost — once for both events
     } finally {
       vi.useRealTimers();
     }

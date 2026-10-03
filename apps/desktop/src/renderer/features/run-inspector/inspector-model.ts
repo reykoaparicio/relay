@@ -1,16 +1,20 @@
 // Pure view-model helpers of the run inspector (10 J8). Nothing here decides which actions are allowed: buttons come
 // only from `RunDetail.availableActions` (06 F2); these helpers only pick what to show.
-import { budgetBreakdownSchema, validationIssueSchema } from '@relay/contracts';
+import { budgetBreakdownSchema, UNKNOWN_OUTCOME_DECISIONS, validationIssueSchema } from '@relay/contracts';
 import type {
   AppError,
   BudgetBreakdown,
+  LastShutdown,
+  PauseReason,
+  ProviderStatus,
   RunAction,
   RunDetail,
   RunEvent,
   StepView,
   ValidationIssue,
 } from '@relay/contracts';
-import { stepKeyLabel } from '../../lib/format';
+import { statusPresentation, stepKeyLabel } from '../../lib/format';
+import type { StatusPresentation, UnknownOutcomeDecision } from '../../lib/format';
 
 /** Tabs of the selected step panel (`?tab=`). `budget` / `summary` exist as tabs only below 1280 px. */
 export const PRIMARY_TABS = ['output', 'context', 'attempts', 'events', 'ledger'] as const;
@@ -25,20 +29,47 @@ export function parseInspectorTab(value: string | null): InspectorPanel {
     : 'output';
 }
 
-/** Workflow step titles as the user knows them (§5.4 mock); unknown keys are humanized. */
-const STEP_TITLES: Readonly<Record<string, string>> = {
-  intake: 'Read context',
-  review: 'Review input',
-  plan: 'Plan a fix',
-  approve: 'Approve plan',
-  implement: 'Produce patch',
-  verify: 'Review patch',
-  finalize: 'Finalize',
-};
-
-export function stepTitle(step: { readonly stepKey: string }): string {
-  return STEP_TITLES[step.stepKey] ?? stepKeyLabel(step.stepKey);
+/**
+ * A step's title: its display name from the workflow spec (`RunDetail.stepMeta[].name`, E1) when the run carries one,
+ * else the shared label source ({@link stepKeyLabel}), so every view names a step the same way.
+ */
+export function stepTitle(step: { readonly stepKey: string }, stepMeta?: RunDetail['stepMeta']): string {
+  const name = stepMeta?.find((m) => m.stepKey === step.stepKey)?.name;
+  return name === undefined || name === null || name.trim() === '' ? stepKeyLabel(step.stepKey) : name;
 }
+
+/** The instruction version a model step ran with (`RunDetail.stepMeta`, e.g. "reviewer.v2"); null when not known. */
+export function instructionVersionOf(run: Pick<RunDetail, 'stepMeta'>, stepKey: string): string | null {
+  return run.stepMeta?.find((m) => m.stepKey === stepKey)?.instructionVersion ?? null;
+}
+
+/**
+ * The step that was in flight when an interrupted (or unknown-outcome) run stopped: the step of its first unresolved
+ * attempt, else the first step left executing / unknown / failed.
+ */
+export function interruptedStep(run: Pick<RunDetail, 'steps' | 'unresolvedAttempts'>): StepView | undefined {
+  const unresolved = run.unresolvedAttempts[0];
+  const byAttempt = unresolved === undefined ? undefined : run.steps.find((s) => s.id === unresolved.stepRunId);
+  return byAttempt ?? run.steps.find((s) => s.state === 'unknown' || s.state === 'executing' || s.state === 'failed');
+}
+
+/**
+ * Why an interrupted run stopped, from `AppInfo.lastShutdown` (E2): a clean quit, the runner stopped responding, or
+ * not known (no record, older main). The interrupted banners word their cause by it.
+ */
+export type InterruptionCause = 'quit' | 'runner_stopped' | 'unknown';
+
+export function interruptionCauseOf(lastShutdown: LastShutdown | null | undefined): InterruptionCause {
+  if (lastShutdown === null || lastShutdown === undefined) return 'unknown';
+  return lastShutdown.clean ? 'quit' : 'runner_stopped';
+}
+
+/** The lead of the cause sentence, to be followed by the step name and " was running". */
+export const INTERRUPTION_LEAD: Readonly<Record<InterruptionCause, string>> = {
+  quit: 'Relay was closed while ',
+  runner_stopped: 'The background runner stopped responding while ',
+  unknown: 'Relay stopped while ',
+};
 
 /** Only the latest `(revision, retry)` row of each step key is the "live" row (06 F3); older rows are history. */
 export function isLatestRow(step: StepView, steps: readonly StepView[]): boolean {
@@ -151,6 +182,22 @@ export function incompleteTitle(run: Pick<RunDetail, 'statusDetail' | 'revisionC
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<RunDetail['status']> = new Set(['completed', 'incomplete', 'cancelled', 'failed']);
 
+/** A finished run (completed / incomplete / cancelled / failed): nothing runs again, so nothing can be retried. */
+export function isFinishedRun(run: Pick<RunDetail, 'status'>): boolean {
+  return TERMINAL_RUN_STATUSES.has(run.status);
+}
+
+/** Decisions of an unknown request on a finished run (no retry). */
+const FINISHED_RUN_DECISIONS: readonly UnknownOutcomeDecision[] = ['accept_estimated_charge', 'mark_failed_keep_liability'];
+
+/**
+ * The unknown-outcome decisions offered for `run` (§4.4): all of them while the run can continue; on a finished run
+ * only settling the left-over charge (accept the estimate, or mark failed and keep the liability), never a retry.
+ */
+export function unknownDecisionsFor(run: Pick<RunDetail, 'status'>): readonly UnknownOutcomeDecision[] {
+  return isFinishedRun(run) ? FINISHED_RUN_DECISIONS : UNKNOWN_OUTCOME_DECISIONS;
+}
+
 const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([
   'awaiting_approval',
   'executing',
@@ -161,17 +208,22 @@ const ATTENTION_STATES: ReadonlySet<StepView['state']> = new Set([
 ]);
 
 /**
- * The step to show when the URL names none (§5.2 "opens the exact pending step"): the pending approval, else the
- * latest step that needs attention or is in flight, else the next step to run; for a finished run the last step with
- * an output; else the last finished one.
+ * The step to show when the URL names none (§5.2 "opens the exact pending step"): the pending approval, else (for a
+ * cost overrun) the step that overran, else the latest step that needs attention or is in flight, else the step a
+ * pause blocks / the next step to run; for a finished run the last step with an output; else the last finished one.
  */
-export function defaultStep(run: RunDetail): StepView | undefined {
+export function defaultStep(run: RunDetail, events: readonly RunEvent[] = []): StepView | undefined {
   const latest = run.steps.filter((s) => isLatestRow(s, run.steps));
   const approval = latest.find((s) => s.state === 'awaiting_approval');
   if (approval !== undefined) return approval;
   if (run.status === 'paused' && run.pauseReason === 'approval_stale') {
     const approve = latest.find((s) => s.stepKey === 'approve');
     if (approve !== undefined) return approve;
+  }
+  // A cost overrun is about the step whose request cost more than reserved, not the step that waits.
+  if (run.status === 'paused' && run.pauseReason === 'budget_overrun') {
+    const overran = overrunStep(run, events);
+    if (overran !== undefined) return overran;
   }
   const attention = [...latest].reverse().find((s) => ATTENTION_STATES.has(s.state));
   if (attention !== undefined) return attention;
@@ -213,6 +265,113 @@ export function blockedStep(run: RunDetail): StepView | undefined {
     latest.find((s) => s.profileName !== null && (s.state === 'ready' || s.state === 'pending' || s.state === 'reserved')) ??
     [...latest].reverse().find((s) => s.state === 'unknown')
   );
+}
+
+/**
+ * Attempt number per attempt id (`#seq` in the ledger), from `attempt.created` events: the payload's `seq` (engine),
+ * else the order of creation within the step row.
+ */
+export function attemptSeqsOf(events: readonly RunEvent[]): ReadonlyMap<string, number> {
+  const out = new Map<string, number>();
+  const perRow = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== 'attempt.created') continue;
+    const attemptId = e.payload['attemptId'];
+    if (typeof attemptId !== 'string' || out.has(attemptId)) continue;
+    const row = typeof e.payload['stepRunId'] === 'string' ? e.payload['stepRunId'] : '';
+    const n = (perRow.get(row) ?? 0) + 1;
+    perRow.set(row, n);
+    const seq = e.payload['seq'];
+    out.set(attemptId, typeof seq === 'number' && Number.isInteger(seq) ? seq : n);
+  }
+  return out;
+}
+
+/** When the run last changed to `paused` (its `run.status_changed` event), if the events show it. */
+function pausedAt(events: readonly RunEvent[]): number | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e?.type === 'run.status_changed' && (e.payload['to'] ?? e.payload['status']) === 'paused') return e.at;
+  }
+  return null;
+}
+
+/**
+ * Why Resume cannot help yet for a run paused `auth_required`: its provider has no key, or the key that was rejected
+ * has not passed a connection test since the pause. Null when Resume may proceed (or the run is not paused for
+ * sign-in, or the provider is not known).
+ */
+export function signInResumeBlockedReason(
+  run: RunDetail,
+  providers: readonly ProviderStatus[] | undefined,
+  events: readonly RunEvent[],
+): string | null {
+  if (run.status !== 'paused' || run.pauseReason !== 'auth_required' || providers === undefined) return null;
+  const providerId = stringDetail(run.statusDetail, 'providerId');
+  if (providerId === null) return null;
+  const p = providers.find((x) => x.providerId === providerId);
+  const name = p?.displayName ?? providerId;
+  if (p === undefined || !p.connected) return `connect ${name} in Settings → Providers first.`;
+  // Queued run paused for a missing key: a connected key is all it needed.
+  if (run.startedAt === null) return null;
+  const since = pausedAt(events) ?? 0;
+  if (p.lastTest !== null && p.lastTest.ok && p.lastTest.at >= since) return null;
+  return `reconnect ${name} first: its stored key was rejected. Resume becomes available after a successful connection test.`;
+}
+
+/** Short cause of a pause, for "Blocked: …" on the step it blocks. */
+const BLOCKED_BY: Readonly<Record<PauseReason, string>> = {
+  budget_run: 'run budget',
+  budget_project: 'monthly budget',
+  budget_overrun: 'cost overrun',
+  user: 'paused by you',
+  auth_required: 'provider sign-in',
+  rate_limited: 'rate limit',
+  setup_blocked: 'setup check',
+  approval_stale: 'approval out of date',
+  limit_attempts: 'attempt limit',
+  deadline: 'time limit',
+  output_invalid: 'invalid output',
+  provider_unavailable: 'provider unavailable',
+  model_refused: 'model declined',
+  unknown_outcome: 'unknown outcome',
+};
+
+/**
+ * The step a pause holds back (the one the run continues with once the cause is fixed): the approval gate of a stale
+ * approval, else {@link blockedStep}, else the next step to run. Undefined unless the run is paused for a cause.
+ */
+export function pauseBlockedStep(run: RunDetail): StepView | undefined {
+  // A user pause blocks nothing; an unknown outcome is about the unknown row itself (it already says so), and the
+  // recovery choices decide what runs next.
+  if (run.status !== 'paused' || run.pauseReason === null || run.pauseReason === 'user' || run.pauseReason === 'unknown_outcome') {
+    return undefined;
+  }
+  const latest = run.steps.filter((s) => isLatestRow(s, run.steps));
+  if (run.pauseReason === 'approval_stale') return latest.find((s) => s.stepKey === 'approve');
+  return blockedStep(run) ?? latest.find((s) => s.state === 'ready' || s.state === 'pending');
+}
+
+/** States that read wrong on a blocked step ("Ready", "Not started"): shown as "Blocked: …" instead. */
+const BLOCKABLE_STATES: ReadonlySet<StepView['state']> = new Set(['pending', 'ready', 'reserved', 'failed']);
+
+/**
+ * The status a step shows in the timeline and the step header: "Blocked: run budget" (etc.) for the step a pause
+ * holds back, never "Ready" or "Not started"; else its own state.
+ */
+export function stepPresentation(run: RunDetail, step: StepView, blocked: StepView | undefined = pauseBlockedStep(run)): StatusPresentation {
+  const own = statusPresentation('step', step.state);
+  if (blocked?.id !== step.id || run.pauseReason === null || !BLOCKABLE_STATES.has(step.state)) return own;
+  const pause = statusPresentation('pause', run.pauseReason);
+  return { label: `Blocked: ${BLOCKED_BY[run.pauseReason]}`, tone: 'warning', icon: pause.icon, ...(pause.detail === undefined ? {} : { detail: pause.detail }) };
+}
+
+/** The step row whose request cost more than reserved (the latest `ledger.overrun` names it), if known. */
+export function overrunStep(run: RunDetail, events: readonly RunEvent[]): StepView | undefined {
+  const o = lastOverrun(events);
+  if (o === null) return undefined;
+  if (o.stepRunId !== null) return run.steps.find((s) => s.id === o.stepRunId);
+  return o.stepKey === null ? undefined : latestRowOf(run.steps, o.stepKey);
 }
 
 /** `details.issues` of an OUTPUT_INVALID / VALIDATION_FAILED error (schema-checked; malformed entries dropped). */
@@ -263,16 +422,37 @@ export function hashMapDetail(error: AppError | null | undefined, key: string): 
   return out;
 }
 
-/** The latest `ledger.overrun` event (06 F4 payload `{ attemptId, N, X }`): reserved N vs actual X, in µUSD. */
-export function lastOverrun(events: readonly RunEvent[]): { readonly reserved: number; readonly actual: number; readonly attemptId: string | null } | null {
+export interface OverrunFact {
+  /** Reserved N, µUSD. */
+  readonly reserved: number;
+  /** Actual X, µUSD. */
+  readonly actual: number;
+  readonly attemptId: string | null;
+  /** The step row of the attempt (`payload.stepRunId`), when the event names it. */
+  readonly stepRunId: string | null;
+  readonly stepKey: string | null;
+}
+
+/**
+ * The latest `ledger.overrun` event (06 F4 payload `{ attemptId, stepRunId, N, X }`): reserved N vs actual X, in µUSD.
+ */
+export function lastOverrun(events: readonly RunEvent[]): OverrunFact | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
     if (e?.type !== 'ledger.overrun') continue;
     const n = e.payload['N'];
     const x = e.payload['X'];
     const attemptId = e.payload['attemptId'];
+    const stepRunId = e.payload['stepRunId'];
+    const stepKey = e.payload['stepKey'];
     if (typeof n === 'number' && typeof x === 'number') {
-      return { reserved: n, actual: x, attemptId: typeof attemptId === 'string' ? attemptId : null };
+      return {
+        reserved: n,
+        actual: x,
+        attemptId: typeof attemptId === 'string' ? attemptId : null,
+        stepRunId: typeof stepRunId === 'string' ? stepRunId : null,
+        stepKey: typeof stepKey === 'string' ? stepKey : null,
+      };
     }
   }
   return null;

@@ -3,11 +3,12 @@
 // `RunActionRequest`; the page dispatches it through `useRunActions` (the single action→op mapping).
 import { useId, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
-import { RUN_LIMIT_MAXIMUMS, UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
-import type { Microusd, ProfileWithWarnings, ProjectDetail, RunDetail, StepView } from '@relay/contracts';
+import { RUN_LIMIT_MAXIMUMS } from '@relay/contracts';
+import type { Microusd, ProfileOption, ProfileWithWarnings, ProjectDetail, RunDetail, StepView } from '@relay/contracts';
 import { Dialog, DialogFooter, Field, Money, MoneyInput, NumberInput, RadioGroup, Select } from '../../components/ui';
 import {
   formatDuration,
+  formatMoney,
   PROVIDER_LABELS,
   UNKNOWN_OUTCOME_DECISION_HINTS,
   UNKNOWN_OUTCOME_DECISION_LABELS,
@@ -15,7 +16,8 @@ import {
 import type { UnknownOutcomeDecision } from '../../lib/format';
 import { dollarsText } from '../run-setup/limits';
 import { ActionErrorNotice } from './ActionErrorNotice';
-import { stepTitle } from './inspector-model';
+import { isFinishedRun, stepTitle, unknownDecisionsFor } from './inspector-model';
+import { RequestFacts } from './RequestFacts';
 
 interface BaseDialogProps {
   readonly open: boolean;
@@ -164,31 +166,90 @@ export interface ProfileDialogProps extends BaseDialogProps {
   readonly step: StepView | undefined;
   /** Profiles the project permits: those whose provider is in the loaded project's `allowedProviderIds`. */
   readonly profiles: readonly ProfileWithWarnings[];
+  /**
+   * E1 `RunDetail.profileOptions` for the step (with the reservation each would need). When non-empty, the dialog
+   * lists these (still only permitted providers) and marks the current one; absent or empty → `profiles` as before.
+   */
+  readonly profileOptions?: readonly ProfileOption[] | undefined;
+  /** The project's allowed providers (loaded); options of other providers are never offered. */
+  readonly allowedProviderIds?: readonly string[] | undefined;
+  /** The step's display name (`RunDetail.stepMeta`), else its key label. */
+  readonly stepName?: string | undefined;
   /** Shown instead of the generic copy when no profile is offered (e.g. the project allows no provider). */
   readonly emptyMessage?: ReactNode;
   readonly onSubmit: (profileId: string) => void;
 }
 
-/**
- * `choose_profile`: permitted profiles only. A failed step is retried with the new profile (`runs.retryStep`);
- * other pauses switch the step's profile and resume (`runs.resume` `switch_profile`) — the mapping lives in run-actions.
- */
-export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, profiles, emptyMessage, onSubmit, returnFocusFallback }: ProfileDialogProps) {
-  const formId = useId();
-  const options = profiles
-    .filter((p) => p.profile.name !== step?.profileName)
-    .map((p) => ({
-      value: p.profile.id,
-      label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]} · ${p.profile.modelId}${p.warnings.length > 0 ? ' (has warnings)' : ''}`,
+/** "reserves ≈ $0.24" (from the step's estimate) or "reserves at least ≈ $0.08" (input not estimated yet). */
+export function reservationText(o: Pick<ProfileOption, 'basis' | 'reservationMicrousd'>): string {
+  const amount = formatMoney(o.reservationMicrousd);
+  return o.basis === 'minimum' ? `reserves at least ≈ ${amount}` : `reserves ≈ ${amount}`;
+}
+
+interface ProfileChoice {
+  readonly value: string;
+  readonly label: string;
+  readonly disabled?: boolean;
+}
+
+function choicesOf(
+  step: StepView | undefined,
+  profiles: readonly ProfileWithWarnings[],
+  profileOptions: readonly ProfileOption[] | undefined,
+  allowedProviderIds: readonly string[] | undefined,
+): readonly ProfileChoice[] {
+  const forStep = (profileOptions ?? []).filter((o) => step === undefined || o.stepKey === step.stepKey);
+  if (forStep.length === 0) {
+    return profiles
+      .filter((p) => p.profile.name !== step?.profileName)
+      .map((p) => ({
+        value: p.profile.id,
+        label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]} · ${p.profile.modelId}${p.warnings.length > 0 ? ' (has warnings)' : ''}`,
+      }));
+  }
+  const allowed = allowedProviderIds === undefined ? null : new Set<string>(allowedProviderIds);
+  const warned = new Set(profiles.filter((p) => p.warnings.length > 0).map((p) => p.profile.id));
+  return forStep
+    .filter((o) => allowed === null || allowed.has(o.providerId))
+    .map((o) => ({
+      value: o.profileId,
+      label: `${o.profileName} · ${PROVIDER_LABELS[o.providerId]} · ${o.modelId} · ${reservationText(o)}${warned.has(o.profileId) ? ' (has warnings)' : ''}${o.current ? ' (current)' : ''}`,
+      // The current profile is listed for comparison but cannot be chosen again.
+      ...(o.current ? { disabled: true } : {}),
     }));
+}
+
+/**
+ * `choose_profile`: permitted profiles only, each with the reservation it would need (E1 `profileOptions`). A failed
+ * step is retried with the new profile (`runs.retryStep`); other pauses switch the step's profile and resume
+ * (`runs.resume` `switch_profile`) — the mapping lives in run-actions.
+ */
+export function ChooseProfileDialog({
+  open,
+  onOpenChange,
+  pending,
+  error,
+  step,
+  profiles,
+  profileOptions,
+  allowedProviderIds,
+  stepName,
+  emptyMessage,
+  onSubmit,
+  returnFocusFallback,
+}: ProfileDialogProps) {
+  const formId = useId();
+  const options = choicesOf(step, profiles, profileOptions, allowedProviderIds);
+  const selectable = options.filter((o) => o.disabled !== true);
   const [choice, setChoice] = useState('');
-  const selected = choice === '' ? (options[0]?.value ?? '') : choice;
+  const selected = choice === '' ? (selectable[0]?.value ?? '') : choice;
+  const title = step === undefined ? undefined : (stepName ?? stepTitle(step));
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
       {...(returnFocusFallback === undefined ? {} : { returnFocusFallback })}
-      title={step === undefined ? 'Choose another profile' : `Choose another profile for ${stepTitle(step)}`}
+      title={title === undefined ? 'Choose another profile' : `Choose another profile for ${title}`}
       description="Only profiles permitted for this project are listed. The change is recorded as a configuration revision of this run."
       footer={
         <DialogFooter
@@ -205,7 +266,7 @@ export function ChooseProfileDialog({ open, onOpenChange, pending, error, step, 
           if (selected !== '' && step !== undefined) onSubmit(selected);
         }}
       >
-        {options.length === 0 ? (
+        {selectable.length === 0 ? (
           <p>{emptyMessage ?? 'No other profile is permitted for this project. Add one in Settings → Model profiles.'}</p>
         ) : (
           <Field
@@ -335,6 +396,8 @@ export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, o
   const [attemptChoice, setAttemptChoice] = useState('');
   const [decision, setDecision] = useState<UnknownOutcomeDecision | null>(null);
   const attempts = run.unresolvedAttempts;
+  // A finished run can only settle the charge: no retry is offered (§4.4).
+  const decisions = unknownDecisionsFor(run);
   const attemptId = attemptChoice === '' ? (attempts[0]?.id ?? '') : attemptChoice;
   const attempt = attempts.find((x) => x.id === attemptId);
   return (
@@ -367,23 +430,29 @@ export function DecideUnknownDialog({ open, onOpenChange, pending, error, run, o
                 {...control}
                 value={attemptId}
                 onValueChange={setAttemptChoice}
-                options={attempts.map((x) => ({ value: x.id, label: `${stepTitle(x)} · attempt ${String(x.seq)}` }))}
+                options={attempts.map((x) => ({ value: x.id, label: `${stepTitle(x, run.stepMeta)} · attempt ${String(x.seq)}` }))}
               />
             )}
           </Field>
         ) : null}
         {attempt === undefined ? null : (
-          <p>
-            {stepTitle(attempt)} · attempt {attempt.seq}: possible charge{' '}
-            {attempt.cost === null ? 'not known' : <Money value={attempt.cost.microusd} certainty={attempt.cost.certainty} />}{' '}
-            (liability kept until you decide).
-          </p>
+          <div className="stack" style={{ gap: 4 }}>
+            <p>
+              {stepTitle(attempt, run.stepMeta)} · attempt {attempt.seq}: possible charge{' '}
+              {attempt.cost === null ? 'not known' : <Money value={attempt.cost.microusd} certainty={attempt.cost.certainty} />}{' '}
+              (liability kept until you decide).
+            </p>
+            <RequestFacts attempt={attempt} label={`${stepTitle(attempt, run.stepMeta)} · attempt ${String(attempt.seq)}`} />
+          </div>
         )}
+        {isFinishedRun(run) ? (
+          <p className="subtle">The run has ended, so the request cannot be retried; choose how to record its charge.</p>
+        ) : null}
         <RadioGroup<UnknownOutcomeDecision>
           legend="Recovery options"
           value={decision}
           onValueChange={setDecision}
-          options={UNKNOWN_OUTCOME_DECISIONS.map((d) => ({
+          options={decisions.map((d) => ({
             value: d,
             label: UNKNOWN_OUTCOME_DECISION_LABELS[d],
             description: UNKNOWN_OUTCOME_DECISION_HINTS[d],

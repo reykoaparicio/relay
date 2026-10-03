@@ -1,8 +1,10 @@
 // `tsx --conditions=development scripts/verify-package.ts [Relay.app]` (13 §M1, RLY-025): verifies the ad-hoc signed,
-// not notarized dir build from `pnpm package` (08 §H9) and smoke-launches it against a temp HOME + userData. Playwright
+// not notarized dir build from `pnpm package` (08 §H9) and smoke-launches it against a temp home (HOME + CFFIXED_USER_HOME,
+// so macOS resolves Application Support inside it; the shipped build ignores RELAY_E2E overrides). Playwright
 // cannot attach to the packaged build (nodeCliInspect fuse off), so the smoke facts are read from the seeded DB.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdir, readdir, stat } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -121,14 +123,34 @@ async function quit(child: ChildProcess): Promise<string> {
   return `killed after ${String(QUIT_WAIT_MS)} ms (${await exited})`;
 }
 
+/**
+ * The user's real Relay profile, under both names it has had (the product name, and the package name used before
+ * `productName` was set). The smoke launch must never create or touch either.
+ */
+const REAL_PROFILES = ['Relay', '@relay/desktop'].map((n) => path.join(userInfo().homedir, 'Library', 'Application Support', n));
+const REAL_USER_DATA = REAL_PROFILES[0] ?? '';
+async function anyRealProfile(): Promise<string | null> {
+  for (const p of REAL_PROFILES) if (await exists(p)) return p;
+  return null;
+}
+
 async function smokeLaunch(app: string): Promise<CheckResult[]> {
+  // Fail closed: with a real profile present, a broken isolation could open it, so do not launch at all.
+  const existing = await anyRealProfile();
+  if (existing !== null) {
+    return [{ name: 'smoke launch', ok: false, detail: `refused: a real Relay profile exists at ${existing}; run on a machine or user without one` }];
+  }
   const parent = await makeTempDir('verify-');
   const home = path.join(parent, 'home');
-  const userData = path.join(parent, 'userData'); // the app's `<userData>-samples` sibling also lands inside `parent`
-  await Promise.all([mkdir(home), mkdir(userData)]);
-  // Minimal env: nothing from the caller's shell (provider keys) reaches the app.
-  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, TMPDIR: parent, RELAY_E2E: '1', RELAY_USER_DATA_DIR: userData, RELAY_PROVIDER_MODE: 'fake', RELAY_FAKE_SCENARIO: 'happy-path' };
+  // macOS resolves Application Support from CFFIXED_USER_HOME (HOME alone is ignored); Electron's userData is
+  // <Application Support>/<productName>.
+  const userData = path.join(home, 'Library', 'Application Support', 'Relay');
+  await mkdir(home);
+  // Minimal env: nothing from the caller's shell (provider keys) reaches the app. No RELAY_* overrides: the shipped
+  // build ignores them, and the smoke facts need no provider calls.
+  const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, CFFIXED_USER_HOME: home, TMPDIR: parent };
   const child = spawn(path.join(app, 'Contents/MacOS/Relay'), [], { env, detached: true, stdio: 'ignore' });
+  const leaked = async (): Promise<boolean> => (await anyRealProfile()) !== null;
   const onExit = (): void => { killGroup(child, 'SIGKILL'); };
   process.once('exit', onExit);
   const onSignal = (): void => { killGroup(child, 'SIGKILL'); process.exit(130); };
@@ -136,8 +158,13 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
   process.once('SIGTERM', onSignal);
   try {
     const dbFile = path.join(userData, 'relay.sqlite');
-    const appeared = await waitFor(DB_WAIT_MS, async () => ((await exists(dbFile)) ? true : null));
-    if (appeared === null) return [{ name: 'smoke launch', ok: false, detail: `relay.sqlite not created within ${String(DB_WAIT_MS)} ms` }];
+    // Watch the real profile while waiting: if isolation fails, stop the app at once.
+    const appeared = await waitFor(DB_WAIT_MS, async () => ((await leaked()) ? 'leaked' : (await exists(dbFile)) ? 'ok' : null));
+    if (appeared === 'leaked') {
+      killGroup(child, 'SIGKILL');
+      return [{ name: 'smoke launch', ok: false, detail: `isolation failed: the app created ${REAL_USER_DATA} (left in place for you to inspect)` }];
+    }
+    if (appeared === null) return [{ name: 'smoke launch', ok: false, detail: `relay.sqlite not created within ${String(DB_WAIT_MS)} ms in the temp home` }];
     const facts = await waitFor(SEED_WAIT_MS, () => {
       const f = readSeedFacts(dbFile);
       return Promise.resolve(isSeedComplete(f) ? f : null);
@@ -151,7 +178,10 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
     }
     if (final === null) return [{ name: 'smoke launch', ok: false, detail: 'relay.sqlite unreadable' }];
     const latest = Math.max(...MIGRATIONS.map((m) => m.version));
-    return [{ name: 'smoke launch', ok: true, detail: 'relay.sqlite created' }, ...checkSeedFacts(final, latest)];
+    const isolation: CheckResult = (await leaked())
+      ? { name: 'profile isolation', ok: false, detail: `the app created ${REAL_USER_DATA}` }
+      : { name: 'profile isolation', ok: true, detail: 'userData inside the temp home; real profile untouched' };
+    return [{ name: 'smoke launch', ok: true, detail: 'relay.sqlite created' }, isolation, ...checkSeedFacts(final, latest)];
   } finally {
     const how = await quit(child);
     console.log(`  app quit: ${how}`);

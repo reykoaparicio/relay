@@ -25,6 +25,9 @@ export type MemoryScope = z.infer<typeof memoryScopeSchema>;
 /** Synthetic steps the engine inserts around spec steps (06 F15); spec steps may not use these ids. */
 export const RESERVED_STEP_KEYS = ['intake', 'finalize'] as const;
 
+/** Optional display name of a step (shown in the editor and the inspector); the step id stays the key. */
+export const stepNameSchema = z.string().trim().min(1).max(60);
+
 /** Approval binding targets (§11.3). */
 export const APPROVAL_BIND_TARGETS = ['planHash', 'contextHash'] as const;
 
@@ -36,6 +39,7 @@ export const APPROVAL_BIND_TARGETS = ['planHash', 'contextHash'] as const;
 export const modelStepSpecSchema = z
   .strictObject({
     id: stepKeySchema,
+    name: stepNameSchema.optional(),
     kind: z.literal('model'),
     role: roleSchema,
     profile: z.string(),
@@ -58,6 +62,7 @@ export const modelStepSpecSchema = z
 /** Approval step spec (§11.3). */
 export const approvalStepSpecSchema = z.strictObject({
   id: stepKeySchema,
+  name: stepNameSchema.optional(),
   kind: z.literal('approval'),
   dependsOn: z.array(stepKeySchema).min(1),
   bindTo: z.array(z.enum(APPROVAL_BIND_TARGETS)).min(1),

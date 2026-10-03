@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { RunDetail } from '@relay/contracts';
-import { appError, runDetail } from '../../components/ui/test-fixtures';
+import { appError, attempt, runDetail } from '../../components/ui/test-fixtures';
 import { renderWithProviders } from '../../components/ui/test-utils';
 import { hashMapDetail } from './inspector-model';
 import { StatusBanner } from './StatusBanner';
+import { createFakeBridge, FAKE_PROJECT_ID } from '../../api/fake-bridge';
+import { renderApp } from '../testing/render-app';
 
 const A = 'a1'.repeat(32);
 const B = 'b2'.repeat(32);
@@ -84,5 +86,71 @@ describe('StatusBanner approval_stale (PROJECT_CHANGED)', () => {
     const li = screen.getByRole('listitem');
     expect(li).toHaveTextContent('src/a.ts changed since the context snapshot');
     expect(li.textContent).not.toContain('hash');
+  });
+});
+
+describe('StatusBanner: one cause-and-action banner (audit #3, #14, #15)', () => {
+  it('overrun: reserved + over = actual at one precision, the actual labelled by its certainty', async () => {
+    const bridge = createFakeBridge('budget-overrun');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    renderApp(`/p/${FAKE_PROJECT_ID}/runs/${run.id}`, { bridge });
+    const banner = await screen.findByTestId('status-banner', {}, { timeout: 3000 });
+    const value = (term: string) => within(banner).getByText(term).nextElementSibling?.textContent;
+    expect(value('Reserved')).toBe('$0.62');
+    expect(value('Over the reservation')).toBe('$0.09');
+    // The fake settles the attempt as provider-reported: the label follows the ledger, never a fixed "Reported".
+    expect(await within(banner).findByText('Reported by provider')).toBeInTheDocument();
+    expect(value('Reported by provider')).toBe('$0.71');
+    // No nested status badge inside the banner (the page header shows it once).
+    expect(within(banner).queryByText('Paused: cost exceeded reservation')).not.toBeInTheDocument();
+  });
+
+  it('output-invalid: a plain summary leads, the field list and error code are collapsed under the actions', async () => {
+    const bridge = createFakeBridge('output-invalid');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    renderApp(`/p/${FAKE_PROJECT_ID}/runs/${run.id}`, { bridge });
+    const banner = await screen.findByTestId('status-banner', {}, { timeout: 3000 });
+    expect(within(banner).getByText(/returned output in the wrong format/)).toBeInTheDocument();
+    const details = within(banner).getByText('Technical details').closest('details');
+    expect(details).not.toHaveAttribute('open');
+    const fields = within(banner).queryByText(/^What did not match/)?.closest('details');
+    if (fields !== null && fields !== undefined) expect(fields).not.toHaveAttribute('open');
+    // The actions come before the collapsed detail.
+    const retry = within(banner).getByRole('button', { name: 'Retry step' });
+    expect(retry.compareDocumentPosition(details as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('StatusBanner unknown request facts (E1)', () => {
+  it('cancelled with an unknown request: the request id is copyable and the step uses its display name', () => {
+    renderBanner(
+      runDetail({
+        status: 'cancelled',
+        pauseReason: null,
+        unresolvedAttempts: [attempt(1, { stepKey: 'implement', state: 'unknown', cost: { microusd: 620_000, certainty: 'unknown' }, providerRequestId: 'req_xyz' })],
+        availableActions: ['decide_unknown'],
+        stepMeta: [{ stepKey: 'implement', name: 'Write the fix', instructionVersion: 'implementer.v1' }],
+      }),
+    );
+    const list = screen.getByRole('list', { name: 'Requests with an unknown outcome' });
+    expect(within(list).getByText(/Write the fix · attempt 1: liability/)).toBeInTheDocument();
+    expect(within(list).getByText('req_xyz')).toBeInTheDocument();
+    expect(within(list).getByRole('button', { name: 'Copy provider request id of Write the fix · attempt 1' })).toBeInTheDocument();
+  });
+
+  it('a request without an id says so', () => {
+    renderBanner(
+      runDetail({
+        status: 'paused',
+        pauseReason: 'unknown_outcome',
+        unresolvedAttempts: [attempt(1, { state: 'unknown', cost: null, providerRequestId: null })],
+        availableActions: ['decide_unknown', 'stop'],
+      }),
+    );
+    const list = screen.getByRole('list', { name: 'Requests with an unknown outcome' });
+    expect(within(list).getByText('No request id was recorded')).toBeInTheDocument();
+    expect(within(list).getByText(/liability amount not known/)).toBeInTheDocument();
   });
 });

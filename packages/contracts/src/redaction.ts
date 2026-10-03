@@ -7,6 +7,13 @@ import { assertNever } from './assert.js';
 
 /** Every `sk-` pattern starts with this lookbehind so words like "risk-assessment-…" or "task-…" never match. */
 const NB = '(?<![A-Za-z0-9])';
+/**
+ * Left boundary for the distinctive-prefix rules (sk-ant-, sk-proj-, sk-svcacct-, gh*_/github_pat_, AIza): {@link NB},
+ * or right after a literal `\n` / `\t` / `\r` escape (JSON text, e.g. `"Key rejected:\nsk-ant-…"`) or a `%XX` URL
+ * escape (`%22sk-ant-…`), whose last char is a letter or digit (audit F3). The generic `sk-` rule keeps plain
+ * {@link NB}: after `%2D` or `\n` in random text it would over-match. Fixed-length lookbehinds: still linear.
+ */
+const NB_ESC = `(?:${NB}|(?<=\\\\[nrt]|%[0-9A-Fa-f]{2}))`;
 /** An optional quote around a JSON key or value, possibly backslash-escaped (`"`, `'`, `\"`). */
 const Q = `(?:\\\\?["'])?`;
 /** Characters of a credential-shaped token (base64/base64url, JWT, and API key alphabets). */
@@ -85,14 +92,14 @@ function findPemBlock(text: string, from: number): Span | null {
 }
 
 const RULES: readonly SecretRule[] = [
-  { re: new RegExp(`${NB}sk-ant-(?:api|admin)\\d\\d-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' }, // Anthropic API / admin keys
-  { re: new RegExp(`${NB}sk-ant-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' }, // other Anthropic-shaped keys
-  { re: new RegExp(`${NB}sk-proj-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' }, // OpenAI project keys
-  { re: new RegExp(`${NB}sk-svcacct-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' }, // OpenAI service-account keys
+  { re: new RegExp(`${NB_ESC}sk-ant-(?:api|admin)\\d\\d-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' }, // Anthropic API / admin keys
+  { re: new RegExp(`${NB_ESC}sk-ant-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' }, // other Anthropic-shaped keys
+  { re: new RegExp(`${NB_ESC}sk-proj-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' }, // OpenAI project keys
+  { re: new RegExp(`${NB_ESC}sk-svcacct-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' }, // OpenAI service-account keys
   { re: new RegExp(`${NB}sk-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' }, // generic / legacy sk- keys
   // GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-  { re: new RegExp(`${NB}(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})`, 'g'), label: 'plain' },
-  { re: new RegExp(`${NB}AIza[0-9A-Za-z_-]{35}`, 'g'), label: 'plain' }, // Google / Gemini API keys
+  { re: new RegExp(`${NB_ESC}(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})`, 'g'), label: 'plain' },
+  { re: new RegExp(`${NB_ESC}AIza[0-9A-Za-z_-]{35}`, 'g'), label: 'plain' }, // Google / Gemini API keys
   { re: /(?<keep>[?&]key=)(?!\[REDACTED)(?<secret>[A-Za-z0-9_\-.~%]{20,})/g, label: 'plain' }, // Gemini `?key=` param
   // Authorization header/key with a scheme: the whole credential after the scheme is secret.
   {

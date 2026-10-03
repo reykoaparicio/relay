@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { usd } from '@relay/contracts';
 import type { Microusd } from '@relay/contracts';
-import { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision } from './money';
+import { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
 
 const m = (n: number) => n as Microusd;
 
@@ -94,5 +94,17 @@ describe('moneyColumnPrecision (one rule per column)', () => {
     expect(formatMoney(m(50), null, { precision: 4 })).toBe('< $0.0001');
     expect(formatMoney(m(4_200), 'estimated', { precision: 4 })).toBe('≈ $0.0042 est.');
     expect(formatMoney(m(-20_000), null, { precision: 4 })).toBe('-$0.0200');
+  });
+});
+
+describe('sumConsistentPrecision', () => {
+  it('keeps 2 dp when the rounded parts add up', () => {
+    expect(sumConsistentPrecision([60_000, 440_000], 500_000)).toBe(2);
+  });
+
+  it('adds decimals until reserved + over = actual on screen ($0.055 + $0.445 ≠ $0.50 at 2 dp)', () => {
+    const digits = sumConsistentPrecision([55_000, 445_000], 500_000);
+    expect(digits).toBe(3);
+    expect([55_000, 445_000, 500_000].map((v) => formatUsdAtPrecision(m(v), digits))).toEqual(['$0.055', '$0.445', '$0.500']);
   });
 });

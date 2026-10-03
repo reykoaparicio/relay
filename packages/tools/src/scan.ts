@@ -8,6 +8,8 @@ import { SNIFF_BYTES, classifyByContent, classifyByName, compileUserPatterns, sn
 import { createIncrementalGitignore, loadGitignore } from './gitignore.js';
 import type { ProjectRoot } from './paths.js';
 import { isSecretRootPath, normalizeRelPath, realRelPath, resolveInside } from './paths.js';
+import type { SuspectedSecret } from './secret-scan.js';
+import { detectSuspectedSecret } from './secret-scan.js';
 
 /** Input caps used by scan and read (defaults: contracts `INPUT_CAPS`). */
 export interface InputCaps {
@@ -21,6 +23,8 @@ export interface FileEntry {
   readonly relPath: RelPath;
   readonly size: number;
   readonly sha256?: Sha256;
+  /** E2 #11: the content looks like a credential (label + line only). Shown, but not selected by default. */
+  readonly suspectedSecret?: SuspectedSecret;
 }
 
 /** One excluded entry; an excluded directory is collapsed into one row and never descended into. */
@@ -56,6 +60,8 @@ export interface ScanOptions {
   readonly caps?: InputCaps;
   /** Aborting throws the signal's reason (caller-initiated cancellation, not an expected failure). */
   readonly signal?: AbortSignal;
+  /** Run the E2 #11 content check on every included text file (default true). */
+  readonly detectSecrets?: boolean;
 }
 
 type Inspected =
@@ -94,6 +100,10 @@ function isGone(e: unknown): boolean {
 interface FileProbe {
   readonly size: number;
   readonly sniff: Sniff;
+  /** Hard-link count (E2 #13: > 1 is refused). */
+  readonly nlink: number;
+  /** The whole file, when the sniff window already holds it (reused by the content check). */
+  readonly bytes?: Buffer;
   /**
    * Whole-file UTF-8 validity when the sniff window already holds the whole file; `undefined` when only a prefix was
    * read (decided later, only for files the caps admit: {@link isUtf8File}).
@@ -126,20 +136,17 @@ async function probeFile(abs: string): Promise<FileProbe | null> {
     if (!st.isFile()) return null;
     const bytes = await readPrefix(fh, Math.min(st.size, SNIFF_BYTES));
     const whole = bytes.byteLength === st.size;
-    return { size: st.size, sniff: sniffBytes(bytes), ...(whole ? { utf8: isUtf8(bytes) } : {}) };
+    return { size: st.size, nlink: st.nlink, sniff: sniffBytes(bytes), ...(whole ? { utf8: isUtf8(bytes), bytes } : {}) };
   } finally {
     await fh.close();
   }
 }
 
-/**
- * UTF-8 validity of the first `size` bytes (the probed size) of a file the caps admit, so the preview agrees with
- * `readSelected` (invalid UTF-8 → `binary`, B8).
- */
-async function isUtf8File(abs: string, size: number): Promise<boolean> {
+/** The first `size` bytes (the probed size) of a file the caps admit (UTF-8 validity and the content check). */
+async function readWhole(abs: string, size: number): Promise<Buffer> {
   const fh = await fs.promises.open(abs, OPEN_FLAGS);
   try {
-    return isUtf8(await readPrefix(fh, size));
+    return await readPrefix(fh, size);
   } finally {
     await fh.close();
   }
@@ -153,6 +160,7 @@ async function inspectFile(relPath: string, abs: string, ctx: ClassifyContext, r
   if (rel === null) return SKIP;
   const probe = await probeFile(abs);
   if (probe === null) return SKIP;
+  if (probe.nlink > 1) return { kind: 'excluded', relPath, reason: 'hard_link', isDirectory: false };
   return { kind: 'file', relPath: rel, abs, probe };
 }
 
@@ -233,17 +241,25 @@ function addUnreadable(state: ScanState, relPath: string): void {
   if (rel !== null) state.unreadable.push(rel);
 }
 
-/** The content verdict of a probed file: binary sniff → too_large → caps; then UTF-8 validity, read only if admitted. */
-async function fileReason(item: Extract<Inspected, { kind: 'file' }>, state: ScanState, ctx: ClassifyContext, caps: InputCaps): Promise<ExclusionReason | null> {
+type FileVerdict = { readonly reason: ExclusionReason } | { readonly reason: null; readonly suspectedSecret: SuspectedSecret | null };
+
+/**
+ * The content verdict of a probed file: binary sniff → too_large → caps; then UTF-8 validity (read only if admitted);
+ * then, for an included text file, the E2 #11 content check (same bytes, no extra read).
+ */
+async function fileReason(item: Extract<Inspected, { kind: 'file' }>, state: ScanState, ctx: ClassifyContext, caps: InputCaps, detectSecrets: boolean): Promise<FileVerdict> {
   const totals = { ...caps, includedBytes: state.includedBytes, includedFiles: state.included.length };
   const reason = classifyByContent({ isDirectory: false, size: item.probe.size }, item.probe.sniff, { ...ctx, caps: totals });
-  if (reason !== null) return reason;
+  if (reason !== null) return { reason };
   // Invalid UTF-8 is binary, exactly as readSelected decides (05 E4, B8). Only admitted files pay for the full read.
-  const utf8 = item.probe.utf8 ?? (await isUtf8File(item.abs, item.probe.size));
-  return utf8 ? null : 'binary';
+  const needBytes = item.probe.utf8 === undefined || detectSecrets;
+  const bytes = needBytes ? (item.probe.bytes ?? (await readWhole(item.abs, item.probe.size))) : null;
+  const utf8 = item.probe.utf8 ?? (bytes !== null && isUtf8(bytes));
+  if (!utf8) return { reason: 'binary' };
+  return { reason: null, suspectedSecret: detectSecrets && bytes !== null ? detectSuspectedSecret(bytes.toString('utf8')) : null };
 }
 
-async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext, caps: InputCaps): Promise<void> {
+async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext, caps: InputCaps, detectSecrets: boolean): Promise<void> {
   switch (item.kind) {
     case 'skip':
       return;
@@ -257,19 +273,20 @@ async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyCo
       state.excluded.push({ relPath: item.relPath, reason: item.reason, isDirectory: item.isDirectory });
       return;
     case 'file': {
-      let reason: ExclusionReason | null;
+      let verdict: FileVerdict;
       try {
-        reason = await fileReason(item, state, ctx, caps);
+        verdict = await fileReason(item, state, ctx, caps, detectSecrets);
       } catch (e) {
         // The file vanished or became unreadable between the probe and the UTF-8 read (B7: never throw).
         if (!isGone(e)) addUnreadable(state, item.relPath);
         return;
       }
-      if (reason !== null) {
-        state.excluded.push({ relPath: item.relPath, reason, isDirectory: false });
+      if (verdict.reason !== null) {
+        state.excluded.push({ relPath: item.relPath, reason: verdict.reason, isDirectory: false });
         return;
       }
-      state.included.push({ relPath: item.relPath, size: item.probe.size });
+      const flagged = verdict.suspectedSecret;
+      state.included.push({ relPath: item.relPath, size: item.probe.size, ...(flagged === null ? {} : { suspectedSecret: flagged }) });
       state.includedBytes += item.probe.size;
       return;
     }
@@ -279,8 +296,9 @@ async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyCo
 }
 
 function unreadableRoot(e: unknown): AppError {
-  return errnoOf(e) === 'ENOENT'
-    ? errors.notFound('project_root', {}, { details: errnoDetails(e) })
+  const code = errnoOf(e);
+  return code === 'ENOENT' || code === 'ENOTDIR'
+    ? errors.projectRootMissing({ details: errnoDetails(e) }) // E2 #7: moved / renamed / deleted between open and scan
     : errors.permissionDenied('unsafe_root', { userMessage: 'The project folder cannot be read. Check its permissions.', details: errnoDetails(e) });
 }
 
@@ -288,7 +306,9 @@ function unreadableRoot(e: unknown): AppError {
  * Previews a project (FR-01, §3.4): iterative breadth-first walk with `opendir`. Excluded directories are never
  * descended into (keeps `node_modules` fast); directory symlinks are not followed; symlinked files are confined by E1.
  * Cap overflow is listed as `cap_exceeded`, never silently dropped. Per-entry fs errors never throw: such entries are
- * listed in `unreadable` (B7). Only an unreadable root is an error (`NOT_FOUND` / `PERMISSION_DENIED`).
+ * listed in `unreadable` (B7). Only an unreadable root is an error (`PROJECT_ROOT_MISSING` / `PERMISSION_DENIED`).
+ * Hard-linked files are excluded (`hard_link`, E2 #13); included text files whose content looks like a credential carry
+ * `suspectedSecret` (E2 #11).
  */
 export async function scanProject(root: ProjectRoot, opts: ScanOptions = {}): Promise<Result<ScanResult>> {
   const caps = opts.caps ?? INPUT_CAPS;
@@ -320,7 +340,7 @@ export async function scanProject(root: ProjectRoot, opts: ScanOptions = {}): Pr
     }
     const parent = dir;
     const items = await mapLimit(dirents, DIR_FAN_OUT, (d) => inspectEntry(root, d, parent, ctx));
-    for (const item of items) await applyInspected(item, state, ctx, caps);
+    for (const item of items) await applyInspected(item, state, ctx, caps, opts.detectSecrets !== false);
   }
   const included = [...state.included].sort(byRelPath);
   const excluded = [...state.excluded].sort(byRelPath);

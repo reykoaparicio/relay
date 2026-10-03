@@ -3,7 +3,7 @@ import { idSchema } from '../ids.js';
 import { sha256Schema, stepKeySchema } from '../primitives.js';
 import { roleSchema } from '../status.js';
 import { validationIssueSchema } from '../validation.js';
-import { memoryScopeSchema, retryPolicySchema, workflowSpecSchema } from '../workflow-spec.js';
+import { memoryScopeSchema, retryPolicySchema, stepNameSchema, workflowSpecSchema } from '../workflow-spec.js';
 import { workflowLimitsSchema } from './run.js';
 
 /** A workflow version selector: a validated version number or the editable draft. */
@@ -79,6 +79,7 @@ export const workflowDraftPatchSchema = z
         stepKeySchema,
         z
           .object({
+            name: stepNameSchema.optional(), // any step kind (model or approval)
             profile: z.string().min(1).max(40).optional(),
             maxOutputTokens: z.number().int().positive().optional(),
             retryPolicy: retryPolicySchema.optional(),

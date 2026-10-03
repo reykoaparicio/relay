@@ -13,6 +13,7 @@ import {
   MEMORY_STATUSES,
   MEMORY_TYPES,
   PAUSE_REASONS,
+  PROVIDER_TEST_SOURCES,
   RUN_STATUSES,
   STEP_STATES,
   workflowVersionViewSchema,
@@ -123,6 +124,7 @@ describe('schema (0001_init)', () => {
       ['memory_records', 'status', MEMORY_STATUSES],
       ['memory_events', 'event', MEMORY_EVENT_TYPES],
       ['provider_credential_refs', 'storage_mode', CREDENTIAL_STORAGE_MODES],
+      ['provider_credential_refs', 'last_test_source', PROVIDER_TEST_SOURCES],
       ['workflow_versions', 'status', workflowVersionViewSchema.shape.status.options],
     ];
 

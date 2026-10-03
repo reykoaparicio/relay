@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { Check } from 'lucide-react';
 
 export interface StepperStep {
@@ -15,7 +16,7 @@ export interface StepperProps {
 export function Stepper({ steps, currentKey, label }: StepperProps) {
   const currentIndex = steps.findIndex((s) => s.key === currentKey);
   return (
-    <ol className="stepper" aria-label={label}>
+    <ol className="stepper" aria-label={label} style={{ '--stepper-count': steps.length } as CSSProperties}>
       {steps.map((s, i) => {
         const isDone = currentIndex > i;
         const isCurrent = i === currentIndex;

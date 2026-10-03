@@ -175,6 +175,20 @@ export const ERROR_DEFINITIONS = {
     httpStatus: 422,
     userMessage: 'The model declined this request. Choose another profile or edit the goal.',
   },
+  DATABASE_UNAVAILABLE: {
+    retryable: false,
+    nextAction: 'none',
+    alternatives: [],
+    httpStatus: 503,
+    userMessage: 'Relay cannot use its database.',
+  },
+  PROJECT_ROOT_MISSING: {
+    retryable: false,
+    nextAction: 'none',
+    alternatives: [],
+    httpStatus: 404,
+    userMessage: 'The project folder was moved, renamed, or deleted. Locate the folder to continue.',
+  },
   INTERNAL: {
     retryable: false,
     nextAction: 'report_bug',
@@ -233,6 +247,9 @@ export const PERMISSION_DENIED_REASONS = [
   'contains_project',
   'unsafe_root',
   'untrusted_sender',
+  'unreadable', // a selected project file exists but cannot be read (EACCES/EPERM/EIO); details.relPath names it
+  'suspected_secret', // a selected file's content looks like a credential and was not acknowledged (details.denied)
+  'hard_link', // a selected file has more than one hard link, so it may be a file from outside the project
 ] as const;
 /** Schema for {@link PermissionDeniedReason}. */
 export const permissionDeniedReasonSchema = z.enum(PERMISSION_DENIED_REASONS);
@@ -268,6 +285,37 @@ export type InternalReason = z.infer<typeof internalReasonSchema>;
 export const INTERNAL_REASON_MESSAGES: Readonly<Partial<Record<InternalReason, string>>> = {
   not_implemented: 'This feature is not available in this build yet.',
   integrity_check_failed: 'The Relay database failed its integrity check. Restore it from a backup in the backups folder.',
+};
+
+/**
+ * `DATABASE_UNAVAILABLE` `details.reason` values: a closed set, so the fatal runner message and the UI can say what
+ * is wrong with the database and offer the right recovery (wait / free disk space / restore a backup / update Relay).
+ */
+export const DATABASE_UNAVAILABLE_REASONS = [
+  'database_busy', // another process held the database lock for the whole boot retry window
+  'schema_too_new', // written by a newer Relay version
+  'migration_checksum_mismatch', // an applied migration differs from this build's copy
+  'disk_full', // SQLITE_FULL
+  'db_readonly', // SQLITE_READONLY, or the file / folder is not writable
+  'db_corrupt', // SQLITE_CORRUPT / SQLITE_NOTADB at open (before the integrity check)
+  'integrity_check_failed', // PRAGMA quick_check did not return ok
+  'db_cannot_open', // SQLITE_CANTOPEN / SQLITE_IOERR at open
+] as const;
+/** Schema for {@link DatabaseUnavailableReason}. */
+export const databaseUnavailableReasonSchema = z.enum(DATABASE_UNAVAILABLE_REASONS);
+/** `DATABASE_UNAVAILABLE` reason. */
+export type DatabaseUnavailableReason = z.infer<typeof databaseUnavailableReasonSchema>;
+
+/** Curated user message per {@link DatabaseUnavailableReason} (static text; never SQLite output or paths). */
+export const DATABASE_UNAVAILABLE_MESSAGES: Readonly<Record<DatabaseUnavailableReason, string>> = {
+  database_busy: 'The Relay database is busy because another program is using it. Close other copies of Relay and try again.',
+  schema_too_new: 'This database was created by a newer version of Relay. Update Relay to open it.',
+  migration_checksum_mismatch: 'The Relay database does not match this version of Relay. Update Relay or restore a backup.',
+  disk_full: 'The disk is full, so Relay cannot write its database. Free some disk space and try again.',
+  db_readonly: 'Relay cannot write its database because the file or its folder is read-only. Check the permissions and try again.',
+  db_corrupt: 'The Relay database file is damaged. Restore it from a backup.',
+  integrity_check_failed: 'The Relay database failed its integrity check. Restore it from a backup.',
+  db_cannot_open: 'Relay could not open its database file. Check that the data folder exists and is accessible.',
 };
 
 /** `LIMIT_REACHED` `details.limit` values (§9.1). */
@@ -333,6 +381,16 @@ export const errors = {
       providerId === undefined ? ctx : { ...ctx, details: { ...ctx?.details, providerId } },
     ),
   /**
+   * The database cannot be used (fatal at boot, 03 §C1/§C2). The userMessage is the curated one for `reason`;
+   * `database_busy` is retryable (restart the runner), every other reason is not.
+   */
+  databaseUnavailable: (reason: DatabaseUnavailableReason, ctx?: Omit<ErrorContext, 'userMessage'>): AppError => {
+    const e = appError('DATABASE_UNAVAILABLE', { ...ctx, userMessage: DATABASE_UNAVAILABLE_MESSAGES[reason], details: { ...ctx?.details, reason } });
+    return reason === 'database_busy' ? { ...e, retryable: true, nextAction: 'restart_runner' } : e;
+  },
+  /** The project's root folder no longer exists (moved / renamed / deleted). `projects.relocateRoot` re-points it. */
+  projectRootMissing: (ctx?: ErrorContext): AppError => appError('PROJECT_ROOT_MISSING', ctx),
+  /**
    * `INTERNAL` carries only the correlation id (02 §B0) and, optionally, a closed {@link InternalReason}. It takes no
    * free-form context: a message, details, or ids could leak internals (SQL errors, stacks, paths), so anything else
    * passed at runtime is ignored. `correlationId` is `undefined` only where none exists (providers, tools); the
@@ -394,4 +452,21 @@ export function isRelayError(e: unknown): e is RelayError {
  */
 export function toAppError(e: unknown, correlationId: CorrelationId): AppError {
   return isRelayError(e) ? e.appError : errors.internal(correlationId);
+}
+
+/**
+ * `{ code, reason?, message }` for the runner's `fatal` message (02 §B7, E2 #3): a {@link RelayError} keeps its code,
+ * its closed `details.reason` (when it is a short string), and its userMessage; anything else is INTERNAL with the
+ * generic INTERNAL message (never the raw error text, which can hold SQLite output or paths).
+ */
+export function fatalInfoOf(e: unknown): { readonly code: ErrorCode; readonly reason?: string; readonly message: string } {
+  if (!isRelayError(e)) return { code: 'INTERNAL', message: ERROR_DEFINITIONS.INTERNAL.userMessage };
+  const reason = e.appError.details?.['reason'];
+  const ok = typeof reason === 'string' && /^[a-z_]{1,64}$/.test(reason);
+  return { code: e.appError.code, ...(ok ? { reason } : {}), message: e.appError.userMessage };
+}
+
+/** True when `e` is the retryable `DATABASE_UNAVAILABLE database_busy` (a lock held by another connection, E2 #2). */
+export function isDatabaseBusyError(e: unknown): boolean {
+  return isRelayError(e) && e.appError.code === 'DATABASE_UNAVAILABLE' && e.appError.details?.['reason'] === 'database_busy';
 }

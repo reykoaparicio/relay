@@ -1,6 +1,7 @@
 // Error mapping (10 J2): AppError → ErrorView props, and `nextAction` → a route or a page handler.
-import { errors } from '@relay/contracts';
-import type { AppError, ErrorCode, NextAction } from '@relay/contracts';
+import { DATABASE_UNAVAILABLE_MESSAGES, errors } from '@relay/contracts';
+import type { AppError, DatabaseUnavailableReason, ErrorCode, NextAction, RunnerFatal } from '@relay/contracts';
+import { DATABASE_BUSY_MESSAGE } from '../lib/format/actions';
 import { paths } from '../features/shell/paths';
 import { isAppErrorException } from './client';
 
@@ -26,9 +27,11 @@ export function nextActionTarget(action: NextAction, ctx: NextActionContext = {}
     case 'reconnect_provider':
     case 'use_session_key':
       return { kind: 'navigate', to: paths.settings('providers') };
-    case 'restart_runner':
     case 'report_bug':
       return { kind: 'navigate', to: paths.settings('diagnostics') };
+    // `useNextAction` restarts the runner in place (`app.restartRunner`); a page may still own it.
+    case 'restart_runner':
+      return { kind: 'handler', action };
     case 'edit_policy':
       return { kind: 'navigate', to: paths.settings('projects', { project: ctx.projectId ?? undefined }) };
     case 'decide_unknown':
@@ -65,6 +68,7 @@ export function toViewError(e: unknown): AppError {
 }
 
 const ERROR_TITLES: Partial<Readonly<Record<ErrorCode, string>>> = {
+  PROJECT_ROOT_MISSING: 'Project folder not found',
   RUNNER_UNAVAILABLE: 'The background runner is not available',
   NOT_FOUND: 'Not found',
   AUTH_REQUIRED: 'Provider sign-in needed',
@@ -74,6 +78,7 @@ const ERROR_TITLES: Partial<Readonly<Record<ErrorCode, string>>> = {
 
 /** Short title for an error banner, by code. Falls back to the error's own user message. */
 export function errorTitle(error: AppError): string {
+  if (isDatabaseBusy(error)) return DATABASE_BUSY_TEXT;
   return ERROR_TITLES[error.code] ?? error.userMessage;
 }
 
@@ -86,4 +91,55 @@ export function validationIssuesOf(e: unknown): ReadonlyArray<{ readonly path: s
     (i): i is { path: string; message: string; code: string } =>
       typeof i === 'object' && i !== null && typeof (i as { path?: unknown }).path === 'string' && typeof (i as { message?: unknown }).message === 'string',
   );
+}
+
+/** The AppError of a thrown value, else null. */
+export function appErrorOf(e: unknown): AppError | null {
+  return isAppErrorException(e) ? e.appError : null;
+}
+
+/** `details.reason` of an AppError (a short string), else null. */
+export function errorReason(e: AppError | null | undefined): string | null {
+  const reason = e?.details?.['reason'];
+  return typeof reason === 'string' ? reason : null;
+}
+
+/**
+ * E2 #2: `DATABASE_UNAVAILABLE database_busy` — another program holds the database lock. Retryable (next action
+ * `wait`); queries retry it with a short backoff, and it is never shown as a crash.
+ */
+export function isDatabaseBusy(e: unknown): boolean {
+  const error = isAppErrorException(e) ? e.appError : (e as AppError | null | undefined);
+  return error?.code === 'DATABASE_UNAVAILABLE' && errorReason(error) === 'database_busy';
+}
+
+/** Plain wording of a busy database (E2 #2). */
+export const DATABASE_BUSY_TEXT = DATABASE_BUSY_MESSAGE;
+
+/** E2 #7: the project's folder was moved, renamed, or deleted. */
+export function isProjectRootMissing(e: unknown): boolean {
+  return appErrorOf(e)?.code === 'PROJECT_ROOT_MISSING';
+}
+
+/** Fatal reasons a backup restore can fix (the database file itself is damaged or from a newer Relay). */
+export const RESTORABLE_FATAL_REASONS: readonly string[] = ['db_corrupt', 'integrity_check_failed', 'schema_too_new'];
+
+/** True when restoring the latest backup is a sensible recovery for this runner fatal. */
+export function fatalOffersRestore(fatal: RunnerFatal | null | undefined): boolean {
+  return fatal?.reason !== undefined && fatal.reason !== null && RESTORABLE_FATAL_REASONS.includes(fatal.reason);
+}
+
+/**
+ * `Diagnostics.runner.lastFatal` in plain words: the curated DATABASE_UNAVAILABLE message for its reason, a fixed
+ * sentence for a crash loop, else the (redacted, user-presentable) message main recorded.
+ */
+export function runnerFatalText(fatal: RunnerFatal): string {
+  const reason = fatal.reason;
+  if (reason !== null && reason in DATABASE_UNAVAILABLE_MESSAGES) {
+    return DATABASE_UNAVAILABLE_MESSAGES[reason as DatabaseUnavailableReason];
+  }
+  if (reason === 'restart_limit') {
+    return 'The background runner stopped several times in a row, so Relay stopped restarting it automatically.';
+  }
+  return fatal.message;
 }

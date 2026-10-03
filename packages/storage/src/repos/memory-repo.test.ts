@@ -101,15 +101,21 @@ describe('MemoryRepo', () => {
     expect(() => repo.setStatus(a.record.id, [], 'archived', epochMs(1))).toThrow();
   });
 
-  it('snapshots memory per run and purges the snapshots of one project only', () => {
+  it('snapshots memory per run and purges the snapshots of ended runs of one project only (E2 #14: active runs keep theirs)', () => {
     const p = seedProject(f.db, f.clock);
     const other = seedProject(f.db, f.clock);
     const m = add(p.id);
     const o = add(other.id);
     const run = seedRun(f.db, f.clock, p.id);
+    const active = seedRun(f.db, f.clock, p.id);
     const otherRun = seedRun(f.db, f.clock, other.id);
-    f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
-    f.db.repos.memory.snapshotForRun(otherRun.id, [{ recordId: o.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: false }]);
+    const row = (recordId: typeof m.record.id, included: boolean) =>
+      [{ recordId, revision: 1, title: 'T', content: 'C', type: 'user_rule' as const, pinned: false, scope: { roles: 'all' as const }, included }];
+    f.db.repos.memory.snapshotForRun(run.id, row(m.record.id, true));
+    f.db.repos.memory.snapshotForRun(active.id, row(m.record.id, true));
+    f.db.repos.memory.snapshotForRun(otherRun.id, row(o.record.id, false));
+    expect(f.db.repos.runs.updateStatus(run.id, ['queued'], 'cancelled', {})).toBe(true);
+    expect(f.db.repos.runs.updateStatus(otherRun.id, ['queued'], 'cancelled', {})).toBe(true);
 
     const snap = f.db.repos.memory.runSnapshot(run.id);
     const purged = f.db.repos.memory.purgeRunSnapshots(p.id);
@@ -117,7 +123,9 @@ describe('MemoryRepo', () => {
     expect(snap.map((s) => [s.recordId, s.included])).toEqual([[m.record.id, true]]);
     expect(purged).toEqual({ deleted: 1, recordIds: [m.record.id] });
     expect(f.db.repos.memory.runSnapshot(run.id)).toEqual([]);
+    expect(f.db.repos.memory.runSnapshot(active.id)).toHaveLength(1); // still queued: its snapshot is its context
     expect(f.db.repos.memory.runSnapshot(otherRun.id)).toHaveLength(1);
+    expect(f.db.repos.runs.listTerminalIdsForProject(p.id)).toEqual([run.id]);
   });
 
   it('the run snapshot keeps type, pinned, and role scope as of the snapshot; live attribute edits do not change it (BH-1)', () => {

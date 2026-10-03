@@ -5,9 +5,10 @@ import { useRetryAction } from '../common/useNextAction';
 
 import { formatBytes } from '../../lib/format/bytes';
 
-/** "11 included · 6 excluded · 38.6 KB of 512 KB input cap". */
+/** "11 included · 6 excluded · 1 unreadable · 38.6 KB of 512 KB input cap". */
 function previewTotals(p: PreviewResult): string {
-  return `${String(p.totals.files)} included · ${String(p.excluded.length)} excluded · ${formatBytes(p.totals.bytes)} of ${formatBytes(p.totals.capBytes)} input cap`;
+  const unreadable = p.unreadable?.length ?? 0;
+  return `${String(p.totals.files)} included · ${String(p.excluded.length)} excluded${unreadable === 0 ? '' : ` · ${String(unreadable)} unreadable`} · ${formatBytes(p.totals.bytes)} of ${formatBytes(p.totals.capBytes)} input cap`;
 }
 
 export interface PreviewPanelProps {
@@ -33,7 +34,7 @@ export function PreviewPanel({ data, error, onRetry, label }: PreviewPanelProps)
     <div className="stack">
       <p className="small num">{previewTotals(data)}</p>
       <div style={{ maxHeight: 320, overflow: 'auto' }}>
-        <FileTree included={data.included} excluded={data.excluded} label={label} />
+        <FileTree included={data.included} excluded={data.excluded} unreadable={data.unreadable} label={label} />
       </div>
     </div>
   );

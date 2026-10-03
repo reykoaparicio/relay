@@ -231,3 +231,11 @@ Output-schema acceptance/rejection tests live in contracts (02). G keeps only th
 - [ ] Output and manifest schemas are imported from contracts, never redefined; strict JSON schemas are derived from them, and the Zod parse remains the authority
 - [ ] The templates package performs no runtime fs reads (prompts are `.ts` modules, `workflow.json` is a JSON import with `with { type: 'json' }`)
 - [ ] `seedVersions()` is the only seed data source; G writes nothing to the database at seed time
+
+## Addendum E2 (memory fixes, 2026-10-02)
+
+- Intake drops ticked records that are no longer approvable (event `skipped`, log `memory_record_skipped`) instead of
+  failing into `setup_blocked`.
+- `memory.update { confirmCurrent: true }` re-hashes the file source refs (new revision only when a hash changed),
+  writes `reviewed`, and never moves `reviewAt`. Views expose `lastReviewedAt` and `reviewDue` (last review vs
+  `reviewAt`, not `updatedAt`). Details expose `proposal.sourceRefs`, `events[].detail`, `revisions[].usedByRuns`.

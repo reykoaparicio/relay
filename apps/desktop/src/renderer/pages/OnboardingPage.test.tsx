@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { appError, errors } from '@relay/contracts';
+import { appError, errors, previewResultSchema } from '@relay/contracts';
 import { createFakeBridge } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
 import { renderApp } from '../features/testing/render-app';
@@ -334,6 +334,47 @@ describe('OnboardingPage (J6)', () => {
     );
     expect(second?.idempotencyKey).not.toBe(first?.idempotencyKey);
     expect(second?.selectionId).not.toBe(first?.selectionId);
+  });
+
+  it('E2 #8/#11: the folder preview flags a suspected secret (not selected by default) and lists unreadable entries', async () => {
+    const user = userEvent.setup();
+    const bridge = createFakeBridge('suspected-secret');
+    bridge.world.preview = previewResultSchema.parse({ ...bridge.world.preview, unreadable: ['config/local.json'] });
+    renderApp('/onboarding/select-project', { bridge });
+    await heading('Select the project folder');
+    await user.click(screen.getByRole('button', { name: 'Choose folder…' }));
+    const tree = await screen.findByRole('list', { name: 'Files in ~/code/my-api' });
+    const keys = within(tree).getByText('src/config/keys.ts').closest('li') as HTMLElement;
+    expect(keys).toHaveTextContent('Looks like it contains a secret: Anthropic API key, line 4. Not selected by default.');
+    const unreadable = within(tree).getByText('config/local.json').closest('li') as HTMLElement;
+    expect(unreadable).toHaveTextContent('Cannot be read (permissions)');
+    expect(within(tree).getByText(/Hard-linked file: has more than one hard link/)).toBeInTheDocument();
+    expect(screen.getByText(/1 unreadable/)).toBeInTheDocument();
+  });
+
+  it('E2 #11 review-and-start: a suspected secret starts unticked; a confirmed tick sends acknowledgedSuspectedSecrets', async () => {
+    const user = userEvent.setup();
+    const { bridge } = await walkToReview(user, { scenario: 'suspected-secret' });
+    const keys = await screen.findByRole('checkbox', { name: 'src/config/keys.ts' });
+    expect(keys).not.toBeChecked();
+    expect(keys).toHaveAccessibleDescription(/Looks like it contains a secret: Anthropic API key, line 4\./);
+    await startEnabled();
+    await user.click(keys);
+    const dialog = await screen.findByRole('dialog', { name: /^Send this file to / });
+    await user.click(within(dialog).getByRole('button', { name: 'Send this file' }));
+    expect(screen.getByRole('checkbox', { name: 'src/config/keys.ts' })).toBeChecked();
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toMatchObject({
+        input: { acknowledgedSuspectedSecrets: ['src/config/keys.ts'] },
+      });
+    }, SLOW);
+    await user.click(await startEnabled());
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+    });
+    expect(bridge.callsTo('relay/v1/runs.start')[0]?.input).toMatchObject({
+      input: { acknowledgedSuspectedSecrets: ['src/config/keys.ts'] },
+    });
   });
 
   it('B10: an expired folder choice is never sent to projects.create', async () => {

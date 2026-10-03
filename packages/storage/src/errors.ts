@@ -1,8 +1,16 @@
-import { RelayError, errors } from '@relay/contracts';
+import { RelayError, errnoOf, errors, isDatabaseBusyError, isRelayError } from '@relay/contracts';
+import type { DatabaseUnavailableReason } from '@relay/contracts';
 
-/** SQLite primary result code for `SQLITE_BUSY` (extended codes keep it in the low byte). */
+/** SQLite primary result codes (extended codes keep them in the low byte). */
 const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
+const SQLITE_READONLY = 8;
+const SQLITE_IOERR = 10;
+const SQLITE_CORRUPT = 11;
+const SQLITE_FULL = 13;
+const SQLITE_CANTOPEN = 14;
 const SQLITE_CONSTRAINT = 19;
+const SQLITE_NOTADB = 26;
 const PRIMARY_CODE_MASK = 0xff;
 
 /** A stored row failed validation in a mapper (03 §C5). The message carries only table, id, and column. */
@@ -52,37 +60,89 @@ function sqliteErrcode(e: unknown): number | null {
   return typeof code === 'number' ? code : null;
 }
 
+function primaryCode(e: unknown): number | null {
+  const code = sqliteErrcode(e);
+  return code === null ? null : code & PRIMARY_CODE_MASK;
+}
+
 /** True when `e` is a SQLite `SQLITE_BUSY` error (any extended variant). */
 export function isSqliteBusy(e: unknown): boolean {
-  const code = sqliteErrcode(e);
-  return code !== null && (code & PRIMARY_CODE_MASK) === SQLITE_BUSY;
+  return primaryCode(e) === SQLITE_BUSY;
 }
 
 /** True when `e` is a SQLite constraint violation (UNIQUE, CHECK, FOREIGN KEY, …). */
 export function isSqliteConstraint(e: unknown): boolean {
-  const code = sqliteErrcode(e);
-  return code !== null && (code & PRIMARY_CODE_MASK) === SQLITE_CONSTRAINT;
+  return primaryCode(e) === SQLITE_CONSTRAINT;
 }
 
+/** True when `e` is a raw SQLite busy error or the mapped "database busy" error, i.e. a retry may succeed. */
+export function isDatabaseBusy(e: unknown): boolean {
+  return isSqliteBusy(e) || isDatabaseBusyError(e);
+}
+
+/** The {@link DatabaseUnavailableReason} of a raw SQLite error, or null when it is not a database-level failure. */
+export function sqliteReason(e: unknown): DatabaseUnavailableReason | null {
+  switch (primaryCode(e)) {
+    case SQLITE_BUSY:
+    case SQLITE_LOCKED:
+      return 'database_busy';
+    case SQLITE_FULL:
+      return 'disk_full';
+    case SQLITE_READONLY:
+      return 'db_readonly';
+    case SQLITE_CORRUPT:
+    case SQLITE_NOTADB:
+      return 'db_corrupt';
+    case SQLITE_CANTOPEN:
+    case SQLITE_IOERR:
+      return 'db_cannot_open';
+    case null:
+    default:
+      return null;
+  }
+}
+
+/** Curated message of a busy error during normal use (the op failed; nothing was written; retry is safe). */
+export const DATABASE_BUSY_OP_MESSAGE = 'The Relay database is busy. Try again in a moment.';
+
 /**
- * Maps driver errors to the taxonomy where one applies: `SQLITE_BUSY` after `busy_timeout` becomes a retryable
- * `RUNNER_UNAVAILABLE` (03 §C4). Everything else is returned unchanged.
+ * Maps driver errors during normal use (03 §C4, E2 #2/#3): `SQLITE_BUSY` after the short `busy_timeout` becomes a
+ * retryable `DATABASE_UNAVAILABLE database_busy` (next action `wait`); disk full / read-only / damaged become
+ * `DATABASE_UNAVAILABLE` with their reason. `SQLITE_CANTOPEN` / `IOERR` mid-session and everything else are returned
+ * unchanged. The raw SQLite error stays on the never-serialized `cause`.
  */
 export function mapSqliteError(e: unknown): unknown {
-  if (isSqliteBusy(e)) {
-    const mapped = new RelayError(errors.runnerUnavailable({ details: { reason: 'database_busy' } }));
-    return Object.assign(mapped, { cause: e });
+  const reason = sqliteReason(e);
+  if (reason === null || reason === 'db_cannot_open') return e;
+  if (reason === 'database_busy') {
+    const appErr = { ...errors.databaseUnavailable('database_busy'), nextAction: 'wait' as const, userMessage: DATABASE_BUSY_OP_MESSAGE };
+    return new RelayError(appErr, { cause: e });
   }
-  return e;
+  return new RelayError(errors.databaseUnavailable(reason), { cause: e });
 }
 
 /**
- * Fatal integrity failure on open (03 §C1): the user must restore from `backups/`. Built by `errors.internal` with the
- * closed reason `integrity_check_failed`, whose static recovery `userMessage` ("Restore it from a backup in the backups
- * folder") lives in contracts `INTERNAL_REASON_MESSAGES` — INTERNAL may carry a userMessage, but only a curated one
- * keyed by its reason, never call-site text. SQLite's raw check output (which can name tables, indexes, and pages)
- * stays on the never-serialized `cause` for in-process debugging.
+ * Maps a failure while OPENING the database (pragmas, quick_check, migrations; 03 §C1/§C2) to a fatal
+ * `DATABASE_UNAVAILABLE` with a closed reason, so the runner's `fatal` message says what is wrong (E2 #3):
+ * newer schema, checksum mismatch, disk full, read-only, damaged (before the integrity check), busy, cannot open.
+ * An already-mapped RelayError keeps its error; anything unrecognised is returned unchanged.
+ */
+export function mapOpenError(e: unknown): unknown {
+  if (e instanceof MigrationVersionError) return new RelayError(errors.databaseUnavailable('schema_too_new'), { cause: e });
+  if (e instanceof MigrationChecksumError) return new RelayError(errors.databaseUnavailable('migration_checksum_mismatch'), { cause: e });
+  if (isRelayError(e)) return e;
+  const errno = errnoOf(e);
+  if (errno === 'EROFS' || errno === 'EACCES' || errno === 'EPERM') return new RelayError(errors.databaseUnavailable('db_readonly'), { cause: e });
+  if (errno === 'ENOSPC') return new RelayError(errors.databaseUnavailable('disk_full'), { cause: e });
+  const reason = sqliteReason(e);
+  return reason === null ? e : new RelayError(errors.databaseUnavailable(reason), { cause: e });
+}
+
+/**
+ * Fatal integrity failure on open (03 §C1): the user must restore from `backups/`. `DATABASE_UNAVAILABLE` with the
+ * closed reason `integrity_check_failed` and its curated restore message. SQLite's raw check output (which can name
+ * tables, indexes, and pages) stays on the never-serialized `cause` for in-process debugging.
  */
 export function integrityError(result: string): RelayError {
-  return new RelayError(errors.internal(undefined, 'integrity_check_failed'), { cause: new Error(result.slice(0, 200)) });
+  return new RelayError(errors.databaseUnavailable('integrity_check_failed'), { cause: new Error(result.slice(0, 200)) });
 }

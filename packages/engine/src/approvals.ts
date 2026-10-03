@@ -75,12 +75,12 @@ async function checkInputsUnchanged(ctx: EngineCtx, a: ApprovalRow): Promise<App
   return drift.changed.length === 0 ? null : projectChangedError(drift);
 }
 
-function replay(ctx: EngineCtx, req: IdempotentRequest, input: DecideInput): Result<DecideOutput> | null {
-  const stored = storedResult(ctx.db.repos, req);
+function replay(r: Repos, req: IdempotentRequest, input: DecideInput): Result<DecideOutput> | null {
+  const stored = storedResult(r, req);
   if (stored === null || !stored.ok) return stored;
-  const a = ctx.db.repos.approvals.get(input.approvalId);
+  const a = r.approvals.get(input.approvalId);
   if (a === undefined) return err(errors.notFound('approval'));
-  return ok({ approval: toApprovalView(a), runStatus: ctx.db.repos.runs.get(a.runId).status });
+  return ok({ approval: toApprovalView(a), runStatus: r.runs.get(a.runId).status });
 }
 
 /** Applies the decision inside the decide tx. */
@@ -119,7 +119,7 @@ function applyDecision(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, a: Appr
 /** `approvals.decide`. */
 export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promise<Result<DecideOutput>> {
   const req: IdempotentRequest = { op: OP, key: input.idempotencyKey, hash: requestHash({ ...input }) };
-  const replayed = replay(ctx, req, input);
+  const replayed = replay(ctx.db.repos, req, input);
   if (replayed !== null) return replayed; // 1. idempotency lookup first, before any plan/file hashing
   const a = ctx.db.repos.approvals.get(input.approvalId);
   if (a === undefined) return err(errors.notFound('approval'));
@@ -141,7 +141,15 @@ export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promis
     }
   }
   const fx: PostCommitEffect[] = [];
+  const inTx = { replayed: false };
   const decided = ctx.db.txResult('immediate', (r): Result<DecideOutput> => {
+    // E1 #7: a concurrent same-key decide (double click) committed while this one hashed the inputs: its stored
+    // result is replayed here instead of failing `duplicate_in_flight`.
+    const again = replay(r, req, input);
+    if (again !== null) {
+      inTx.replayed = true;
+      return again;
+    }
     const now = ctx.clock.now();
     const fresh = r.approvals.get(a.id);
     if (fresh?.decision !== null || fresh.invalidatedAt !== null) return err(errors.conflict({ reason: 'duplicate_in_flight' }));
@@ -154,7 +162,7 @@ export async function decideApproval(ctx: EngineCtx, input: DecideInput): Promis
     const row = r.approvals.get(a.id);
     return ok({ approval: toApprovalView(row ?? a), runStatus: status });
   });
-  if (!decided.ok) return decided;
+  if (!decided.ok || inTx.replayed) return decided;
   await runEffects(ctx, fx);
   const step = ctx.db.repos.steps.get(a.stepRunId);
   ctx.hooks?.afterApprovalCommit?.({ stepKey: step.stepKey, purpose: null, attemptSeq: 0 });

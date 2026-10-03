@@ -12,11 +12,12 @@ import {
   RadioGroup,
   Select,
   Textarea,
+  TextInput,
 } from '../../components/ui';
 import { MEMORY_TYPE_LABELS, PROVIDER_LABELS, stepKeyLabel } from '../../lib/format';
 import { LIMIT_BOUNDS } from '../run-setup/limits';
 import { profileIdByName, ROLE_LABELS } from '../run-setup/model-steps';
-import { OUTPUT_TOKENS_BOUNDS, RETRY_BOUNDS, WF_FIELD } from './workflow-form';
+import { OUTPUT_TOKENS_BOUNDS, promptVersioning, RETRY_BOUNDS, STEP_NAME_MAX, WF_FIELD } from './workflow-form';
 import type { ModelStep, StepForm, WorkflowForm } from './workflow-form';
 
 type SetForm = Dispatch<SetStateAction<WorkflowForm>>;
@@ -27,10 +28,10 @@ function profileOf(profiles: readonly ProfileWithWarnings[], name: string): Prof
 }
 
 function stepMeta(step: StepSpec, form: WorkflowForm, profiles: readonly ProfileWithWarnings[]): string {
-  if (step.kind === 'approval') return 'Human decision / Required / binds plan + context hash';
+  if (step.kind === 'approval') return 'Human decision · Required · binds plan + context hash';
   const name = form.steps[step.id]?.profile ?? step.profile;
   const profile = profileOf(profiles, name);
-  return `${profile?.profile.name ?? name} profile / ${step.outputSchema} / ${ROLE_LABELS[step.role]}`;
+  return `${profile?.profile.name ?? name} profile · ${step.outputSchema} · ${ROLE_LABELS[step.role]}`;
 }
 
 export interface StepListProps {
@@ -77,7 +78,7 @@ export function StepList({ view, form, profiles, selected, errorCounts, structur
                 leading={<span className="num muted">{String(i + 1)}</span>}
                 title={
                   <>
-                    <span className="sr-only">Step {String(i + 1)}:</span> {stepKeyLabel(s.id)}
+                    <span className="sr-only">Step {String(i + 1)}:</span> {stepTitleOf(s.id, form)}
                   </>
                 }
                 meta={stepMeta(s, form, profiles)}
@@ -91,6 +92,17 @@ export function StepList({ view, form, profiles, selected, errorCounts, structur
       </ol>
     </section>
   );
+}
+
+/** A step's display name from the form (trimmed), else its key label. */
+function stepTitleOf(stepKey: string, form: WorkflowForm): string {
+  const name = (form.names[stepKey] ?? '').trim();
+  return name === '' ? stepKeyLabel(stepKey) : name;
+}
+
+/** "8000" → "8,000" (a locked numeric field, formatted like New run); other text unchanged. */
+function groupDigits(text: string): string {
+  return /^\d+$/.test(text.trim()) ? Number.parseInt(text, 10).toLocaleString() : text;
 }
 
 export interface LimitsCardProps {
@@ -113,13 +125,13 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
         <h2 id={headingId}>Workflow limits</h2>
         <span className="subtle small">Snapshotted into every run</span>
       </div>
-      <div className="grid grid-cols-2 gap-4 max-[700px]:grid-cols-1">
+      <div className="grid grid-cols-2 items-start gap-4 max-[700px]:grid-cols-1">
         {editable ? (
           <MoneyInput
             id={WF_FIELD.allowance}
             label="Run allowance (USD)"
             value={form.allowance}
-            hint="Checked before each billable request."
+            hint="Checked before every call. Tracked by Relay."
             {...(errors[WF_FIELD.allowance] === undefined ? {} : { error: errors[WF_FIELD.allowance] })}
             onValueChange={(text) => {
               set({ allowance: text });
@@ -127,7 +139,7 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
           />
         ) : (
           // Limits are locked for this version: the allowance is shown, not editable (like the other limit inputs).
-          <Field label="Run allowance (USD)" id={WF_FIELD.allowance} hint="Checked before each billable request. Locked for this version.">
+          <Field label="Run allowance (USD)" id={WF_FIELD.allowance} hint="Checked before every call. Tracked by Relay. Locked for this version.">
             {(control) => (
               <span className="money-input">
                 <span className="prefix" aria-hidden="true">
@@ -141,7 +153,7 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
         <Field
           label="Revision cycles"
           id={WF_FIELD.revisions}
-          hint={`Policy maximum ${String(LIMIT_BOUNDS.maxRevisionCycles.max)}. On limit: incomplete.`}
+          hint={`Then the run is marked incomplete. ${String(LIMIT_BOUNDS.maxRevisionCycles.min)}–${String(LIMIT_BOUNDS.maxRevisionCycles.max)}.`}
           error={errors[WF_FIELD.revisions]}
         >
           {(control) => (
@@ -157,7 +169,12 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
             />
           )}
         </Field>
-        <Field label="Maximum attempts" id={WF_FIELD.attempts} hint="All steps, all retries." error={errors[WF_FIELD.attempts]}>
+        <Field
+          label="Max attempts (run)"
+          id={WF_FIELD.attempts}
+          hint={`Across all steps. ${String(LIMIT_BOUNDS.maxAttempts.min)}–${String(LIMIT_BOUNDS.maxAttempts.max)}.`}
+          error={errors[WF_FIELD.attempts]}
+        >
           {(control) => (
             <NumberInput
               {...control}
@@ -172,9 +189,9 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
           )}
         </Field>
         <Field
-          label="Execution timeout (minutes)"
+          label="Timeout (minutes)"
           id={WF_FIELD.timeout}
-          hint="Runner deadline; waiting for approval does not count."
+          hint={`Execution time only; waiting for your approval does not count. ${String(LIMIT_BOUNDS.timeoutMinutes.min)}–${String(LIMIT_BOUNDS.timeoutMinutes.max)}.`}
           error={errors[WF_FIELD.timeout]}
         >
           {(control) => (
@@ -190,10 +207,8 @@ export function LimitsCard({ view, form, errors, onChange }: LimitsCardProps) {
             />
           )}
         </Field>
-        <Field label="Concurrency" hint="Locked to 1 in this preview.">
-          {(control) => <input {...control} className="input mono" value="1" readOnly />}
-        </Field>
       </div>
+      <p className="small">Concurrency: one step at a time (fixed in this release).</p>
       <p className="subtle small">
         Relay pauses before dispatch when the next request would exceed the remaining allowance. Models cannot raise
         limits.
@@ -210,8 +225,34 @@ export interface StepDetailProps {
   readonly profiles: readonly ProfileWithWarnings[];
   readonly errors: Readonly<Record<string, string>>;
   readonly showPrompt: boolean;
+  /** Instruction versions a validated version carries (E1), or null while unknown. */
+  readonly publishedPrompts: ReadonlySet<string> | null;
   readonly onShowPrompt: (show: boolean) => void;
   readonly onChange: SetForm;
+}
+
+/** Optional display name of any step (E2 #10): 1–60 characters, trimmed; empty = no name. */
+function StepNameField({ step, form, errors, onChange }: Pick<StepDetailProps, 'step' | 'form' | 'errors' | 'onChange'>) {
+  const value = form.names[step.id] ?? '';
+  return (
+    <Field
+      label="Name (optional)"
+      id={WF_FIELD.name(step.id)}
+      hint={`Shown in the editor and the run inspector instead of "${stepKeyLabel(step.id)}". Up to ${String(STEP_NAME_MAX)} characters.`}
+      error={errors[WF_FIELD.name(step.id)]}
+    >
+      {(control) => (
+        <TextInput
+          {...control}
+          value={value}
+          autoComplete="off"
+          onValueChange={(text) => {
+            onChange((prev) => ({ ...prev, names: { ...prev.names, [step.id]: text } }));
+          }}
+        />
+      )}
+    </Field>
+  );
 }
 
 /** Detail form of the selected step (§5.3 fields). Approval steps are read-only in P0. */
@@ -222,10 +263,11 @@ export function StepDetail(props: StepDetailProps) {
     <section className="card stack" aria-labelledby={headingId}>
       <div className="card-header">
         <h2 id={headingId}>
-          Step {String(index + 1)}: {stepKeyLabel(step.id)}
+          Step {String(index + 1)}: {stepTitleOf(step.id, props.form)}
         </h2>
         <span className="badge">{step.kind === 'model' ? 'Model step' : 'Approval step'}</span>
       </div>
+      <StepNameField {...props} />
       {step.kind === 'model' ? (
         <ModelStepFields {...props} step={step} />
       ) : (
@@ -235,8 +277,8 @@ export function StepDetail(props: StepDetailProps) {
             hash; a changed plan or project file needs a new approval.
           </p>
           <p className="small muted">
-            Depends on: {step.dependsOn.map(stepKeyLabel).join(', ')} · binds {step.bindTo.join(' + ')}. Approval
-            steps cannot be edited in this preview.
+            Depends on: {step.dependsOn.map(stepKeyLabel).join(', ')} · binds {step.bindTo.join(' + ')}. Apart from
+            its name, an approval step cannot be edited in this preview.
           </p>
         </div>
       )}
@@ -248,7 +290,7 @@ export function StepDetail(props: StepDetailProps) {
   );
 }
 
-function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onShowPrompt, onChange }: StepDetailProps & { readonly step: ModelStep }) {
+function ModelStepFields({ view, step, form, profiles, errors, showPrompt, publishedPrompts, onShowPrompt, onChange }: StepDetailProps & { readonly step: ModelStep }) {
   const promptWrapId = useId();
   const schemaId = useId();
   const f = form.steps[step.id];
@@ -261,11 +303,18 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onSho
   };
   const iv = step.instructionVersion;
   const promptText = form.prompts[iv];
+  const versioning = promptVersioning(view, iv, publishedPrompts);
+  const versionNote =
+    versioning.kind === 'published'
+      ? `Editing creates ${versioning.next}; runs that used ${iv} keep it.`
+      : versioning.kind === 'draft_only'
+        ? `${iv} exists only in this draft; editing changes it in place.`
+        : null;
   const role = ROLE_LABELS[step.role];
   const resolved = profileOf(profiles, f.profile);
   const profileOptions = [
     ...(resolved === undefined ? [{ value: f.profile, label: `${f.profile} (no matching profile)` }] : []),
-    ...profiles.map((p) => ({ value: p.profile.name, label: `${p.profile.name} / ${PROVIDER_LABELS[p.profile.providerId]}` })),
+    ...profiles.map((p) => ({ value: p.profile.name, label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]}` })),
   ];
   const editable = view.editable;
   const toggleType = (t: MemoryType, on: boolean) => {
@@ -282,7 +331,9 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onSho
       <div className="field">
         <span className="label">Instruction version</span>
         <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-          <span className="mono">{iv}</span>
+          <span className="mono" data-testid="instruction-version">
+            {iv}
+          </span>
           <Button
             size="sm"
             variant="ghost"
@@ -295,6 +346,11 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onSho
             {showPrompt ? 'Hide prompt' : editable.prompts ? 'View and edit prompt' : 'View prompt'}
           </Button>
         </span>
+        {versionNote === null || !editable.prompts ? null : (
+          <span className="hint" data-testid="instruction-version-note">
+            {versionNote}
+          </span>
+        )}
         <div id={promptWrapId} hidden={!showPrompt}>
           {promptText === undefined ? (
             <p className="small muted">This build has no prompt text for {iv}.</p>
@@ -327,7 +383,7 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onSho
         hint={
           resolved === undefined
             ? 'No profile has this name. Choose one of your profiles.'
-            : `Resolves to ${PROVIDER_LABELS[resolved.profile.providerId]} / ${resolved.profile.modelId}. ${
+            : `Resolves to ${PROVIDER_LABELS[resolved.profile.providerId]} · ${resolved.profile.modelId}. ${
                 resolved.warnings.length === 0 ? 'No capability warnings.' : resolved.warnings.map((w) => w.message).join(' ')
               }`
         }
@@ -354,23 +410,27 @@ function ModelStepFields({ view, step, form, profiles, errors, showPrompt, onSho
           id={WF_FIELD.maxOutputTokens(step.id)}
           hint={
             f.maxOutputTokens === '' && resolved !== undefined
-              ? `Empty: the profile's ${String(resolved.profile.params.maxOutputTokens)} applies. Reserved in full before dispatch.`
+              ? `Empty: the profile's ${resolved.profile.params.maxOutputTokens.toLocaleString()} applies. Reserved in full before dispatch.`
               : 'Reserved in full before dispatch.'
           }
           error={errors[WF_FIELD.maxOutputTokens(step.id)]}
         >
-          {(control) => (
-            <NumberInput
-              {...control}
-              value={f.maxOutputTokens}
-              min={OUTPUT_TOKENS_BOUNDS.min}
-              max={OUTPUT_TOKENS_BOUNDS.max}
-              readOnly={!editable.maxOutputTokens}
-              onValueChange={(text) => {
-                setStep({ maxOutputTokens: text });
-              }}
-            />
-          )}
+          {(control) =>
+            editable.maxOutputTokens ? (
+              <NumberInput
+                {...control}
+                value={f.maxOutputTokens}
+                min={OUTPUT_TOKENS_BOUNDS.min}
+                max={OUTPUT_TOKENS_BOUNDS.max}
+                onValueChange={(text) => {
+                  setStep({ maxOutputTokens: text });
+                }}
+              />
+            ) : (
+              // Locked: shown like New run shows it ("8,000").
+              <input {...control} className="input mono" type="text" readOnly value={groupDigits(f.maxOutputTokens)} />
+            )
+          }
         </Field>
       </div>
       <div className="field">

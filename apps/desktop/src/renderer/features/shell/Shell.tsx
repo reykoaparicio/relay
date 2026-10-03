@@ -1,8 +1,8 @@
-import { Suspense, useRef } from 'react';
+import { Suspense, useEffect, useRef } from 'react';
 import type { MouseEvent, ReactNode, RefObject } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, BookOpen, CircleCheck, LayoutDashboard, Settings, TriangleAlert, Workflow } from 'lucide-react';
-import { Outlet, useMatches, useNavigate, useParams } from 'react-router';
+import { Outlet, useLocation, useMatches, useNavigate, useParams } from 'react-router';
 import type { ProviderStatus } from '@relay/contracts';
 import {
   AppShell,
@@ -13,16 +13,20 @@ import {
   SideNav,
   Skeleton,
   usePageFocusRescue,
+  useToast,
 } from '../../components/ui';
 import type { NavItemData } from '../../components/ui';
 import { call } from '../../api/client';
 import { qk } from '../../api/keys';
 import { useAppInfo } from '../../hooks/useAppInfo';
+import { useDiagnostics } from '../../hooks/useDiagnostics';
 import { useProjects } from '../../hooks/useProjects';
 import { useProviders } from '../../hooks/useProviders';
+import { useRun } from '../../hooks/useRun';
 import { useSettings } from '../../hooks/useSettings';
 import { useWorkflows } from '../../hooks/useWorkflow';
 import { useRunnerState } from '../../state/PushSyncProvider';
+import { RunnerFatalText, RunnerRecovery } from '../runner/RunnerRecovery';
 import { href, paths } from './paths';
 
 /** Nav key per leaf route id (`aria-current` on the matching item). */
@@ -37,10 +41,16 @@ const NAV_KEY_BY_ROUTE: Readonly<Record<string, string>> = {
   settings: 'settings',
 };
 
-/** "2 providers connected" / warning (§5.1). Status is text + icon, never color alone. */
-function providerStatusText(providers: readonly ProviderStatus[]): { readonly text: string; readonly ok: boolean } {
+/**
+ * "2 providers connected" / warning (§5.1). Status is text + icon, never color alone. A provider counts as unhealthy
+ * while its last test failed, or while a run is paused for its sign-in (`signInNeeded`).
+ */
+export function providerStatusText(
+  providers: readonly ProviderStatus[],
+  signInNeeded: ReadonlySet<string> = new Set(),
+): { readonly text: string; readonly ok: boolean } {
   const connected = providers.filter((p) => p.connected);
-  const healthy = connected.filter((p) => p.lastTest?.ok !== false);
+  const healthy = connected.filter((p) => p.lastTest?.ok !== false && !signInNeeded.has(p.providerId));
   if (connected.length === 0) return { text: 'No providers connected', ok: false };
   if (healthy.length === connected.length) {
     return { text: `${String(healthy.length)} provider${healthy.length === 1 ? '' : 's'} connected`, ok: true };
@@ -48,10 +58,14 @@ function providerStatusText(providers: readonly ProviderStatus[]): { readonly te
   return { text: `${String(healthy.length)} of ${String(connected.length)} providers connected`, ok: false };
 }
 
-function ProviderStatusLine() {
+function ProviderStatusLine({ authPausedRunId }: { readonly authPausedRunId: string | undefined }) {
   const providers = useProviders();
+  // A run paused for sign-in names its provider in the run detail (statusDetail.details.providerId).
+  const authRun = useRun(authPausedRunId);
+  const named = authRun.data?.statusDetail?.details?.['providerId'];
+  const signInNeeded = new Set(typeof named === 'string' ? [named] : []);
   if (providers.data === undefined) return null;
-  const { text, ok } = providerStatusText(providers.data);
+  const { text, ok } = providerStatusText(providers.data, signInNeeded);
   const Icon = ok ? CircleCheck : TriangleAlert;
   return (
     <a className={ok ? 'provider-status no-underline' : 'provider-status warn no-underline'} href={href(paths.settings('providers'))}>
@@ -64,40 +78,73 @@ function ProviderStatusLine() {
 function RunnerBanner() {
   const state = useRunnerState();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // Why it stopped (main keeps the last fatal): read only while the runner is unavailable.
+  const diagnostics = useDiagnostics({ enabled: state === 'unavailable' });
+  const previous = useRef(state);
+  useEffect(() => {
+    // Back from unavailable: refresh the fatal-free diagnostics (other queries refetch through their own errors).
+    if (previous.current === 'unavailable' && state !== 'unavailable') void queryClient.invalidateQueries({ queryKey: qk.diagnostics() });
+    previous.current = state;
+  }, [state, queryClient]);
   if (state === 'restarting') {
     return <InlineAlert tone="info" live="polite" title="Background runner restarting…">Runs continue from their last checkpoint when it is back.</InlineAlert>;
   }
   if (state === 'unavailable') {
+    const fatal = diagnostics.data?.runner.lastFatal;
     return (
       <InlineAlert
         tone="danger"
         live="polite"
         title="The background runner is unavailable"
-        actions={
-          <Button
-            onClick={() => {
-              void navigate(paths.settings('diagnostics'));
-            }}
-          >
-            Open diagnostics
-          </Button>
-        }
       >
-        Runs are paused safely. Relay could not restart the runner automatically.
+        <p>Runs are paused safely. Relay could not restart the runner automatically.</p>
+        <RunnerFatalText fatal={fatal} />
+        <RunnerRecovery
+          fatal={fatal}
+          compact
+          extra={
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                void navigate(paths.settings('diagnostics'));
+              }}
+            >
+              Open diagnostics
+            </Button>
+          }
+        />
       </InlineAlert>
     );
   }
   return null;
 }
 
-/** Count of runs waiting for approval (the Runs nav badge). */
-function useAwaitingApprovalCount(projectId: string | undefined): number {
+/** Runs that wait for the user (the Runs nav badge): awaiting approval, and paused for any reason. */
+function useAttentionCounts(projectId: string | undefined): {
+  readonly awaiting: number;
+  readonly paused: number;
+  /** A run paused for provider sign-in, if any (the provider status line counts its provider as unhealthy). */
+  readonly authPausedRunId: string | undefined;
+} {
   const query = useQuery({
-    queryKey: qk.runs(projectId ?? '', 'awaiting-count', 100),
-    queryFn: () => call('relay/v1/runs.list', { projectId: projectId ?? '', status: ['awaiting_approval'], limit: 100 }),
+    queryKey: qk.runs(projectId ?? '', 'attention-count', 100),
+    queryFn: () => call('relay/v1/runs.list', { projectId: projectId ?? '', status: ['awaiting_approval', 'paused'], limit: 100 }),
     enabled: projectId !== undefined && projectId !== '',
   });
-  return query.data?.items.length ?? 0;
+  const items = query.data?.items ?? [];
+  const awaiting = items.filter((r) => r.status === 'awaiting_approval').length;
+  const authPausedRunId = items.find((r) => r.status === 'paused' && r.pauseReason === 'auth_required')?.id;
+  return { awaiting, paused: items.length - awaiting, authPausedRunId };
+}
+
+/** Screen-reader text of the Runs badge, by what the runs wait for. */
+export function attentionBadgeLabel(counts: { readonly awaiting: number; readonly paused: number }): string {
+  const total = counts.awaiting + counts.paused;
+  if (counts.paused === 0) return `${String(total)} waiting for approval`;
+  if (counts.awaiting === 0) return `${String(total)} paused run${total === 1 ? ' needs' : 's need'} you`;
+  return `${String(total)} runs need your attention`;
 }
 
 export interface ShellProps {
@@ -114,7 +161,7 @@ export function Shell({ projectId, activeRouteId, children, mainRef }: ShellProp
   const projects = useProjects();
   const info = useAppInfo();
   const workflows = useWorkflows();
-  const awaiting = useAwaitingApprovalCount(projectId);
+  const attention = useAttentionCounts(projectId);
   const firstWorkflowId = workflows.data?.[0]?.id;
 
   const items: NavItemData[] =
@@ -133,8 +180,8 @@ export function Shell({ projectId, activeRouteId, children, mainRef }: ShellProp
             label: 'Runs',
             href: href(paths.runs(projectId)),
             icon: Activity,
-            badgeCount: awaiting,
-            badgeLabel: (n) => `${String(n)} waiting for approval`,
+            badgeCount: attention.awaiting + attention.paused,
+            badgeLabel: () => attentionBadgeLabel(attention),
           },
           { key: 'memory', label: 'Memory', href: href(paths.memory(projectId)), icon: BookOpen },
           { key: 'settings', label: 'Settings', href: href(paths.settings()), icon: Settings },
@@ -172,7 +219,7 @@ export function Shell({ projectId, activeRouteId, children, mainRef }: ShellProp
               void navigate(paths.onboarding('select-project'));
             }}
           />
-          <ProviderStatusLine />
+          <ProviderStatusLine authPausedRunId={attention.authPausedRunId} />
           {info.data?.providerMode === 'fake' ? <FakeProviderBadge /> : null}
         </>
       }
@@ -196,6 +243,16 @@ export function ShellLayout() {
   // A11Y-02: when a mutation removes or disables the focused control, focus lands on <main>, never on <body>.
   const mainRef = useRef<HTMLElement>(null);
   usePageFocusRescue(mainRef);
+  // Toasts belong to the page that raised them: leaving it dismisses them (search-param changes such as a tab or the
+  // selected step stay on the page and keep them).
+  const { pathname } = useLocation();
+  const { dismissStale } = useToast();
+  const lastPath = useRef(pathname);
+  useEffect(() => {
+    if (lastPath.current === pathname) return;
+    lastPath.current = pathname;
+    dismissStale();
+  }, [pathname, dismissStale]);
   return (
     <Shell projectId={projectId} activeRouteId={activeRouteId} mainRef={mainRef}>
       <Suspense

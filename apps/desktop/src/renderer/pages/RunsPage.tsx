@@ -201,18 +201,19 @@ export function RunsPage() {
           <p className="subtle">
             {runs.hasNextPage
               ? `Showing ${String(rows.length)} runs, newest first.`
-              : `${String(rows.length)} run${rows.length === 1 ? '' : 's'}${isFiltered ? ` (${filter.label})` : ''}. No older runs.`}
+              : `${String(rows.length)} run${rows.length === 1 ? '' : 's'}${isFiltered ? ` (${filter.label})` : ''}.`}
           </p>
-          <Button
-            icon={ChevronDown}
-            pending={runs.isFetchingNextPage}
-            disabled={!runs.hasNextPage}
-            onClick={() => {
-              void runs.fetchNextPage();
-            }}
-          >
-            {runs.hasNextPage ? 'Load older runs' : 'No older runs'}
-          </Button>
+          {runs.hasNextPage ? (
+            <Button
+              icon={ChevronDown}
+              pending={runs.isFetchingNextPage}
+              onClick={() => {
+                void runs.fetchNextPage();
+              }}
+            >
+              Load older runs
+            </Button>
+          ) : null}
         </div>
       </div>
     );

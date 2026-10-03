@@ -10,7 +10,7 @@ import {
   sha256Schema,
   stepKeySchema,
 } from '../primitives.js';
-import { pauseReasonSchema, runActionSchema, runStatusSchema } from '../status.js';
+import { pauseReasonSchema, providerIdSchema, runActionSchema, runStatusSchema } from '../status.js';
 import { approvalViewSchema } from './approval.js';
 import { attemptViewSchema } from './attempt.js';
 import { costSummarySchema } from './ledger.js';
@@ -37,9 +37,27 @@ export const workflowLimitsSchema = runLimitsSchema.partial();
 /** Workflow limits. */
 export type WorkflowLimits = z.infer<typeof workflowLimitsSchema>;
 
+/**
+ * The `files` run input. `acknowledgedSuspectedSecrets`: selected files the user confirmed sending although their
+ * content looks like it holds a secret (intake refuses such a file with PERMISSION_DENIED `suspected_secret` unless it
+ * is listed here); every entry must be one of `relPaths`. Kept on the stored input, so intake sees it on re-parse.
+ */
+const filesRunInputSchema = z
+  .object({
+    kind: z.literal('files'),
+    relPaths: z.array(relPathSchema).min(1).max(INPUT_CAPS.maxFiles),
+    acknowledgedSuspectedSecrets: z.array(relPathSchema).max(INPUT_CAPS.maxFiles).optional(),
+  })
+  .superRefine((v, ctx) => {
+    const selected = new Set(v.relPaths);
+    (v.acknowledgedSuspectedSecrets ?? []).forEach((p, i) => {
+      if (!selected.has(p)) ctx.addIssue({ code: 'custom', path: ['acknowledgedSuspectedSecrets', i], message: 'Not one of the selected files.' });
+    });
+  });
+
 /** Run input: selected files, or an imported diff (imported as an artifact first, ADR-015). */
 export const runInputSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('files'), relPaths: z.array(relPathSchema).min(1).max(INPUT_CAPS.maxFiles) }),
+  filesRunInputSchema,
   z.object({ kind: z.literal('diff'), diffArtifactId: idSchema('artifact') }),
 ]);
 /** Run input. */
@@ -80,6 +98,47 @@ export const runSummarySchema = z.object({
 /** Run summary. */
 export type RunSummary = z.infer<typeof runSummarySchema>;
 
+/**
+ * One profile the blocked step could switch to (`choose_profile`), with the reservation it would need: the local
+ * estimate (no network) over the step's last estimated input tokens and the profile's catalog prices. `basis`:
+ * `step_estimate` when the step's input was estimated before (a reserve-time block or an earlier attempt), else
+ * `minimum` (input not estimated yet, e.g. a queued run blocked before intake: the smallest possible reservation —
+ * word it "at least"). Only profiles whose provider the project allows and that have a credential ref are listed.
+ * `current` marks the step's effective profile.
+ */
+export const profileOptionSchema = z.object({
+  stepKey: stepKeySchema,
+  profileId: idSchema('profile'),
+  profileName: z.string(),
+  providerId: providerIdSchema,
+  modelId: z.string(),
+  reservationMicrousd: nonNegativeMicrousdSchema,
+  estimatedInputTokens: z.number().int().nonnegative(),
+  basis: z.enum(['step_estimate', 'minimum']),
+  current: z.boolean(),
+});
+/** Choose-profile option. */
+export type ProfileOption = z.infer<typeof profileOptionSchema>;
+
+/** Per step key: the optional display name from the workflow spec and the instruction version the run used. */
+export const stepMetaSchema = z.object({
+  stepKey: stepKeySchema,
+  name: z.string().nullable(),
+  instructionVersion: z.string().nullable(), // model steps only (e.g. "reviewer.v2")
+});
+/** Step meta. */
+export type StepMeta = z.infer<typeof stepMetaSchema>;
+
+/** The newest context manifest of the run (fetch the JSON with `artifacts.get`). */
+export const manifestRefSchema = z.object({
+  stepRunId: idSchema('stepRun'),
+  stepKey: stepKeySchema,
+  attemptId: idSchema('attempt'),
+  artifactId: idSchema('artifact'),
+});
+/** Manifest ref. */
+export type ManifestRef = z.infer<typeof manifestRefSchema>;
+
 /** Run inspector projection. `availableActions` is server-computed (06 F2); the UI never re-derives rules. */
 export const runDetailSchema = runSummarySchema.extend({
   limits: runLimitsSchema,
@@ -93,6 +152,15 @@ export const runDetailSchema = runSummarySchema.extend({
   statusDetail: appErrorSchema.nullable(), // the blocking error behind pauseReason
   reportArtifactId: idSchema('artifact').nullable(), // report.v1, set on every terminal transition (06 F17)
   availableActions: z.array(runActionSchema),
+  // E1 additions (optional so older producers stay valid; the engine always sets them):
+  /** Every attempt of the run, oldest first (the run-level Attempts tab). */
+  attempts: z.array(attemptViewSchema).optional(),
+  /** The newest context manifest of any attempt of the run (the run-level Context tab), or null. */
+  latestManifest: manifestRefSchema.nullable().optional(),
+  /** Choose-profile options with reservation estimates; non-empty only while `choose_profile` is offered. */
+  profileOptions: z.array(profileOptionSchema).optional(),
+  /** Display name and instruction version per step key, in step order. */
+  stepMeta: z.array(stepMetaSchema).optional(),
 });
 /** Run detail. */
 export type RunDetail = z.infer<typeof runDetailSchema>;

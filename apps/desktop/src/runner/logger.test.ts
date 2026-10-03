@@ -35,4 +35,18 @@ describe('createRunnerLogger', () => {
     expect(String(line['err'])).toContain('[REDACTED:');
     expect(JSON.parse(await readFile(join(logs, '2026-10-01.jsonl'), 'utf8'))).toMatchObject({ level: 'debug', event: 'engine.tick', proc: 'runner' });
   });
+
+  it('falls back to stderr when logs/ cannot be written (never throws)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const blocked = join(dir, 'file-not-dir');
+    await writeFile(blocked, 'x');
+    const out: string[] = [];
+    const logger = createRunnerLogger(join(blocked, 'logs'), () => 0, (t) => out.push(t));
+
+    logger.error('runner.fatal', { code: 'DATABASE_UNAVAILABLE', apiKey: KEY });
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('runner.fatal');
+    expect(out[0]).not.toContain('SEEDEDRUNNERKEY');
+  });
 });

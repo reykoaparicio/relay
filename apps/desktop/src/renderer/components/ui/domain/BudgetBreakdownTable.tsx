@@ -1,5 +1,6 @@
 import type { BudgetBreakdown, BudgetScope } from '@relay/contracts';
-import { formatMoneyPair } from '../../../lib/format/money';
+import { microusd } from '@relay/contracts';
+import { formatMoney, formatMoneyPair } from '../../../lib/format/money';
 import { Money } from '../Money';
 
 const SCOPE_LABEL: Readonly<Record<BudgetScope, string>> = {
@@ -19,6 +20,7 @@ export interface BudgetBreakdownTableProps {
 export function BudgetBreakdownTable({ breakdown: b }: BudgetBreakdownTableProps) {
   const [total, limit] = formatMoneyPair(b.total, b.L);
   const verdict = b.allowed ? `${total} ≤ ${limit} → allowed` : `${total} > ${limit} → blocked`;
+  const over = b.allowed ? null : formatMoney(microusd(b.total - b.L));
   return (
     <div className="stack">
       <table className="arith">
@@ -51,13 +53,19 @@ export function BudgetBreakdownTable({ breakdown: b }: BudgetBreakdownTableProps
           </tr>
           <tr className="total">
             <td className="sym">=</td>
-            <th scope="row">C + R + U + N</th>
+            <th scope="row">
+              C + R + U + N{over === null ? null : <span className="subtle"> (exceeds L by <span className="num">{over}</span>)</span>}
+            </th>
             <td className="num"><Money value={b.total} /></td>
           </tr>
         </tbody>
       </table>
       <p className="small">
         <strong className="num">{verdict}</strong>
+      </p>
+      <p className="subtle small">
+        L = allowance · C = settled usage · R = reservations in flight · U = unknown liability · N = reservation for the
+        next request. A request starts only when C + R + U + N ≤ L.
       </p>
     </div>
   );

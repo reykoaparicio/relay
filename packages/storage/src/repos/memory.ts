@@ -1,5 +1,5 @@
-import type { MemoryId, Result } from '@relay/contracts';
-import { err, errors, idSchema, invariant, ok } from '@relay/contracts';
+import type { EpochMs, MemoryId, Result } from '@relay/contracts';
+import { TERMINAL_RUN_STATUSES, err, errors, idSchema, invariant, ok } from '@relay/contracts';
 import type { SqlDriver } from '../driver.js';
 import { mapMemoryEvent, mapMemoryItem, mapMemoryRevision, mapRunMemorySnapshot, RowReader } from '../mappers.js';
 import { bit, jsonParam, toJson } from '../sql.js';
@@ -157,6 +157,29 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
           at, id,
         );
     },
+    countRunSnapshotsByRevision(recordId) {
+      const out = new Map<number, number>();
+      for (const row of driver.prepare('SELECT revision, COUNT(*) AS n FROM run_memory_snapshot WHERE record_id = ? GROUP BY revision').all(recordId)) {
+        const r = new RowReader('run_memory_snapshot', row, 'revision');
+        out.set(r.int('revision'), r.int('n'));
+      }
+      return out;
+    },
+    lastEventAt(recordIds, event) {
+      const out = new Map<MemoryId, EpochMs>();
+      if (recordIds.length === 0) return out;
+      const rows = driver
+        .prepare(
+          `SELECT record_id, MAX(created_at) AS at FROM memory_events
+            WHERE event = ?1 AND record_id IN (SELECT value FROM json_each(?2)) GROUP BY record_id`,
+        )
+        .all(event, JSON.stringify(recordIds));
+      for (const row of rows) {
+        const r = new RowReader('memory_events', row, 'record_id');
+        out.set(r.as('record_id', idSchema('memory')), r.ms('at'));
+      }
+      return out;
+    },
     countRunSnapshots(recordId) {
       const row = driver.prepare('SELECT COUNT(*) AS n FROM run_memory_snapshot WHERE record_id = ?').get(recordId);
       return new RowReader('run_memory_snapshot', row).int('n');
@@ -190,10 +213,13 @@ export function createMemoryRepo(driver: SqlDriver, deps: RepoDeps): MemoryRepo 
     purgeRunSnapshots(projectId) {
       const recordIds = driver
         .prepare(
-          `DELETE FROM run_memory_snapshot WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?)
+          // Only ENDED runs (E2 #14): an active run still reads its snapshot at its next model step, and its
+          // approval binds to the context it was built from; it is purged by a later purge once it has ended.
+          `DELETE FROM run_memory_snapshot WHERE run_id IN (
+             SELECT id FROM runs WHERE project_id = ?1 AND status IN (SELECT value FROM json_each(?2)))
            RETURNING record_id`,
         )
-        .all(projectId)
+        .all(projectId, JSON.stringify(TERMINAL_RUN_STATUSES))
         .map((r) => new RowReader('run_memory_snapshot', r, 'record_id').as('record_id', idSchema('memory')));
       return { deleted: recordIds.length, recordIds: [...new Set(recordIds)] };
     },

@@ -17,6 +17,13 @@ const electronPath = createRequire(path.join(desktopDir, 'package.json'))('elect
 /** The fake secret the onboarding spec places in the project copy (never committed; never sent). */
 export const FIXTURE_ENV_SECRET = 'SAMPLE_API_TOKEN=sk-fixture-DO-NOT-READ-1234567890';
 
+/**
+ * A fake Anthropic-shaped marker (never a real key) that the file-safety spec writes into the per-test project copy
+ * (`src/keys.ts`, line 2), so the content check flags the file as a suspected secret. Never committed into the fixture.
+ */
+export const FIXTURE_SUSPECTED_SECRET_FILE = 'src/keys.ts';
+export const FIXTURE_SUSPECTED_SECRET = 'sk-ant-e2e-SUSPECTED-0123456789abcdef';
+
 export interface DialogStub {
   directory?: string;
   diffFile?: string;
@@ -56,6 +63,8 @@ type Fixtures = {
   crashAt: string | undefined;
   /** Adds `.env` with {@link FIXTURE_ENV_SECRET} to the project copy before hashing it. */
   projectEnvSecret: boolean;
+  /** Adds {@link FIXTURE_SUSPECTED_SECRET_FILE} holding {@link FIXTURE_SUSPECTED_SECRET} before hashing the copy. */
+  projectSuspectedSecret: boolean;
   userDataDir: string;
   project: ProjectCopy;
   session: Session;
@@ -120,6 +129,7 @@ export const test = base.extend<Fixtures>({
   scenario: ['happy-path', { option: true }],
   crashAt: [undefined, { option: true }],
   projectEnvSecret: [false, { option: true }],
+  projectSuspectedSecret: [false, { option: true }],
 
   userDataDir: async ({}, use) => {
     const d = await makeTempDir();
@@ -137,11 +147,17 @@ export const test = base.extend<Fixtures>({
 
   // Every test gets its own copy of tests/fixtures/sample-api outside userData; the tree must be unchanged afterwards.
   project: [
-    async ({ projectEnvSecret }, use) => {
+    async ({ projectEnvSecret, projectSuspectedSecret }, use) => {
       const parent = await makeTempDir('project-');
       const dir = path.join(parent, 'sample-api');
       await cp(SAMPLE_API_ROOT, dir, { recursive: true, verbatimSymlinks: true });
       if (projectEnvSecret) await writeFile(path.join(dir, '.env'), `${FIXTURE_ENV_SECRET}\n`);
+      if (projectSuspectedSecret) {
+        await writeFile(
+          path.join(dir, FIXTURE_SUSPECTED_SECRET_FILE),
+          `// Test-only fake marker (not a real key).\nexport const SAMPLE_KEY = '${FIXTURE_SUSPECTED_SECRET}';\n`,
+        );
+      }
       const before = await treeHash(dir);
       await use({ dir, name: 'sample-api', treeHashBefore: before });
       const after = await treeHash(dir);

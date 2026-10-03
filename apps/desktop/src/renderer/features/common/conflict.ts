@@ -119,7 +119,9 @@ const OTHER_COPY: Readonly<Record<string, { readonly title: string; readonly mes
   duplicate_in_flight: { title: 'This decision is already being applied', message: 'Wait for it to finish.' },
   already_archived: { title: 'This project is already archived', message: 'Nothing was changed.' },
   project_archived: { title: 'This project is archived', message: 'An archived project cannot start runs.' },
-  root_already_used: { title: 'This folder is already a Relay project', message: 'Open the existing project instead.' },
+  root_already_used: { title: 'This folder is already a Relay project', message: 'Another active project uses this folder. Open that project instead.' },
+  archived: { title: 'This project is archived', message: 'Restore it in Settings → Projects first.' },
+  not_archived: { title: 'This project is not archived', message: 'Nothing was changed.' },
   invalid_memory_transition: {
     title: 'This record can no longer do that',
     message: 'Its status changed (for example it was archived, approved or rejected elsewhere).',

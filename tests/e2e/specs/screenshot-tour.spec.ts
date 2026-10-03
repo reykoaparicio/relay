@@ -2,9 +2,10 @@
 // to look at. It asserts only that each state is reached; it never compares pixels. Skipped unless TOUR_DIR is set:
 //   env -u ELECTRON_RUN_AS_NODE TOUR_DIR=/abs/out pnpm exec playwright test tests/e2e/specs/screenshot-tour.spec.ts
 import { mkdirSync } from 'node:fs';
+import { rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
-import { expect, test } from '../fixtures.js';
+import { expect, FIXTURE_SUSPECTED_SECRET_FILE, test } from '../fixtures.js';
 import { setupOwnProject, startRunViaNewRun } from '../flows.js';
 import { NewRun, Runs, Settings } from '../pages/app-pages.js';
 import type { SettingsSectionName } from '../pages/app-pages.js';
@@ -87,6 +88,8 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
       await page.keyboard.press('Escape');
       await inspector.approve();
       await inspector.waitForStatus('Completed', 60_000);
+      // The badge follows the push at once; wait for the refetched detail (a finished run offers no Pause).
+      await expect(inspector.headerAction('Pause')).toBeHidden();
       await shot('inspector-completed');
       await inspector.viewReportLink().click();
       const report = new Report(page);
@@ -153,6 +156,9 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
         await inspector.expectLoaded();
         await s.before(inspector);
         await inspector.waitForStatus(s.status, 60_000);
+        // The status badge follows the push at once; the rest of the run detail refetches a moment later (debounced).
+        // A paused run offers no Pause, so its absence means the detail on screen is the paused one.
+        await expect(inspector.headerAction('Pause')).toBeHidden();
         await shot('inspector');
         await inspector.openTab('Attempts');
         await shot('attempts');
@@ -162,4 +168,66 @@ if (OUT !== '') test.describe('screenshot tour', { tag: '@tour' }, () => {
       });
     });
   }
+
+  // R2 recovery screens: a suspected secret in New run, a moved project folder, a damaged database.
+  test.describe('recovery screens', () => {
+    test.use({ projectSuspectedSecret: true });
+
+    test('recovery', async ({ page, stubDialogs, project, relaunch, closeApp, userDataDir }) => {
+      await page.setViewportSize(WIDE);
+      const shot = shooter(page, 'c-recovery');
+      await setupOwnProject(page, stubDialogs, project);
+      const shell = new Shell(page);
+      await shell.nav('Runs');
+      await new Runs(page).startWorkflow();
+      const form = new NewRun(page);
+      await form.expectLoaded();
+      await form.fillGoal(GOAL);
+      await form.expectReady();
+      await shot('new-run-suspected-secret');
+      await form.form().getByRole('checkbox', { name: FIXTURE_SUSPECTED_SECRET_FILE, exact: true }).click();
+      await expect(page.getByRole('dialog', { name: /^Send this file to / })).toBeVisible();
+      await shot('new-run-secret-confirm');
+      await page.keyboard.press('Escape');
+
+      const moved = path.join(path.dirname(project.dir), `${project.name}-moved`);
+      await rename(project.dir, moved);
+      try {
+        await shell.nav('Overview');
+        await page.reload();
+        await expect(page.getByText('Project folder not found')).toBeVisible({ timeout: 30_000 });
+        await shot('overview-folder-missing');
+        await stubDialogs({ directory: moved });
+        await page.getByRole('button', { name: 'Locate folder…' }).click();
+        await expect(page.getByRole('dialog', { name: 'Use this folder anyway?' })).toBeVisible();
+        await shot('relocate-confirm');
+        await page.getByRole('dialog').getByRole('button', { name: 'Use this folder' }).click();
+        await expect(page.getByText('Project folder not found')).toBeHidden();
+      } finally {
+        await rename(moved, project.dir);
+      }
+
+      await shell.nav('Settings');
+      const settings = new Settings(page);
+      await settings.section('Storage & data');
+      await page.getByRole('button', { name: 'Create backup' }).click();
+      await expect(page.getByText('Backup created')).toBeVisible();
+      await closeApp();
+      await writeFile(path.join(userDataDir, 'relay.sqlite'), Buffer.alloc(8192, 0x5a));
+      for (const side of ['relay.sqlite-wal', 'relay.sqlite-shm']) await rm(path.join(userDataDir, side), { force: true });
+      const page2 = await relaunch();
+      const shot2 = shooter(page2, 'c-recovery-2');
+      await expect(page2.getByText('The background runner is unavailable')).toBeVisible({ timeout: 60_000 });
+      await shot2('runner-unavailable-banner');
+      await page2.getByRole('button', { name: 'Open diagnostics' }).click();
+      await expect(page2.getByText('Why it stopped')).toBeVisible();
+      await shot2('diagnostics-runner-unavailable');
+      await page2.getByRole('region', { name: 'Diagnostics' }).getByRole('button', { name: 'Restore latest backup' }).click();
+      await expect(page2.getByRole('dialog', { name: 'Restore the latest backup?' })).toBeVisible();
+      await shot2('restore-confirm');
+      await page2.getByRole('dialog').getByRole('button', { name: 'Restore backup' }).click();
+      await expect(page2.getByText('Backup restored').first()).toBeVisible({ timeout: 60_000 });
+      await shot2('restored');
+    });
+  });
 });

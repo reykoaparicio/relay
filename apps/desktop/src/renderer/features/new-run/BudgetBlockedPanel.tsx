@@ -1,19 +1,103 @@
 import { useId, useState } from 'react';
+import { useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router';
-import type { BudgetBreakdown } from '@relay/contracts';
-import { BudgetBreakdownTable, Button, ButtonLink, MoneyInput } from '../../components/ui';
-import { formatMoney } from '../../lib/format';
+import type { BudgetBreakdown, Microusd, ProfileWithWarnings, Project } from '@relay/contracts';
+import { BudgetBreakdownTable, Button, ButtonLink, Field, MoneyInput, parseDollarInput, Select } from '../../components/ui';
+import { call } from '../../api/client';
+import { MutationError } from '../common/MutationError';
+import { formatMoney, PROVIDER_LABELS, stepKeyLabel } from '../../lib/format';
 import { paths } from '../shell/paths';
 import { dollarsText } from '../run-setup/limits';
-import type { Microusd } from '@relay/contracts';
+import type { ModelStepRow } from '../run-setup/model-steps';
 
 export interface BudgetBlockedPanelProps {
   readonly budget: BudgetBreakdown;
-  readonly projectId: string;
+  readonly project: Project;
+  /** Model steps of the workflow: the first one is the request the check reserves for (N). */
+  readonly rows: readonly ModelStepRow[];
+  readonly profiles: readonly ProfileWithWarnings[];
+  readonly selection: Readonly<Record<string, string>>;
   /** Applies a new run allowance to the form (the preflight re-checks). */
   readonly onSetAllowance: (text: string) => void;
-  /** Moves focus to the first profile select. */
-  readonly onChooseProfile: () => void;
+  /** Switches a step's profile in the form (the preflight re-checks). */
+  readonly onSelectProfile: (stepKey: string, profileId: string) => void;
+  /** The project's monthly allowance was saved: re-check. */
+  readonly onProjectAllowanceSaved: () => void;
+}
+
+/** Inline monthly allowance edit (`projects.update`), then the page re-checks. */
+function MonthlyAllowanceEdit({ project, suggested, onSaved }: { readonly project: Project; readonly suggested: string; readonly onSaved: () => void }) {
+  const [edit, setEdit] = useState<{ readonly over: string; readonly text: string } | null>(null);
+  const text = edit !== null && edit.over === suggested ? edit.text : suggested;
+  const parsed = parseDollarInput(text);
+  const save = useMutation({
+    mutationFn: (value: Microusd) =>
+      call('relay/v1/projects.update', {
+        projectId: project.id,
+        expectedUpdatedAt: project.updatedAt,
+        patch: { monthlyAllowanceMicrousd: value },
+      }),
+    onSuccess: onSaved,
+  });
+  return (
+    <>
+      <MoneyInput
+        label="New monthly allowance (USD)"
+        value={text}
+        onValueChange={(t) => {
+          setEdit({ over: suggested, text: t });
+        }}
+      />
+      <p className="small muted">A project setting, recorded as a policy change. Runs of this project paused for it are re-checked.</p>
+      <div>
+        <Button
+          pending={save.isPending}
+          disabled={!parsed.ok}
+          onClick={() => {
+            if (parsed.ok) save.mutate(parsed.value);
+          }}
+        >
+          Save and re-check
+        </Button>
+      </div>
+      <MutationError error={save.error} projectId={project.id} />
+      <p className="small">
+        Or <Link to={paths.settings('projects', { project: project.id })}>edit it in Settings</Link>; this form is kept.
+      </p>
+    </>
+  );
+}
+
+/** Inline profile switch for the first model step (its reservation is the N of the check). */
+function ProfileSwitch({
+  rows,
+  profiles,
+  selection,
+  onSelect,
+}: {
+  readonly rows: readonly ModelStepRow[];
+  readonly profiles: readonly ProfileWithWarnings[];
+  readonly selection: Readonly<Record<string, string>>;
+  readonly onSelect: (stepKey: string, profileId: string) => void;
+}) {
+  const id = useId();
+  const row = rows[0];
+  if (row === undefined) return null;
+  const value = selection[row.stepKey] ?? row.defaultProfileId ?? '';
+  return (
+    <Field label={`Profile for ${stepKeyLabel(row.stepKey)}`} id={id} hint="Changes this run only. The check runs again.">
+      {(control) => (
+        <Select
+          {...control}
+          value={value}
+          options={profiles.map((p) => ({ value: p.profile.id, label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]}` }))}
+          onValueChange={(v) => {
+            onSelect(row.stepKey, v);
+          }}
+        />
+      )}
+    </Field>
+  );
 }
 
 /** The smallest allowance that admits this reservation: L + (total − L), rounded up to the cent. */
@@ -28,10 +112,15 @@ function neededAllowance(b: BudgetBreakdown): Microusd {
  */
 export function BudgetBlockedPanel({
   budget,
-  projectId,
+  project,
+  rows,
+  profiles,
+  selection,
   onSetAllowance,
-  onChooseProfile,
+  onSelectProfile,
+  onProjectAllowanceSaved,
 }: BudgetBlockedPanelProps) {
+  const projectId = project.id;
   const titleId = useId();
   // The suggestion follows the current breakdown: an edit applies only to the suggestion it was typed over.
   const suggested = dollarsText(neededAllowance(budget));
@@ -57,16 +146,7 @@ export function BudgetBlockedPanel({
         <div className="stack rounded-md border border-border p-4">
           <strong>{isProject ? 'Increase the monthly allowance' : 'Increase the run allowance'}</strong>
           {isProject ? (
-            <>
-              <p className="small muted">
-                The project monthly allowance is a project setting, recorded as a policy change.
-              </p>
-              <div>
-                <ButtonLink as={Link} to={paths.settings('projects', { project: projectId })}>
-                  Edit project allowance
-                </ButtonLink>
-              </div>
-            </>
+            <MonthlyAllowanceEdit project={project} suggested={suggested} onSaved={onProjectAllowanceSaved} />
           ) : (
             <>
               <MoneyInput
@@ -91,9 +171,7 @@ export function BudgetBlockedPanel({
         <div className="stack rounded-md border border-border p-4">
           <strong>Use a cheaper profile</strong>
           <p className="small muted">A smaller model lowers the first reservation (N).</p>
-          <div>
-            <Button onClick={onChooseProfile}>Choose a profile</Button>
-          </div>
+          <ProfileSwitch rows={rows} profiles={profiles} selection={selection} onSelect={onSelectProfile} />
         </div>
         <div className="stack rounded-md border border-border p-4">
           <strong>Don&apos;t start</strong>

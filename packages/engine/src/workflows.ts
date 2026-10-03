@@ -75,13 +75,61 @@ function lockedSections(patch: WorkflowDraftPatch, editable: EditableFlags): Val
 }
 
 /**
- * Applies a P0 patch to `base` (pure). Unknown / approval step keys and unused prompt keys are `structural_edit_p1`;
- * a section whose `editable` flag is false is `locked_field` (default {@link P0_EDITABLE}).
+ * The next free instruction version of `name`'s family: `reviewer.v1` → `reviewer.v{max + 1}` over every name in
+ * `taken` with the same prefix.
+ */
+export function nextInstructionVersion(name: string, taken: Iterable<string>): string {
+  const prefix = name.replace(/\.v\d+$/, '');
+  let max = 0;
+  for (const t of taken) {
+    const m = /^(.*)\.v(\d+)$/.exec(t);
+    if (m?.[1] === prefix) max = Math.max(max, Number(m[2]));
+  }
+  return `${prefix}.v${String(max + 1)}`;
+}
+
+/**
+ * E1 instruction versioning: a prompt edit never changes the text behind a PUBLISHED instruction version (one a
+ * validated version of the workflow already carries — runs and reports cite it). Its new text gets the next free
+ * name (`reviewer.v1` → `reviewer.v2`), the steps using it are pointed at that name, and the old name leaves this
+ * draft (the validated versions keep its text). A name that only this draft carries is edited in place.
+ */
+function versionPrompts(
+  base: { readonly spec: WorkflowSpec; readonly prompts: Readonly<Record<string, string>> },
+  edits: Readonly<Record<string, string>>,
+  published: ReadonlySet<string>,
+): { prompts: Record<string, string>; renamed: ReadonlyMap<string, string> } {
+  const prompts: Record<string, string> = { ...base.prompts };
+  const renamed = new Map<string, string>();
+  const taken = new Set([...Object.keys(base.prompts), ...published]);
+  for (const [key, text] of Object.entries(edits)) {
+    if (base.prompts[key] === text) continue; // unchanged: keeps its name
+    if (!published.has(key)) {
+      prompts[key] = text;
+      continue;
+    }
+    const next = nextInstructionVersion(key, taken);
+    taken.add(next);
+    renamed.set(key, next);
+    prompts[next] = text;
+  }
+  // The renamed (published) names leave this draft: the validated versions keep their texts.
+  return { prompts: Object.fromEntries(Object.entries(prompts).filter(([k]) => !renamed.has(k))), renamed };
+}
+
+/** A step edit an approval step accepts: its display name only (anything else is structure, P1). */
+const isNameOnly = (e: object): boolean => Object.keys(e).every((k) => k === 'name');
+
+/**
+ * Applies a P0 patch to `base` (pure). Unknown step keys, non-name edits of approval steps, and unused prompt keys are
+ * `structural_edit_p1`; a section whose `editable` flag is false is `locked_field` (default {@link P0_EDITABLE}).
+ * `published`: instruction versions a validated version already carries (E1 instruction versioning).
  */
 export function applyDraftPatch(
   base: { readonly spec: WorkflowSpec; readonly prompts: Readonly<Record<string, string>> },
   patch: WorkflowDraftPatch,
   editable: EditableFlags = P0_EDITABLE,
+  published: ReadonlySet<string> = new Set(),
 ): Result<{ spec: WorkflowSpec; prompts: Record<string, string> }> {
   const issues: ValidationIssue[] = lockedSections(patch, editable);
   const modelVersions = new Set(base.spec.steps.flatMap((s) => (s.kind === 'model' ? [s.instructionVersion] : [])));
@@ -89,21 +137,32 @@ export function applyDraftPatch(
     if (!modelVersions.has(key)) issues.push(issue(`prompts.${key}`, 'No step uses this instruction version.', 'structural_edit_p1'));
   }
   const edits = patch.steps ?? {};
-  for (const key of Object.keys(edits)) {
+  for (const [key, e] of Object.entries(edits)) {
     const step = base.spec.steps.find((s) => s.id === key);
-    if (step?.kind !== 'model') issues.push(issue(`steps.${key}`, 'Only existing model steps can be edited (structure is P1).', 'structural_edit_p1'));
+    if (step === undefined || (step.kind !== 'model' && !isNameOnly(e))) {
+      issues.push(issue(`steps.${key}`, 'Only existing model steps can be edited, and approval steps only renamed (structure is P1).', 'structural_edit_p1'));
+    }
   }
   if (issues.length > 0) return err(errors.validationFailed(issues));
+  const { prompts, renamed } = versionPrompts(base, patch.prompts ?? {}, published);
   const steps = base.spec.steps.map((s): StepSpec => {
     const e = edits[s.id];
-    if (s.kind !== 'model' || e === undefined) return s;
-    return { ...s, ...(e.profile === undefined ? {} : { profile: e.profile }), ...(e.maxOutputTokens === undefined ? {} : { maxOutputTokens: e.maxOutputTokens }),
+    const named = e?.name === undefined ? s : { ...s, name: e.name };
+    if (named.kind !== 'model') return named;
+    const versioned = { ...named, instructionVersion: renamed.get(named.instructionVersion) ?? named.instructionVersion };
+    if (e === undefined) return versioned;
+    return { ...versioned, ...(e.profile === undefined ? {} : { profile: e.profile }), ...(e.maxOutputTokens === undefined ? {} : { maxOutputTokens: e.maxOutputTokens }),
       ...(e.retryPolicy === undefined ? {} : { retryPolicy: e.retryPolicy }), ...(e.memoryScope === undefined ? {} : { memoryScope: e.memoryScope }) };
   });
   const candidate = { ...base.spec, limits: { ...base.spec.limits, ...(patch.limits ?? {}) }, steps };
   const parsed = workflowSpecSchema.safeParse(candidate);
   if (!parsed.success) return err(errors.validationFailed(toValidationIssues(parsed.error.issues)));
-  return ok({ spec: parsed.data, prompts: { ...base.prompts, ...(patch.prompts ?? {}) } });
+  return ok({ spec: parsed.data, prompts });
+}
+
+/** Every instruction version a validated version of the workflow carries (their texts are frozen). */
+function publishedInstructionVersions(r: Repos, workflowId: WorkflowId): Set<string> {
+  return new Set(r.workflows.listVersions(workflowId).filter((v) => v.status === 'validated').flatMap((v) => Object.keys(v.prompts)));
 }
 
 /** Parsed `workflows.saveDraft` input. */
@@ -122,7 +181,7 @@ export function saveDraft(ctx: EngineCtx, input: SaveDraftInput): Result<Workflo
     if (input.expectedDraftRevision > 0 && draft === undefined) return err(errors.notFound('workflow_draft'));
     const base = draft ?? r.workflows.latestValidated(input.workflowId);
     if (base === undefined) return err(errors.notFound('workflow_version'));
-    const applied = applyDraftPatch(base, input.patch);
+    const applied = applyDraftPatch(base, input.patch, P0_EDITABLE, publishedInstructionVersions(r, input.workflowId));
     if (!applied.ok) return applied;
     const { spec, prompts } = applied.value;
     const contentHash = workflowContentHash(spec, prompts);

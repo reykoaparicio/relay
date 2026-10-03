@@ -21,8 +21,8 @@ import { useStreamProgress } from '../../hooks/useStreamProgress';
 import { PlanView, StepOutputView } from '../outputs/OutputViews';
 import { paths } from '../shell/paths';
 import { ActionErrorNotice } from './ActionErrorNotice';
-import { issuesOf, numberDetail, stepTitle, stringDetail } from './inspector-model';
-import { RawResponseToggle, repairsText, ValidationIssueList } from './StepIssues';
+import { issuesOf, numberDetail, pauseBlockedStep, stepTitle, stringDetail } from './inspector-model';
+import { RawResponseToggle, repairsText, TechnicalDetails, ValidationIssueList } from './StepIssues';
 
 // ---------------------------------------------------------------------------------------------------------------
 // Streaming attempt (running-streaming)
@@ -120,13 +120,9 @@ export function SchemaInvalidCard({ step, attempts }: { readonly step: StepView;
           ? 'Relay is asking the model to repair the output.'
           : 'Relay pauses the run if repairs are used up.'}
       </p>
-      <ValidationIssueList issues={issuesOf(err)} />
+      <ValidationIssueList issues={issuesOf(err)} collapsed />
       <RawResponseToggle artifactId={stringDetail(err, 'rawResponseArtifactId')} />
-      {err === null ? null : (
-        <p className="subtle">
-          Error code <code>{err.code}</code>
-        </p>
-      )}
+      <TechnicalDetails error={err} />
     </InlineAlert>
   );
 }
@@ -169,7 +165,7 @@ function allowedApprovalDecisions(run: RunDetail): ApprovalDecision[] {
 /** Shown in the revision form: which revision this would be, and that re-planning spends more of the allowance. */
 function revisionNoteText(run: RunDetail): string {
   const next = run.revisionCycle + 1;
-  return `This is revision ${String(next)} of ${String(run.limits.maxRevisionCycles)}. Re-planning sends another request and uses more of the run allowance.`;
+  return `This is revision cycle ${String(next)} of ${String(run.limits.maxRevisionCycles)}. Re-planning sends another request and uses more of the run allowance.`;
 }
 
 export function ApprovalOutput({ run, onDecide, pendingDecision, error, staleNotice }: ApprovalOutputProps) {
@@ -253,22 +249,39 @@ export function StepOutputTab({ run, projectId, step, detail, detailError, appro
   }
   if (isSchemaInvalidStep(run, step)) return <SchemaInvalidCard step={step} attempts={detail.attempts} />;
   if (detail.output !== null) {
+    const completed = run.status === 'completed';
     return (
       <StepOutputView
         output={detail.output}
+        // The completed run's banner already says what "accepted" means, links the report and the run's suggestions.
+        review={{ showDisclaimer: !completed, memoryHref: completed ? null : paths.memory(projectId, { tab: 'suggested' }) }}
         reportLink={
-          run.reportArtifactId === null ? undefined : <Link to={paths.report(projectId, run.id)}>Open the run report</Link>
+          run.reportArtifactId === null || completed ? undefined : <Link to={paths.report(projectId, run.id)}>Open the run report</Link>
         }
       />
     );
   }
-  if (step.error !== null) {
+  // The step a pause holds back: the run banner above states the cause and the actions once; repeating it here as a
+  // second alert stacked messages (one cause-and-action banner per pause).
+  const blockedByPause = run.status === 'paused' && pauseBlockedStep(run)?.id === step.id;
+  if (step.error !== null && !blockedByPause) {
     return (
       <InlineAlert tone={step.state === 'unknown' ? 'unknown' : 'danger'} title={`${stepTitle(step)}: ${step.error.userMessage}`}>
-        <p className="subtle">
-          Error code <code>{step.error.code}</code>
-        </p>
+        <TechnicalDetails error={step.error} />
       </InlineAlert>
+    );
+  }
+  if (blockedByPause) {
+    return (
+      <EmptyState
+        headingLevel={3}
+        title={step.state === 'failed' ? `${stepTitle(step)}: no valid output` : `${stepTitle(step)}: waiting on the run`}
+        body={
+          step.state === 'failed'
+            ? 'The run paused on this step. The banner above says why and what you can do.'
+            : 'This is the step the run continues with. The banner above says why the run paused and what you can do.'
+        }
+      />
     );
   }
   const bodyByState: Partial<Record<StepView['state'], string>> = {

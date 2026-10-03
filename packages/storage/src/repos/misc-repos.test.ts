@@ -112,17 +112,19 @@ describe('settings, credentials, catalog, workflows, config revisions, approvals
     const id = newId('credentialRef');
 
     repo.upsert({ id, providerId: 'anthropic', storageMode: 'os_protected', vaultFile: `secrets/${id}.bin`, redactedLabel: 'sk-…a1F9' });
-    const tested = repo.recordTest('anthropic', false, 'AUTH_REQUIRED', epochMs(5));
+    const tested = repo.recordTest('anthropic', false, 'AUTH_REQUIRED', epochMs(5), 'run');
     const afterTest = repo.get('anthropic');
     const replaced = repo.upsert({ id: newId('credentialRef'), providerId: 'anthropic', storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…zz' });
 
     expect(tested).toBe(true);
-    expect(afterTest?.lastTest).toEqual({ at: 5, ok: false, code: 'AUTH_REQUIRED' });
+    expect(afterTest?.lastTest).toEqual({ at: 5, ok: false, code: 'AUTH_REQUIRED', source: 'run' });
     expect(replaced.id).toBe(id);
     expect(replaced.storageMode).toBe('session');
     expect(replaced.lastTest).toBeNull();
     expect(repo.list()).toHaveLength(1);
-    expect(repo.recordTest('openai', true, null, epochMs(1))).toBe(false);
+    expect(repo.recordTest('anthropic', true, null, epochMs(6), 'connection_test')).toBe(true);
+    expect(repo.get('anthropic')?.lastTest).toEqual({ at: 6, ok: true, code: null, source: 'connection_test' });
+    expect(repo.recordTest('openai', true, null, epochMs(1), 'connection_test')).toBe(false);
     expect(repo.delete('anthropic')).toBe(true);
     expect(repo.get('anthropic')).toBeUndefined();
   });

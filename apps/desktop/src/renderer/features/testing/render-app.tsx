@@ -9,6 +9,7 @@ import { installBridge } from '../../api/bridge';
 import { createFakeBridge } from '../../api/fake-bridge';
 import type { FakeBridge, FakeScenarioName } from '../../api/fake-bridge';
 import { attachNavPerf, resetNavPerf } from '../../hooks/useNavPerf';
+import { resetNewRunDrafts } from '../new-run/new-run-draft';
 import { routes } from '../../router';
 
 export interface RenderAppOptions {
@@ -27,6 +28,7 @@ export function renderApp(path: string, options: RenderAppOptions = {}): RenderA
   const bridge = options.bridge ?? createFakeBridge(options.scenario ?? 'awaiting-approval');
   installBridge(bridge);
   resetNavPerf();
+  resetNewRunDrafts();
   const queryClient = createTestQueryClient();
   const router = createMemoryRouter(routes, { initialEntries: [path] });
   attachNavPerf(router);

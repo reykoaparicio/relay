@@ -74,7 +74,7 @@ describe('recovery (F9 Wave-1 subset)', () => {
     expect(harness.db.repos.ledger.runBalances(runId)).toEqual(expect.objectContaining({ R: 0, U: N }));
     expect(harness.db.repos.runs.get(runId).status).toBe('interrupted');
     const detail = await harness.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['review_recovery', 'decide_unknown', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['decide_unknown', 'stop']); // E1 #8: review_recovery once decided
     expect(detail.ok && detail.data.unresolvedAttempts.map((x) => x.cost)).toEqual([{ microusd: N, certainty: 'unknown' }]);
   });
 

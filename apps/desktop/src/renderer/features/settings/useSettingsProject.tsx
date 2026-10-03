@@ -1,7 +1,9 @@
 import { useId } from 'react';
 import { useSearchParams } from 'react-router';
 import type { Project } from '@relay/contracts';
-import { Field, InlineAlert, Select } from '../../components/ui';
+import { Link } from 'react-router';
+import { Field, Select } from '../../components/ui';
+import { paths } from '../shell/paths';
 import { useProjects } from '../../hooks/useProjects';
 import { useSettings } from '../../hooks/useSettings';
 
@@ -61,15 +63,17 @@ export function SettingsProjectPicker({
   );
 }
 
-/** Prominent "acting on <project>" note for a destructive card when the project was not chosen explicitly. */
+/**
+ * "Project: sample-api (change)": which project a card acts on, as a neutral line (the folder path is in the
+ * tooltip). Shown on every card that acts on one project, chosen or not, so a destructive card always names it.
+ */
 export function FallbackProjectNote({ project, explicit }: { readonly project: Project; readonly explicit: boolean }) {
-  if (explicit) return null;
   return (
-    <InlineAlert tone="warning" title={`Acts on project “${project.name}”`}>
-      <p>
-        <span className="mono">{project.rootDisplayPath}</span>. No project was chosen, so Settings uses the active
-        project. Choose another with the project picker before you continue.
-      </p>
-    </InlineAlert>
+    <p className="small">
+      Project:{' '}
+      <b title={project.rootDisplayPath}>{project.name}</b>
+      {explicit ? null : <span className="subtle"> (the active project)</span>} (
+      <Link to={paths.settings('projects', { project: project.id })}>change</Link>)
+    </p>
   );
 }

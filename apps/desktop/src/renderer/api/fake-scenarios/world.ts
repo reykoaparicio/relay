@@ -39,8 +39,10 @@ import type {
   LedgerEntryView,
   MemoryRecordDetail,
   PauseReason,
+  ExportPart,
   PreviewResult,
   ProfileWithWarnings,
+  RunnerState,
   Project,
   ProviderStatus,
   RunDetail,
@@ -116,6 +118,24 @@ export interface FakeWorld {
   authFailing: Set<string>;
   /** `memory.purgeProjectHistory`: how many files fail to purge (reported as `failed`, retried by the next sweep). */
   purgeFailures: number;
+  /** `runner.state` the fake main reports (pushed on subscribe when not `ready`); `unavailable` fails runner-routed ops. */
+  runnerState: RunnerState;
+  /** `app.restartRunner` brings the runner back (else it fails again with the same fatal reason). */
+  restartFixes: boolean;
+  /** `app.restoreLatestBackup` finds a healthy backup. */
+  backupAvailable: boolean;
+  /** The next N runner-routed queries fail with the retryable DATABASE_UNAVAILABLE `database_busy` (next action wait). */
+  busyFailures: number;
+  /** Projects whose folder is gone: file ops answer PROJECT_ROOT_MISSING until `projects.relocate`. */
+  rootMissing: Set<string>;
+  /** `projects.relocate` without `confirm` answers CONFLICT `root_unverified` (no earlier file matches). */
+  relocateUnverified: boolean;
+  /** Directory selections handed out by `projects.pickDirectory` (selectionId → display path). */
+  selections: Map<string, string>;
+  /** Selected files that cannot be read at preflight / start (PERMISSION_DENIED `unreadable`). */
+  unreadableOnRead: Set<string>;
+  /** Parts `artifacts.export` fails to write once each (a partial export); a retry of the part succeeds. */
+  exportFailParts: ExportPart[];
   /** idempotencyKey → first result (02 §B0: a replay returns the first result). */
   idempotency: Map<string, unknown>;
   /** Next id number for created entities. */
@@ -264,7 +284,16 @@ export function buildWorkflowVersion(version: number | 'draft', draftRevision: n
   });
 }
 
-function buildPreview(): PreviewResult {
+/** Preview variants: a file that looks like it holds a secret, and entries that cannot be read. */
+export interface PreviewOptions {
+  readonly suspectedSecret?: boolean;
+  readonly unreadable?: readonly string[];
+}
+
+/** The suspected-secret file of the `suspected-secret` scenario (the fake never has a value, only a label and line). */
+export const SUSPECTED_SECRET_FILE = 'src/config/keys.ts';
+
+function buildPreview(o: PreviewOptions = {}): PreviewResult {
   const files = [
     ['README.md', 2_140],
     ['package.json', 812],
@@ -277,16 +306,23 @@ function buildPreview(): PreviewResult {
     ['tests/users.test.ts', 2_300],
   ] as const;
   return previewResultSchema.parse({
-    included: files.map(([relPath, sizeBytes], i) => ({ relPath, sizeBytes, sha256: sha(`f${String(i)}`) })),
+    included: [
+      ...files.map(([relPath, sizeBytes], i) => ({ relPath, sizeBytes, sha256: sha(`f${String(i)}`) })),
+      ...(o.suspectedSecret === true
+        ? [{ relPath: SUSPECTED_SECRET_FILE, sizeBytes: 640, sha256: sha('5ec7'), suspectedSecret: true, secretLabel: 'anthropic_key', secretLine: 4 }]
+        : []),
+    ],
     excluded: [
       { relPath: '.env', reason: 'secret' },
       { relPath: 'node_modules', reason: 'dependency_dir' },
       { relPath: 'assets/logo.png', reason: 'binary' },
       { relPath: 'dist', reason: 'build_output' },
+      ...(o.suspectedSecret === true ? [{ relPath: 'scripts/shared-fixture.txt', reason: 'hard_link' }] : []),
     ],
+    ...(o.unreadable === undefined ? {} : { unreadable: [...o.unreadable] }),
     totals: {
-      files: files.length,
-      bytes: files.reduce((sum, [, b]) => sum + b, 0),
+      files: files.length + (o.suspectedSecret === true ? 1 : 0),
+      bytes: files.reduce((sum, [, b]) => sum + b, 0) + (o.suspectedSecret === true ? 640 : 0),
       capBytes: 512 * 1024,
       capFiles: 200,
     },
@@ -383,19 +419,29 @@ interface MemorySpec {
   readonly previousContent?: string;
 }
 
+/** E2 #16 (engine `isReviewDue`): due once `reviewAt` has passed and no `reviewed` event is at or after it. */
+export function reviewDueAt(reviewAt: number | null, lastReviewedAt: number | null, now: number): boolean {
+  if (reviewAt === null || reviewAt > now) return false;
+  return lastReviewedAt === null || lastReviewedAt < reviewAt;
+}
+
 function memoryRecord(now: number, m: MemorySpec): MemoryRecordDetail {
   const createdAt = now - (20 - m.n) * DAY;
   const fromRun = m.status === 'suggested';
   const author = fromRun ? `run:${sid('run', 23)}` : 'user';
   const sourceRefs = m.sourceFile === undefined ? [] : [{ kind: 'file' as const, relPath: m.sourceFile, sha256: sha('a19f') }];
+  const usedByRuns = fromRun ? 0 : 3;
   const revisions =
     m.previousContent === undefined
-      ? [{ revision: 1, title: m.title, content: m.content, author, createdAt, sourceRefs }]
+      ? [{ revision: 1, title: m.title, content: m.content, author, createdAt, sourceRefs, usedByRuns }]
       : [
-          { revision: 1, title: m.title, content: m.previousContent, author, createdAt, sourceRefs },
-          { revision: 2, title: m.title, content: m.content, author: 'user', createdAt: createdAt + DAY, sourceRefs },
+          { revision: 1, title: m.title, content: m.previousContent, author, createdAt, sourceRefs, usedByRuns: 1 },
+          { revision: 2, title: m.title, content: m.content, author: 'user', createdAt: createdAt + DAY, sourceRefs, usedByRuns: usedByRuns - 1 },
         ];
   const updatedAt = revisions.at(-1)?.createdAt ?? createdAt;
+  // The stale record was confirmed once (before its review date): the review is due again.
+  const reviewedAt = m.stale === true ? createdAt + 2 * DAY : null;
+  const reviewAt = m.reviewAt ?? null;
   return memoryRecordDetailSchema.parse({
     id: sid('memory', m.n),
     projectId: PROJECT_ID,
@@ -410,24 +456,38 @@ function memoryRecord(now: number, m: MemorySpec): MemoryRecordDetail {
     createdAt,
     updatedAt,
     expiresAt: null,
-    reviewAt: m.reviewAt ?? null,
+    reviewAt,
     supersededById: m.supersededById ?? null,
     stale: m.stale ?? false,
     conflictsWith: [...m.conflictsWith],
+    lastReviewedAt: reviewedAt,
+    reviewDue: reviewDueAt(reviewAt, reviewedAt, now),
     content: m.content,
     revisions,
     events: [
       { event: fromRun ? 'suggested' : 'approved', revision: 1, actor: author, createdAt },
       ...(revisions.length > 1 ? [{ event: 'edited' as const, revision: 2, actor: 'user', createdAt: updatedAt }] : []),
-      ...(m.status === 'archived' ? [{ event: 'conflict_resolved' as const, revision: 1, actor: 'user', createdAt: createdAt + DAY }] : []),
+      ...(reviewedAt === null
+        ? []
+        : [{ event: 'reviewed' as const, revision: revisions.length, actor: 'user', createdAt: reviewedAt, detail: { fileRefs: 1, refreshed: 0 } }]),
+      ...(m.status === 'archived'
+        ? [
+            { event: 'conflict_resolved' as const, revision: 1, actor: 'user', createdAt: createdAt + DAY, detail: { resolution: 'keep', with: m.supersededById ?? null } },
+            { event: 'skipped' as const, revision: 1, actor: `run:${sid('run', 22)}`, createdAt: createdAt + 2 * DAY, detail: { runId: sid('run', 22), status: 'archived' } },
+          ]
+        : []),
     ],
-    usedByRuns: fromRun ? 0 : 3,
+    usedByRuns,
     ...(fromRun
       ? {
           proposal: {
             rationale: 'The verifier asked for this in two separate runs.',
             suggestedScope: { roles: 'all' },
             conflictsWith: [...m.conflictsWith],
+            sourceRefs: [
+              { relPath: 'src/errors.ts', startLine: 4, endLine: 12 },
+              { relPath: 'src/routes/users.ts', startLine: null, endLine: null },
+            ],
           },
         }
       : {}),
@@ -488,6 +548,8 @@ export interface RunSpec {
    * `report.v1` approvals / revisions of a terminal run: `'legacy'` = a report generated before wave 4 (both absent);
    * otherwise overrides of the derived defaults.
    */
+  /** Optional display names of steps (`RunDetail.stepMeta[].name`). */
+  readonly stepNames?: Partial<Record<StepKeyName, string>>;
   readonly report?: 'legacy' | { readonly approvals?: readonly ReportApprovalSpec[]; readonly revisions?: In<typeof reportV1Schema>['revisions'] };
 }
 
@@ -791,6 +853,34 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
     hasPatchArtifact: hasPatch,
   });
 
+  // E1: the newest context manifest of the run (the run-level Context tab), stored as an artifact.
+  const latestAttempt = attemptsAll.at(-1);
+  let latestManifest: { stepRunId: string; stepKey: string; attemptId: string; artifactId: string } | null = null;
+  if (latestAttempt !== undefined) {
+    const manifestId = sid('artifact', spec.n * 100 + 90);
+    const latestProfile = STEP_PROFILE[latestAttempt.stepKey as StepKeyName];
+    if (latestProfile !== null) {
+      artifacts.push([
+        manifestId,
+        artifact(manifestId, runId, latestAttempt.stepRunId, 'context_manifest', 'context_manifest.v1', latestAttempt.startedAt, manifest(runId, latestAttempt.stepKey, PROFILES[latestProfile])),
+      ]);
+      latestManifest = { stepRunId: latestAttempt.stepRunId, stepKey: latestAttempt.stepKey, attemptId: latestAttempt.id, artifactId: manifestId };
+    }
+  }
+  const stepMeta = STEP_KEYS.map((key) => {
+    const specStep = WORKFLOW_SPEC.steps.find((st) => st.id === key);
+    return {
+      stepKey: key,
+      name: spec.stepNames?.[key] ?? null,
+      instructionVersion: specStep !== undefined && 'instructionVersion' in specStep ? specStep.instructionVersion : null,
+    };
+  });
+  const blockedStep = stepViews.find((st) => st.state === 'failed') ?? stepViews.find((st) => st.profileName !== null && st.state !== 'succeeded');
+  const profileOptions =
+    availableActions.includes('choose_profile') && blockedStep !== undefined
+      ? fakeProfileOptions(blockedStep.stepKey, spec.neverStarted === true)
+      : [];
+
   const run = runDetailSchema.parse({
     id: runId,
     projectId: PROJECT_ID,
@@ -821,6 +911,10 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
     statusDetail: spec.statusDetail ?? null,
     reportArtifactId,
     availableActions,
+    attempts: attemptsAll,
+    latestManifest,
+    profileOptions,
+    stepMeta,
   });
 
   const events = buildEvents(run, spec, attemptsAll);
@@ -832,6 +926,25 @@ export function buildRun(now: number, spec: RunSpec): BuiltRun {
   }
   const steps = stepDetails.map((d) => ({ ...d, events: byRow.get(d.step.id) ?? [] }));
   return { run, steps, events, ledger: buildLedger(run, attemptsAll), artifacts };
+}
+
+/** Local reservation estimate per profile for the blocked step (fake: fixed figures; `minimum` when never estimated). */
+const PROFILE_RESERVATION: Readonly<Record<ProfileKey, number>> = { economy: 180_000, balanced: 240_000, capable: 620_000 };
+
+/** E1 `RunDetail.profileOptions` for `stepKey` (all three fake profiles' providers are allowed and connected). */
+export function fakeProfileOptions(stepKey: StepKeyName, neverStarted: boolean) {
+  const current = STEP_PROFILE[stepKey] ?? 'capable';
+  return (Object.keys(PROFILES) as ProfileKey[]).map((k) => ({
+    stepKey,
+    profileId: PROFILES[k].id,
+    profileName: PROFILES[k].name,
+    providerId: PROFILES[k].providerId,
+    modelId: PROFILES[k].modelId,
+    reservationMicrousd: neverStarted ? Math.round(PROFILE_RESERVATION[k] / 3) : PROFILE_RESERVATION[k],
+    estimatedInputTokens: neverStarted ? 0 : 12_400,
+    basis: neverStarted ? ('minimum' as const) : ('step_estimate' as const),
+    current: k === current,
+  }));
 }
 
 function artifact(
@@ -991,6 +1104,14 @@ export interface WorldOptions {
   /** A fresh install: no project, no connected provider, onboarding not completed. */
   readonly fresh?: boolean;
   readonly preflightIssues?: readonly ValidationIssue[];
+  /** File preview variants (a suspected secret, unreadable entries). */
+  readonly preview?: PreviewOptions;
+  /** How the previous session ended (`AppInfo.lastShutdown`); default a clean quit a day ago with no run. */
+  readonly lastShutdown?: { readonly clean: boolean; readonly runActive: boolean; readonly agoMs?: number } | null;
+  /** The runner is down, with this fatal (`Diagnostics.runner.lastFatal`). */
+  readonly runnerFatal?: { readonly code: 'DATABASE_UNAVAILABLE' | 'RUNNER_UNAVAILABLE'; readonly reason: string | null; readonly message: string };
+  /** Main's log file cannot be written (`Diagnostics.loggingDegraded`). */
+  readonly loggingDegraded?: boolean;
   readonly scenario: string;
 }
 
@@ -1012,10 +1133,18 @@ export function buildWorld(o: WorldOptions): FakeWorld {
         label === null
           ? null
           : authFailed.has(providerId)
-            ? { at: now - HOUR, ok: false, code: 'AUTH_REQUIRED' }
-            : { at: now - DAY, ok: true },
+            ? { at: now - HOUR, ok: false, code: 'AUTH_REQUIRED', source: 'run' }
+            : { at: now - DAY, ok: true, source: 'connection_test' },
     });
   };
+  const lastShutdown =
+    o.lastShutdown === null
+      ? null
+      : {
+          clean: o.lastShutdown?.clean ?? true,
+          at: now - (o.lastShutdown?.agoMs ?? DAY),
+          runActive: o.lastShutdown?.runActive ?? false,
+        };
   const world: FakeWorld = {
     info: appInfoSchema.parse({
       version: '0.1.0',
@@ -1027,6 +1156,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
       isPackaged: false,
       providerMode: o.providerMode ?? 'fake',
       fakeScenario: o.scenario,
+      lastShutdown,
     }),
     settings: appSettingsSchema.parse({
       theme: 'dark',
@@ -1036,12 +1166,17 @@ export function buildWorld(o: WorldOptions): FakeWorld {
       setupAllowanceMicrousd: 50_000,
     }),
     diagnostics: diagnosticsSchema.parse({
-      runner: { state: 'ready', pid: 4242, lastHeartbeatAt: now - 1_000, restarts: 0 },
-      db: { schemaVersion: 1, migrationsPending: 0, sizeBytes: 1_048_576 },
+      runner:
+        o.runnerFatal === undefined
+          ? { state: 'ready', pid: 4242, lastHeartbeatAt: now - 1_000, restarts: 0, lastFatal: null }
+          : { state: 'unavailable', pid: null, lastHeartbeatAt: now - 5 * MINUTE, restarts: 3, lastFatal: { ...o.runnerFatal, at: now - 5 * MINUTE } },
+      db: { schemaVersion: 1, migrationsPending: 0, sizeBytes: 1_048_576, displayPath: '~/Library/Application Support/Relay/relay.sqlite' },
       unresolvedAttempts: built.reduce((sum, b) => sum + b.run.unresolvedAttempts.length, 0),
       secureStorage: { available: secure, backend: secure ? 'keychain' : 'basic_text' },
       catalog: { version: '2026-09-25', models: 3 },
       prompts: { loaded: 4 },
+      loggingDegraded: o.loggingDegraded ?? false,
+      lastShutdown,
     }),
     projects: fresh
       ? []
@@ -1086,7 +1221,7 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     ledger: new Map(built.map((b) => [b.run.id as string, b.ledger])),
     memory: fresh ? [] : buildMemory(now, o.memory, { conflict: o.memoryConflict ?? false, stale: o.memoryStale ?? false }),
     artifacts: new Map(built.flatMap((b) => b.artifacts)),
-    preview: buildPreview(),
+    preview: buildPreview(o.preview),
     preflightBlocked: o.preflightBlocked ?? false,
     preflightIssues: [...(o.preflightIssues ?? [])],
     notImplemented: new Set<string>(),
@@ -1095,6 +1230,15 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     importDiffWarnings: [],
     authFailing: authFailed,
     purgeFailures: 0,
+    runnerState: o.runnerFatal === undefined ? 'ready' : 'unavailable',
+    restartFixes: o.runnerFatal?.code === 'RUNNER_UNAVAILABLE',
+    backupAvailable: true,
+    busyFailures: 0,
+    rootMissing: new Set(),
+    relocateUnverified: false,
+    selections: new Map(),
+    unreadableOnRead: new Set(),
+    exportFailParts: [],
     idempotency: new Map(),
     nextId: 5_000,
     now: () => now,

@@ -99,7 +99,7 @@ test.describe('run happy path', { tag: '@m2' }, () => {
     await expect(report.approvals().first()).toContainText('Approve plan: approved');
     await expect(report.approvals().first()).toContainText(/Decided /);
     await expect(report.approvals().first()).not.toContainText('invalidated:');
-    await expect(report.revisionsValue('Quality revision cycles')).toHaveText(/^0 of \d+$/);
+    await expect(report.revisionsValue('Revision cycles')).toHaveText(/^0 of \d+$/);
     await expect(report.revisionsValue('Plan revisions')).toHaveText('0');
     await expect(report.revisions().getByText('Why the run is incomplete')).toHaveCount(0);
 

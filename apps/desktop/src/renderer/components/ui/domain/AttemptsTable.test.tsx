@@ -16,11 +16,11 @@ describe('AttemptsTable', () => {
 
   it('lets keyboard users reveal the exact token count', async () => {
     const user = userEvent.setup();
-    const { container } = render(<AttemptsTable attempts={[attempt(1)]} />);
+    render(<AttemptsTable attempts={[attempt(1)]} />);
     const exact = screen.getByText('12,400 exact');
     expect(exact).not.toBeVisible();
 
-    const summary = container.querySelector('summary');
+    const summary = screen.getByText('12,400 tokens').closest('summary');
     for (let i = 0; i < 10 && document.activeElement !== summary; i++) await user.tab();
     expect(summary).toHaveFocus();
     expect(summary).toHaveTextContent('12,400 tokens');
@@ -31,15 +31,20 @@ describe('AttemptsTable', () => {
     expect(exact).toBeVisible();
   });
 
-  it('shows app time as total elapsed minus provider time (not the total)', () => {
+  it('shows app time as total elapsed minus provider time (not the total), in the attempt\'s Timing details', async () => {
     // 43.5 s total, 41 s of it provider time → 2.5 s app time ("2s"), never "43s".
     render(<AttemptsTable attempts={[attempt(1)]} />);
-    const row = screen.getAllByRole('row')[1];
-    if (row === undefined) throw new Error('no row');
+    await userEvent.click(screen.getByText('Timing'));
+    expect(screen.getByText('Provider time').nextElementSibling).toHaveTextContent('41s');
+    expect(screen.getByText('App time').nextElementSibling).toHaveTextContent(/^2s$/);
+  });
+
+  it('keeps the table narrow: the purpose is short text and the model id never wraps', () => {
+    render(<AttemptsTable attempts={[attempt(1)]} />);
     const headers = screen.getAllByRole('columnheader').map((h) => h.textContent);
-    const cells = [...row.children];
-    expect(cells[headers.indexOf('Provider time')]).toHaveTextContent('41s');
-    expect(cells[headers.indexOf('App time')]).toHaveTextContent(/^2s$/);
+    expect(headers).not.toContain('Provider time');
+    expect(headers).not.toContain('App time');
+    expect(screen.getByText('Initial')).toBeInTheDocument();
   });
 });
 
@@ -49,5 +54,17 @@ describe('attemptAppTimeMs', () => {
     expect(attemptAppTimeMs({ appElapsedMs: 1_000, providerLatencyMs: 1_200 })).toBe(0);
     expect(attemptAppTimeMs({ appElapsedMs: 900, providerLatencyMs: null })).toBe(900);
     expect(attemptAppTimeMs({ appElapsedMs: null, providerLatencyMs: null })).toBeNull();
+  });
+
+  it('run-level view: the Step column names each attempt\'s step with stepNameFor', () => {
+    render(
+      <AttemptsTable
+        attempts={[attempt(1, { stepKey: 'review' }), attempt(2, { stepKey: 'implement', purpose: 'schema_repair' })]}
+        caption="Attempts for the whole run"
+        stepNameFor={(k) => (k === 'review' ? 'Code review' : 'Produce patch')}
+      />,
+    );
+    expect(screen.getByText('Code review · Initial')).toBeInTheDocument();
+    expect(screen.getByText('Produce patch · Repair')).toBeInTheDocument();
   });
 });

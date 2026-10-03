@@ -4,6 +4,7 @@ import { MIGRATIONS } from '../migrations/index.js';
 import type { Migration } from '../migrations/index.js';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import { MigrationChecksumError, MigrationVersionError } from './errors.js';
+import { mapCredentialRef } from './mappers.js';
 import { migrate, migrationChecksum } from './migrate.js';
 import { applyPragmas } from './pragmas.js';
 import { manualClock } from './testing/fixtures.js';
@@ -99,6 +100,21 @@ describe('migrate', () => {
     );
     expect(driver.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'ok_t'").get()).toEqual({ n: 0 });
     expect(driver.inTransaction).toBe(false);
+    driver.close();
+  });
+
+  it('0004 adds provider_credential_refs.last_test_source: an older test result keeps a null source; the CHECK holds', async () => {
+    const db = await track(openTestDb({ migrations: MIGRATIONS.slice(0, 3) }));
+    const driver = openNodeSqlite(db.path);
+    applyPragmas(driver);
+    driver.prepare(`INSERT INTO provider_credential_refs (id, provider_id, storage_mode, vault_file, redacted_label, created_at, updated_at,
+      last_test_at, last_test_ok, last_test_code) VALUES ('crd_01J9ZZZZZZZZZZZZZZZZZZZZZ0', 'anthropic', 'session', NULL, 'sk-…', 1, 1, 5, 0, 'AUTH_REQUIRED')`).run();
+
+    const r = await migrate(driver, { clock: manualClock(), backupsDir: join(dirname(db.path), 'pre4') });
+
+    expect(r).toEqual({ from: 3, to: MIGRATIONS.length });
+    expect(mapCredentialRef(driver.prepare('SELECT * FROM provider_credential_refs').get()).lastTest).toEqual({ at: 5, ok: false, code: 'AUTH_REQUIRED', source: null });
+    expect(() => driver.prepare("UPDATE provider_credential_refs SET last_test_source = 'bogus'").run()).toThrow(/CHECK constraint failed/);
     driver.close();
   });
 

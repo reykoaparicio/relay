@@ -56,7 +56,7 @@ test.describe('onboarding', { tag: '@m1' }, () => {
     const review = ob.step('Review the input and start');
     await expect(review.getByRole('definition').filter({ hasText: '$3.00' })).toBeVisible();
     await expect(review.getByText('Excluded files such as .env are never sent.')).toBeVisible();
-    await expect(review.getByRole('listitem').filter({ hasText: /^Anthropic:/ })).toBeVisible();
+    await expect(review.getByRole('listitem').filter({ hasText: /^Anthropic\b.*Receives the goal/ })).toBeVisible();
     await ob.startButton().click();
 
     // Lands on the run inspector.

@@ -6,14 +6,19 @@ import type { Plugin } from 'vite';
 /** CSP mode. */
 export type CspMode = 'development' | 'production';
 
-/** The strict production policy (00b §6). `frame-ancestors` is ignored in a meta CSP, so it is never emitted. */
+/**
+ * The strict production policy (00b §6). Deny by default: the renderer talks to main only over IPC, so it may not
+ * fetch anything (`connect-src 'none'` — no file://, no http), frame anything, or run workers. `frame-ancestors` is
+ * ignored in a meta CSP, so it is never emitted.
+ */
 export const PRODUCTION_CSP_DIRECTIVES: readonly string[] = [
-  "default-src 'self'",
+  "default-src 'none'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:", // Vite inlines small woff2 files as data: URIs
-  "connect-src 'self'",
+  "connect-src 'none'",
+  "frame-src 'none'",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
@@ -39,7 +44,8 @@ export function buildCsp(mode: CspMode, html: string): string {
   if (mode === 'production') return PRODUCTION_CSP;
   return PRODUCTION_CSP_DIRECTIVES.map((d) => {
     if (d.startsWith('script-src')) return [d, ...inlineScriptHashes(html), 'http://localhost:*'].join(' ');
-    if (d.startsWith('connect-src')) return `${d} ws://localhost:* http://localhost:*`;
+    // 'none' cannot be combined with sources: dev replaces it with the dev server (module fetches) and HMR socket.
+    if (d.startsWith('connect-src')) return "connect-src 'self' ws://localhost:* http://localhost:*";
     return d;
   }).join('; ');
 }

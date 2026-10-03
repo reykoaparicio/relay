@@ -23,7 +23,7 @@ import type {
   StepKey,
   StepRunId,
 } from '@relay/contracts';
-import type { ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
+import type { AttemptRow, ConfigRevisionReason, Repos, RunRow, StepRow } from '@relay/storage';
 import type { InputDrift } from './approval-binding.js';
 import { inputDrift, invalidateApproval } from './approval-binding.js';
 import { admitAgainstLedger, resolveUnknownEntries } from './budget.js';
@@ -41,7 +41,8 @@ import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { allowedRunActions, appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
 import { resolveProfile } from './run-start.js';
-import { RESNAPSHOT_KIND, ancestorsOf, effectiveModelSteps, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf, stepEntries } from './snapshot.js';
+import { missingCredentialFact, profileOptionsOf, providersMissingCredential } from './run-views.js';
+import { RESNAPSHOT_KIND, ancestorsOf, effectiveStepSnapshot, hasSnapshotPreserved, snapshotOf, stepEntries } from './snapshot.js';
 import type { Snapshotted } from './steps/intake.js';
 import { diffReferencedPaths, inputFileRows, intakeContextHash, snapshotSelectedFiles } from './steps/intake.js';
 import { applyStepEvent, isTerminalStep } from './step-machine.js';
@@ -83,8 +84,10 @@ const notApplicable = (run: RunRow, decision: string): AppError =>
  * run's current state is refused (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree.
  */
 function offered(r: Repos, run: RunRow, action: RunAction, decision: string): AppError | null {
-  const facts = runActionFacts(r.steps.latestPerStepKey(run.id), r.attempts.countInState(run.id, 'unknown'), false);
-  const actions = allowedRunActions(run, facts);
+  const latest = r.steps.latestPerStepKey(run.id);
+  const facts = runActionFacts(latest, r.attempts.countInState(run.id, 'unknown'), false, missingCredentialFact(r, run, latest), run);
+  const hasProfileOptions = action !== 'choose_profile' || profileOptionsOf(r, run, latest, r.attempts.listForRun(run.id), run.status === 'paused').length > 0;
+  const actions = allowedRunActions(run, { ...facts, hasProfileOptions });
   return actions.includes(action) ? null : notApplicable(run, decision);
 }
 
@@ -142,6 +145,8 @@ function revisionReason(run: RunRow): ConfigRevisionReason {
 /**
  * N of the next eligible model step, built exactly like dispatch (context → request → adapter estimate), or null
  * when no model step is left or the estimate cannot be built (the loop's authoritative checks then decide).
+ * F2 (security): nothing is sent toward a provider the project no longer allows or that has no credential ref — the
+ * key is never resolved and the adapter never asked; null lets the dispatch-time checks pause the run instead.
  */
 export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Promise<Microusd | null> {
   const r = ctx.db.repos;
@@ -150,6 +155,8 @@ export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Pro
   if (step === undefined) return null;
   try {
     const stepSnap = effectiveStepSnapshot(r, run, step.stepKey);
+    const providerId = stepSnap.profile.providerId;
+    if (!r.projects.get(run.projectId).providerPolicy.allowedProviderIds.includes(providerId) || r.credentials.get(providerId) === undefined) return null;
     const prior = r.attempts.listForStep(step.id);
     const purpose = nextPurpose(step, prior);
     const assembled = await ctx.context.assemble({ run, step, snapshot: stepSnap.profile, stepSpec: stepSnap,
@@ -201,12 +208,6 @@ function resumeContinue(r: Repos, fx: PostCommitEffect[], run: RunRow, now: Epoc
   // `unknown_outcome`: only reachable once every unknown attempt is decided and no step failed — the `offered` gate
   // (F2 truth table) refuses `resume` otherwise, before this runs.
   if (!isPausedFor(run, ['user', 'rate_limited', 'auth_required', 'setup_blocked', 'unknown_outcome'])) return err(notApplicable(run, 'continue'));
-  if (run.pauseReason === 'auth_required') {
-    const models = effectiveModelSteps(r, run);
-    const missing = [...new Set(openModelSteps(r, run).flatMap((s) => models.get(s.stepKey)?.profile.providerId ?? []))]
-      .find((p) => r.credentials.get(p) === undefined);
-    if (missing !== undefined) return err(errors.authRequired(missing));
-  }
   if (run.pauseReason === 'rate_limited') {
     // F2: resuming from rate_limited resets the ready step's wait counter.
     for (const s of r.steps.latestPerStepKey(run.id)) {
@@ -323,6 +324,11 @@ function resumeRaiseLimits(
 }
 
 function applyResume(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, d: RecoveryDecision, pre: Prepared, now: EpochMs): Result<void> {
+  if (d.kind === 'continue' && isPausedFor(run, ['auth_required'])) {
+    // `resume` is not offered while a credential ref is missing; the precise error names the provider to reconnect.
+    const missing = providersMissingCredential(r, run, r.steps.latestPerStepKey(run.id))[0];
+    if (missing !== undefined) return err(errors.authRequired(missing));
+  }
   const refused = offered(r, run, actionOf(run, d), d.kind);
   if (refused !== null) return err(refused);
   switch (d.kind) {
@@ -398,16 +404,46 @@ function costNow(r: Repos, runId: RunId): CostSummary {
 }
 
 /**
+ * Re-check of a `paused(budget_run | budget_project)` run inside the caller's tx (E1 #1): RESUME_RESOLVED when the
+ * next admission passes; otherwise, when the OTHER scope is now the one that fails, the run moves to that scope's
+ * pause (BUDGET_BLOCKED, the breakdown as its detail) so the offered action is the one that can unblock it. Returns
+ * the failing breakdown (null when resumed).
+ */
+function recheckBudgetPause(r: Repos, fx: PostCommitEffect[], run: RunRow, N: Microusd | null, now: EpochMs): BudgetBreakdown | null {
+  const next = nextAdmission(r, run, N, now);
+  if (next.ok || next.breakdown === null) {
+    applyRunEvent(r, run, { type: 'RESUME_RESOLVED' }, now, fx);
+    return null;
+  }
+  const scope = next.breakdown.scope === 'project' ? 'project' : 'run';
+  const wanted: PauseReason = scope === 'project' ? 'budget_project' : 'budget_run';
+  if (isPausedFor(run, ['budget_run', 'budget_project']) && run.pauseReason !== wanted) {
+    appendRunEvent(r, fx, run.id, 'ledger.blocked', { ...next.breakdown, stepRunId: null });
+    applyRunEvent(r, run, { type: 'BUDGET_BLOCKED', scope, error: errors.budgetBlocked(next.breakdown) }, now, fx);
+  }
+  return next.breakdown;
+}
+
+/**
  * `runs.increaseAllowance`: `allowance_change +(L′ − L)` (a model can never reach this), and an automatic
- * RESUME_RESOLVED on `paused(budget_run | budget_overrun)` when the next admission would now pass.
+ * RESUME_RESOLVED on `paused(budget_run | budget_overrun)` when the next admission would now pass. A `budget_run`
+ * pause whose next admission now fails at the PROJECT scope moves to `paused(budget_project)` (E1 #1).
  */
 export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowanceInput): Promise<Result<{ cost: CostSummary; status: RunStatus; budget: BudgetBreakdown | null }>> {
   const req = keyed('runs.increaseAllowance', input);
-  const replay = storedFor(ctx, ctx.db.repos, req);
-  if (replay !== null) return replay.ok ? ok({ cost: costNow(ctx.db.repos, input.runId), status: ctx.db.repos.runs.get(input.runId).status, budget: null }) : replay;
+  const replayOf = (r: Repos) => {
+    const replay = storedFor(ctx, r, req);
+    if (replay === null) return null;
+    return replay.ok ? ok({ cost: costNow(r, input.runId), status: r.runs.get(input.runId).status, budget: null }) : replay;
+  };
+  const early = replayOf(ctx.db.repos);
+  if (early !== null) return early;
   const before = ctx.db.repos.runs.get(input.runId);
   const N = isPausedFor(before, ['budget_run', 'budget_overrun']) ? await estimateNextReservation(ctx, before.id) : null;
   const res = await inTx(ctx, (r, fx, now) => {
+    // E1 #7: a concurrent same-key request committed while this one estimated: replay its result, never re-apply.
+    const again = replayOf(r);
+    if (again !== null) return again;
     const run = r.runs.get(input.runId);
     if (isTerminalRunStatus(run.status) || run.status === 'cancelling') return err(errors.conflict({ reason: 'run_terminal', status: run.status }));
     const L = r.ledger.runBalances(run.id).L;
@@ -419,7 +455,9 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
     r.runs.setLimits(run.id, { ...run.limits, budgetMicrousd: input.newAllowanceMicrousd });
     appendRunEvent(r, fx, run.id, 'run.limits_raised', { budgetMicrousd: { from: L, to: input.newAllowanceMicrousd } });
     let budget: BudgetBreakdown | null = null;
-    if (isPausedFor(run, ['budget_run', 'budget_overrun'])) {
+    if (isPausedFor(run, ['budget_run'])) budget = recheckBudgetPause(r, fx, r.runs.get(run.id), N, now);
+    else if (isPausedFor(run, ['budget_overrun'])) {
+      // An overrun is never moved to another pause here: acknowledge_overrun stays offered (dispatch then decides).
       const next = nextAdmission(r, run, N, now);
       if (next.ok) applyRunEvent(r, r.runs.get(run.id), { type: 'RESUME_RESOLVED' }, now, fx);
       else budget = next.breakdown;
@@ -432,20 +470,20 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
 }
 
 /**
- * `projects.update` follow-up (edit_project_allowance): every `paused(budget_project)` run of the project whose next
- * admission would now pass gets RESUME_RESOLVED. Returns the resumed run ids.
+ * `projects.update` follow-up (edit_project_allowance): every `paused(budget_project)` AND `paused(budget_run)` run of
+ * the project is re-checked (E1 #1): RESUME_RESOLVED when its next admission now passes, else it moves to the pause of
+ * the scope that fails. Returns the resumed run ids.
  */
 export async function reevaluateProjectBudget(ctx: EngineCtx, projectId: RunRow['projectId']): Promise<RunId[]> {
-  // Every such run (newest first, as before), in one statement — no page limit: a 101st paused run is re-evaluated too.
-  const runs = ctx.db.repos.runs.listPausedFor(projectId, 'budget_project');
+  // Every such run (newest first, as before), in one statement per reason — no page limit.
+  const runs = [...ctx.db.repos.runs.listPausedFor(projectId, 'budget_project'), ...ctx.db.repos.runs.listPausedFor(projectId, 'budget_run')];
   const resumed: RunId[] = [];
   for (const run of runs) {
     const N = await estimateNextReservation(ctx, run.id);
     const res = await inTx(ctx, (r, fx, now) => {
       const cur = r.runs.get(run.id);
-      if (!isPausedFor(cur, ['budget_project']) || !nextAdmission(r, cur, N, now).ok) return ok(false);
-      applyRunEvent(r, cur, { type: 'RESUME_RESOLVED' }, now, fx);
-      return ok(true);
+      if (!isPausedFor(cur, ['budget_project', 'budget_run'])) return ok(false);
+      return ok(recheckBudgetPause(r, fx, cur, N, now) === null);
     });
     if (res.ok && res.value) resumed.push(run.id);
   }
@@ -463,6 +501,26 @@ interface DecideUnknownInput {
   readonly decision: 'retry_acknowledging_charge' | 'mark_failed_keep_liability' | 'accept_estimated_charge';
 }
 
+/**
+ * E1 #4: on a terminal run only the liability is settled — the ledger and the attempt, never the step or the run. A
+ * retry makes no sense there, so `retry_acknowledging_charge` is refused; `accept_estimated_charge` turns the unknown
+ * liability into an `estimated` settled cost (it stops counting against later months); `mark_failed_keep_liability`
+ * keeps it as the user chose.
+ */
+function applyTerminalUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, a: AttemptRow, input: DecideUnknownInput, now: EpochMs): Result<void> {
+  if (input.decision === 'retry_acknowledging_charge') return err(notApplicable(run, input.decision));
+  if (input.decision === 'accept_estimated_charge') {
+    const liability = r.ledger.attemptBalances(a.id).unknown;
+    r.ledger.append(resolveUnknownEntries({ liability, settled: liability, certainty: 'estimated', attemptId: a.id, runId: run.id,
+      projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now }));
+    r.attempts.transition(a.id, ['unknown'], 'failed', { error: errors.requestOutcomeUnknown(a.id, { details: { chargeAccepted: true } }), finishedAt: now });
+  } else {
+    r.attempts.transition(a.id, ['unknown'], 'abandoned', { error: errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } }), finishedAt: now });
+  }
+  appendRunEvent(r, fx, run.id, 'attempt.settled', { attemptId: a.id, stepRunId: a.stepRunId, decision: input.decision, runStatus: run.status });
+  return ok(undefined);
+}
+
 function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, input: DecideUnknownInput, now: EpochMs): Result<void> {
   const a = r.attempts.find(input.attemptId);
   if (a?.runId !== run.id) return err(errors.notFound('attempt'));
@@ -470,6 +528,7 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
   // Clarification 15: decidable from any pause (deadline, user, …) or interrupted while an unknown attempt is open.
   const refused = offered(r, run, 'decide_unknown', input.decision);
   if (refused !== null) return err(refused);
+  if (isTerminalRunStatus(run.status)) return applyTerminalUnknownDecision(r, fx, run, a, input, now);
   const step = r.steps.get(a.stepRunId);
   const unknownError = errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } });
   switch (input.decision) {
@@ -496,14 +555,19 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
   return ok(undefined);
 }
 
-/** `runs.decideUnknown` (§4.4, §7.5) on a paused or `interrupted` run with an unresolved unknown attempt. */
+/**
+ * `runs.decideUnknown` (§4.4, §7.5) on a paused or `interrupted` run with an unresolved unknown attempt, or on a
+ * terminal run (E1 #4: settles the liability only, no status change).
+ */
 export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): Promise<Result<RunDetail>> {
   const req = keyed('runs.decideUnknown', input);
   const replay = storedFor(ctx, ctx.db.repos, req);
   if (replay !== null) return replay.ok ? ok(runDetail(ctx, input.runId)) : replay;
   const res = await inTx(ctx, (r, fx, now) => {
+    const again = storedFor(ctx, r, req); // E1 #7: a concurrent same-key request committed first
+    if (again !== null) return again.ok ? ok(undefined) : again;
     const run = r.runs.get(input.runId);
-    if (run.status !== 'paused' && run.status !== 'interrupted') return err(notApplicable(run, input.decision));
+    if (run.status !== 'paused' && run.status !== 'interrupted' && !isTerminalRunStatus(run.status)) return err(notApplicable(run, input.decision));
     const applied = applyUnknownDecision(r, fx, run, input, now);
     if (!applied.ok) return applied;
     remember(r, req, run.id);
@@ -529,7 +593,9 @@ interface RetryStepInput {
  * 4xx pauses as provider_unavailable (BH-1); `setup_blocked` is listed only so a run paused that way by an earlier
  * build with a FAILED step is not stuck (choose_profile maps to retryStep for a failed step, 02 B5).
  */
-const RETRYABLE_PAUSES: readonly PauseReason[] = ['output_invalid', 'provider_unavailable', 'model_refused', 'unknown_outcome', 'setup_blocked'];
+const RETRYABLE_PAUSES: readonly PauseReason[] = ['output_invalid', 'provider_unavailable', 'model_refused', 'unknown_outcome', 'setup_blocked',
+  // E1 #8: a budget pause with a failed step offers retry_step / choose_profile, which act through this op.
+  'budget_run', 'budget_project'];
 
 function applyRetryStep(r: Repos, fx: PostCommitEffect[], ctx: EngineCtx, run: RunRow, input: RetryStepInput, profile: ProfileSnapshot | null, now: EpochMs): Result<void> {
   if (!isPausedFor(run, RETRYABLE_PAUSES)) return err(notApplicable(run, 'retry_step'));
@@ -568,6 +634,8 @@ export async function retryStep(ctx: EngineCtx, input: RetryStepInput): Promise<
     profile = resolved.value;
   }
   const res = await inTx(ctx, (r, fx, now) => {
+    const again = storedFor(ctx, r, req); // E1 #7: a concurrent same-key request committed first
+    if (again !== null) return again.ok ? ok(undefined) : again;
     const applied = applyRetryStep(r, fx, ctx, r.runs.get(input.runId), input, profile, now);
     if (!applied.ok) return applied;
     remember(r, req, input.runId);

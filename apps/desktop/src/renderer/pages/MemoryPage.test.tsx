@@ -3,7 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { appError, errors } from '@relay/contracts';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../api/fake-bridge';
-import { sid } from '../api/fake-scenarios/world';
+import { sha, sid } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 
 const P = `/p/${FAKE_PROJECT_ID}/memory`;
@@ -345,6 +345,16 @@ describe('MemoryPage (J9)', () => {
     expect(await screen.findByText('No suggestions to review')).toBeInTheDocument();
   });
 
+  it('E2 #17: a suggestion shows the files and lines it was based on', async () => {
+    renderApp(`${P}?tab=suggested`, { scenario: 'awaiting-approval' });
+    const card = (await screen.findByRole('heading', { level: 3, name: 'Log request IDs on every error' })).closest('article') as HTMLElement;
+    const refs = await within(card).findByRole('list', { name: 'Sources' });
+    expect(within(refs).getByText('src/errors.ts:4–12')).toBeInTheDocument();
+    // A whole-file reference has no line range.
+    expect(within(refs).getByText('src/routes/users.ts')).toBeInTheDocument();
+    expect(within(card).getByText('Based on')).toBeInTheDocument();
+  });
+
   it('A11Y-02: after a decision, focus moves to the next suggestion heading (never <body>)', async () => {
     const user = userEvent.setup();
     renderApp(`${P}?tab=suggested`, { scenario: 'awaiting-approval' });
@@ -460,7 +470,7 @@ describe('MemoryPage (J9)', () => {
     });
   });
 
-  it('stale-source: badge, banner, and "Confirm still accurate" writes reviewAt without changing the text', async () => {
+  it('stale-source: badge, banner, and "Confirm still accurate" sends confirmCurrent (never reviewAt) without changing the text', async () => {
     const user = userEvent.setup();
     const { bridge } = renderApp(`${P}?record=${M(4)}`, { scenario: 'memory-stale' });
     const panel = await detail('Keep handlers thin');
@@ -474,13 +484,112 @@ describe('MemoryPage (J9)', () => {
       expect(bridge.callsTo('relay/v1/memory.update')).toHaveLength(1);
     });
     const input = bridge.callsTo('relay/v1/memory.update')[0]?.input as Record<string, unknown>;
-    expect(input).toMatchObject({ recordId: M(4), expectedRevision: 2, reviewAt: expect.any(Number) as unknown });
-    expect(input).not.toHaveProperty('content');
-    expect(input).not.toHaveProperty('title');
+    expect(input).toEqual({ recordId: M(4), expectedRevision: 2, confirmCurrent: true });
+    expect(input).not.toHaveProperty('reviewAt');
     await waitFor(() => {
       expect(within(panel).queryByText('Source changed since approval')).not.toBeInTheDocument();
     });
     expect(within(panel).queryByRole('button', { name: 'Confirm still accurate' })).not.toBeInTheDocument();
+    // The confirmation refreshed the file hash (a new revision) and is listed in the events history.
+    expect(within(panel).getByText(/Confirmed still accurate · 1 source file checked, 1 hash refreshed/)).toBeInTheDocument();
+    expect(within(panel).queryByText('Review due')).not.toBeInTheDocument();
+  });
+
+  it('E2 #16: a confirmation whose source file is missing or unreadable shows a plain message and changes nothing', async () => {
+    const user = userEvent.setup();
+    const bridge = createFakeBridge('memory-stale');
+    renderApp(`${P}?record=${M(4)}`, { bridge });
+    const panel = await detail('Keep handlers thin');
+    bridge.failNext('relay/v1/memory.update', errors.notFound('file'));
+    await user.click(within(panel).getByRole('button', { name: 'Confirm still accurate' }));
+    const missing = await within(panel).findByRole('alert');
+    expect(missing).toHaveTextContent('A source file could not be found');
+    expect(missing).toHaveTextContent(/could not find this record's source file \(src\/routes\/users\.ts\)/);
+    expect(missing).toHaveTextContent('Nothing was changed');
+    expect(within(panel).getByText('Source changed since approval')).toBeInTheDocument();
+
+    bridge.failNext('relay/v1/memory.update', errors.permissionDenied('unreadable', { details: { relPath: 'src/routes/other.ts' } }));
+    await user.click(within(panel).getByRole('button', { name: 'Confirm still accurate' }));
+    await waitFor(() => {
+      expect(within(panel).getByRole('alert')).toHaveTextContent('A source file could not be read');
+    });
+    expect(within(panel).getByRole('alert')).toHaveTextContent('src/routes/other.ts');
+    expect(bridge.world.memory.find((m) => m.id === M(4))?.stale).toBe(true);
+  });
+
+  it('E2 #16: review due and last confirmation come from the record view (absent fields: not due, never confirmed)', async () => {
+    const bridge = createFakeBridge('memory-stale');
+    bridge.world.memory = bridge.world.memory.map((m) => {
+      if (m.id !== M(4)) return m;
+      const next = { ...m, stale: false };
+      delete next.reviewDue;
+      delete next.lastReviewedAt;
+      return next;
+    });
+    renderApp(`${P}?record=${M(4)}`, { bridge });
+    const panel = await detail('Keep handlers thin');
+    // reviewAt has passed, but without the runner's reviewDue the record is not shown as due.
+    expect(within(panel).queryByText('Review due')).not.toBeInTheDocument();
+    expect(within(panel).queryByRole('button', { name: 'Confirm still accurate' })).not.toBeInTheDocument();
+    expect(within(panel).getByText('Never')).toBeInTheDocument();
+  });
+
+  it('E2 #16: the stale banner names the changed file and the hash recorded at approval', async () => {
+    renderApp(`${P}?record=${M(4)}`, { scenario: 'memory-stale' });
+    const panel = await detail('Keep handlers thin');
+    const files = within(panel).getByRole('list', { name: 'Changed source files' });
+    expect(files).toHaveTextContent('src/routes/users.ts · hash when approved');
+    expect(within(files).getByTitle(sha('a19f'))).toBeInTheDocument();
+    expect(within(panel).getByText(/Source file/)).toHaveTextContent('Source file src/routes/users.ts changed since this record was approved.');
+  });
+
+  it('E2 #16: after a confirmation refreshed a hash, the stale banner shows the previous and current revision hashes', async () => {
+    const bridge = createFakeBridge('memory-stale');
+    const fresh = sha('f7e5c0');
+    bridge.world.memory = bridge.world.memory.map((m) => {
+      if (m.id !== M(4)) return m;
+      const last = m.revisions.at(-1);
+      if (last === undefined) return m;
+      const sourceRefs = last.sourceRefs.map((r) => (r.kind === 'file' ? { ...r, sha256: fresh } : r));
+      return { ...m, currentRevision: 3, revisions: [...m.revisions, { ...last, revision: 3, sourceRefs, usedByRuns: 0 }] };
+    });
+    renderApp(`${P}?record=${M(4)}`, { bridge });
+    const panel = await detail('Keep handlers thin');
+    const files = within(panel).getByRole('list', { name: 'Changed source files' });
+    expect(files).toHaveTextContent('hash when last confirmed (revision 3)');
+    expect(files).toHaveTextContent('before that (revision 2)');
+    expect(within(files).getByTitle(fresh)).toBeInTheDocument();
+    expect(within(files).getByTitle(sha('a19f'))).toBeInTheDocument();
+  });
+
+  it('E2 #17: revisions list how many runs used each one', async () => {
+    renderApp(`${P}?record=${M(4)}`, { scenario: 'memory-stale' });
+    const panel = await detail('Keep handlers thin');
+    const revs = within(panel).getAllByText(/^rev \d/).map((el) => el.closest('li')?.textContent ?? '');
+    expect(revs[0]).toContain('used by 2 runs');
+    expect(revs[1]).toContain('used by 1 run');
+    expect(revs[1]).not.toContain('used by 1 runs');
+  });
+
+  it('E2 #17: the events history explains each event in words (reviewed, skipped, conflict_resolved)', async () => {
+    renderApp(`${P}?record=${M(4)}`, { scenario: 'memory-stale' });
+    const stale = await detail('Keep handlers thin');
+    const events = within(stale).getByRole('list', { name: 'Events' });
+    expect(events).toHaveTextContent('Confirmed still accurate · 1 source file checked, no change found · by you');
+    expect(events).toHaveTextContent('Edited · by you');
+    expect(events).toHaveTextContent('Approved · by you');
+  });
+
+  it('E2 #17: an archived record shows why a run left it out and how its conflict was resolved', async () => {
+    renderApp(`${P}?tab=archived&record=${M(11)}`, { scenario: 'memory-stale' });
+    const panel = await detail('Validate with express-validator');
+    const events = within(panel).getByRole('list', { name: 'Events' });
+    expect(events).toHaveTextContent('Left out of Run 0022 because it was archived');
+    expect(events).not.toHaveTextContent('by Run 0022');
+    await waitFor(() => {
+      expect(events).toHaveTextContent('Conflict resolved with “Validate request bodies with zod”: one record was kept · by you');
+    });
+    expect(events).not.toHaveTextContent('{');
   });
 
   it('a failing memory.list (e.g. a future stubbed channel) renders the generic ErrorView', async () => {

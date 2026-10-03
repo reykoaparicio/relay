@@ -1,11 +1,11 @@
 // Run status banners (10 J8 StatusBanner table): status / pause reason → InlineAlert + the action buttons. The
 // mapping is exhaustive over `pauseReasonSchema` and `runStatusSchema` (a new member is a compile error), and every
 // button comes from `RunDetail.availableActions` (the server's 06 F2 table): nothing here re-derives run policy.
-import { memo, useId } from 'react';
+import { memo, useId, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { microusd } from '@relay/contracts';
-import type { PauseReason, RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
+import type { CostCertainty, LastShutdown, PauseReason, RunAction, RunDetail, RunEvent, StepView } from '@relay/contracts';
 import { UNKNOWN_OUTCOME_DECISIONS } from '@relay/contracts';
 import {
   BudgetBreakdownTable,
@@ -16,17 +16,21 @@ import {
   KeyValueList,
   Money,
   RecoveryPanel,
-  StatusBadge,
 } from '../../components/ui';
 import type { RecoveryDecisionDetail } from '../../components/ui';
 import {
   DESTRUCTIVE_RUN_ACTIONS,
   formatDuration,
+  formatUsdAtPrecision,
   PROVIDER_LABELS,
   RUN_ACTION_LABELS,
   statusPresentation,
   stepKeyLabel,
+  sumConsistentPrecision,
 } from '../../lib/format';
+import { useAppInfo } from '../../hooks/useAppInfo';
+import { useLedger } from '../../hooks/useLedger';
+import { RunSuggestionsLink } from '../memory/RunSuggestionsLink';
 import { paths } from '../shell/paths';
 import {
   bannerActions,
@@ -35,17 +39,22 @@ import {
   hashMapDetail,
   incompleteCauseOf,
   incompleteTitle,
+  INTERRUPTION_LEAD,
+  interruptedStep,
+  interruptionCauseOf,
   issuesOf,
   lastOverrun,
   numberDetail,
+  overrunStep,
   stepTitle,
   stringDetail,
   stringListDetail,
   usefulArtifactSteps,
 } from './inspector-model';
-import type { IncompleteCause } from './inspector-model';
+import type { IncompleteCause, OverrunFact } from './inspector-model';
 import { planRunAction } from './run-actions';
-import { RawResponseToggle, repairsText, ValidationIssueList } from './StepIssues';
+import { RequestFacts } from './RequestFacts';
+import { RawResponseToggle, repairsText, TechnicalDetails, ValidationIssueList } from './StepIssues';
 
 export interface StatusBannerProps {
   readonly run: RunDetail;
@@ -136,12 +145,36 @@ function UsefulArtifacts({ run, projectId }: { readonly run: RunDetail; readonly
         {steps.map((s) => (
           <li key={s.id}>
             <Link to={paths.run(projectId, run.id, { step: s.id, tab: 'output' })}>
-              {stepTitle(s)} output
+              {stepTitle(s, run.stepMeta)} output
             </Link>
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * The requests whose outcome is unknown, each with its possible charge and request facts (E1: the provider request
+ * id, copyable, and the dispatch time), so the user can ask the provider before deciding.
+ */
+function UnresolvedRequests({ run }: { readonly run: RunDetail }) {
+  if (run.unresolvedAttempts.length === 0) return null;
+  return (
+    <ul className="stack small" aria-label="Requests with an unknown outcome" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+      {run.unresolvedAttempts.map((a) => {
+        const label = `${stepTitle(a, run.stepMeta)} · attempt ${String(a.seq)}`;
+        return (
+          <li key={a.id} className="stack" style={{ gap: 4 }}>
+            <span>
+              {label}: liability{' '}
+              {a.cost === null ? 'amount not known' : <Money value={a.cost.microusd} certainty={a.cost.certainty} />}
+            </span>
+            <RequestFacts attempt={a} label={label} />
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -179,7 +212,10 @@ function FileHashChange({
 
 interface BannerContent {
   readonly title: ReactNode;
+  /** The cause and what it means (and costs): shown above the actions. */
   readonly body: ReactNode;
+  /** Secondary detail under the actions: field lists, technical details (error codes). */
+  readonly details?: ReactNode;
 }
 
 /** What every paused banner can draw on. */
@@ -192,7 +228,7 @@ interface PausedContext {
   /** Paused from `queued` (06 F2 clarification 9): no step ran, no attempt exists, nothing was reserved. */
   readonly notStarted: boolean;
   readonly stepKeyDetail: string | null;
-  /** "Error code X" line of the status detail, or null. */
+  /** "Technical details" disclosure with the status detail's error code, or null. */
   readonly code: ReactNode;
 }
 
@@ -228,51 +264,89 @@ function pausedBudget({ reason, detail, notStarted, code }: PausedContext): Bann
             ? 'Raising the project allowance re-checks every run of this project paused for it; runs that now fit continue on their own.'
             : 'After you raise the allowance, the run continues on its own when the next request fits.'}
         </p>
-        {code}
       </>
     ),
+    details: code,
   };
+}
+
+/** The term for the actual amount, by how sure it is (FR-09), matching the Budget card's rows. */
+const ACTUAL_TERM: Readonly<Record<CostCertainty, string>> = {
+  reported: 'Reported by provider',
+  calculated: 'Calculated from usage',
+  estimated: 'Estimated',
+  unknown: 'Unknown charge',
+};
+
+/** Reserved + over = actual, all at one precision so the three amounts visibly add up. */
+function overrunAmounts(o: OverrunFact): { readonly reserved: string; readonly actual: string; readonly over: string } {
+  const over = o.actual - o.reserved;
+  const digits = sumConsistentPrecision([o.reserved, over], o.actual);
+  return {
+    reserved: formatUsdAtPrecision(microusd(o.reserved), digits),
+    actual: formatUsdAtPrecision(microusd(o.actual), digits),
+    over: formatUsdAtPrecision(microusd(over), digits),
+  };
+}
+
+/** Reserved / actual (labelled by certainty) / over, from the ledger's settle entry of the overrunning attempt. */
+function OverrunFacts({ run, o }: { readonly run: RunDetail; readonly o: OverrunFact }) {
+  const { entries } = useLedger(run.id);
+  const certainty = useMemo(() => {
+    if (o.attemptId === null) return null;
+    for (const page of entries.data?.pages ?? []) {
+      for (const e of page.items) {
+        if (e.attemptId === o.attemptId && e.type === 'settle' && e.certainty !== null) return e.certainty;
+      }
+    }
+    return null;
+  }, [entries.data, o.attemptId]);
+  const a = overrunAmounts(o);
+  return (
+    <KeyValueList
+      items={[
+        { id: 'r', term: 'Reserved', value: a.reserved, mono: true },
+        {
+          id: 'a',
+          term: certainty === null ? 'Actual cost' : ACTUAL_TERM[certainty],
+          value: certainty === 'estimated' ? `≈ ${a.actual} est.` : a.actual,
+          mono: true,
+        },
+        { id: 'd', term: 'Over the reservation', value: a.over, mono: true },
+      ]}
+    />
+  );
 }
 
 function pausedBudgetOverrun({ run, events, detail }: PausedContext): BannerContent {
   const o = lastOverrun(events);
   const b = breakdownOf(detail);
+  const a = o === null ? null : overrunAmounts(o);
+  const step = overrunStep(run, events);
   return {
     title:
-      o === null ? (
+      a === null ? (
         'The last call cost more than was reserved'
       ) : (
         <>
-          The last call cost <Money value={microusd(o.actual)} />, more than the{' '}
-          <Money value={microusd(o.reserved)} /> reserved
+          The last call cost <span className="num">{a.actual}</span>, more than the <span className="num">{a.reserved}</span>{' '}
+          reserved
         </>
       ),
     body: (
       <>
         <p>
-          The provider reported more usage than the reservation assumed. Relay recorded the true amount and
-          paused before starting another step.
+          {step === undefined ? 'A request' : <>The <b>{stepTitle(step, run.stepMeta)}</b> request</>} used more than the reservation
+          assumed. Relay recorded the true amount and paused before starting another step.
         </p>
-        {o === null ? null : (
-          <KeyValueList
-            items={[
-              { id: 'r', term: 'Reserved', value: <Money value={microusd(o.reserved)} /> },
-              { id: 'a', term: 'Reported by provider', value: <Money value={microusd(o.actual)} /> },
-              {
-                id: 'd',
-                term: 'Over the reservation',
-                value: <Money value={microusd(o.actual - o.reserved)} />,
-              },
-            ]}
-          />
-        )}
-        {b === null ? null : <BudgetBreakdownTable breakdown={b} />}
+        {o === null ? null : <OverrunFacts run={run} o={o} />}
         <p className="subtle">
           Run usage now: <Money value={microusd(run.cost.allowance - run.cost.remaining)} /> of{' '}
           <Money value={run.cost.allowance} /> allowance.
         </p>
       </>
     ),
+    details: b === null ? undefined : <BudgetBreakdownTable breakdown={b} />,
   };
 }
 
@@ -301,20 +375,36 @@ function pausedDeadline({ run }: PausedContext): BannerContent {
   };
 }
 
-function pausedOutputInvalid({ step, detail, code }: PausedContext): BannerContent {
+function pausedOutputInvalid({ run, step, detail, code }: PausedContext): BannerContent {
   const err = step?.error ?? detail;
   const schemaId = stringDetail(err, 'schemaId');
   const used = numberDetail(err, 'repairsUsed');
   const max = numberDetail(err, 'repairsMax');
+  const issues = issuesOf(err);
   return {
-    title:
-      schemaId === null
-        ? 'The output did not match the expected format'
-        : `The output did not match ${schemaId}`,
+    title: `${step === undefined ? 'The step' : stepTitle(step, run.stepMeta)} returned output in the wrong format`,
     body: (
       <>
-        <ValidationIssueList issues={issuesOf(err)} />
-        {used === null ? null : <p>{repairsText(used, max)}. The step failed and the run is paused.</p>}
+        <p>
+          The model answered, but its output did not match the format the workflow expects
+          {used === null ? '' : `, and ${repairsText(used, max).toLowerCase()}`}. Retry the step or choose another
+          profile; finished steps are kept.
+        </p>
+        <p className="subtle">
+          Each attempt, including repairs, was charged as tracked in the ledger. A retry sends a new request and uses
+          more of the run allowance.
+        </p>
+      </>
+    ),
+    details: (
+      <>
+        {issues.length === 0 ? null : (
+          <ValidationIssueList
+            issues={issues}
+            collapsed
+            summary={`What did not match${schemaId === null ? '' : ` ${schemaId}`} (${String(issues.length)} field${issues.length === 1 ? '' : 's'})`}
+          />
+        )}
         <RawResponseToggle artifactId={stringDetail(err, 'rawResponseArtifactId')} />
         {code}
       </>
@@ -332,13 +422,9 @@ function pausedProviderUnavailable({ step, detail }: PausedContext): BannerConte
           {providerName(stringDetail(err, 'providerId'))} could not be reached. Failed requests before any
           output are not charged; the reservation was released. Completed steps are kept.
         </p>
-        {err === null ? null : (
-          <p className="subtle">
-            Error code <code>{err.code}</code>
-          </p>
-        )}
       </>
     ),
+    details: <TechnicalDetails error={err} />,
   };
 }
 
@@ -353,13 +439,9 @@ function pausedModelRefused({ step, detail }: PausedContext): BannerContent {
           declined request on its own. Try another permitted profile, or stop the run.
         </p>
         <p className="subtle">The goal is part of the approved plan, so a different goal starts a new run.</p>
-        {err === null ? null : (
-          <p className="subtle">
-            Error code <code>{err.code}</code>
-          </p>
-        )}
       </>
     ),
+    details: <TechnicalDetails error={err} />,
   };
 }
 
@@ -382,9 +464,9 @@ function pausedSetupBlocked({ detail, notStarted, stepKeyDetail, code }: PausedC
         <p className="subtle">
           Resume re-runs the checks. Choosing another profile records a configuration revision.
         </p>
-        {code}
       </>
     ),
+    details: code,
   };
 }
 
@@ -404,10 +486,13 @@ function pausedUnknownOutcome({ run }: PausedContext): BannerContent {
   return {
     title: 'The request may have been sent; its charge is unknown',
     body: (
-      <p>
-        Relay cannot confirm whether the provider processed the request. The possible charge is kept as
-        unknown liability until you decide. Nothing is retried on its own.
-      </p>
+      <>
+        <p>
+          Relay cannot confirm whether the provider processed the request. The possible charge is kept as
+          unknown liability until you decide. Nothing is retried on its own.
+        </p>
+        <UnresolvedRequests run={run} />
+      </>
     ),
   };
 }
@@ -466,9 +551,9 @@ function pausedRateLimited({ code }: PausedContext): BannerContent {
           The provider kept limiting requests after the allowed waits, so Relay paused instead of waiting
           longer. Rejected requests did no work and are not charged.
         </p>
-        {code}
       </>
     ),
+    details: code,
   };
 }
 
@@ -502,9 +587,9 @@ function pausedApprovalStale({ detail, code }: PausedContext): BannerContent {
           Re-snapshot and re-plan captures the current files and asks for a new approval. Using the preserved
           snapshot keeps the old file contents; the patch may not apply cleanly.
         </p>
-        {code}
       </>
     ),
+    details: code,
   };
 }
 
@@ -533,12 +618,7 @@ function pausedContent(
   step: StepView | undefined,
 ): BannerContent {
   const detail = run.statusDetail;
-  const code =
-    detail === null ? null : (
-      <p className="subtle">
-        Error code <code>{detail.code}</code>
-      </p>
-    );
+  const code = <TechnicalDetails error={detail} />;
   return PAUSED_CONTENT[reason]({
     reason,
     run,
@@ -580,6 +660,7 @@ function statusContent(
   projectId: string,
   events: readonly RunEvent[],
   step: StepView | undefined,
+  lastShutdown: LastShutdown | null | undefined,
 ): BannerContent | null {
   switch (run.status) {
     case 'queued':
@@ -590,16 +671,25 @@ function statusContent(
       return run.pauseReason === null
         ? { title: 'Paused', body: <p>The run is paused. No new step starts until you resume.</p> }
         : pausedContent(run.pauseReason, run, events, step);
-    case 'interrupted':
+    case 'interrupted': {
+      // E2: the cause follows how the previous session ended (a clean quit, or the runner stopped responding).
+      const cause = interruptionCauseOf(lastShutdown);
+      const stuck = interruptedStep(run);
       return {
         title: 'Relay stopped while this run was in progress',
         body: (
-          <p>
-            The background runner stopped responding. Relay restarted it and did not resume or retry anything
-            on its own. Your approvals and completed artifacts are kept.
-          </p>
+          <>
+            <p>
+              {INTERRUPTION_LEAD[cause]}
+              <b>{stuck === undefined ? 'a step' : stepTitle(stuck, run.stepMeta)}</b> was running.{' '}
+              {cause === 'runner_stopped' ? 'Relay restarted it and did not' : 'Relay did not'} resume or retry anything
+              on its own. Your approvals and completed artifacts are kept.
+            </p>
+            <UnresolvedRequests run={run} />
+          </>
         ),
       };
+    }
     case 'cancelling':
       return {
         title: 'Cancellation requested; waiting for the in-flight request to stop (best effort)',
@@ -620,18 +710,7 @@ function statusContent(
                 <p>
                   These requests have no confirmed charge; the possible amount stays as unknown liability:
                 </p>
-                <ul className="small">
-                  {run.unresolvedAttempts.map((a) => (
-                    <li key={a.id}>
-                      {stepTitle(a)} · attempt {a.seq}: liability{' '}
-                      {a.cost === null ? (
-                        'amount not known'
-                      ) : (
-                        <Money value={a.cost.microusd} certainty={a.cost.certainty} />
-                      )}
-                    </li>
-                  ))}
-                </ul>
+                <UnresolvedRequests run={run} />
               </div>
             ) : (
               <p>No request is waiting for a charge to be confirmed.</p>
@@ -647,24 +726,13 @@ function statusContent(
         body: (
           <>
             <p>The run cannot continue; start a new run to try again.</p>
-            {run.statusDetail === null ? null : (
-              <p className="subtle">
-                Error code <code>{run.statusDetail.code}</code>
-                {run.statusDetail.correlationId === undefined ? null : (
-                  <>
-                    {' '}
-                    · reference <code>{run.statusDetail.correlationId}</code> (include it if you report the
-                    problem; it contains no project data)
-                  </>
-                )}
-              </p>
-            )}
             <UsefulArtifacts run={run} projectId={projectId} />
             <p>
               <Link to={paths.settings('diagnostics')}>Open diagnostics</Link>
             </p>
           </>
         ),
+        details: <TechnicalDetails error={run.statusDetail} />,
       };
     case 'completed': {
       const verify = [...run.steps].reverse().find((s) => s.outcome === 'accept');
@@ -676,7 +744,8 @@ function statusContent(
               Completed means the configured workflow accepted its output. It does not guarantee the code is
               correct. Review the patch before applying it. Original project files were not modified.
             </p>
-            <ReportLink run={run} projectId={projectId} />
+            {/* The report is one click away in the page header ("View report"). */}
+            <RunSuggestionsLink projectId={projectId} runId={run.id} />
           </>
         ),
       };
@@ -707,7 +776,8 @@ function StatusBannerView({
   disabledReasons,
 }: StatusBannerProps) {
   const step = blockedStep(run);
-  const content = statusContent(run, projectId, events, step);
+  const lastShutdown = useAppInfo().data?.lastShutdown;
+  const content = statusContent(run, projectId, events, step, lastShutdown);
   if (content === null) return null;
   const p = statusPresentation('run', run.status, run.pauseReason);
   const recovery =
@@ -718,6 +788,7 @@ function StatusBannerView({
       <InlineAlert
         tone={p.tone}
         title={content.title}
+        footer={content.details}
         actions={
           recovery ? undefined : actions.length > 0 ? (
             <ActionButtons
@@ -730,11 +801,7 @@ function StatusBannerView({
           ) : undefined
         }
       >
-        {recovery ? null : (
-          <p>
-            <StatusBadge kind="run" value={run.status} pauseReason={run.pauseReason} showDetail />
-          </p>
-        )}
+        {/* The page header already shows the run's status badge: the banner states the cause and the actions once. */}
         {content.body}
       </InlineAlert>
       {recovery ? (

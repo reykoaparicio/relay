@@ -28,7 +28,7 @@ test.describe('approval controls', { tag: '@m2' }, () => {
     await expect(send).toBeDisabled();
     await inspector.revisionNote().fill('   ');
     await expect(send).toBeDisabled();
-    await expect(inspector.approvalCard()).toContainText(/This is revision 1 of \d+\./);
+    await expect(inspector.approvalCard()).toContainText(/This is revision cycle 1 of \d+\./);
 
     // With a note: the planner re-runs (call log plan ×2) and a new approval is requested.
     await inspector.revisionNote().fill('Keep the existing 400 response body shape; only add the id check.');
@@ -62,7 +62,7 @@ test.describe('approval controls', { tag: '@m2' }, () => {
     await expect(report.approvals().nth(1)).toContainText('Approve plan: approved');
     await expect(report.approvals().nth(1)).not.toContainText('invalidated:');
     await expect(report.revisionsValue('Plan revisions')).toHaveText('1');
-    await expect(report.revisionsValue('Quality revision cycles')).toHaveText(/^1 of \d+$/);
+    await expect(report.revisionsValue('Revision cycles')).toHaveText(/^1 of \d+$/);
 
     // Reject path on a new run → Cancelled; nothing after the approval runs.
     const rejectRunId = await startRunViaNewRun(page, GOAL_REJECT);

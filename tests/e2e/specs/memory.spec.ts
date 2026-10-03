@@ -179,4 +179,43 @@ test.describe('memory', { tag: '@m3' }, () => {
     await inspector.selectStep('Review input');
     await expect(await inspector.contextSummaryValue('Approved memory records')).toHaveText('1');
   });
+
+  test('E2 #16: "Confirm still accurate" on a due record sends confirmCurrent, keeps the review date and logs a review', async ({
+    page,
+    stubDialogs,
+    project,
+  }) => {
+    await setupOwnProject(page, stubDialogs, project);
+    // A source reference whose review date has passed (created "by another session" through the preload bridge).
+    const title = 'Config loading lives in src/config.ts';
+    const reviewAt = Date.now() - 60_000;
+    await invokeAsAnotherSession(page, 'relay/v1/memory.create', {
+      idempotencyKey: '01JE2E0000000000000000CONF',
+      projectId: projectIdOf(page),
+      type: 'source_reference',
+      title,
+      content: 'Configuration is read once at startup in src/config.ts.',
+      scope: { roles: 'all' },
+      reviewAt,
+      sourceFile: { relPath: 'src/config.ts' },
+    });
+    await new Shell(page).nav('Memory');
+    const memory = new Memory(page);
+    await memory.expectLoaded();
+    await memory.record('Approved', title).click();
+    const detail = memory.detail(title);
+    await expect(detail).toContainText('Review due');
+    await expect(detail).toContainText(/Last confirmed\s*Never/);
+
+    await detail.getByRole('button', { name: 'Confirm still accurate' }).click();
+    await expect(detail).not.toContainText('Review due');
+    await expect(detail).not.toContainText(/Last confirmed\s*Never/);
+    await expect(detail).toContainText('Confirmed still accurate');
+    // The review date is kept (a confirmation never moves it).
+    const rec = await approvedRecord(page, title);
+    const got = await invokeAsAnotherSession<{ reviewAt: number | null; reviewDue?: boolean; lastReviewedAt?: number | null }>(page, 'relay/v1/memory.get', { recordId: rec.id });
+    expect(got.reviewAt).toBe(reviewAt);
+    expect(got.reviewDue).toBe(false);
+    expect(typeof got.lastReviewedAt).toBe('number');
+  });
 });

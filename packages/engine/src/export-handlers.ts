@@ -4,7 +4,9 @@
 // realpath re-resolution, refusal inside/containing a project root, never overwriting). No credential ever leaves.
 import { err, errors, isTerminalRunStatus, looksLikeSecret, ok, patchV1Schema, reportV1Schema } from '@relay/contracts';
 import type {
+  AppError,
   ArtifactId,
+  ExportPart,
   InternalReason,
   ProjectId,
   ReportV1,
@@ -93,34 +95,48 @@ async function runPatchText(ctx: EngineCtx, runId: RunId, report: ReportV1 | nul
   return ok(parsed.data.files.map((f) => (f.unifiedDiff.endsWith('\n') ? f.unifiedDiff : `${f.unifiedDiff}\n`)).join(''));
 }
 
-/** `artifacts.exportTo`: report → Markdown (`.md`), patch → concatenated unified diffs (`.patch`), or both. */
+/**
+ * `artifacts.exportTo`: report → Markdown (`.md`), patch → concatenated unified diffs (`.patch`), or both. E2 #10: each
+ * part is rendered and written independently; a part that fails (missing / purged artifact, write error) is reported in
+ * `failed` with its code while the other part is still written, so the caller retries only the failed part. Only when
+ * NOTHING was written is the result an error (the first failure's error, with `details.failed`). A destination refused
+ * for every file (inside / containing a project) is that PERMISSION_DENIED, as before.
+ */
 export async function exportRunArtifacts(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/artifacts.exportTo'>): Promise<Result<RunnerOutputOf<'relay/v1/artifacts.exportTo'>>> {
   const port = exportPort(ctx, 'relay/v1/artifacts.exportTo');
   if (!port.ok) return port;
   const r = ctx.db.repos;
   if (r.runs.find(input.runId) === undefined) return err(errors.notFound('run'));
-  const files: { name: string; text: string }[] = [];
-  let report: ReportV1 | null = null;
-  if (input.what !== 'patch') {
-    const rep = await runReport(ctx, input.runId);
-    if (!rep.ok) return rep;
-    report = rep.value;
-    files.push({ name: `relay-report-${input.runId}.md`, text: renderReportMarkdown(rep.value) });
-  }
-  if (input.what !== 'report') {
-    const patch = await runPatchText(ctx, input.runId, report);
-    if (!patch.ok) return patch;
-    files.push({ name: `relay-patch-${input.runId}.patch`, text: patch.value });
-  }
-  // Everything is read and rendered before the first write; the run itself is never touched (§17.1 retry only export).
+  const parts: ExportPart[] = input.what === 'both' ? ['report', 'patch'] : [input.what];
   const roots = projectRoots(r);
-  const written: string[] = [];
-  for (const f of files) {
-    const w = await port.value.writeFile(input.destinationRealpath, f.name, utf8(f.text), roots);
-    if (!w.ok) return w;
-    written.push(w.value.writtenRealpath);
+  const written: { what: ExportPart; realpath: string }[] = [];
+  const failed: { what: ExportPart; error: AppError }[] = [];
+  let report: ReportV1 | null = null;
+  // The run itself is never touched (§17.1 retry only export).
+  for (const what of parts) {
+    let file: Result<{ name: string; text: string }>;
+    if (what === 'report') {
+      const rep = await runReport(ctx, input.runId);
+      if (rep.ok) report = rep.value;
+      file = rep.ok ? ok({ name: `relay-report-${input.runId}.md`, text: renderReportMarkdown(rep.value) }) : rep;
+    } else {
+      const patch = await runPatchText(ctx, input.runId, report);
+      file = patch.ok ? ok({ name: `relay-patch-${input.runId}.patch`, text: patch.value }) : patch;
+    }
+    if (!file.ok) {
+      failed.push({ what, error: file.error });
+      continue;
+    }
+    const w = await port.value.writeFile(input.destinationRealpath, file.value.name, utf8(file.value.text), roots);
+    if (w.ok) written.push({ what, realpath: w.value.writtenRealpath });
+    else failed.push({ what, error: w.error });
   }
-  return ok({ writtenRealpaths: written });
+  const failedOut = failed.map((f) => ({ what: f.what, code: f.error.code, userMessage: f.error.userMessage }));
+  const first = failed[0];
+  if (written.length === 0 && first !== undefined) {
+    return err({ ...first.error, details: { ...first.error.details, failed: failedOut } });
+  }
+  return ok({ writtenRealpaths: written.map((w) => w.realpath), written, ...(failed.length === 0 ? {} : { failed: failedOut }) });
 }
 
 /**

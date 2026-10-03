@@ -34,7 +34,10 @@ describe('workflows.saveDraft (P0 patch only)', () => {
     const again = await x.engine.handle('relay/v1/workflows.saveDraft', { workflowId: wf, expectedDraftRevision: 0, patch: {} });
 
     expect(created.ok && [created.data.version, created.data.status, created.data.draftRevision, created.data.spec.limits.maxAttempts]).toEqual(['draft', 'draft', 1, 12]);
-    expect(created.ok && created.data.prompts['reviewer.v1']?.text).toBe('Review carefully.');
+    // E1: the published reviewer.v1 text is never overwritten; the edit is reviewer.v2 and the step points at it.
+    expect(created.ok && created.data.prompts['reviewer.v2']?.text).toBe('Review carefully.');
+    expect(created.ok && created.data.prompts['reviewer.v1']).toBeUndefined();
+    expect(created.ok && created.data.spec.steps.find((s) => s.id === 'review')).toEqual(expect.objectContaining({ instructionVersion: 'reviewer.v2' }));
     expect(updated.ok && [updated.data.draftRevision, updated.data.spec.steps.find((s) => s.id === 'review')]).toEqual([2, expect.objectContaining({ profile: 'Economy', maxOutputTokens: 4000 })]);
     expect(stale.ok ? null : stale.error.code).toBe('CONFLICT');
     expect(again.ok ? null : again.error.details?.['reason']).toBe('draft_exists');

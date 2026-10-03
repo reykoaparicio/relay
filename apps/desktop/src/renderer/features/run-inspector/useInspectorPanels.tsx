@@ -1,12 +1,13 @@
 // The run inspector's step panels (10 J8, SPLIT-01): Output / Context / Attempts / Events / Ledger tabs, and the
 // Budget + Context summary row that collapses into tabs below 1280 px (ResponsivePanels).
 import type { RunDetail, RunEvent, StepDetail, StepView } from '@relay/contracts';
-import { AttemptsTable, BudgetLedger, Button, ContextManifestView, Skeleton } from '../../components/ui';
+import { BudgetLedger, Button } from '../../components/ui';
 import type { Panel } from '../../components/ui';
 import type { useLedger } from '../../hooks/useLedger';
 import { runLabel } from '../runs/run-display';
 import { ContextSummary, EventsList, LedgerPanel } from './InspectorPanels';
-import { stepTitle } from './inspector-model';
+import { attemptSeqsOf } from './inspector-model';
+import { AttemptsPanel, ContextPanel } from './RunLevelPanels';
 import { StepOutputTab } from './StepOutput';
 import type { StepOutputTabProps } from './StepOutput';
 import type { useLedgerExport } from './useRunExports';
@@ -24,6 +25,8 @@ export interface InspectorPanelsInput {
   /** The selected step's events and the run-level ones (`stepEventsOf`). */
   readonly selectedEvents: { readonly events: readonly RunEvent[]; readonly runLevel: readonly RunEvent[] };
   readonly eventsLoaded: boolean;
+  /** Every event of the run (attempt numbers of the ledger's Attempt column). */
+  readonly runEvents: readonly RunEvent[];
   readonly ledger: ReturnType<typeof useLedger>;
   readonly ledgerExport: ReturnType<typeof useLedgerExport>;
   readonly approval: StepOutputTabProps['approval'];
@@ -44,6 +47,7 @@ export function useInspectorPanels({
   detailError,
   selectedEvents,
   eventsLoaded,
+  runEvents,
   ledger,
   ledgerExport,
   approval,
@@ -62,23 +66,13 @@ export function useInspectorPanels({
     {
       id: 'context',
       label: 'Context',
-      content:
-        detail === undefined ? (
-          <Skeleton lines={4} />
-        ) : detail.manifest === null ? (
-          <p className="subtle">No context was sent for this step. Only the items in a manifest are ever sent to a provider.</p>
-        ) : (
-          <div className="stack">
-            <p className="subtle">Immutable manifest for this request. Only these items were sent to providers.</p>
-            <ContextManifestView manifest={detail.manifest} />
-          </div>
-        ),
+      content: <ContextPanel run={run} detail={detail} />,
     },
     {
       id: 'attempts',
       label: 'Attempts',
-      content:
-        detail === undefined ? <Skeleton lines={4} /> : <AttemptsTable attempts={detail.attempts} caption={`Attempts for ${stepTitle(selected)}`} />,
+      // Keyed by row: the "This step / Whole run" choice starts over for each selected step.
+      content: <AttemptsPanel key={selected.id} run={run} step={selected} stepAttempts={detail?.attempts} />,
     },
     {
       id: 'events',
@@ -92,6 +86,7 @@ export function useInspectorPanels({
         <LedgerPanel
           runLabel={runLabel(run.id)}
           entries={entries}
+          attemptSeqs={attemptSeqsOf(runEvents)}
           error={ledger.entries.error}
           hasMore={ledger.entries.hasNextPage}
           loadingMore={ledger.entries.isFetchingNextPage}

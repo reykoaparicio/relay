@@ -117,7 +117,7 @@ export async function testProviderConnection(ctx: EngineCtx, input: { readonly p
   const settledAt = ctx.db.tx('immediate', (r) => {
     const now = ctx.clock.now();
     r.ledger.append(settlementEntries({ ...refs, reservation: N, cost, createdAt: now }));
-    r.credentials.recordTest(providerId, error === null, error?.code ?? null, now);
+    r.credentials.recordTest(providerId, error === null, error?.code ?? null, now, 'connection_test');
     return now;
   });
   const costMicrousd = cost.kind === 'known' ? cost.microusd : cost.kind === 'unknown' ? N : microusd(0);

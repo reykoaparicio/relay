@@ -7,12 +7,14 @@ import { logSafe } from './log-safe.js';
 import type { DeadlineWatcher, EngineCtx } from './ports.js';
 import { applyRunEvent, runEffects } from './run-machine.js';
 import type { PostCommitEffect } from './run-machine.js';
+import { openSegment, openSegmentMs } from './segments.js';
 
-type DeadlineRun = Pick<RunRow, 'executionMsUsed' | 'runningSince' | 'limits'>;
+/** `id` lets the open segment be measured on the monotonic clock (segments.ts); without it the wall clock is used. */
+type DeadlineRun = Pick<RunRow, 'executionMsUsed' | 'runningSince' | 'limits'> & { readonly id?: RunRow['id'] | undefined };
 
-/** Execution ms used including the open running segment. */
+/** Execution ms used including the open running segment (monotonic while this process measures it, E1). */
 export function executionMsAt(run: DeadlineRun, now: EpochMs): number {
-  return run.executionMsUsed + (run.runningSince === null ? 0 : Math.max(0, now - run.runningSince));
+  return run.executionMsUsed + openSegmentMs(run, now);
 }
 
 /** `execution_ms_used + (now − running_since) ≥ executionTimeoutSeconds × 1000`. */
@@ -28,8 +30,11 @@ export function remainingExecutionMs(run: DeadlineRun, now: EpochMs): number {
 /**
  * Creates the per-run segment timer. On fire: in-flight attempts are aborted with `{ kind: 'deadline' }` (they settle
  * through F4 step 7, which applies LIMIT_REACHED); with nothing in flight the watcher applies LIMIT_REACHED itself.
+ * E1: arming opens the run's monotonic segment (when a monotonic clock is injected); a timer that fires before the
+ * deadline is actually reached (the wall clock was set back, the timer ran early) RE-ARMS for the remaining time
+ * instead of returning silently, so the deadline is always enforced.
  */
-export function createDeadlineWatcher(ctx: Pick<EngineCtx, 'db' | 'clock' | 'timers' | 'cancellation' | 'logger' | 'emit' | 'wake' | 'onTerminal'> & {
+export function createDeadlineWatcher(ctx: Pick<EngineCtx, 'db' | 'clock' | 'timers' | 'cancellation' | 'logger' | 'emit' | 'wake' | 'onTerminal' | 'monotonic'> & {
   readonly deadlines?: DeadlineWatcher;
 }): DeadlineWatcher {
   const armed = new Map<RunId, unknown>();
@@ -40,12 +45,15 @@ export function createDeadlineWatcher(ctx: Pick<EngineCtx, 'db' | 'clock' | 'tim
       return;
     }
     const fx: PostCommitEffect[] = [];
-    ctx.db.tx('immediate', (r) => {
+    const early = ctx.db.tx('immediate', (r) => {
       const run = r.runs.get(runId);
       const now = ctx.clock.now();
-      if (run.status !== 'running' || !deadlineReached(run, now)) return;
+      if (run.status !== 'running') return false;
+      if (!deadlineReached(run, now)) return true;
       applyRunEvent(r, run, { type: 'LIMIT_REACHED', reason: 'deadline', error: errors.limitReached('deadline') }, now, fx);
+      return false;
     });
+    if (early) watcher.arm(runId);
     await runEffects({ ...ctx, deadlines: watcher }, fx);
   };
   const disarm = (runId: RunId): void => {
@@ -58,7 +66,9 @@ export function createDeadlineWatcher(ctx: Pick<EngineCtx, 'db' | 'clock' | 'tim
       disarm(runId);
       const run = ctx.db.repos.runs.find(runId);
       if (run?.status !== 'running') return;
-      const ms = remainingExecutionMs(run, ctx.clock.now());
+      const now = ctx.clock.now();
+      if (ctx.monotonic !== undefined && run.runningSince !== null) openSegment(run.id, run.runningSince, now, ctx.monotonic);
+      const ms = remainingExecutionMs(run, now);
       armed.set(runId, ctx.timers.setTimeout(() => {
         fire(runId).catch((e: unknown) => {
           ctx.logger.error('deadline.fire_failed', { runId, err: logSafe(e) });

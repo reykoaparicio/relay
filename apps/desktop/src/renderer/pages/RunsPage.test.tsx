@@ -22,7 +22,7 @@ describe('RunsPage', () => {
     expect(within(rows[0] as HTMLElement).getByText('v3')).toBeInTheDocument();
     expect(within(rows[0] as HTMLElement).getByText('3/6')).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('button', { name: 'No older runs' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /older runs/ })).not.toBeInTheDocument();
   });
 
   it('filtered: the status filter uses tabs and the URL (?status=)', async () => {

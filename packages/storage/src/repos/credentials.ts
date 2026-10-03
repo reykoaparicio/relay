@@ -20,7 +20,7 @@ export function createCredentialRefRepo(driver: SqlDriver, deps: RepoDeps): Cred
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (provider_id) DO UPDATE SET storage_mode = excluded.storage_mode, vault_file = excluded.vault_file,
              redacted_label = excluded.redacted_label, updated_at = excluded.updated_at,
-             last_test_at = NULL, last_test_ok = NULL, last_test_code = NULL`,
+             last_test_at = NULL, last_test_ok = NULL, last_test_code = NULL, last_test_source = NULL`,
         )
         .run(ref.id, ref.providerId, ref.storageMode, ref.vaultFile, ref.redactedLabel, now, now);
       const row = get(ref.providerId);
@@ -34,14 +34,14 @@ export function createCredentialRefRepo(driver: SqlDriver, deps: RepoDeps): Cred
     delete(providerId) {
       return driver.prepare('DELETE FROM provider_credential_refs WHERE provider_id = ?').run(providerId).changes > 0;
     },
-    recordTest(providerId, ok, code, at) {
+    recordTest(providerId, ok, code, at, source) {
       return (
         driver
           .prepare(
-            `UPDATE provider_credential_refs SET last_test_at = ?, last_test_ok = ?, last_test_code = ?, updated_at = ?
+            `UPDATE provider_credential_refs SET last_test_at = ?, last_test_ok = ?, last_test_code = ?, last_test_source = ?, updated_at = ?
              WHERE provider_id = ?`,
           )
-          .run(at, bit(ok), code, deps.clock.now(), providerId).changes > 0
+          .run(at, bit(ok), code, source, deps.clock.now(), providerId).changes > 0
       );
     },
   };

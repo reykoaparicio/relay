@@ -1,10 +1,12 @@
 import { useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Archive } from 'lucide-react';
+import { Archive, ArchiveRestore, Plus } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
 import { PROVIDER_IDS } from '@relay/contracts';
-import type { InputOf, Microusd, Project, ProviderId } from '@relay/contracts';
+import type { AppSettings, InputOf, Microusd, Project, ProviderId } from '@relay/contracts';
 import {
   Button,
+  ButtonLink,
   Checkbox,
   ConfirmDialog,
   ErrorView,
@@ -26,10 +28,14 @@ import { EXCLUSION_REASON_LABELS, formatBytes, PROVIDER_LABELS } from '../../lib
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { takeFields, useRebasableForm } from '../../hooks/useRebasableForm';
 import { usePreview } from '../../hooks/usePreview';
+import { useArchivedProjects } from '../../hooks/useProjects';
+import { isProjectRootMissing } from '../../api/errors';
+import { ProjectRootMissing } from '../projects/ProjectRootMissing';
 import { isStaleConflict } from '../common/conflict';
 import { MutationError } from '../common/MutationError';
 import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
+import { paths } from '../shell/paths';
 import { SettingsProjectPicker, useSettingsProject } from './useSettingsProject';
 
 /** Providers a project may allow (the fake provider is a dev tool, never a policy choice). */
@@ -73,16 +79,88 @@ export function ProjectsSection() {
     return (
       <section className="card stack" aria-labelledby={titleId}>
         <h2 id={titleId}>Projects</h2>
-        <p className="muted">No project yet. Create one from onboarding or try the sample project.</p>
+        <p className="muted">No project yet. Add a project folder, or try the sample project from onboarding.</p>
+        <div>
+          <AddProjectLink />
+        </div>
+        <ArchivedProjects />
       </section>
     );
   }
   return (
     <section className="stack" aria-label="Projects">
-      <SettingsProjectPicker projects={projects.data} value={project.id} onChange={choose} />
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <SettingsProjectPicker projects={projects.data} value={project.id} onChange={choose} />
+        <AddProjectLink />
+      </div>
       {/* Keyed by id only: a refetch (or a CONFLICT) must never remount the form and drop the user's edits. */}
       <ProjectForm key={project.id} project={project} />
+      <ArchivedProjects />
     </section>
+  );
+}
+
+/** E2 #18: archived projects, collapsed, each with "Restore" (`projects.unarchive`). Hidden while there are none. */
+function ArchivedProjects() {
+  const archived = useArchivedProjects();
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const titleId = useId();
+  const restore = useMutation({
+    mutationFn: (projectId: string) => call('relay/v1/projects.unarchive', { projectId }),
+    onSuccess: (p) => {
+      void queryClient.invalidateQueries({ queryKey: qk.projects() });
+      void queryClient.invalidateQueries({ queryKey: qk.project(p.id) });
+      toast.show({ key: `project:restored:${p.id}`, title: `Restored “${p.name}”`, body: 'It is back in the project switcher.', tone: 'success' });
+    },
+  });
+  const list = archived.data ?? [];
+  if (archived.error !== null) return <MutationError error={archived.error} handlers={{ reload: () => void archived.refetch() }} />;
+  if (list.length === 0) return null;
+  return (
+    <section className="card stack" aria-labelledby={titleId}>
+      <details className="disclosure">
+        <summary>
+          <span id={titleId}>
+            Archived projects ({String(list.length)})
+          </span>
+        </summary>
+        <div className="disclosure-body stack">
+          <p className="small">Archived projects are hidden from the project switcher and cannot start runs. Their runs, reports and memory are kept.</p>
+          <ul className="stack" style={{ margin: 0, padding: 0, listStyle: 'none', gap: 8 }} aria-label="Archived projects">
+            {list.map((p) => (
+              <li key={p.id} className="row" style={{ gap: 12, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                <span>
+                  <b>{p.name}</b> <span className="mono small muted">{p.rootDisplayPath}</span>
+                </span>
+                <Button
+                  size="sm"
+                  icon={ArchiveRestore}
+                  pending={restore.isPending && restore.variables === p.id}
+                  disabled={restore.isPending && restore.variables !== p.id}
+                  onClick={() => {
+                    restore.mutate(p.id);
+                  }}
+                  aria-label={`Restore ${p.name}`}
+                >
+                  Restore
+                </Button>
+              </li>
+            ))}
+          </ul>
+          <MutationError error={restore.error} />
+        </div>
+      </details>
+    </section>
+  );
+}
+
+/** "Add project…": the onboarding folder step (pick a folder, allowed providers, exclusions). */
+function AddProjectLink() {
+  return (
+    <ButtonLink as={Link} icon={Plus} to={paths.onboarding('select-project')}>
+      Add project…
+    </ButtonLink>
   );
 }
 
@@ -164,6 +242,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
   const { base, values, setValues, baseValues, serverAhead, serverValues } = form;
   const [submitted, setSubmitted] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const navigate = useNavigate();
   const { name, exclusionsText, allowanceText, storeResponses } = values;
   const allowed: ReadonlySet<ProviderId> = new Set(values.allowed);
   const set = (patch: Partial<ProjectValues>) => {
@@ -228,10 +307,22 @@ function ProjectForm({ project }: { readonly project: Project }) {
   });
   const archive = useMutation({
     mutationFn: () => call('relay/v1/projects.archive', { projectId: project.id }),
-    onSuccess: (p) => {
+    onSuccess: async (p) => {
       setArchiveOpen(false);
-      refresh();
       toast.show({ key: `project:archived:${p.id}`, title: `Archived “${p.name}”`, body: 'Its runs and memory stay on this computer.', tone: 'success' });
+      // Archiving the active project moves the app to another project (or to onboarding when none is left), so the
+      // shell never keeps showing a project the switcher no longer lists.
+      const settings = queryClient.getQueryData<AppSettings>(qk.settings());
+      if (settings?.activeProjectId === p.id) {
+        const next = (queryClient.getQueryData<readonly Project[]>(qk.projects()) ?? []).find((x) => x.id !== p.id && x.archivedAt === null);
+        try {
+          await call('relay/v1/app.updateSettings', { activeProjectId: next?.id ?? null });
+        } finally {
+          void queryClient.invalidateQueries({ queryKey: qk.settings() });
+          void navigate(next === undefined ? paths.onboarding('select-project') : paths.overview(next.id));
+        }
+      }
+      refresh();
     },
   });
   const serverIssues = validationIssuesOf(update.error);
@@ -245,6 +336,7 @@ function ProjectForm({ project }: { readonly project: Project }) {
         </h2>
         <span className="mono small muted">{project.rootDisplayPath}</span>
       </div>
+      {isProjectRootMissing(preview.error) && project.archivedAt === null ? <ProjectRootMissing project={project} /> : null}
       {project.archivedAt === null ? null : (
         <InlineAlert tone="info" title="This project is archived">
           <p>It is hidden from the project switcher. Its runs and memory are kept.</p>
@@ -330,7 +422,9 @@ function ProjectForm({ project }: { readonly project: Project }) {
           </Field>
           <section className="stack" aria-label="Exclusion preview" aria-live="polite" aria-busy={preview.isFetching || undefined}>
             <span className="section-label">Preview</span>
-            {preview.error !== null ? (
+            {isProjectRootMissing(preview.error) ? (
+              <p className="small">No preview: the project folder was not found.</p>
+            ) : preview.error !== null ? (
               <MutationError error={preview.error} />
             ) : preview.data === undefined ? (
               <Skeleton lines={3} />

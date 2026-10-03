@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import type { SqlDriver } from './driver.js';
-import { ERROR_DEFINITIONS, INTERNAL_REASON_MESSAGES, isRelayError } from '@relay/contracts';
+import { ERROR_DEFINITIONS, DATABASE_UNAVAILABLE_MESSAGES, isRelayError } from '@relay/contracts';
 import { CONNECTION_PRAGMAS, applyPragmas, quickCheck } from './pragmas.js';
 import { openTestDb } from './unit-of-work.js';
 import type { TestDb } from './unit-of-work.js';
@@ -30,7 +30,7 @@ async function connection(withPragmas: boolean): Promise<SqlDriver> {
 }
 
 describe('connection pragmas (03 §C1)', () => {
-  it('applyPragmas leaves WAL, synchronous FULL, foreign keys on, busy_timeout 5000, trusted_schema off, temp_store MEMORY', async () => {
+  it('applyPragmas leaves WAL, synchronous FULL, foreign keys on, busy_timeout 200, trusted_schema off, temp_store MEMORY', async () => {
     const d = await connection(true);
 
     expect({
@@ -40,7 +40,7 @@ describe('connection pragmas (03 §C1)', () => {
       busy_timeout: pragma(d, 'busy_timeout'),
       trusted_schema: pragma(d, 'trusted_schema'),
       temp_store: pragma(d, 'temp_store'),
-    }).toEqual({ journal_mode: 'wal', synchronous: 2, foreign_keys: 1, busy_timeout: 5000, trusted_schema: 0, temp_store: 2 }); // FULL = 2, MEMORY = 2
+    }).toEqual({ journal_mode: 'wal', synchronous: 2, foreign_keys: 1, busy_timeout: 200, trusted_schema: 0, temp_store: 2 }); // FULL = 2, MEMORY = 2
   });
 
   it('a bare connection lacks the per-connection settings (so they come from applyPragmas) but keeps WAL from the file', async () => {
@@ -54,7 +54,7 @@ describe('connection pragmas (03 §C1)', () => {
     expect(CONNECTION_PRAGMAS.map((p) => p.replace(/^PRAGMA (\w+).*$/, '$1'))).toEqual(['journal_mode', 'synchronous', 'foreign_keys', 'busy_timeout', 'trusted_schema', 'temp_store']);
   });
 
-  it('a failed quick_check throws INTERNAL integrity_check_failed with the curated restore hint, never the raw output', () => {
+  it('a failed quick_check throws DATABASE_UNAVAILABLE integrity_check_failed with the curated restore hint, never the raw output', () => {
     const raw = 'row 7 missing from index secret_idx on /Users/me/relay.db';
     const driver = { prepare: () => ({ all: () => [{ quick_check: raw }] }) } as unknown as SqlDriver;
 
@@ -66,10 +66,10 @@ describe('connection pragmas (03 §C1)', () => {
     }
 
     expect(isRelayError(thrown) && thrown.appError).toEqual({
-      code: 'INTERNAL',
-      userMessage: INTERNAL_REASON_MESSAGES.integrity_check_failed,
+      code: 'DATABASE_UNAVAILABLE',
+      userMessage: DATABASE_UNAVAILABLE_MESSAGES.integrity_check_failed,
       retryable: false,
-      nextAction: ERROR_DEFINITIONS.INTERNAL.nextAction,
+      nextAction: ERROR_DEFINITIONS.DATABASE_UNAVAILABLE.nextAction,
       alternatives: [],
       details: { reason: 'integrity_check_failed' },
     });

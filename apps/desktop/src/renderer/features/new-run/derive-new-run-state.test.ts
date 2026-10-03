@@ -128,4 +128,33 @@ describe('deriveNewRunState', () => {
     expect(same.otherStartError).toBe(e);
     expect(changed.otherStartError).toBeNull();
   });
+
+  it('a suspected_secret preflight issue links to the file\'s checkbox and shows at that row', async () => {
+    const pf = await preflightFor(WITH_GOAL);
+    const ids = new Map([['src/a.ts', FIELD.files], ['src/config/keys.ts', `${FIELD.files}-1`]]);
+    const issue = { path: 'input.relPaths.1', code: 'suspected_secret', message: 'src/config/keys.ts looks like it contains a secret.' };
+
+    const s = deriveNewRunState(
+      stateInput(WITH_GOAL, settled({ ...pf, issues: [issue] }), { fileAnchors: { relPaths: ['src/a.ts', 'src/config/keys.ts'], ids } }),
+    );
+
+    expect(s.problems).toEqual([{ fieldId: `${FIELD.files}-1`, message: issue.message, code: 'suspected_secret' }]);
+    expect(s.fieldErrors[`${FIELD.files}-1`]).toBe(issue.message);
+    expect(s.status).toBe('problems');
+    expect(s.startDisabled).toBe(true);
+  });
+
+  it('an unreadable preflight error is a file problem with the page\'s exclude actions, not a system error', () => {
+    const e = new AppErrorException(errors.permissionDenied('unreadable', { userMessage: 'Relay cannot read src/a.ts.', details: { relPath: 'src/a.ts' } }));
+
+    const s = deriveNewRunState(
+      stateInput(WITH_GOAL, settled(undefined, e), {
+        fileAnchors: { relPaths: ['src/a.ts'], ids: new Map([['src/a.ts', FIELD.files]]) },
+        unreadableAction: (relPath) => `exclude ${relPath}`,
+      }),
+    );
+
+    expect(s.preflightSystemError).toBeNull();
+    expect(s.problems).toEqual([{ fieldId: FIELD.files, message: 'Relay cannot read src/a.ts.', code: 'PERMISSION_DENIED', action: 'exclude src/a.ts' }]);
+  });
 });

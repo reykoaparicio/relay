@@ -31,6 +31,12 @@ const ADVERSARIAL: readonly (readonly [string, string])[] = [
   ['GitHub prefixes', fill('ghp_')],
   ['Google prefixes', fill('AIza')],
   ['AWS prefixes', fill('AKIA')],
+  // Escape-sequence boundaries (audit F3): every prefix sits right after a `\n` or `%XX` escape.
+  ['escaped Anthropic prefixes', fill('\\nsk-ant-api03-')],
+  ['URL-encoded OpenAI prefixes', fill('%22sk-proj-')],
+  ['escaped GitHub prefixes', fill('\\tghp_')],
+  ['URL-encoded Google prefixes', fill('%3AAIza')],
+  ['escape and percent runs', fill('\\n%2')],
   ['credential alphabet', fill('abcdefgh1234/+=')],
   // Near-miss key names inside one long rejected run: a rescan from every name after a rejection is quadratic, so
   // these pin the resume rule (scanning restarts near the end of a rejected value, not after its key name).
@@ -77,6 +83,11 @@ describe('redaction runs in linear time on adversarial input', () => {
 // Kept here only; it is quadratic on long adversarial input, so it is fed short strings.
 
 const OLD_NB = '(?<![A-Za-z0-9])';
+/**
+ * Deliberate change (audit F3): the distinctive-prefix rules also match right after a literal `\n`/`\t`/`\r` or a
+ * `%XX` escape. The oracle carries that boundary so the agreement tests below still pin everything else.
+ */
+const OLD_NB_ESC = `(?:${OLD_NB}|(?<=\\\\[nrt]|%[0-9A-Fa-f]{2}))`;
 const OLD_Q = `(?:\\\\?["'])?`;
 const OLD_CRED = 'A-Za-z0-9_\\-+/=.~';
 const OLD_CREDENTIAL_VALUE = `(?!\\[REDACTED)(?=[${OLD_CRED}]*\\d)(?=[${OLD_CRED}]*[A-Za-z])[${OLD_CRED}]{16,}(?![${OLD_CRED}(])`;
@@ -93,13 +104,13 @@ interface OldRule {
 }
 
 const OLD_RULES: readonly OldRule[] = [
-  { re: new RegExp(`${OLD_NB}sk-ant-(?:api|admin)\\d\\d-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' },
-  { re: new RegExp(`${OLD_NB}sk-ant-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' },
-  { re: new RegExp(`${OLD_NB}sk-proj-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' },
-  { re: new RegExp(`${OLD_NB}sk-svcacct-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' },
+  { re: new RegExp(`${OLD_NB_ESC}sk-ant-(?:api|admin)\\d\\d-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' },
+  { re: new RegExp(`${OLD_NB_ESC}sk-ant-[A-Za-z0-9_-]{10,}`, 'g'), label: 'sk' },
+  { re: new RegExp(`${OLD_NB_ESC}sk-proj-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' },
+  { re: new RegExp(`${OLD_NB_ESC}sk-svcacct-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' },
   { re: new RegExp(`${OLD_NB}sk-[A-Za-z0-9_-]{16,}`, 'g'), label: 'sk' },
-  { re: new RegExp(`${OLD_NB}(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})`, 'g'), label: 'plain' },
-  { re: new RegExp(`${OLD_NB}AIza[0-9A-Za-z_-]{35}`, 'g'), label: 'plain' },
+  { re: new RegExp(`${OLD_NB_ESC}(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})`, 'g'), label: 'plain' },
+  { re: new RegExp(`${OLD_NB_ESC}AIza[0-9A-Za-z_-]{35}`, 'g'), label: 'plain' },
   { re: /(?<keep>[?&]key=)(?!\[REDACTED)(?<secret>[A-Za-z0-9_\-.~%]{20,})/g, label: 'plain' },
   {
     re: new RegExp(`(?<keep>${OLD_AUTHZ_NAME}(?:basic|bearer|token)\\s+)(?!\\[REDACTED)(?<secret>[${OLD_CRED}]{8,})`, 'gi'),
@@ -163,7 +174,7 @@ function oldSecretMatches(text: string): { index: number; match: string }[] {
 /** Fragments that exercise every rule's prefix, delimiters, value alphabet, and boundary chars. */
 const FRAGMENTS = [
   'authorization', 'Authorization', 'AUTHORIZATION', 'api_key', 'api-key', 'apikey', 'apiKey', 'x-api-key', 'X-Api-Key',
-  ':', '=', ': ', ' = ', '"', "'", '\\"', ' ', '\t', '\n', '(', ')', ',', ';', '{', '}', '[', ']', '<', '>',
+  ':', '=', ': ', ' = ', '"', "'", '\\"', ' ', '\t', '\n', '\\n', '\\t', '\\r', '\\b', '%22', '%3a', '%2D', '%2', '(', ')', ',', ';', '{', '}', '[', ']', '<', '>',
   'bearer ', 'Bearer ', 'basic ', 'token ', 'Token\t',
   'abcdefgh', 'ABCDEFGH', '12345678', 'a1b2c3d4', 'Zz9_', '-', '_', '/', '+', '.', '~', '%', 'x', '7',
   'sk-', 'sk-ant-', 'sk-ant-api03-', 'sk-ant-admin01-', 'sk-proj-', 'sk-svcacct-', 'risk-', 'task-',

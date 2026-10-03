@@ -1,6 +1,6 @@
 // 06 F13 + F1: the runner loop (one active run, §9.1 concurrency 1) and the engine factory. The loop is the queue:
 // running/cancelling first, else the oldest queued run. Waits use the injected timers; commands wake the loop.
-import { IDEMPOTENCY_TTL_MS, RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, epochMs, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
+import { IDEMPOTENCY_TTL_MS, isDatabaseBusyError, RUNNER_HEARTBEAT_MS, RUNNER_STALE_AFTER_MS, RelayError, epochMs, errors, getRunnerOperation, isRelayError, toAppError, toIpc, toValidationIssues } from '@relay/contracts';
 import type { EpochMs, IpcResult, RunId, RunnerChannel, RunnerInputOf, StepKey, ValidationIssue } from '@relay/contracts';
 import type { Repos, RunRow, StepRow } from '@relay/storage';
 import { logSafe, redactingLogger } from './log-safe.js';
@@ -13,7 +13,7 @@ import type { DeadlineWatcher, EngineApi, EngineCtx, EngineDeps, RunSnapshot } f
 import type { ReadinessIssue } from './policy.js';
 import { budgetReadiness, checkStepReadiness, minimumReservation } from './policy.js';
 import { reconcileUnknownAttempts, recoverOnStart } from './recovery.js';
-import { generateReport, regenerateMissingReports } from './report.js';
+import { generateReport } from './report.js';
 import { eventForFailure } from './retry.js';
 import type { PostCommitEffect, RunMachineEvent } from './run-machine.js';
 import { appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -35,6 +35,21 @@ const IDLE_MS = 1_000;
  * responses past the retention setting and idempotency rows older than `IDEMPOTENCY_TTL_MS` (02 §B0).
  */
 export const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * E2 #2: waits (ms) before re-running a QUERY whose statement hit a database lock that outlasted the short
+ * `busy_timeout`. Each wait yields the event loop (heartbeats keep flowing). Commands are never re-run here (a retry
+ * could repeat an earlier committed transaction of the same handler): they return the retryable `database_busy`.
+ */
+export const QUERY_BUSY_RETRY_DELAYS_MS: readonly number[] = [50, 150, 400];
+/** Backoff of the run loop after a tick hit a database lock (the run is left as it is, never failed for it). */
+const LOOP_BUSY_BACKOFF_MS = 250;
+/**
+ * E2 #6: reports regenerated before `start()` resolves (so a crash-lost report normally exists by the time the app is
+ * ready); the rest are generated in the background, {@link REPORT_REGEN_PER_BATCH} per batch between idle waits.
+ */
+const REPORT_REGEN_AT_START = 2;
+const REPORT_REGEN_PER_BATCH = 2;
 
 /** What the loop should do next for a running run (pure). */
 type NextStep =
@@ -194,12 +209,65 @@ export async function tick(ctx: EngineCtx): Promise<boolean> {
     } else if (run.pauseRequested) await applyTx(ctx, run.id, { type: 'USER_PAUSE' }, ['running']);
     else await advance(ctx, run);
   } catch (e) {
+    // E2 #2: a lock held by another process is transient — back off and retry the same work; never fail the run for it.
+    if (isDatabaseBusyError(e)) {
+      ctx.logger.warn('loop.database_busy', { runId: run.id });
+      await ctx.wake.wait(LOOP_BUSY_BACKOFF_MS);
+      return true;
+    }
     const correlationId = ctx.ids.next('correlation');
     ctx.logger.error('loop.handler_threw', { runId: run.id, correlationId, code: isRelayError(e) ? e.appError.code : 'INTERNAL',
       err: logSafe(e) });
     await applyTx(ctx, run.id, { type: 'UNRECOVERABLE', error: toAppError(e, correlationId) }, ['running']);
   }
   return true;
+}
+
+/** Waits between lease acquisitions that met a database lock at start (E2 #1). */
+const LEASE_BUSY_RETRY_DELAYS_MS: readonly number[] = [100, 250, 500, 1_000, 2_000];
+
+/**
+ * Acquires the runner lease, retrying a database lock with backoff (yielding) before giving up with the boot variant of
+ * `DATABASE_UNAVAILABLE database_busy` (E2 #1): a short lock at boot is not fatal for the session.
+ */
+async function acquireLease(ctx: EngineCtx, ownerId: string): Promise<'acquired' | 'held_by_other'> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return ctx.db.repos.lease.acquire(ownerId, process.pid, ctx.clock.now(), RUNNER_STALE_AFTER_MS);
+    } catch (e) {
+      const wait = isDatabaseBusyError(e) ? LEASE_BUSY_RETRY_DELAYS_MS[attempt] : undefined;
+      if (wait === undefined) {
+        if (isDatabaseBusyError(e)) throw new RelayError(errors.databaseUnavailable('database_busy'), { cause: e });
+        throw e;
+      }
+      ctx.logger.warn('lease.acquire_busy_retry', { attempt: attempt + 1, waitMs: wait });
+      await delay(ctx, wait);
+    }
+  }
+}
+
+/** Resolves after `ms` on the injected timers (never global timers, R4-36). */
+function delay(ctx: Pick<EngineCtx, 'timers'>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    ctx.timers.setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Generates up to `limit` missing reports of terminal runs (F1 step 3); returns how many runs still lack one.
+ * Failures are logged and skipped (a run whose report keeps failing is retried at the next batch / start).
+ */
+export async function regenerateReportBatch(ctx: EngineCtx, limit: number, skip: Set<string> = new Set()): Promise<number> {
+  const pending = ctx.db.repos.runs.listTerminalWithoutReport().filter((r) => !skip.has(r.id));
+  for (const run of pending.slice(0, limit)) {
+    const res = await generateReport(ctx, run.id);
+    if (res.ok) ctx.logger.info('report.regenerated', { runId: run.id });
+    else {
+      skip.add(run.id);
+      ctx.logger.warn('report.regenerate_failed', { runId: run.id, code: res.error.code });
+    }
+  }
+  return Math.max(0, pending.length - limit);
 }
 
 /**
@@ -247,6 +315,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
   let started = false;
   let loopDone: Promise<void> = Promise.resolve();
   let reconcileDone: Promise<unknown> = Promise.resolve();
+  let backgroundDone: Promise<unknown> = Promise.resolve();
   let reconcileAbort = new AbortController();
   const intervals: unknown[] = [];
 
@@ -274,12 +343,21 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       if (!parsed.success) return { ok: false, error: errors.validationFailed(inputIssues(channel, parsed.error.issues)) };
       const handler: Handler<C> = handlers[channel];
       let result: IpcResult<C>;
-      try {
-        result = toIpc(await handler(parsed.data as ParsedInputOf<C>));
-      } catch (e) {
-        const correlationId = ctx.ids.next('correlation');
-        if (!isRelayError(e)) ctx.logger.error('handler.threw', { channel, correlationId, err: logSafe(e) });
-        result = { ok: false, error: toAppError(e, correlationId) };
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          result = toIpc(await handler(parsed.data as ParsedInputOf<C>));
+          break;
+        } catch (e) {
+          const wait = def.kind === 'query' && isDatabaseBusyError(e) ? QUERY_BUSY_RETRY_DELAYS_MS[attempt] : undefined;
+          if (wait !== undefined) {
+            await delay(ctx, wait); // yields: the heartbeat keeps running while another process holds the lock
+            continue;
+          }
+          const correlationId = ctx.ids.next('correlation');
+          if (!isRelayError(e)) ctx.logger.error('handler.threw', { channel, correlationId, err: logSafe(e) });
+          result = { ok: false, error: toAppError(e, correlationId) };
+          break;
+        }
       }
       // 02 §B5: a code the op does not declare is a contract bug (the renderer has no copy for it). Logged here; the
       // test harnesses turn it into a failure.
@@ -289,20 +367,47 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
     },
     async start() {
       if (started) return;
-      const lease = ctx.db.repos.lease.acquire(ownerId, process.pid, ctx.clock.now(), RUNNER_STALE_AFTER_MS);
+      const lease = await acquireLease(ctx, ownerId);
       if (lease === 'held_by_other') throw new RelayError(errors.runnerUnavailable({ userMessage: 'Another Relay runner is already using this data folder.' }));
       started = true;
       stopping = false;
       ctx.lease.owned = true;
       ctx.lease.ownerId = ownerId;
       intervals.push(ctx.timers.setInterval(() => {
-        if (!ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now())) ctx.lease.owned = false; // taken over: stop dispatching
+        // E2 #2: a heartbeat that meets a lock is skipped (the next one, 2 s later, refreshes the lease; stale is 10 s).
+        try {
+          if (!ctx.db.repos.lease.heartbeat(ownerId, ctx.clock.now())) ctx.lease.owned = false; // taken over: stop dispatching
+        } catch (e) {
+          if (isDatabaseBusyError(e)) ctx.logger.warn('lease.heartbeat_skipped_busy', {});
+          else ctx.logger.error('lease.heartbeat_failed', { err: logSafe(e) });
+        }
       }, RUNNER_HEARTBEAT_MS));
       await recoverOnStart(ctx);
-      // F1 step 3: terminal runs whose post-commit report never ran (a crash after the terminal commit) get one now.
-      await regenerateMissingReports(ctx).catch((e: unknown) => {
+      // F1 step 3 / E2 #6: terminal runs whose post-commit report never ran (a crash after the terminal commit) get one.
+      // A bounded first batch runs now; the rest never delays `ready` and runs in the background, batch by batch.
+      const failedReports = new Set<string>();
+      const leftover = await regenerateReportBatch(ctx, REPORT_REGEN_AT_START, failedReports).catch((e: unknown) => {
         ctx.logger.warn('report.regenerate_crashed', { err: logSafe(e) });
+        return 0;
       });
+      const regenerateRest = async (): Promise<void> => {
+        for (let left = leftover; left > 0 && !stopping; ) {
+          await delay(ctx, 0);
+          left = await regenerateReportBatch(ctx, REPORT_REGEN_PER_BATCH, failedReports);
+        }
+      };
+      // E2 #4: rolling automatic backup (daily; also re-checked by the 24 h sweep interval below).
+      const autoBackupSafely = (): Promise<void> => ctx.db.autoBackup().then((b) => {
+        if (b !== null) ctx.logger.info('backup.auto_created', { sizeBytes: b.sizeBytes });
+      }, (e: unknown) => {
+        ctx.logger.warn('backup.auto_failed', { err: logSafe(e) });
+      });
+      backgroundDone = Promise.all([
+        regenerateRest().catch((e: unknown) => {
+          ctx.logger.warn('report.regenerate_crashed', { err: logSafe(e) });
+        }),
+        autoBackupSafely(),
+      ]);
       for (const run of ctx.db.repos.runs.listActive().filter((x) => x.status === 'running')) ctx.deadlines.arm(run.id);
       const sweepSafely = (): Promise<void> => sweep().catch((e: unknown) => {
         ctx.logger.warn('retention.sweep_failed', { err: logSafe(e) });
@@ -310,7 +415,9 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       await sweepSafely();
       // Cleared with the heartbeat in stop(): a stopped engine never sweeps.
       intervals.push(ctx.timers.setInterval(() => {
-        if (!stopping) void sweepSafely();
+        if (stopping) return;
+        void sweepSafely();
+        backgroundDone = Promise.all([backgroundDone, autoBackupSafely()]);
       }, RETENTION_SWEEP_INTERVAL_MS));
       loopDone = loop().catch((e: unknown) => {
         ctx.logger.error('loop.crashed', { err: logSafe(e) });
@@ -330,7 +437,7 @@ export function createEngineFromContext(ctx: EngineCtx): EngineApi {
       const grace = new Promise<void>((resolve) => {
         timer = ctx.timers.setTimeout(resolve, graceMs);
       });
-      await Promise.race([Promise.all([loopDone, reconcileDone]), grace]);
+      await Promise.race([Promise.all([loopDone, reconcileDone, backgroundDone]), grace]);
       ctx.timers.clearTimeout(timer);
       for (const h of intervals.splice(0)) ctx.timers.clearInterval(h);
       ctx.deadlines.disarmAll();

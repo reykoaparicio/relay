@@ -8,6 +8,8 @@ import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, R
 import { APPROVAL_DECISION_LABELS, formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
 import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
+import { EXPORT_PART_LABELS, retryWhatOf } from './export-results';
+import type { ExportPartResult } from './export-results';
 import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
 import type { IncompleteCause } from '../run-inspector/inspector-model';
 
@@ -76,7 +78,16 @@ const INCOMPLETE_NOTE: Readonly<Record<IncompleteCause, string>> = {
     'The workflow reviewer marked the result incomplete. It is not a failure of Relay; review the latest proposal before using it.',
 };
 
-export function SummarySection({ report, run }: { readonly report: ReportV1; readonly run: RunDetail | undefined }) {
+export function SummarySection({
+  report,
+  run,
+  after,
+}: {
+  readonly report: ReportV1;
+  readonly run: RunDetail | undefined;
+  /** Shown under the summary list (the memory suggestions the run proposed). */
+  readonly after?: ReactNode;
+}) {
   const verdict = VERDICT_TEXT[report.status];
   const cause =
     report.status !== 'incomplete'
@@ -120,6 +131,7 @@ export function SummarySection({ report, run }: { readonly report: ReportV1; rea
             : []),
         ]}
       />
+      {after}
     </Section>
   );
 }
@@ -251,7 +263,7 @@ export function RevisionsSection({ report }: { readonly report: ReportV1 }) {
       ) : (
         <KeyValueList
           items={[
-            { id: 'cycles', term: 'Quality revision cycles', value: `${String(r.cycles)} of ${String(r.maxCycles)}` },
+            { id: 'cycles', term: 'Revision cycles', value: `${String(r.cycles)} of ${String(r.maxCycles)}` },
             { id: 'plans', term: 'Plan revisions', value: String(r.planRevisions) },
             ...(report.status === 'incomplete'
               ? [
@@ -341,7 +353,7 @@ export function ArtifactsSection({ report, onExport }: { readonly report: Report
         ))}
       </ul>
       <div className="actions">
-        <Button onClick={onExport}>Export artifacts…</Button>
+        <Button onClick={onExport}>Export run…</Button>
       </div>
     </Section>
   );
@@ -358,30 +370,76 @@ export interface ExportDialogProps {
   readonly pending: boolean;
   readonly error: unknown;
   readonly onExport: (what: ExportWhat) => void;
+  /**
+   * Per-part rows of a partial export (E2 #10), or `null` before one. With rows, the dialog shows each file as
+   * "Written" (path) or "Failed" (reason), and the primary action retries only the failed parts.
+   */
+  readonly parts?: readonly ExportPartResult[] | null;
+}
+
+/** "Written" / "Failed" rows of a partial export. Status is spelled out, never shown by color alone. */
+function ExportPartRows({ parts }: { readonly parts: readonly ExportPartResult[] }) {
+  return (
+    <ul className="stack" aria-label="Exported files">
+      {parts.map((p) => (
+        <li key={p.what} data-testid="export-part">
+          <strong>{EXPORT_PART_LABELS[p.what]}</strong>
+          {': '}
+          {p.state === 'written' ? (
+            <>
+              Written to <span className="mono">{p.displayPath}</span>
+            </>
+          ) : (
+            <>
+              Failed. {p.reason}
+            </>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** What to export; main shows the folder dialog. A failure changes nothing: "Run is intact; retry export only." */
-export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, error, onExport }: ExportDialogProps) {
+export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, error, onExport, parts = null }: ExportDialogProps) {
   const [what, setWhat] = useState<ExportWhat>(hasPatch ? initial : 'report');
   const failed = error !== null && error !== undefined;
   const e = failed ? toViewError(error) : null;
+  const retryWhat = parts === null ? null : retryWhatOf(parts);
+  const partial = parts !== null && retryWhat !== null;
+  const failedCount = parts?.filter((p) => p.state === 'failed').length ?? 0;
+  const title = partial ? 'Export partly saved' : failed ? 'Export failed' : 'Export the run';
+  const primaryLabel = partial
+    ? failedCount > 1
+      ? 'Retry failed files'
+      : 'Retry failed file'
+    : failed
+      ? 'Retry export'
+      : what === 'both'
+        ? 'Export 2 files'
+        : 'Export';
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title={failed ? 'Export failed' : 'Export the run'}
-      description={failed ? undefined : 'Relay asks where to save; it never exports into the project folder.'}
+      title={title}
+      description={failed || partial ? undefined : 'Relay asks where to save; it never exports into the project folder.'}
       footer={
         <DialogFooter
-          primaryLabel={failed ? 'Retry export' : what === 'both' ? 'Export 2 files' : 'Export'}
-          secondaryLabel={failed ? 'Close' : 'Cancel'}
+          primaryLabel={primaryLabel}
+          secondaryLabel={failed || partial ? 'Close' : 'Cancel'}
           pending={pending}
           onPrimary={() => {
-            onExport(what);
+            onExport(partial ? retryWhat : what);
           }}
         />
       }
     >
+      {partial ? (
+        <InlineAlert tone="warning" live="polite" title={failedCount > 1 ? 'Some files were not saved' : 'One file was not saved'}>
+          <p>Run is intact; retry only the files that failed.</p>
+        </InlineAlert>
+      ) : null}
       {failed && e !== null ? (
         <InlineAlert tone="danger" live="assertive" title={errorTitle(e)}>
           <p>Run is intact; retry export only.</p>
@@ -390,16 +448,20 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
           </p>
         </InlineAlert>
       ) : null}
-      <RadioGroup<ExportWhat>
-        legend="What to export"
-        value={what}
-        onValueChange={setWhat}
-        options={[
-          { value: 'report', label: 'Report (Markdown)' },
-          { value: 'patch', label: 'Patch (.patch)', disabled: !hasPatch, ...(hasPatch ? {} : { description: 'This run has no patch.' }) },
-          { value: 'both', label: 'Both', description: '2 files', disabled: !hasPatch },
-        ]}
-      />
+      {partial ? (
+        <ExportPartRows parts={parts} />
+      ) : (
+        <RadioGroup<ExportWhat>
+          legend="What to export"
+          value={what}
+          onValueChange={setWhat}
+          options={[
+            { value: 'report', label: 'Report (Markdown)' },
+            { value: 'patch', label: 'Patch (.patch)', disabled: !hasPatch, ...(hasPatch ? {} : { description: 'This run has no patch.' }) },
+            { value: 'both', label: 'Both', description: '2 files', disabled: !hasPatch },
+          ]}
+        />
+      )}
       <p className="subtle small">Export excludes credentials, raw provider payloads, and diagnostics.</p>
     </Dialog>
   );

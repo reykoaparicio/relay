@@ -9,7 +9,9 @@ import { useAppInfo } from '../../hooks/useAppInfo';
 import { useDiagnostics } from '../../hooks/useDiagnostics';
 import { NOW_IDLE_INTERVAL_MS, useNow } from '../../hooks/useNow';
 import { useOpenExternal } from '../common/useOpenExternal';
-import { formatBytes } from '../../lib/format';
+import { formatBytes, formatDate } from '../../lib/format';
+import { runnerFatalText } from '../../api/errors';
+import { RunnerRecovery } from '../runner/RunnerRecovery';
 import { paths } from '../shell/paths';
 import type { ThirdPartyNotices } from './third-party-notices';
 
@@ -19,6 +21,14 @@ const RUNNER: Readonly<Record<RunnerState, { label: string; tone: string; icon: 
   restarting: { label: 'Restarting', tone: 'warning', icon: TriangleAlert },
   unavailable: { label: 'Unavailable', tone: 'danger', icon: CircleX },
 };
+
+/** How the previous session ended, in words (`lastShutdown`; null = first launch or no record). */
+export function lastShutdownText(last: { readonly clean: boolean; readonly at: number; readonly runActive: boolean } | null): string {
+  if (last === null) return 'No record (first launch)';
+  const when = formatDate(last.at);
+  if (last.clean) return `Quit normally on ${when}${last.runActive ? ' while a run was in progress' : ''}`;
+  return `Did not quit normally (crash, force quit or power loss) · session started ${when}${last.runActive ? ' · a run was in progress' : ''}`;
+}
 
 /** Settings → Diagnostics (§18.3): runner heartbeat, schema version, unresolved calls, provider mode, version/build. */
 export function DiagnosticsSection() {
@@ -74,10 +84,36 @@ export function DiagnosticsSection() {
           </span>
         ),
       },
+      ...(d.runner.lastFatal === null || d.runner.lastFatal === undefined
+        ? []
+        : [
+            {
+              id: 'fatal',
+              term: 'Why it stopped',
+              value: (
+                <span>
+                  {runnerFatalText(d.runner.lastFatal)}{' '}
+                  <span className="small muted">
+                    (<RelativeTime epochMs={d.runner.lastFatal.at} now={now} /> · <code>{d.runner.lastFatal.code}</code>
+                    {d.runner.lastFatal.reason === null ? null : (
+                      <>
+                        {' '}
+                        · <code>{d.runner.lastFatal.reason}</code>
+                      </>
+                    )}
+                    )
+                  </span>
+                </span>
+              ),
+            },
+          ]),
       {
         id: 'schema',
         term: 'Database schema',
-        value: `Version ${String(d.db.schemaVersion)} · ${d.db.migrationsPending === 0 ? 'current' : `${String(d.db.migrationsPending)} migration(s) pending`} · ${formatBytes(d.db.sizeBytes)}`,
+        value:
+          d.runner.state === 'unavailable' && d.db.schemaVersion === 0
+            ? `Unknown while the runner is down · ${formatBytes(d.db.sizeBytes)}`
+            : `Version ${String(d.db.schemaVersion)} · ${d.db.migrationsPending === 0 ? 'current' : `${String(d.db.migrationsPending)} migration(s) pending`} · ${formatBytes(d.db.sizeBytes)}`,
         mono: true,
       },
       {
@@ -110,6 +146,27 @@ export function DiagnosticsSection() {
         mono: true,
       },
       { id: 'prompts', term: 'Prompt templates', value: `${String(d.prompts.loaded)} loaded` },
+      {
+        id: 'logging',
+        term: 'Log file',
+        value:
+          d.loggingDegraded === true ? (
+            <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <span className="badge warning">
+                <TriangleAlert aria-hidden="true" />
+                Not writable
+              </span>
+              <span className="small">Relay cannot write its log file; log lines go to a temporary fallback file instead.</span>
+            </span>
+          ) : (
+            'Writing normally'
+          ),
+      },
+      {
+        id: 'shutdown',
+        term: 'Last shutdown',
+        value: lastShutdownText(d.lastShutdown ?? i.lastShutdown ?? null),
+      },
       { id: 'version', term: 'App version', value: i.version, mono: true },
       { id: 'build', term: 'Build id', value: i.buildId, mono: true },
       {
@@ -122,6 +179,15 @@ export function DiagnosticsSection() {
     body = (
       <>
         <KeyValueList items={items} />
+        <div className="stack" style={{ gap: 6 }}>
+          <h3 className="section-label">Runner recovery</h3>
+          <p className="small">
+            {d.runner.state === 'unavailable'
+              ? 'The runner is not running. Restart it, or quit and relaunch Relay if restarting does not help.'
+              : 'Use these only when Relay stops responding: restarting the runner pauses work safely; relaunching restarts the whole app.'}
+          </p>
+          <RunnerRecovery fatal={d.runner.lastFatal} />
+        </div>
         <p className="small muted">
           Diagnostics exports include versions, migration state, error codes and attempt ids. They exclude API
           keys, prompts, file contents and memory text. Export diagnostics and create backups in{' '}

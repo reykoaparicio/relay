@@ -22,6 +22,13 @@ async function ready() {
   await screen.findByRole('heading', { level: 2, name: 'Summary' });
 }
 
+/** The page header's "Export run…" (the Artifacts card has the same entry point, named the same). */
+function headerExport(): HTMLElement {
+  const first = screen.getAllByRole('button', { name: 'Export run…' })[0];
+  if (first === undefined) throw new Error('no Export run… button');
+  return first;
+}
+
 describe('ReportPage', () => {
   it('report: summary, findings, limitations, cost, and the not-modified banner from report.v1', async () => {
     open('completed');
@@ -63,7 +70,7 @@ describe('ReportPage', () => {
   it('export-dialog: choosing both calls artifacts.export({ what: both })', async () => {
     const { bridge, run } = open('completed');
     await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     const dialog = await screen.findByRole('dialog', { name: 'Export the run' });
     expect(describeViolations(await axe(document.body))).toEqual([]);
     await userEvent.click(within(dialog).getByRole('radio', { name: /Both/ }));
@@ -80,7 +87,7 @@ describe('ReportPage', () => {
   it('export-failed: shows "Run is intact; retry export only" and retries the export', async () => {
     const { bridge } = open('export-failed');
     await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
     const dialog = await screen.findByRole('dialog', { name: 'Export failed' });
     expect(within(dialog).getByText('Run is intact; retry export only.')).toBeInTheDocument();
@@ -96,15 +103,59 @@ describe('ReportPage', () => {
     });
   });
 
+  it('export-partial: both → report written, patch failed (a warning, not an error); Retry re-exports only the patch', async () => {
+    const { bridge, run } = open('export-partial');
+    await ready();
+    await userEvent.click(headerExport());
+    const first = await screen.findByRole('dialog', { name: 'Export the run' });
+    await userEvent.click(within(first).getByRole('radio', { name: /Both/ }));
+    await userEvent.click(within(first).getByRole('button', { name: 'Export 2 files' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export partly saved' });
+    expect(screen.queryByRole('dialog', { name: 'Export failed' })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(dialog).getByText('One file was not saved')).toBeInTheDocument();
+    const rows = within(dialog).getAllByTestId('export-part');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('Report (Markdown): Written to ~/Downloads/report.md');
+    expect(rows[1]).toHaveTextContent('Patch (.patch): Failed. Relay could not write patch.diff. The folder may be read-only or full.');
+    expect(describeViolations(await axe(document.body))).toEqual([]);
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry failed file' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(2);
+    });
+    expect(bridge.callsTo('relay/v1/artifacts.export')[1]?.input).toEqual({ runId: run.id, what: 'patch' });
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText('Export saved')).toBeInTheDocument();
+    expect(screen.getByText('~/Downloads/report.md, ~/Downloads/patch.diff')).toBeInTheDocument();
+  });
+
+  it('export-partial: a failed report part (patch written) retries only the report', async () => {
+    const { bridge } = open('export-partial');
+    await ready();
+    bridge.world.exportFailParts = ['report'];
+    await userEvent.click(headerExport());
+    const first = await screen.findByRole('dialog', { name: 'Export the run' });
+    await userEvent.click(within(first).getByRole('radio', { name: /Both/ }));
+    await userEvent.click(within(first).getByRole('button', { name: 'Export 2 files' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export partly saved' });
+    expect(within(dialog).getAllByTestId('export-part')[0]).toHaveTextContent('Report (Markdown): Failed.');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry failed file' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.export')[1]?.input).toMatchObject({ what: 'report' });
+    });
+  });
+
   it('export success names where the files were saved; a cancelled save dialog closes quietly', async () => {
     const { bridge } = open('completed');
     await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
     expect(await screen.findByText('Export saved')).toBeInTheDocument();
     expect(screen.getByText('~/Downloads/report.md')).toBeInTheDocument();
     bridge.world.dialogCancels.add('artifacts.export');
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(2);
@@ -118,7 +169,7 @@ describe('ReportPage', () => {
     const { bridge } = open('completed');
     await ready();
     bridge.world.notImplemented.add('artifacts.export');
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
     const dialog = await screen.findByRole('dialog', { name: 'Export failed' });
     expect(within(dialog).getByText('This feature is not available in this build yet.')).toBeInTheDocument();
@@ -129,7 +180,7 @@ describe('ReportPage', () => {
   it('a patch-less run cannot export a patch', async () => {
     open('cancelled');
     await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Export…' }));
+    await userEvent.click(headerExport());
     const dialog = await screen.findByRole('dialog', { name: 'Export the run' });
     expect(within(dialog).getByRole('radio', { name: /Patch/ })).toBeDisabled();
     expect(within(dialog).getByRole('radio', { name: /Both/ })).toBeDisabled();
@@ -188,7 +239,7 @@ describe('ReportPage', () => {
     expect(within(items[1] as HTMLElement).queryByText(/^invalidated:/)).not.toBeInTheDocument();
 
     const revisions = screen.getByRole('region', { name: 'Revisions' });
-    expect(within(revisions).getByText('Quality revision cycles')).toBeInTheDocument();
+    expect(within(revisions).getByText('Revision cycles')).toBeInTheDocument();
     expect(within(revisions).getByText('2 of 2')).toBeInTheDocument();
     expect(within(revisions).getByText('Plan revisions')).toBeInTheDocument();
     expect(within(revisions).getByText('1')).toBeInTheDocument();

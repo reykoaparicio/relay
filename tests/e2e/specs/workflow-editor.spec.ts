@@ -21,7 +21,7 @@ test.describe('workflow editor', { tag: '@m4' }, () => {
     await expect(editor.saveButton()).toBeDisabled();
 
     // Edit → dirty → Save draft → draft revision 1 based on v1.
-    const attempts = editor.limitField('Maximum attempts');
+    const attempts = editor.limitField('Max attempts (run)');
     await expect(attempts).toHaveValue('10');
     await attempts.fill('8');
     await expect(editor.status()).toHaveText('Draft, unsaved changes');
@@ -98,7 +98,7 @@ test.describe('workflow editor', { tag: '@m4' }, () => {
     await expect(allowance).toHaveAttribute('readonly', '');
     await expect(allowance).not.toBeEditable();
     await expect(allowance).toHaveAccessibleDescription(/Locked for this version\./);
-    for (const label of ['Revision cycles', 'Maximum attempts', 'Execution timeout (minutes)'] as const) {
+    for (const label of ['Revision cycles', 'Max attempts (run)', 'Timeout (minutes)'] as const) {
       await expect(editor.limitField(label)).not.toBeEditable();
     }
     await expect(editor.saveButton()).toBeDisabled();

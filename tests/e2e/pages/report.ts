@@ -43,7 +43,7 @@ export class Report {
 
   /** Header "Export…" → dialog "Export the run" → choice → Export. The export dir must already be stubbed. */
   async export(choice: ExportChoice): Promise<void> {
-    await this.page.getByRole('main').locator('header').getByRole('button', { name: 'Export…' }).click();
+    await this.page.getByRole('main').locator('header').getByRole('button', { name: 'Export run…' }).click();
     const dialog = this.page.getByRole('dialog', { name: 'Export the run' });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('radio', { name: new RegExp(`^${choice.replace(/[().]/g, '\\$&')}`) }).check();
@@ -55,7 +55,7 @@ export class Report {
 
   /** Export both files; the "Export saved" toast confirms it (the export dir must already be stubbed). */
   async exportBoth(): Promise<void> {
-    await this.page.getByRole('main').locator('header').getByRole('button', { name: 'Export…' }).click();
+    await this.page.getByRole('main').locator('header').getByRole('button', { name: 'Export run…' }).click();
     const dialog = this.page.getByRole('dialog', { name: 'Export the run' });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('radio', { name: /^Both/ }).check();

@@ -51,7 +51,7 @@ describe('error helpers', () => {
     expect(isSqliteBusy(plain)).toBe(false);
     expect(isSqliteBusy({ errcode: 'x' })).toBe(false);
     expect(mapSqliteError(plain)).toBe(plain);
-    expect(mapSqliteError(busy)).toMatchObject({ appError: { code: 'RUNNER_UNAVAILABLE' } });
+    expect(mapSqliteError(busy)).toMatchObject({ appError: { code: 'DATABASE_UNAVAILABLE', details: { reason: 'database_busy' } } });
   });
 
   it('quickCheck raises a fatal INTERNAL error with a restore hint when the check fails', () => {

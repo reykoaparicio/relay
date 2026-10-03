@@ -4,7 +4,8 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appInfoSchema, createIdGen, epochMs } from '@relay/contracts';
-import type { AppInfo } from '@relay/contracts';
+import type { AppInfo, RunnerFatal, RunnerState } from '@relay/contracts';
+import type { MaintenanceOutcome, RestartOutcome, SupervisorSnapshot } from '../../runner-supervisor.js';
 import { createDialogService } from '../../dialogs.js';
 import type { NativeDialogs, RelayDialogsSeam } from '../../dialogs.js';
 import { nullLogger } from '../../logger.js';
@@ -34,7 +35,15 @@ afterEach(async () => {
   await removeTempDir(dir);
 });
 
-function setup(o: { confirm?: boolean; native?: Partial<NativeDialogs> } = {}) {
+function fakeRunner(o: { restart?: RestartOutcome; fatal?: RunnerFatal | null; maintenance?: MaintenanceOutcome; state?: RunnerState } = {}) {
+  return {
+    restart: vi.fn(() => Promise.resolve(o.restart ?? { restarted: false, state: 'ready' as const })),
+    state: vi.fn((): SupervisorSnapshot => ({ state: o.state ?? 'unavailable', restarts: 0, lastFatal: o.fatal ?? null, activeRunId: null })),
+    runMaintenance: vi.fn(() => Promise.resolve(o.maintenance ?? ({ ok: false, reason: 'runner_active' } as const))),
+  };
+}
+
+function setup(o: { confirm?: boolean; native?: Partial<NativeDialogs>; runner?: ReturnType<typeof fakeRunner> } = {}) {
   const seamTarget: Record<string, unknown> = {};
   const showOpenDialog = vi.fn<NativeDialogs['showOpenDialog']>(() => Promise.resolve({ canceled: true, filePaths: [] }));
   const dialogs = createDialogService({
@@ -48,6 +57,8 @@ function setup(o: { confirm?: boolean; native?: Partial<NativeDialogs> } = {}) {
     dialogs,
     confirmOpenExternal: vi.fn(() => Promise.resolve(o.confirm ?? false)),
     openExternal: vi.fn(() => Promise.resolve()),
+    runner: o.runner ?? fakeRunner(),
+    relaunch: vi.fn(),
   } satisfies MainHandlerDeps;
   const handlers = createMainHandlers(deps);
   const router = createIpcRouter({
@@ -162,5 +173,69 @@ describe('projects.pickDirectory (H3/H4)', () => {
 
     expect(!r.ok && r.error.code).toBe('PERMISSION_DENIED');
     expect(dialogs.pendingSelections()).toBe(0);
+  });
+});
+
+describe('app.restartRunner / app.relaunch / app.restoreLatestBackup (resilience)', () => {
+  it('restartRunner: a no-op while a runner is alive answers restarted:false', async () => {
+    const runner = fakeRunner({ restart: { restarted: false, state: 'ready' } });
+    const { router } = setup({ runner });
+
+    const r = await router.invoke('relay/v1/app.restartRunner', FRAME, {});
+
+    expect(r).toEqual({ ok: true, data: { restarted: false, state: 'ready' } });
+  });
+
+  it('restartRunner: success answers ready; a new failure answers RUNNER_UNAVAILABLE with the fatal reason', async () => {
+    const ok = await setup({ runner: fakeRunner({ restart: { restarted: true, state: 'ready' } }) }).router.invoke('relay/v1/app.restartRunner', FRAME, {});
+    const fatal: RunnerFatal = { code: 'DATABASE_UNAVAILABLE', reason: 'db_corrupt', message: 'm', at: epochMs(1) };
+    const bad = await setup({ runner: fakeRunner({ restart: { restarted: true, state: 'unavailable' }, fatal }) }).router.invoke('relay/v1/app.restartRunner', FRAME, {});
+
+    expect(ok).toEqual({ ok: true, data: { restarted: true, state: 'ready' } });
+    expect(!bad.ok && bad.error.code).toBe('RUNNER_UNAVAILABLE');
+    expect(!bad.ok && bad.error.details).toMatchObject({ reason: 'db_corrupt', fatalCode: 'DATABASE_UNAVAILABLE' });
+  });
+
+  it('restartRunner is rate limited (3 quick attempts, then RATE_LIMITED)', async () => {
+    const { router } = setup();
+
+    const results = [];
+    for (let i = 0; i < 4; i += 1) results.push(await router.invoke('relay/v1/app.restartRunner', FRAME, {}));
+
+    expect(results.map((r) => r.ok)).toEqual([true, true, true, false]);
+    expect(!results[3]?.ok && results[3]?.error.code).toBe('RATE_LIMITED');
+  });
+
+  it('relaunch answers relaunching:true and starts the relaunch', async () => {
+    const { router, deps } = setup();
+
+    const r = await router.invoke('relay/v1/app.relaunch', FRAME, {});
+
+    expect(r).toEqual({ ok: true, data: { relaunching: true } });
+    expect(deps.relaunch).toHaveBeenCalledOnce();
+  });
+
+  it('restoreLatestBackup: refused (CONFLICT) while a runner is alive', async () => {
+    const { router } = setup({ runner: fakeRunner({ maintenance: { ok: false, reason: 'runner_active' } }) });
+
+    const r = await router.invoke('relay/v1/app.restoreLatestBackup', FRAME, {});
+
+    expect(!r.ok && r.error.code).toBe('CONFLICT');
+  });
+
+  it('restoreLatestBackup: a restored backup restarts the runner; no backup leaves it down', async () => {
+    const restored = fakeRunner({
+      maintenance: { ok: true, result: { ok: true, restored: true, restoredFromDisplayPath: '~/b/1', backupCreatedAt: epochMs(7), previousMovedToDisplayPath: '~/ud/relay.sqlite.before-restore' } },
+      restart: { restarted: true, state: 'ready' },
+    });
+    const none = fakeRunner({ maintenance: { ok: true, result: { ok: true, restored: false, restoredFromDisplayPath: null, backupCreatedAt: null, previousMovedToDisplayPath: null } } });
+
+    const a = await setup({ runner: restored }).router.invoke('relay/v1/app.restoreLatestBackup', FRAME, {});
+    const b = await setup({ runner: none }).router.invoke('relay/v1/app.restoreLatestBackup', FRAME, {});
+
+    expect(a).toEqual({ ok: true, data: { restored: true, restoredFromDisplayPath: '~/b/1', backupCreatedAt: 7, previousMovedToDisplayPath: '~/ud/relay.sqlite.before-restore', runnerState: 'ready' } });
+    expect(restored.restart).toHaveBeenCalledOnce();
+    expect(b.ok && b.data).toMatchObject({ restored: false, runnerState: 'unavailable' });
+    expect(none.restart).not.toHaveBeenCalled();
   });
 });

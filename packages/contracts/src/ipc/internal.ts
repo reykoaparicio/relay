@@ -8,8 +8,9 @@ import { nonNegativeMicrousdSchema } from '../money.js';
 import { idempotencyKeySchema } from '../primitives.js';
 import { credentialStorageModeSchema, providerIdSchema } from '../status.js';
 import { emptyInputSchema, op } from './common.js';
-import { exportWhatSchema, diffImportResultSchema } from './artifacts.js';
+import { diffImportResultSchema, exportFailureSchema, exportPartSchema, exportWhatSchema } from './artifacts.js';
 import { ledgerExportTargetSchema } from './ledger.js';
+import { projectRelocateResultSchema } from './projects.js';
 
 /** Absolute POSIX path (≤ 4096 chars, no NUL). Main/runner only; never part of a renderer DTO. */
 export const absPathSchema = z
@@ -86,6 +87,21 @@ export const INTERNAL_RUNNER_OPS = {
     errors: ['NOT_FOUND', 'PERMISSION_DENIED'],
     idempotent: false,
   }),
+  /** E2 #7: second half of `projects.relocate` (main resolved the selection to `rootRealpath`). */
+  'projects.relocateRoot': op({
+    channel: 'relay/v1/projects.relocateRoot',
+    kind: 'command',
+    route: 'runner',
+    input: z.object({
+      projectId: idSchema('project'),
+      rootRealpath: absPathSchema,
+      rootDisplayPath: z.string(),
+      confirm: z.literal(true).optional(),
+    }),
+    output: projectRelocateResultSchema,
+    errors: ['CONFLICT', 'NOT_FOUND', 'PERMISSION_DENIED', 'VALIDATION_FAILED'],
+    idempotent: false,
+  }),
   'artifacts.importDiffText': op({
     channel: 'relay/v1/artifacts.importDiffText',
     kind: 'command',
@@ -104,7 +120,13 @@ export const INTERNAL_RUNNER_OPS = {
     kind: 'command',
     route: 'runner',
     input: z.object({ runId: idSchema('run'), what: exportWhatSchema, destinationRealpath: absPathSchema }),
-    output: z.object({ writtenRealpaths: z.array(absPathSchema) }), // main converts to display paths
+    // Main converts realpaths to display paths. E2 #10 (additive): `written` / `failed` per part; a partial export is
+    // ok:true (`writtenRealpaths` = the written parts, in order); only when NOTHING was written is it an error.
+    output: z.object({
+      writtenRealpaths: z.array(absPathSchema),
+      written: z.array(z.object({ what: exportPartSchema, realpath: absPathSchema })).optional(),
+      failed: z.array(exportFailureSchema).optional(),
+    }),
     errors: ['ARTIFACT_WRITE_FAILED', 'PERMISSION_DENIED', 'NOT_FOUND'],
     idempotent: false,
   }),

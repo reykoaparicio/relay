@@ -42,7 +42,9 @@ describe('providers.test (F18)', () => {
 
     await x.engine.handle('relay/v1/providers.test', { providerId: 'anthropic' });
 
-    expect(x.db.repos.credentials.get('anthropic')?.lastTest).toEqual(expect.objectContaining({ ok: true, code: null }));
+    expect(x.db.repos.credentials.get('anthropic')?.lastTest).toEqual(expect.objectContaining({ ok: true, code: null, source: 'connection_test' }));
+    const status = await x.engine.handle('relay/v1/providers.list', {});
+    expect(status.ok && status.data.find((p) => p.providerId === 'anthropic')?.lastTest?.source).toBe('connection_test');
   });
 
   it('BUDGET_BLOCKED (scope setup) without any call when C + R + U + N > L', async () => {

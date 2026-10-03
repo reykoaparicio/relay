@@ -29,7 +29,7 @@ export class Shell {
   }
 
   runsBadgeCount(): Locator {
-    return this.primaryNav.getByText(/waiting for approval/);
+    return this.primaryNav.getByText(/waiting for approval|need(s)? (you|your attention)/);
   }
 
   fakeProviderBadge(): Locator {

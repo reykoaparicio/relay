@@ -1,7 +1,7 @@
 // 08 H4 composite handlers (route `main+runner`): main does the dialog / realpath / vault half, then calls the runner
 // through `supervisor.request` — INTERNAL_RUNNER_OPS or the same channel for FORWARDED_COMPOSITE_CHANNELS.
 import { appError, errors, redactDeep, toDisplayPath } from '@relay/contracts';
-import type { AppError, AppInfo, Clock, CredentialRef, Diagnostics, IpcEnvelope, ProviderId, ProviderStatus, Result } from '@relay/contracts';
+import type { AppError, AppInfo, Clock, CredentialRef, Diagnostics, IpcEnvelope, LastShutdown, Project, ProviderId, ProviderStatus, Result } from '@relay/contracts';
 import type { CredentialVault } from '../../credentials.js';
 import type { DialogService, FileFilter } from '../../dialogs.js';
 import type { SampleService } from '../../samples.js';
@@ -18,7 +18,19 @@ export interface CompositeDeps {
   readonly appInfo: () => AppInfo;
   readonly homeDir: string;
   readonly clock: Clock;
-  readonly writeTextFile: (absPath: string, text: string) => Promise<void>;
+  /**
+   * Writes a NEW file at `absPath` (or `name (2).ext`, `(3)`, … when taken): temp file + no-clobber link, never
+   * overwriting and never following a symlink at the destination. Resolves the absolute path actually written.
+   */
+  readonly writeNewTextFile: (absPath: string, text: string) => Promise<string>;
+  /** Absolute path of `relay.sqlite` (diagnostics report its size and display path even while the runner is down). */
+  readonly dbFile: string;
+  /** Size in bytes of a regular file, or null when it is missing / unreadable. */
+  readonly fileSize: (absPath: string) => Promise<number | null>;
+  /** True while main's log file cannot be written. */
+  readonly loggingDegraded: () => boolean;
+  /** How the previous session ended (null on first launch). */
+  readonly lastShutdown: () => LastShutdown | null;
   /** Push `providers.changed` to windows after connect/disconnect. */
   readonly notifyProvidersChanged: () => void;
 }
@@ -42,8 +54,15 @@ export function overlaySessionKeys(list: readonly ProviderStatus[], vault: Crede
   });
 }
 
+/** The runner-owned half while the runner is down (main fills in the DB file facts it can read from disk). */
 function degradedDiagnostics(): Omit<Diagnostics, 'runner' | 'secureStorage'> {
   return { db: { schemaVersion: 0, migrationsPending: 0, sizeBytes: 0 }, unresolvedAttempts: 0, catalog: { version: null, models: 0 }, prompts: { loaded: 0 } };
+}
+
+/** `relay.sqlite` + its `-wal` file, on disk (a large uncheckpointed WAL is part of what the database occupies). */
+export async function dbSizeOnDisk(dbFile: string, fileSize: (p: string) => Promise<number | null>): Promise<number> {
+  const [main, wal] = await Promise.all([fileSize(dbFile), fileSize(`${dbFile}-wal`)]);
+  return (main ?? 0) + (wal ?? 0);
 }
 
 /** A keyed async mutex: `run(key, fn)` runs `fn` after every earlier `fn` for the same key settled. */
@@ -69,6 +88,14 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
   // connect/disconnect of one provider never interleave (two connects would otherwise both read the same
   // `previous` ref and orphan one vault file).
   const providerLock = createKeyedMutex();
+  // Two quick clicks on "Try the sample project" must not both copy it.
+  const sampleLock = createKeyedMutex();
+
+  /** The live (not archived) sample project, if any. */
+  const existingSample = async (): Promise<Project | null> => {
+    const list = await d.runner.request('relay/v1/projects.list', {});
+    return list.ok ? (list.data.find((p) => p.isDemo && p.archivedAt === null) ?? null) : null;
+  };
 
   const lookupRef = async (providerId: ProviderId): Promise<CredentialRef | undefined> => {
     const refs = await d.runner.request('relay/v1/providers.listCredentialRefs', {});
@@ -88,13 +115,20 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
   };
 
   const getDiagnostics = async (): Promise<IpcEnvelope<Diagnostics>> => {
-    const [r, storage] = await Promise.all([d.runner.request('relay/v1/app.getDiagnostics', {}), d.vault.status()]);
+    const [r, storage, sizeBytes] = await Promise.all([
+      d.runner.request('relay/v1/app.getDiagnostics', {}), d.vault.status(), dbSizeOnDisk(d.dbFile, d.fileSize),
+    ]);
     const sup = d.supervisorState();
-    const runner = { state: sup.state, pid: sup.pid ?? null, lastHeartbeatAt: sup.lastHeartbeatAt ?? null, restarts: sup.restarts };
+    const runner = {
+      state: sup.state, pid: sup.pid ?? null, lastHeartbeatAt: sup.lastHeartbeatAt ?? null, restarts: sup.restarts, lastFatal: sup.lastFatal ?? null,
+    };
     const secureStorage = { available: storage.available, backend: storage.backend };
-    if (r.ok) return { ok: true, data: { ...r.data, runner, secureStorage } };
+    const mainHalf = { runner, secureStorage, loggingDegraded: d.loggingDegraded(), lastShutdown: d.lastShutdown() };
+    const dbFacts = { sizeBytes, displayPath: display(d.dbFile) };
+    if (r.ok) return { ok: true, data: { ...r.data, ...mainHalf, db: { ...r.data.db, ...dbFacts } } };
     if (r.error.code !== 'RUNNER_UNAVAILABLE') return r;
-    return { ok: true, data: { ...degradedDiagnostics(), runner, secureStorage } };
+    const degraded = degradedDiagnostics();
+    return { ok: true, data: { ...degraded, ...mainHalf, db: { ...degraded.db, ...dbFacts } } };
   };
 
   const saveTo = async (defaultName: string, filters: FileFilter[]): Promise<Result<string | null>> => d.dialogs.pickSaveFile(defaultName, filters);
@@ -139,12 +173,13 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
     const dest = await saveTo(`relay-diagnostics-${new Date(d.clock.now()).toISOString().slice(0, 10)}.json`, JSON_FILTER);
     if (!dest.ok) return fail(dest.error);
     if (dest.value === null) return { ok: true as const, data: { exported: false } };
+    let written: string;
     try {
-      await d.writeTextFile(dest.value, `${JSON.stringify(payload, null, 2)}\n`);
+      written = await d.writeNewTextFile(dest.value, `${JSON.stringify(payload, null, 2)}\n`);
     } catch {
       return fail(errors.artifactWriteFailed());
     }
-    return { ok: true as const, data: { exported: true, displayPath: display(dest.value) } };
+    return { ok: true as const, data: { exported: true, displayPath: display(written) } };
   };
 
   return {
@@ -173,11 +208,27 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
       return r;
     },
 
-    'relay/v1/projects.createSample': async (input) => {
-      const copy = await d.samples.copySample(input.idempotencyKey);
-      if (!copy.ok) return fail(copy.error);
-      return d.runner.request('relay/v1/projects.createFromRoot', { idempotencyKey: input.idempotencyKey, ...copy.value.createInput, isDemo: true });
+    'relay/v1/projects.relocate': async (input) => {
+      const sel = d.dialogs.resolveSelection(input.selectionId);
+      if (!sel.ok) return fail(sel.error);
+      const r = await d.runner.request('relay/v1/projects.relocateRoot', {
+        projectId: input.projectId, rootRealpath: sel.value.realpath, rootDisplayPath: sel.value.displayPath,
+        ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+      });
+      // CONFLICT root_unverified keeps the token: the UI shows the verification and re-calls with confirm: true.
+      if (r.ok) d.dialogs.consumeSelection(input.selectionId);
+      return r;
     },
+
+    'relay/v1/projects.createSample': (input) =>
+      sampleLock.run('sample', async () => {
+        // A sample project that already exists (and is not archived) is reused: never one more copy per click.
+        const existing = await existingSample();
+        if (existing !== null) return { ok: true, data: existing };
+        const copy = await d.samples.copySample(input.idempotencyKey);
+        if (!copy.ok) return fail(copy.error);
+        return d.runner.request('relay/v1/projects.createFromRoot', { idempotencyKey: input.idempotencyKey, ...copy.value.createInput, isDemo: true });
+      }),
 
     'relay/v1/projects.export': async (input) => {
       const project = await d.runner.request('relay/v1/projects.get', { projectId: input.projectId });
@@ -205,7 +256,17 @@ export function createCompositeHandlers(d: CompositeDeps): HandlerTable<Composit
       if (!dir.ok) return fail(dir.error);
       if (dir.value === null) return { ok: true, data: { exported: false, displayPaths: [] } };
       const w = await d.runner.request('relay/v1/artifacts.exportTo', { runId: input.runId, what: input.what, destinationRealpath: dir.value });
-      return w.ok ? { ok: true, data: { exported: true, displayPaths: w.data.writtenRealpaths.map(display) } } : w;
+      if (!w.ok) return w;
+      return {
+        ok: true,
+        data: {
+          exported: true,
+          displayPaths: w.data.writtenRealpaths.map(display),
+          // Partial exports (E2 #10): per-part written / failed, so the UI can retry only the failed parts.
+          ...(w.data.written === undefined ? {} : { written: w.data.written.map((x) => ({ what: x.what, displayPath: display(x.realpath) })) }),
+          ...(w.data.failed === undefined ? {} : { failed: w.data.failed }),
+        },
+      };
     },
 
     'relay/v1/artifacts.importDiff': async (input) => {

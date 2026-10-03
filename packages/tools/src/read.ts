@@ -7,12 +7,19 @@ import { sha256Hex } from './hash.js';
 import type { ProjectRoot } from './paths.js';
 import { isSecretRootPath, normalizeRelPath, readConfined } from './paths.js';
 import type { InputCaps } from './scan.js';
+import type { SuspectedSecretLabel } from './secret-scan.js';
+import { unacknowledgedSuspectedSecret } from './secret-scan.js';
 
 /** Options for {@link readSelected}. */
 export interface ReadOptions {
   readonly caps?: InputCaps;
   readonly exclusions?: readonly string[];
   readonly respectGitignore?: boolean;
+  /**
+   * E2 #11 (intake): refuse files whose content looks like a credential (`suspected_secret`) unless their relPath is in
+   * `acknowledged` (the run input's `acknowledgedSuspectedSecrets`). Omitted = no content check.
+   */
+  readonly secretCheck?: { readonly acknowledged: readonly string[] };
 }
 
 /** One file read at intake. `sha256` is computed over exactly `bytes` (feeds `run_input_files` and the context hash). */
@@ -24,13 +31,16 @@ export interface SelectedFile {
   readonly size: number;
 }
 
-/** Why one selected path was refused. */
-export type DenialReason = ExclusionReason | 'outside_root' | 'not_regular_file';
+/** Why one selected path was refused. `hard_link` is an ExclusionReason (E2 #13). */
+export type DenialReason = ExclusionReason | 'outside_root' | 'not_regular_file' | 'unreadable' | 'suspected_secret';
 
 /** One refused path in a `PERMISSION_DENIED` from {@link readSelected}. */
 export interface Denial {
   readonly relPath: string;
   readonly reason: DenialReason;
+  /** `suspected_secret` only: what it looks like and where (never the value). */
+  readonly secretLabel?: SuspectedSecretLabel;
+  readonly secretLine?: number;
 }
 
 type Outcome =
@@ -44,6 +54,7 @@ function denied(relPath: string, reason: DenialReason): Outcome {
 
 function denialFromReadError(relPath: string, e: AppError): Outcome {
   if (e.code !== 'PERMISSION_DENIED') return { kind: 'error', error: e };
+  if (e.details?.['reason'] === 'unreadable') return denied(relPath, 'unreadable'); // E2 #8
   const exclusion = e.details?.['exclusion'];
   if (exclusion === 'not_regular_file') return denied(relPath, 'not_regular_file');
   const reason = exclusionReasonSchema.safeParse(exclusion);
@@ -72,8 +83,11 @@ async function readClassified(root: ProjectRoot, rel: RelPath, ctx: ClassifyCont
   return readConfined(root, rel, ctx.maxFileBytes, (realRel) => classifyByName(realRel, false, ctx));
 }
 
-/** normalize → classify requested name → resolve once → classify real name → open + identity check → sniff/decode. */
-async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): Promise<Outcome> {
+/**
+ * normalize → classify requested name → resolve once → classify real name → open + identity check → sniff/decode →
+ * (intake) content check for credentials.
+ */
+async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext, secretCheck?: ReadOptions['secretCheck']): Promise<Outcome> {
   const read = await readClassified(root, rel, ctx);
   if (!read.ok) return denialFromReadError(rel, read.error);
   const { bytes } = read.value;
@@ -81,6 +95,10 @@ async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext): P
   if (sniffed !== null) return denied(rel, sniffed);
   const content = decodeUtf8(bytes);
   if (content === null) return denied(rel, 'binary'); // invalid UTF-8 is treated as binary (05 E4)
+  if (secretCheck !== undefined) {
+    const hit = unacknowledgedSuspectedSecret({ relPath: rel, content }, secretCheck.acknowledged);
+    if (hit !== null) return { kind: 'denied', denial: { relPath: rel, reason: 'suspected_secret', secretLabel: hit.label, secretLine: hit.line } };
+  }
   return { kind: 'file', file: { relPath: rel, content, bytes, sha256: sha256Hex(bytes), size: bytes.byteLength } };
 }
 
@@ -106,11 +124,31 @@ async function buildContext(root: ProjectRoot, rels: readonly RelPath[], opts: R
   return { ...base, isGitignored: makeGitignoreMatcher(await loadGitignoresForPaths(root, rels)) };
 }
 
+/** Top-level PERMISSION_DENIED reason when every denial shares a reason that has its own recovery. */
+const OWN_REASONS = ['outside_root', 'unreadable', 'suspected_secret', 'hard_link'] as const;
+
+function deniedMessage(reason: string, denials: readonly Denial[]): string {
+  const first = denials[0]?.relPath ?? '';
+  const names = denials.length === 1 ? first : `${first} and ${String(denials.length - 1)} more`;
+  switch (reason) {
+    case 'unreadable':
+      return `Relay cannot read ${names}. Check the file permissions, or exclude it from this run.`;
+    case 'suspected_secret':
+      return `${names} looks like it contains a credential. Exclude it, or include it explicitly to send it anyway.`;
+    case 'hard_link':
+      return `${names} is a hard link and may be a file from outside the project. Exclude it, or replace it with a copy.`;
+    default:
+      return `${String(denials.length)} selected file(s) cannot be read. Nothing was read; see the listed reasons.`;
+  }
+}
+
 function deniedError(denials: readonly Denial[]): AppError {
-  const allOutside = denials.every((d) => d.reason === 'outside_root');
-  return errors.permissionDenied(allOutside ? 'outside_root' : 'excluded', {
-    userMessage: `${String(denials.length)} selected file(s) cannot be read. Nothing was read; see the listed reasons.`,
-    details: { denied: denials.map((d) => ({ ...d })) },
+  const shared = OWN_REASONS.find((r) => denials.every((d) => d.reason === r));
+  const reason = shared ?? 'excluded';
+  const only = denials.length === 1 ? denials[0] : undefined;
+  return errors.permissionDenied(reason, {
+    userMessage: deniedMessage(reason, denials).slice(0, 400),
+    details: { denied: denials.map((d) => ({ ...d })), ...(only === undefined ? {} : { relPath: only.relPath }) },
   });
 }
 
@@ -133,7 +171,7 @@ export async function readSelected(
   let includedBytes = 0;
   for (const rel of normalized.value) {
     const capsCtx = { ...ctx, caps: { ...caps, includedBytes, includedFiles: files.length } };
-    const outcome = await readOne(root, rel, capsCtx);
+    const outcome = await readOne(root, rel, capsCtx, opts.secretCheck);
     if (outcome.kind === 'error') return err(outcome.error);
     if (outcome.kind === 'denied') {
       denials.push(outcome.denial);

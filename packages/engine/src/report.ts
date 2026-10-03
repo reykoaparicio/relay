@@ -78,6 +78,7 @@ function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run:
     invariant(key !== undefined, 'an attempt / approval references a step row of its own run (FK)');
     return key;
   };
+  const names = new Map(version.spec.steps.flatMap((s) => (s.name === undefined ? [] : [[s.id, s.name] as const])));
   const attempts = r.attempts.listForRun(run.id);
   const ledger = r.ledger.listForRun(run.id);
   const entries = ledger.map((x) => x.entry);
@@ -114,6 +115,7 @@ function buildReport(ctx: Pick<EngineCtx, 'templates' | 'clock'>, r: Repos, run:
       planHash: a.planHash, decision: a.decision, decidedAt: a.decidedAt, note: a.decisionNote, invalidatedReason: a.invalidatedReason, createdAt: a.createdAt,
     })),
     revisions: revisionsOf(run, snapshot, all),
+    stepMeta: latest.map((s) => ({ stepKey: s.stepKey, name: names.get(s.stepKey) ?? null, instructionVersion: models.get(s.stepKey)?.instructionVersion ?? null })),
   };
 }
 
@@ -246,11 +248,15 @@ export function renderReportMarkdown(report: ReportV1): string {
     '',
     '## Steps',
     '',
-    '| Step | Revision | Retry | State | Profile | Model | Settled (USD) | Certainty | Unknown (USD) |',
-    '|---|---|---|---|---|---|---|---|---|',
-    ...report.steps.map((s) => `| ${[s.stepKey, s.revisionIndex, s.retryIndex, s.state, s.profileName,
-      s.providerId === null ? null : `${s.providerId}/${s.modelId ?? '?'}`, usd6(s.cost.settledMicrousd), s.cost.certainty,
-      usd6(s.cost.unknownMicrousd)].map(cell).join(' | ')} |`),
+    '| Step | Revision | Retry | State | Profile | Model | Instructions | Settled (USD) | Certainty | Unknown (USD) |',
+    '|---|---|---|---|---|---|---|---|---|---|',
+    ...report.steps.map((s) => {
+      const meta = report.stepMeta?.find((m) => m.stepKey === s.stepKey);
+      const label = meta?.name == null ? s.stepKey : `${meta.name} (${s.stepKey})`;
+      return `| ${[label, s.revisionIndex, s.retryIndex, s.state, s.profileName,
+      s.providerId === null ? null : `${s.providerId}/${s.modelId ?? '?'}`, meta?.instructionVersion ?? null, usd6(s.cost.settledMicrousd), s.cost.certainty,
+        usd6(s.cost.unknownMicrousd)].map(cell).join(' | ')} |`;
+    }),
     '',
     '## Cost (tracked by Relay)',
     '',

@@ -3,7 +3,10 @@
 // restarts it (at most 3 times per 60 s, after a 0.5 s / 2 s / 8 s backoff) — always waiting for the old child's
 // `exit` before forking again.
 import { RUNNER_SHUTDOWN_MAX_GRACE_MS, RUNNER_STALE_AFTER_MS, appError, assertNever, epochMs, errors, getRunnerOperation, runnerMessageSchema, runnerRequestSchema } from '@relay/contracts';
-import type { AppError, EpochMs, IpcResult, PushEvent, Result, RunnerChannel, RunnerInputOf, RunnerMessage, RunnerRequest, RunnerState, ProviderId } from '@relay/contracts';
+import type {
+  AppError, EpochMs, IpcResult, PushEvent, Result, RunId, RunnerChannel, RunnerFatal, RunnerInputOf, RunnerMaintenanceTask, RunnerMessage,
+  RunnerRequest, RunnerState, ProviderId,
+} from '@relay/contracts';
 import type { MainLogger } from './logger.js';
 import type { RunnerRequestOptions, RunnerRequester } from './ipc/types.js';
 
@@ -120,7 +123,27 @@ export interface SupervisorSnapshot {
   readonly pid?: number;
   readonly lastHeartbeatAt?: EpochMs;
   readonly restarts: number;
+  /** Why the runner last became `unavailable` (cleared by {@link RunnerSupervisor.restart}). */
+  readonly lastFatal: RunnerFatal | null;
+  /** A run with a model request possibly in flight (heartbeat `activeRunId`, updated early by `run.status` events). */
+  readonly activeRunId: RunId | null;
 }
+
+/** Outcome of {@link RunnerSupervisor.restart}. */
+export interface RestartOutcome {
+  /** False when nothing was done (a runner is already starting / restarting / ready, or the supervisor is shut down). */
+  readonly restarted: boolean;
+  /** The state after the attempt settled (`ready` or `unavailable`), or the unchanged state of a no-op. */
+  readonly state: RunnerState;
+}
+
+/** The runner's answer to a maintenance task (`maintenance.result`), or main's own failure. */
+export type MaintenanceOutcome =
+  | { readonly ok: true; readonly result: Extract<RunnerMessage, { kind: 'maintenance.result' }>['result'] }
+  | { readonly ok: false; readonly reason: 'runner_active' | 'busy' | 'shut_down' | 'timeout' | 'exited' };
+
+/** How long a maintenance runner may take (copying a large backup). */
+export const MAINTENANCE_TIMEOUT_MS = 120_000;
 
 /** The supervisor (08 H6). */
 export interface RunnerSupervisor extends RunnerRequester {
@@ -131,7 +154,25 @@ export interface RunnerSupervisor extends RunnerRequester {
   request<C extends RunnerChannel>(channel: C, input: RunnerInputOf<C>, opts?: RunnerRequestOptions): Promise<IpcResult<C>>;
   /** Call on `powerMonitor` 'resume': restarts the heartbeat clock with a grace period (no kill for sleeping). */
   notifyResume(): void;
+  /**
+   * Manual recovery from `unavailable` (the "Restart runner" button): clears the fatal flag, the restart window, and
+   * `lastFatal`, waits for any condemned child to exit, forks a fresh runner, and resolves once it is `ready` or
+   * `unavailable` again. A no-op while a runner is starting, restarting, or ready (never a second runner).
+   */
+  restart(): Promise<RestartOutcome>;
+  /**
+   * Runs a one-shot maintenance runner (`RELAY_RUNNER_TASK`, e.g. `restore_latest_backup`) that never opens the
+   * database. Only while the runner is `unavailable` and no runner process is alive (single DB writer); resolves the
+   * runner's `maintenance.result`. Does not restart the runner (call {@link restart} afterwards).
+   */
+  runMaintenance(task: RunnerMaintenanceTask): Promise<MaintenanceOutcome>;
 }
+
+/** Statuses during which a run may have a provider request in flight. */
+const IN_FLIGHT_RUN_STATUSES: ReadonlySet<string> = new Set(['running', 'cancelling']);
+
+/** Max length of a fatal message kept for diagnostics. */
+const FATAL_MESSAGE_MAX = 400;
 
 /** Inputs of {@link minimalEnv}. */
 export interface RunnerEnvInput {
@@ -208,6 +249,12 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
   let restartTimes: number[] = [];
   let started: Promise<void> | null = null;
   let fatal = false;
+  let lastFatal: RunnerFatal | null = null;
+  let activeRunId: RunId | null = null;
+  /** A restart() in progress (concurrent calls share it). */
+  let restarting: Promise<RestartOutcome> | null = null;
+  /** A maintenance runner in progress (restart() waits for nothing: it is refused meanwhile). */
+  let maintaining: Promise<MaintenanceOutcome> | null = null;
   let seq = 0;
   const pending = new Map<string, Pending>();
   let readyWaiters: ((ready: boolean) => void)[] = [];
@@ -355,6 +402,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       case 'heartbeat':
         s.lastHeartbeatAt = deps.now();
         s.lastBeatMono = mono();
+        activeRunId = msg.activeRunId;
         return;
       case 'op.result': {
         const p = pending.get(msg.id);
@@ -368,14 +416,23 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
         void answerCredential(s, msg);
         return;
       case 'event':
+        trackRunStatus(msg.event);
         deps.broadcast(msg.event);
         return;
-      case 'fatal':
-        log.error({ event: 'runner.fatal', code: msg.code, message: msg.message, outcome: 'error' });
+      case 'fatal': {
+        // `reason` is optional on the wire (older runners send only code + message).
+        const reason = msg.reason === undefined || msg.reason === '' ? null : msg.reason;
+        lastFatal = { code: msg.code, reason, message: msg.message.slice(0, FATAL_MESSAGE_MAX), at: epochMs(deps.now()) };
+        log.error({ event: 'runner.fatal', code: msg.code, reason, message: msg.message, outcome: 'error' });
         fatal = true;
         setState('unavailable');
         settleReadyWaiters(false);
         kill(s, 'fatal');
+        return;
+      }
+      case 'maintenance.result':
+        // Only a maintenance child (runMaintenance) sends this; a serving runner never should.
+        log.warn({ event: 'runner.unexpected_maintenance_result', outcome: 'error' });
         return;
       default:
         assertNever(msg);
@@ -390,7 +447,15 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     }
   };
 
+  /** Keeps {@link activeRunId} current between heartbeats (a quit right after a run started must still warn). */
+  const trackRunStatus = (e: PushEvent): void => {
+    if (e.type !== 'run.status') return;
+    if (IN_FLIGHT_RUN_STATUSES.has(e.status)) activeRunId = e.runId;
+    else if (activeRunId === e.runId) activeRunId = null;
+  };
+
   const giveUp = (): void => {
+    activeRunId = null;
     setState('unavailable');
     settleReadyWaiters(false);
   };
@@ -402,6 +467,10 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     restartTimes = restartTimes.filter((x) => n - x < cfg.restartWindowMs);
     if (restartTimes.length >= cfg.maxRestarts) {
       log.error({ event: 'runner.restart_limit', restarts, outcome: 'error' });
+      lastFatal = {
+        code: 'RUNNER_UNAVAILABLE', reason: 'restart_limit', at: epochMs(deps.now()),
+        message: `The background runner stopped ${String(restartTimes.length + 1)} times within ${String(Math.round(cfg.restartWindowMs / 1000))} seconds.`,
+      };
       giveUp();
       return;
     }
@@ -424,6 +493,7 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     s.port?.close();
     s.port = null;
     session = null;
+    activeRunId = null;
     failPending('runner_exited');
     log.info({ event: 'runner.exit', code, outcome: code === 0 ? 'ok' : 'error' });
     const waiters = exitWaiters;
@@ -520,6 +590,113 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       restartHeartbeatClock('power_resume');
     },
 
+    runMaintenance(task) {
+      if (phase === 'shut_down') return Promise.resolve({ ok: false, reason: 'shut_down' });
+      if (maintaining !== null || restarting !== null) return Promise.resolve({ ok: false, reason: 'busy' });
+      if (state !== 'unavailable' || session !== null) return Promise.resolve({ ok: false, reason: 'runner_active' });
+      log.info({ event: 'runner.maintenance_start', task });
+      const c = deps.fork(deps.entryPath, [], { serviceName: 'relay-runner-maintenance', stdio: 'pipe', env: { ...deps.env, RELAY_RUNNER_TASK: task } });
+      const { port1, port2 } = deps.createChannel();
+      drain(c.stdout, 'runner.stdout');
+      drain(c.stderr, 'runner.stderr');
+      const p = new Promise<MaintenanceOutcome>((resolve) => {
+        let done = false;
+        let timer: unknown = null;
+        const finish = (o: MaintenanceOutcome): void => {
+          if (done) return;
+          done = true;
+          if (timer !== null) t.clearTimeout(timer);
+          port1.close();
+          log.info({ event: 'runner.maintenance_done', task, outcome: o.ok && o.result.ok ? 'ok' : 'error', ...(o.ok ? {} : { reason: o.reason }) });
+          resolve(o);
+        };
+        port1.on('message', (e) => {
+          const parsed = runnerMessageSchema.safeParse(e.data);
+          if (!parsed.success || parsed.data.kind !== 'maintenance.result') return;
+          finish({ ok: true, result: parsed.data.result });
+        });
+        port1.start();
+        c.on('exit', () => {
+          finish({ ok: false, reason: 'exited' });
+        });
+        timer = t.setTimeout(() => {
+          log.warn({ event: 'runner.kill', reason: 'maintenance_timeout', pid: c.pid, outcome: 'error' });
+          c.kill();
+          finish({ ok: false, reason: 'timeout' });
+        }, MAINTENANCE_TIMEOUT_MS);
+        c.postMessage({ kind: 'init' }, [port2]);
+      });
+      // The child exits on its own after posting the result; wait for that exit before anything forks again.
+      const exited = new Promise<void>((resolve) => c.on('exit', () => { resolve(); }));
+      maintaining = p.then(async (o) => {
+        let timer: unknown = null;
+        const gone = await Promise.race([
+          exited.then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = t.setTimeout(() => {
+              resolve(false);
+            }, cfg.shutdownKillSlackMs * 5);
+          }),
+        ]);
+        if (timer !== null) t.clearTimeout(timer);
+        if (!gone) c.kill(); // it already answered (or timed out): never leave it running beside the next runner
+        return o;
+      }).finally(() => {
+        maintaining = null;
+      });
+      return maintaining;
+    },
+
+    restart() {
+      if (restarting !== null) return restarting;
+      if (maintaining !== null) return Promise.resolve({ restarted: false, state });
+      if (phase === 'shut_down' || state !== 'unavailable') {
+        log.info({ event: 'runner.restart_ignored', state, phase, outcome: 'ok' });
+        return Promise.resolve({ restarted: false, state });
+      }
+      const run = async (): Promise<RestartOutcome> => {
+        log.info({ event: 'runner.manual_restart', previous: lastFatal?.code ?? null, reason: lastFatal?.reason ?? null });
+        clearRestartTimer();
+        // A runner condemned by `fatal` may not have exited yet: never fork while the old child lives (§6.4).
+        const old = session;
+        if (old !== null) {
+          const exited = new Promise<void>((resolve) => exitWaiters.push(resolve));
+          kill(old, 'manual_restart');
+          let timer: unknown = null;
+          const timedOut = await Promise.race([
+            exited.then(() => false),
+            new Promise<boolean>((resolve) => {
+              timer = t.setTimeout(() => {
+                resolve(true);
+              }, cfg.shutdownKillSlackMs * 5);
+            }),
+          ]);
+          if (timer !== null) t.clearTimeout(timer);
+          if (timedOut && session === old) {
+            log.error({ event: 'runner.manual_restart_blocked', reason: 'old_runner_alive', outcome: 'error' });
+            return { restarted: false, state };
+          }
+        }
+        if (phase !== 'running') {
+          // A restart before the first start() (or after shutdown began) never forks on its own.
+          if (phase === 'shut_down') return { restarted: false, state };
+          phase = 'running';
+        }
+        fatal = false;
+        lastFatal = null;
+        restartTimes = [];
+        setState('starting');
+        const ready = waitForReady(cfg.startupTimeoutMs + cfg.shutdownKillSlackMs * 5);
+        spawn();
+        const ok = await ready;
+        return { restarted: true, state: ok ? 'ready' : state };
+      };
+      restarting = run().finally(() => {
+        restarting = null;
+      });
+      return restarting;
+    },
+
     async shutdown({ graceMs }) {
       phase = 'shut_down';
       clearRestartTimer(); // a pending backoff never forks after shutdown
@@ -542,6 +719,8 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       return {
         state,
         restarts,
+        lastFatal,
+        activeRunId,
         ...(pid === undefined ? {} : { pid }),
         ...(lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt: epochMs(lastHeartbeatAt) }),
       };

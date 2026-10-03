@@ -38,8 +38,12 @@ import type {
   ScanOptions,
   ScanResult,
   SelectedFile,
+  SuspectedSecret,
 } from '@relay/tools';
 import type { TemplateRegistry } from '@relay/templates';
+import type { MonotonicClock } from './segments.js';
+
+export type { MonotonicClock } from './segments.js';
 
 /** Structured JSONL logger (00b §3). The providers `Logger` is a structural subset. */
 export interface Logger {
@@ -179,6 +183,11 @@ export interface ProjectFsPort {
   parseDiff(text: string): Result<ImportedDiff>;
   /** 05 E5 `checkDiffPaths`: excluded / outside-root paths an imported diff references → PERMISSION_DENIED. */
   checkDiffPaths(root: ProjectRoot, diff: ImportedDiff, opts?: DiffCheckOptions): Promise<Result<void>>;
+  /**
+   * E2 #11 tools `unacknowledgedSuspectedSecret`: the ONE suspected-secret predicate. `runs.preflight` calls it on the
+   * files it read; intake applies it inside `readSelected({ secretCheck })`. Same function → they never disagree.
+   */
+  suspectedSecret(file: { readonly relPath: string; readonly content: string }, acknowledged: readonly string[]): SuspectedSecret | null;
 }
 
 /** 05 E7 export writes (FR-10), injected by runtime.ts. */
@@ -222,6 +231,11 @@ export interface EngineDeps {
   readonly credentials: CredentialResolver;
   readonly maintenance: MaintenancePort;
   readonly clock: Clock;
+  /**
+   * E1: monotonic milliseconds (e.g. `performance.now()`) for running segments, so a sleep or a wall-clock jump is
+   * never charged as execution time. Absent → segments are measured on `clock` (as before).
+   */
+  readonly monotonic?: MonotonicClock | undefined;
   readonly ids: IdGen;
   readonly logger: Logger;
   readonly emit: (e: PushEvent) => void;

@@ -201,6 +201,8 @@ export const MEMORY_EVENT_TYPES = [
   'conflict_resolved',
   'unarchived',
   'history_purged', // revision history purged (the current text is kept)
+  'reviewed', // "Confirm still accurate": file source refs re-hashed, review date kept (E2 #16, migration 0003)
+  'skipped', // a run's intake dropped this record because it was no longer approved/retrievable (E2 #15)
 ] as const;
 /** Schema for {@link MemoryEventType}. */
 export const memoryEventTypeSchema = z.enum(MEMORY_EVENT_TYPES);
@@ -245,6 +247,7 @@ export const EXCLUSION_REASONS = [
   'user_pattern',
   'symlink_outside',
   'cap_exceeded',
+  'hard_link', // E2 #13: a file with more than one hard link may be a file from outside the project; never read
 ] as const;
 /** Schema for {@link ExclusionReason}. */
 export const exclusionReasonSchema = z.enum(EXCLUSION_REASONS);
@@ -272,6 +275,8 @@ export const ERROR_CODES = [
   'PERMISSION_DENIED',
   'SECURE_STORAGE_UNAVAILABLE',
   'MODEL_REFUSED',
+  'DATABASE_UNAVAILABLE',
+  'PROJECT_ROOT_MISSING',
   'INTERNAL',
 ] as const;
 /** Schema for {@link ErrorCode}. */

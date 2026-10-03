@@ -148,7 +148,7 @@ describe('openProjectRoot', () => {
 
     expect(relative.ok || relative.error.code).toBe('VALIDATION_FAILED');
     expect(file.ok || file.error.code).toBe('VALIDATION_FAILED');
-    expect(missing.ok || missing.error.code).toBe('NOT_FOUND');
+    expect(missing.ok || missing.error.code).toBe('PROJECT_ROOT_MISSING');
   });
 });
 

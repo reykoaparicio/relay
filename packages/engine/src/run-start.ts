@@ -17,6 +17,7 @@ import type {
   RunStartInput,
   RunStatus,
   StepKey,
+  ValidationIssue,
   WorkflowSpec,
 } from '@relay/contracts';
 import type { UsageEstimate } from '@relay/providers';
@@ -37,7 +38,7 @@ import { adapterOf, isModelRejected, liveCapabilities } from './provider-lookup.
 import type { PostCommitEffect } from './run-machine.js';
 import { appendRunEvent, runEffects } from './run-machine.js';
 import { outputKindOf, stepEntries } from './snapshot.js';
-import { diffReferencedPaths } from './steps/intake.js';
+import { acknowledgedSuspectedSecrets, diffReferencedPaths } from './steps/intake.js';
 
 /** Parsed `runs.start` input (the IPC schema output). */
 export type StartInput = Omit<RunStartInput, 'idempotencyKey'> & { readonly idempotencyKey?: string };
@@ -157,6 +158,26 @@ function stepRows(ctx: EngineCtx, runId: RunId, p: PreparedRun, now: EpochMs): S
   });
 }
 
+/** The request hash `runs.start` recorded on the run's `run.created` event (null for runs created before E1). */
+function createdRequestHash(r: Repos, runId: RunId): string | null {
+  const created = r.events.list(runId, 0, 1).find((e) => e.type === 'run.created');
+  const hash = (created?.payload as { requestHash?: unknown } | undefined)?.requestHash;
+  return typeof hash === 'string' ? hash : null;
+}
+
+/**
+ * E1 #5: `runs.start` retried with a key whose idempotency record expired (24 h) collides with the run that key
+ * created. Same request (the hash recorded on `run.created`) → a replay of that run (the record is stored again);
+ * another request → CONFLICT `idempotency_key_reused`. Never INTERNAL.
+ */
+function expiredKeyReplay(r: Repos, req: IdempotentRequest): Result<{ runId: RunId; status: RunStatus }> | null {
+  const existing = r.runs.findByIdempotencyKey(req.key); // UNIQUE for ever; the idempotency record expires after 24 h
+  if (existing === undefined) return null;
+  if (createdRequestHash(r, existing.id) !== req.hash) return err(errors.conflict({ reason: 'idempotency_key_reused', op: req.op }));
+  recordResult(r, req, { ids: { runId: existing.id }, status: existing.status });
+  return ok({ runId: existing.id, status: existing.status });
+}
+
 /** `runs.start`. A replay of the same idempotency key returns the stored `{ runId, status }`. */
 export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Result<{ runId: RunId; status: RunStatus }>> {
   const req: IdempotentRequest = { op: OP, key: input.idempotencyKey, hash: requestHash({ ...input }) };
@@ -176,12 +197,23 @@ export async function startRun(ctx: EngineCtx, input: RunStartInput): Promise<Re
     if (again !== null) return again;
     const now = ctx.clock.now();
     const runId = ctx.ids.next('run');
-    r.runs.insert({ id: runId, projectId: p.project.id, workflowVersionId: p.version.id, goal: input.goal, input: input.input,
-      snapshot: p.snapshot, limits: p.limits, idempotencyKey: input.idempotencyKey, createdAt: now });
+    try {
+      r.runs.insert({ id: runId, projectId: p.project.id, workflowVersionId: p.version.id, goal: input.goal, input: input.input,
+        snapshot: p.snapshot, limits: p.limits, idempotencyKey: input.idempotencyKey, createdAt: now });
+    } catch (e) {
+      // The statement failed alone (the tx is still open): a key whose 24 h record expired collides here (E1 #5).
+      const expired = expiredKeyReplay(r, req);
+      if (expired !== null) return expired;
+      throw e;
+    }
+    // E1 #2: the chosen memory records are checked exactly like preflight/intake select them (approved, retrievable,
+    // this project): a run never starts with a record intake cannot snapshot (an error rolls the insert back).
+    const memory = selectRunMemory(r, p.project.id, now, p.snapshot.memoryIncludeIds);
+    if (!memory.ok) return memory;
     r.steps.insertMany(stepRows(ctx, runId, p, now));
     r.ledger.append(allowanceSetEntries({ L: p.limits.budgetMicrousd, attemptId: null, runId, projectId: p.project.id, priceCatalogVersion: null, createdAt: now }));
     recordResult(r, req, { ids: { runId }, status: 'queued' });
-    appendRunEvent(r, fx, runId, 'run.created', { workflowVersionId: p.version.id, goal: input.goal, limits: p.limits });
+    appendRunEvent(r, fx, runId, 'run.created', { workflowVersionId: p.version.id, goal: input.goal, limits: p.limits, requestHash: req.hash });
     fx.push({ kind: 'emit', event: { type: 'run.status', runId, status: 'queued', pauseReason: null, seq: r.events.lastSeq(runId) } });
     fx.push({ kind: 'wake' });
     return ok({ runId, status: 'queued' });
@@ -245,6 +277,7 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     files = read.value.files.map((f) => ({ relPath: f.relPath, sha256: f.sha256, content: f.content, size: f.size }));
   }
   const issues = await profileIssues(ctx, p, input);
+  const secretIssues = suspectedSecretIssues(ctx, input, files);
   const models = stepEntries(p.snapshot).flatMap(([key, snap]) => (snap.kind === 'model' ? [{ key, snap }] : []));
   // The first reservation is the first model step of the SPEC; when its profile could not be resolved there is no N.
   const firstKey = p.version.spec.steps.find((s) => s.kind === 'model')?.id;
@@ -272,7 +305,24 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
     },
     firstReservation: { N, basis },
     budget,
-    issues: issues.map(toPreflightIssue),
+    issues: [...issues.map(toPreflightIssue), ...secretIssues],
+  });
+}
+
+/**
+ * Files intake would refuse with PERMISSION_DENIED `suspected_secret`: the SAME predicate (tools
+ * `unacknowledgedSuspectedSecret`, injected as `projectFs.suspectedSecret`) over the same `readSelected` content and the same acknowledgement list
+ * ({@link acknowledgedSuspectedSecrets}) intake uses, so preflight and intake always agree. A diff-input run cannot
+ * acknowledge (fail closed). Never echoes the content.
+ */
+function suspectedSecretIssues(ctx: EngineCtx, input: StartInput, files: readonly { relPath: string; content: string }[]): ValidationIssue[] {
+  const acknowledged = acknowledgedSuspectedSecrets(input.input);
+  const selected: readonly string[] = input.input.kind === 'files' ? input.input.relPaths : [];
+  return files.flatMap((f) => {
+    if (ctx.projectFs.suspectedSecret(f, acknowledged) === null) return [];
+    const index = selected.indexOf(f.relPath);
+    return [{ path: index >= 0 ? `input.relPaths.${String(index)}` : 'input', code: 'suspected_secret',
+      message: `"${f.relPath}" looks like it contains a secret. Remove it or confirm sending it.` }];
   });
 }
 

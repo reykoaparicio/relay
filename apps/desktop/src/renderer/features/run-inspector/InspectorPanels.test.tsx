@@ -51,7 +51,7 @@ describe('EventsList', () => {
     // 480px / 32px rows = 15 visible + 20 overscan: a window of tens of rows out of 5,000.
     expect(rows.length).toBeGreaterThanOrEqual(15);
     expect(rows.length).toBeLessThan(100);
-    expect(rows[0]).toHaveTextContent(/^1 /); // the window starts at the first event (seq 1)
+    expect(rows[0]).toHaveTextContent(/^#1 · /); // the window starts at the first event (seq 1)
     const ol = region.querySelector('ol') as HTMLElement;
     expect(ol.style.height).toBe(`${String(total * 32)}px`); // full scroll height is reserved for all rows
   });

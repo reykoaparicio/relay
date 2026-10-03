@@ -60,31 +60,77 @@ const SECRET_NAMES = new Set([
   '.npmrc',
   '.pypirc',
   '.netrc',
+  '_netrc', // Windows spelling of .netrc
   '.pgpass',
   '.git-credentials',
   '.dev.vars',
   '.yarnrc.yml',
+  '.yarnrc', // Yarn 1: `_authToken` / registry auth
+  '.htpasswd',
+  '.my.cnf', // MySQL client password; the server's `my.cnf` stays included
+  '.s3cfg',
+  '.boto',
+  '.vault-token',
+  '.terraformrc', // Terraform Cloud API tokens
+  '.mcp.json', // MCP server definitions carry provider keys in `env`
+  '.claude.json',
+  'wp-config.php', // DB password and salts; `wp-config-sample.php` stays included
+  'pip.conf', // fail closed (§11.1): usually present only to carry an authenticated private index-url
+  // Google OAuth quickstart user token (refresh token). Exact name only: `tokens.json` (design tokens) and
+  // `tokenizer.json` stay included.
+  'token.json',
 ]);
 /** Secret name patterns; matched case-insensitively against every segment (§11.1: fail closed). */
 const SECRET_PATTERNS: readonly RegExp[] = [
   /^\.env[._-].+$/,
   /\.env$/,
-  /\.(pem|key|p12|pfx|keystore|jks|tfvars)$/,
+  /\.(pem|key|p12|pfx|keystore|jks|tfvars|p8|ppk|kdbx)$/,
   /^id_(rsa|dsa|ecdsa|ed25519)/,
   /^credentials/,
   /secret/,
   /^service-account.*\.json$/,
+  /\.tfstate(\.|$)/, // terraform.tfstate, terraform.tfstate.backup, terraform.tfstate.d/
+  // kubeconfig, kubeconfig.yaml, kubeconfig-prod.yml; source files such as kubeconfig.go stay included.
+  /^kubeconfig(?:[_-][^.]*)?(?:\.(?:ya?ml|json|conf|config))?$/,
+  /firebase-adminsdk.*\.json$/, // Firebase service-account keys; firebase.json / .firebaserc stay included
+  /(?:^|[._-])sa[_-]key.*\.json$/, // gcp-sa-key.json, sa_key.json
+  // Dot-less `env.<stage>` files (the `.env.*` rule above covers the dotted ones); `env.ts` / `env.d.ts` stay included.
+  /^env\.(?:prod|production|stage|staging|dev|development|local|test|preview)$/,
+  // Production-stage .NET / Spring config holds real connection strings; the base files and the Development stage are
+  // committed defaults and stay included.
+  /^appsettings\.(?:prod|production|staging)\.json$/,
+  /^application-(?:prod|production|staging)\.(?:properties|ya?ml)$/,
 ];
 const SECRET_ALLOWED = new Set(['.env.example']);
+/**
+ * File names that are secret only in context (looked up by {@link isSecretSegment} with the previous segment):
+ * `parent` = that exact parent dir; `dotParent` = any dot-dir parent, or the project root.
+ * - `auth.json`: Codex `.codex/auth.json`, Composer `auth.json` (root or `.composer/`); i18n `locales/en/auth.json` stays.
+ * - `mcp.json`: `.cursor/mcp.json`, `.vscode/mcp.json` (server `env` keys); a plain `src/mcp.json` stays.
+ * - `hosts.yml` only under `gh/` (GitHub CLI OAuth token); `settings.local.json` only under `.claude/`.
+ * `docker/config.json` is deliberately NOT here: only `.docker/config.json` holds registry auth (a dir run already).
+ */
+const SECRET_IN_CONTEXT: ReadonlyMap<string, { readonly parent: string } | { readonly dotParent: true }> = new Map([
+  ['auth.json', { dotParent: true }],
+  ['mcp.json', { dotParent: true }],
+  ['hosts.yml', { parent: 'gh' }],
+  ['settings.local.json', { parent: '.claude' }],
+] as const);
 const OS_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
 const BINARY_EXTENSIONS = new Set(
   'png jpg jpeg gif webp ico pdf zip gz tar 7z jar exe dll so dylib wasm mp4 mov woff woff2 ttf otf sqlite db'.split(' '),
 );
 
-function isSecretSegment(segment: string): boolean {
+/** Used as an `Array#some` callback over the path's segments, so `index`/`segments` give the parent for context rules. */
+function isSecretSegment(segment: string, index: number, segments: readonly string[]): boolean {
   const s = segment.toLowerCase();
   if (SECRET_ALLOWED.has(s)) return false;
-  return SECRET_NAMES.has(s) || SECRET_PATTERNS.some((re) => re.test(s));
+  if (SECRET_NAMES.has(s) || SECRET_PATTERNS.some((re) => re.test(s))) return true;
+  const rule = SECRET_IN_CONTEXT.get(s);
+  if (rule === undefined) return false;
+  const parent = index > 0 ? (segments[index - 1] ?? '').toLowerCase() : undefined;
+  if ('parent' in rule) return parent === rule.parent;
+  return parent === undefined || parent.startsWith('.');
 }
 
 /** True when the segments contain a credential-directory run (`.aws`, `.config/gcloud`, …), case-insensitive. */

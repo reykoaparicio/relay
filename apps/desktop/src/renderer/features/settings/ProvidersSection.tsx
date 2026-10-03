@@ -9,7 +9,7 @@ import { NOW_IDLE_INTERVAL_MS, useNow } from '../../hooks/useNow';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useProviders } from '../../hooks/useProviders';
 import { useNextAction } from '../common/useNextAction';
-import { ProviderCard, providerState } from './ProviderCard';
+import { ProviderCard, providerState, rejectedDuring } from './ProviderCard';
 
 /** CatalogTable.profileChecks: engine warnings grouped by the profile's model (06 F14); never re-derived here. */
 function profileChecksByModel(
@@ -59,15 +59,26 @@ export function ProvidersSection() {
           </p>
         </InlineAlert>
       ) : null}
-      {rejected.map((p) => (
-        <InlineAlert key={p.providerId} tone="danger" title={`${p.displayName} rejected the stored key`}>
-          <p>
-            The last connection test returned <code>AUTH_REQUIRED</code>: {p.displayName} rejected Relay&apos;s small
-            test request made with this key. Profiles on {p.displayName} cannot start runs until you replace the
-            key.
-          </p>
-        </InlineAlert>
-      ))}
+      {rejected.map((p) => {
+        const during = rejectedDuring(p);
+        return (
+          <InlineAlert key={p.providerId} tone="danger" title={`${p.displayName} rejected the stored key`}>
+            {during === null ? (
+              <p>
+                The last connection test returned <code>AUTH_REQUIRED</code>: {p.displayName} rejected Relay&apos;s
+                small test request made with this key. Profiles on {p.displayName} cannot start runs until you replace
+                the key.
+              </p>
+            ) : (
+              <p>
+                {during}: {p.displayName} returned <code>AUTH_REQUIRED</code> for{' '}
+                {p.lastTest?.source === 'run' ? 'a run request' : 'Relay\'s small test request'} made with this key.
+                Profiles on {p.displayName} cannot start runs until you replace the key.
+              </p>
+            )}
+          </InlineAlert>
+        );
+      })}
       {testFailed.map((p) => {
         const code = p.lastTest?.code;
         return (

@@ -6,3 +6,12 @@ import { qk } from '../api/keys';
 export function useProjects() {
   return useQuery({ queryKey: qk.projects(), queryFn: () => call('relay/v1/projects.list', {}) });
 }
+
+/** `projects.list({ includeArchived: true })` → the archived projects only (Settings → Projects "Archived"). */
+export function useArchivedProjects() {
+  return useQuery({
+    queryKey: [...qk.projects(), 'archived'] as const,
+    queryFn: () => call('relay/v1/projects.list', { includeArchived: true }),
+    select: (list) => list.filter((p) => p.archivedAt !== null),
+  });
+}

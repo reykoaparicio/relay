@@ -528,7 +528,7 @@ Each repo is a factory `createXRepo(driver, deps)` built on prepared statements,
 |---|---|
 | `ProjectRepo` | `insert(p)`, `get(id)`, `getWithRoot(id)` (runner-internal, includes realpath), `findActiveByRoot(rootRealpath)` (the non-archived project at a root, one statement on `projects_root_active_uq`; `projects.createFromRoot`), `list({includeArchived})`, `update(id, patch, expectedUpdatedAt)` → `CONFLICT` on mismatch **or when the project is archived** (archived projects are read-only), `NOT_FOUND` when absent, `archive(id)` (sets `archived_at`; like `update`, writes `updated_at = max(now, current.updated_at + 1)` so `updated_at` strictly increases and a stale `update` CAS can never succeed after an archive), `stats(id, monthStart)` |
 | `SettingsRepo` | `get(key)`, `set(key, value)` |
-| `CredentialRefRepo` | `upsert(ref)`, `get(providerId)`, `list()`, `delete(providerId)`, `recordTest(providerId, ok, code, at)` |
+| `CredentialRefRepo` | `upsert(ref)`, `get(providerId)`, `list()`, `delete(providerId)`, `recordTest(providerId, ok, code, at, source)` (`source`: `connection_test` \| `run`, migration 0004) |
 | `CatalogRepo` | `upsertMany(entries)`, `get(provider, model, version?)` (latest when version absent), `list(provider?)`, `latestVersion()`. Mapping: `CatalogEntry.displayName` ↔ `display_name`, `prices` ↔ `prices_json`, `capabilities` ↔ `capabilities_json`, `effectiveDate` ↔ `effective_date`, `source` ↔ `source`, `sourceRetrievedAt` ↔ `source_retrieved_at`, `catalogVersion` ↔ `catalog_version` |
 | `ProfileRepo` | `list()`, `get(id)`, `getByName(name)`, `upsert(p, expectedRevision?)` (writes `params_json`, `capabilities_snapshot_json`, and `catalog_version` together; the caller passes the capability snapshot it validated against), `delete(id)` |
 | `WorkflowRepo` | `ensureWorkflow(slug, name)`, `listSummaries()` (`workflows.list`: each workflow with its latest validated and draft version numbers, one statement), `getVersion(wfId, version \| 'draft')`, `latestValidated(wfId)`, `listVersions(wfId)` (every version, ascending; used by the `profiles.upsert` rename check), `insertVersion(v)`, `updateDraft(wfId, patch, expectedDraftRevision)`, `markValidated(id, at)` |
@@ -626,3 +626,20 @@ Otherwise (fresh heartbeat **and** live PID) it returns `held_by_other`. An imme
 - [ ] `root_realpath` never appears in a type exported for IPC
 - [ ] `idempotency_keys.result_json` holds ids + status only, never a DTO
 - [ ] No `migrationsDir` option or runtime migration file read anywhere; `openDb`/`openTestDb` signatures match C4
+
+## Addendum E2 (resilience fixes, 2026-10-02)
+
+- `busy_timeout` is `BUSY_TIMEOUT_MS = 200` (was 5000): synchronous node:sqlite must never block the runner's event
+  loop long enough to miss heartbeats. A lock that outlasts it is `DATABASE_UNAVAILABLE` `database_busy` (retryable,
+  next action `wait`). The engine retries queries asynchronously (`QUERY_BUSY_RETRY_DELAYS_MS`), backs the run loop off
+  instead of failing the run, and skips a heartbeat that meets a lock.
+- `openDb` retries a lock at boot (`OPEN_BUSY_RETRY_DELAYS_MS`, ~8 s, yielding) and then fails with the boot variant of
+  `database_busy` (next action `restart_runner`). Every open failure maps to `DATABASE_UNAVAILABLE` with a closed reason:
+  `schema_too_new`, `migration_checksum_mismatch`, `disk_full`, `db_readonly` (write probe at open), `db_corrupt`,
+  `integrity_check_failed`, `db_cannot_open`. `fatalInfoOf(err)` (contracts) gives the runner's `fatal {code, reason}`.
+- Backups are atomic: written to `<name>.partial/`, renamed after `manifest.json`; a failure removes the partial dir
+  (guarded delete). Rolling automatic backups (`Db.autoBackup`, DB-only) go to `<userData>/backups-auto/`, daily, newest 5
+  kept. `restoreLatestBackup` (runner-independent, never opens the live DB) restores the newest healthy backup from
+  `backups/` + `backups-auto/` and moves the old files to `relay.sqlite.before-restore-<stamp>/`.
+- `Db.sizeBytes()` counts the `-wal`. Migration 0003 rebuilds `memory_events` for the `reviewed` / `skipped` events. Migration 0004 adds `provider_credential_refs.last_test_source` (`connection_test` | `run`, NULL for older results; cleared on key replacement). `RunRepo.findByIdempotencyKey(key)` is the one-statement lookup `runs.start` uses on an expired-key insert collision.
+- `purgeRunSnapshots` / `purgeProjectHistory` touch only ENDED runs.

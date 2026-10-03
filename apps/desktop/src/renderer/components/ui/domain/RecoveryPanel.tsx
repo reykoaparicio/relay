@@ -9,6 +9,7 @@ import {
 } from '../../../lib/format/actions';
 import type { UnknownOutcomeDecision } from '../../../lib/format/actions';
 import { stepKeyLabel } from '../../../lib/format/labels';
+import { formatMoney } from '../../../lib/format/money';
 import { statusPresentation } from '../../../lib/format/status-presentation';
 import { Button } from '../Button';
 import { ConfirmDialog } from '../Dialog';
@@ -133,7 +134,9 @@ export function RecoveryPanel({
                               onDecide('decide_unknown', { attemptId: a.id, decision });
                             }}
                           >
-                            {UNKNOWN_OUTCOME_DECISION_LABELS[decision]}
+                            {decision === 'accept_estimated_charge' && a.cost !== null
+                              ? `Accept ${formatMoney(a.cost.microusd)} as the charge`
+                              : UNKNOWN_OUTCOME_DECISION_LABELS[decision]}
                           </Button>
                         ))}
                     </div>

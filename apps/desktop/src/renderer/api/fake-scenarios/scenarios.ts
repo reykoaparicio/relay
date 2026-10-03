@@ -1,8 +1,8 @@
 // Fake scenarios (10 J3): one per mock state, selected with `?fake=<name>` in `pnpm dev:renderer`.
-import { appError, errors } from '@relay/contracts';
+import { appError, DATABASE_UNAVAILABLE_MESSAGES, errors } from '@relay/contracts';
 import type { PauseReason, RunStatus } from '@relay/contracts';
 import { runEventSchema } from '@relay/contracts';
-import { buildWorld, DAY, HOUR, MINUTE, rawResponseArtifact, sid } from './world';
+import { buildWorld, DAY, HOUR, MINUTE, PROJECT_ID, rawResponseArtifact, sid } from './world';
 import type { FakeWorld, RunSpec, StepKeyName, WorldOptions } from './world';
 
 export const FAKE_SCENARIOS = [
@@ -47,6 +47,16 @@ export const FAKE_SCENARIOS = [
   'queued-budget',
   'unknown-outcome-decided',
   'report-legacy',
+  // E1/E2 recovery states (R2 wiring):
+  'interrupted-quit',
+  'runner-unavailable',
+  'runner-crashed',
+  'database-busy',
+  'project-root-missing',
+  'suspected-secret',
+  'unreadable-file',
+  'export-partial',
+  'choose-profile-minimum',
 ] as const;
 export type FakeScenarioName = (typeof FAKE_SCENARIOS)[number];
 
@@ -182,11 +192,45 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
         }),
       );
     case 'interrupted':
+    case 'interrupted-quit':
+      // `interrupted`: the runner stopped responding (no clean quit). `interrupted-quit`: the user quit during the run.
       return withFocus(
         focus('interrupted', null, {
           steps: { ...DONE_TO_IMPLEMENT, implement: 'unknown' },
           unknownAttempt: { step: 'implement', liability: 620_000 },
           cost: { reported: 480_000, unknown: 620_000 },
+        }),
+        { lastShutdown: { clean: name === 'interrupted-quit', runActive: true, agoMs: 2 * HOUR } },
+      );
+    case 'runner-unavailable':
+      // The runner cannot open a damaged database; a healthy backup exists.
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), {
+        runnerFatal: { code: 'DATABASE_UNAVAILABLE', reason: 'db_corrupt', message: DATABASE_UNAVAILABLE_MESSAGES.db_corrupt },
+        loggingDegraded: true,
+        lastShutdown: { clean: false, runActive: false },
+      });
+    case 'runner-crashed':
+      // The runner kept crashing; a manual restart brings it back.
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }), {
+        runnerFatal: { code: 'RUNNER_UNAVAILABLE', reason: 'restart_limit', message: 'The background runner stopped responding several times in a row.' },
+      });
+    case 'database-busy':
+    case 'project-root-missing':
+    case 'unreadable-file':
+      return { runs: [...HISTORY], memory: 'full', ...(name === 'unreadable-file' ? { preview: { unreadable: ['config/local.json'] } } : {}) };
+    case 'suspected-secret':
+      return { runs: [...HISTORY], memory: 'full', preview: { suspectedSecret: true } };
+    case 'export-partial':
+      return withFocus(focus('completed', null, { steps: ALL_DONE, cost: { reported: 930_000 } }));
+    case 'choose-profile-minimum':
+      // Blocked before intake (never started): the profile options can only say "at least".
+      return withFocus(
+        focus('paused', 'budget_run', {
+          ...NEVER_STARTED,
+          cost: { allowance: 50_000 },
+          statusDetail: appError('BUDGET_BLOCKED', {
+            details: { L: 50_000, C: 0, R: 0, U: 0, N: 60_000, scope: 'run', total: 60_000, allowed: false },
+          }),
         }),
       );
     case 'unknown-outcome':
@@ -388,6 +432,20 @@ function options(name: FakeScenarioName): Omit<WorldOptions, 'now' | 'scenario'>
 function decorate(name: FakeScenarioName, world: FakeWorld, now: number): FakeWorld {
   const focusRun = world.runs.find((r) => r.id === sid('run', 24));
   if (name === 'export-failed') world.exportFails = true;
+  if (name === 'export-partial') world.exportFailParts = ['patch'];
+  if (name === 'database-busy') world.busyFailures = 2;
+  if (name === 'project-root-missing') {
+    world.rootMissing.add(PROJECT_ID);
+    world.relocateUnverified = true;
+  }
+  if (name === 'unreadable-file') world.unreadableOnRead.add('src/db/client.ts');
+  if (name === 'project-root-missing' || name === 'unreadable-file') {
+    // An archived project (Settings → Projects "Archived" section).
+    const base = world.projects[0];
+    if (base !== undefined) {
+      world.projects.push({ ...base, id: sid('project', 2) as typeof base.id, name: 'Old billing service', rootDisplayPath: '~/code/billing', archivedAt: (now - 10 * DAY) as typeof base.createdAt, updatedAt: (now - 10 * DAY) as typeof base.createdAt });
+    }
+  }
   if ((name === 'schema-invalid' || name === 'output-invalid') && focusRun !== undefined) {
     const step = focusRun.steps.find((s) => s.stepKey === 'implement');
     world.artifacts.set(

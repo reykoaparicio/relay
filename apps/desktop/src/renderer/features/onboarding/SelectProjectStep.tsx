@@ -11,6 +11,7 @@ import { PROVIDER_LABELS } from '../../lib/format';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { usePreview } from '../../hooks/usePreview';
+import { useProject } from '../../hooks/useProject';
 import { useProviders } from '../../hooks/useProviders';
 import { PreviewPanel } from '../run-setup/PreviewPanel';
 import { useNextAction } from '../common/useNextAction';
@@ -31,7 +32,48 @@ function parseExclusions(text: string): string[] {
 const SAFE_NOTE =
   'Only files you select for a run are sent. This preview shows what is eligible. Paths are checked against the canonical project root, including symlinks.';
 
-/** The sample (or an already created project): its preview only; the folder step is skipped (10 J6 step 4). */
+/** "Providers allowed to receive selected context" checkboxes (own folder and the sample alike). */
+function ProviderAllowList({
+  allowed,
+  connected,
+  error,
+  onChange,
+}: {
+  readonly allowed: readonly ProviderId[];
+  readonly connected: readonly ProviderId[];
+  readonly error: string | null;
+  readonly onChange: (next: ProviderId[]) => void;
+}) {
+  return (
+    <fieldset className="fieldset field" aria-describedby={error === null ? undefined : 'allowed-providers-error'}>
+      <legend>Providers allowed to receive selected context</legend>
+      <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+        {LISTED.map((id) => (
+          <Checkbox
+            key={id}
+            label={`${PROVIDER_LABELS[id]}${connected.includes(id) ? '' : ' (not connected)'}`}
+            checked={allowed.includes(id)}
+            onCheckedChange={(checked) => {
+              onChange(checked ? [...allowed.filter((p) => p !== id), id] : allowed.filter((p) => p !== id));
+            }}
+          />
+        ))}
+      </div>
+      {error === null ? null : (
+        <span className="error" id="allowed-providers-error">
+          {error}
+        </span>
+      )}
+    </fieldset>
+  );
+}
+
+const ALLOWED_ERROR = 'Allow at least one provider, or runs cannot send any context.';
+
+/**
+ * The sample (or an already created project): its preview, and for the sample the allowed providers (saved with
+ * `projects.update`, like your own folder's are set at create); the folder step is skipped (10 J6 step 4).
+ */
 function ExistingProject({
   go,
   projectId,
@@ -43,7 +85,36 @@ function ExistingProject({
   readonly name: string;
   readonly isSample: boolean;
 }) {
+  const queryClient = useQueryClient();
   const preview = usePreview({ projectId });
+  const project = useProject(isSample ? projectId : undefined);
+  const providers = useProviders();
+  const [edited, setEdited] = useState<readonly ProviderId[] | null>(null);
+  const [showErrors, setShowErrors] = useState(false);
+  const connected = (providers.data ?? []).filter((p) => p.connected && LISTED.includes(p.providerId)).map((p) => p.providerId);
+  const saved = project.data?.providerPolicy.allowedProviderIds;
+  const allowed = edited ?? saved ?? [];
+  const update = useMutation({
+    mutationFn: (ids: readonly ProviderId[]) =>
+      call('relay/v1/projects.update', {
+        projectId,
+        expectedUpdatedAt: project.data?.updatedAt ?? 0,
+        patch: { allowedProviderIds: [...ids] },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: qk.project(projectId) });
+      void queryClient.invalidateQueries({ queryKey: qk.projects() });
+      go('add-rule');
+    },
+  });
+  const allowedError = isSample && allowed.length === 0 ? ALLOWED_ERROR : null;
+  const changed = edited !== null && saved !== undefined && [...edited].sort().join() !== [...saved].sort().join();
+  const onContinue = () => {
+    setShowErrors(true);
+    if (allowedError !== null) return;
+    if (changed) update.mutate(allowed);
+    else go('add-rule');
+  };
   return (
     <StepFrame
       title={isSample ? 'The sample project' : 'Project folder'}
@@ -56,11 +127,21 @@ function ExistingProject({
       back="connect-provider"
       primary={{
         label: 'Continue',
-        onSubmit: () => {
-          go('add-rule');
-        },
+        onSubmit: onContinue,
+        pending: update.isPending,
+        disabled: isSample && project.data === undefined,
+        disabledReason: 'Loading the sample project…',
       }}
     >
+      {isSample ? (
+        <ProviderAllowList
+          allowed={allowed}
+          connected={connected}
+          error={showErrors ? allowedError : null}
+          onChange={setEdited}
+        />
+      ) : null}
+      {update.error === null ? null : <ErrorView live="assertive" error={toViewError(update.error)} onAction={() => { update.reset(); }} />}
       <h3>Included-file preview</h3>
       <PreviewPanel
         data={preview.data}
@@ -143,8 +224,7 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
       : state.projectName.length > 80
         ? 'Use at most 80 characters.'
         : null;
-  const allowedError =
-    allowed.length === 0 ? 'Allow at least one provider, or runs cannot send any context.' : null;
+  const allowedError = allowed.length === 0 ? ALLOWED_ERROR : null;
 
   const onCreate = () => {
     setShowErrors(true);
@@ -234,32 +314,14 @@ export function SelectProjectStep({ state, dispatch, go }: StepProps) {
               />
             )}
           </Field>
-          <fieldset
-            className="fieldset field"
-            aria-describedby={showErrors && allowedError !== null ? 'allowed-providers-error' : undefined}
-          >
-            <legend>Providers allowed to receive selected context</legend>
-            <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-              {LISTED.map((id) => (
-                <Checkbox
-                  key={id}
-                  label={`${PROVIDER_LABELS[id]}${connected.includes(id) ? '' : ' (not connected)'}`}
-                  checked={allowed.includes(id)}
-                  onCheckedChange={(checked) => {
-                    const next = checked
-                      ? [...allowed.filter((p) => p !== id), id]
-                      : allowed.filter((p) => p !== id);
-                    dispatch({ type: 'patch', patch: { allowedProviders: next } });
-                  }}
-                />
-              ))}
-            </div>
-            {showErrors && allowedError !== null ? (
-              <span className="error" id="allowed-providers-error">
-                {allowedError}
-              </span>
-            ) : null}
-          </fieldset>
+          <ProviderAllowList
+            allowed={allowed}
+            connected={connected}
+            error={showErrors ? allowedError : null}
+            onChange={(next) => {
+              dispatch({ type: 'patch', patch: { allowedProviders: next } });
+            }}
+          />
           <h3>Included-file preview</h3>
           <PreviewPanel
             data={preview.data}

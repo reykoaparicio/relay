@@ -27,9 +27,14 @@ function hasIdempotencyKey(schema: z.ZodType): boolean {
 describe('OPERATIONS / INTERNAL_RUNNER_OPS', () => {
   const all: readonly AnyOperationDef[] = [...OPERATION_LIST, ...INTERNAL_OPERATION_LIST];
 
-  it('has at least 55 renderer ops and 9 internal ops', () => {
+  it('has at least 55 renderer ops and 10 internal ops', () => {
     expect(OPERATION_LIST.length).toBeGreaterThanOrEqual(55);
-    expect(INTERNAL_OPERATION_LIST).toHaveLength(9);
+    expect(INTERNAL_OPERATION_LIST).toHaveLength(10);
+    expect(INTERNAL_OPERATION_LIST.map((d) => d.channel)).toContain('relay/v1/projects.relocateRoot');
+    const renderer = OPERATION_LIST.map((d) => d.channel);
+    for (const c of ['app.restartRunner', 'app.relaunch', 'app.restoreLatestBackup', 'projects.relocate', 'projects.unarchive']) {
+      expect(renderer).toContain(`relay/v1/${c}`);
+    }
   });
 
   it('every channel is unique across both sets and well-formed', () => {

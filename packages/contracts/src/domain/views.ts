@@ -44,6 +44,15 @@ export const fileEntrySchema = z.object({
   relPath: relPathSchema,
   sizeBytes: z.number().int().nonnegative(),
   sha256: sha256Schema.nullable(),
+  /**
+   * E2 #11 (audit F1): the file's content looks like a credential. Shown, but NOT selected by default; a run may include
+   * it only by listing it in the run input's `acknowledgedSuspectedSecrets`. Absent = no hit.
+   */
+  suspectedSecret: z.literal(true).optional(),
+  /** What it looks like (`anthropic_key`, `openai_key`, `github_token`, `google_api_key`, `aws_access_key`, `private_key`, `bearer_token`, `credential_value`); never the value. */
+  secretLabel: z.string().max(40).optional(),
+  /** 1-based line of the first hit. */
+  secretLine: z.number().int().positive().optional(),
 });
 /** File entry. */
 export type FileEntry = z.infer<typeof fileEntrySchema>;
@@ -52,6 +61,8 @@ export type FileEntry = z.infer<typeof fileEntrySchema>;
 export const previewResultSchema = z.object({
   included: z.array(fileEntrySchema),
   excluded: z.array(z.object({ relPath: relPathSchema, reason: exclusionReasonSchema })),
+  /** E2 #8: entries that exist but cannot be read (permissions); never selectable. Optional: older runners omit it. */
+  unreadable: z.array(relPathSchema).optional(),
   totals: z.object({
     files: z.number().int(),
     bytes: z.number().int(),

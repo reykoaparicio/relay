@@ -37,8 +37,8 @@ describe('classify: one row per reason code', () => {
     expect(run()).toBe(expected);
   });
 
-  it('covers every contracts EXCLUSION_REASON (symlink_outside comes from E1 via scan)', () => {
-    const covered = new Set<string>([...rows.map(([r]) => r), 'symlink_outside']);
+  it('covers every contracts EXCLUSION_REASON (symlink_outside comes from E1 via scan, hard_link from the scan probe / readConfined)', () => {
+    const covered = new Set<string>([...rows.map(([r]) => r), 'symlink_outside', 'hard_link']);
 
     expect([...EXCLUSION_REASONS].every((r) => covered.has(r))).toBe(true);
   });
@@ -156,6 +156,105 @@ describe('secrets', () => {
     expect(reasonOf('src/MySecretStore.ts')).toBe('secret');
     expect(reasonOf('SECRETS.md')).toBe('secret');
     expect(reasonOf('config/.ENV')).toBe('secret');
+  });
+});
+
+describe('secrets: credential files from security audit F1', () => {
+  it.each([
+    'terraform.tfstate',
+    'terraform.tfstate.backup',
+    'infra/.terraform/terraform.tfstate',
+    'infra/terraform.tfstate.d/prod/terraform.tfstate',
+    'AuthKey_ABCD1234.p8',
+    'putty/key.ppk',
+    'vault.kdbx',
+    'kubeconfig',
+    'config/kubeconfig.yaml',
+    'deploy/kubeconfig-prod.yml',
+    'KUBECONFIG',
+    '.htpasswd',
+    'public/.htpasswd',
+    '.my.cnf',
+    '.s3cfg',
+    '.boto',
+    '.vault-token',
+    '.terraformrc',
+    '_netrc',
+    '.yarnrc',
+    '.mcp.json',
+    '.claude.json',
+    '.cursor/mcp.json',
+    '.vscode/mcp.json',
+    'mcp.json',
+    '.claude/settings.local.json',
+    '.codex/auth.json',
+    '.composer/auth.json',
+    'auth.json',
+    '.config/gh/hosts.yml',
+    'gh/hosts.yml',
+    'my-project-1a2b3c-firebase-adminsdk-x1y2z.json',
+    'gcp-sa-key.json',
+    'keys/sa_key.json',
+    'wp-config.php',
+    'public_html/WP-CONFIG.PHP',
+    'token.json',
+    'scripts/token.json',
+    'pip.conf',
+    'env.production',
+    'config/env.local',
+    'appsettings.Production.json',
+    'appsettings.Staging.json',
+    'application-prod.properties',
+    'src/main/resources/application-production.yml',
+  ])('%s is secret', (p) => {
+    expect(reasonOf(p)).toBe('secret');
+  });
+
+  it('matches context rules case-insensitively and on NFC', () => {
+    expect(reasonOf('.Cursor/MCP.json')).toBe('secret');
+    expect(reasonOf('.CLAUDE/Settings.Local.json')).toBe('secret');
+    expect(reasonOf('.config/GH/hosts.YML')).toBe('secret');
+    expect(reasonOf('.codex/auth.json'.normalize('NFD'))).toBe('secret');
+  });
+
+  it.each([
+    'firebase.json',
+    '.firebaserc',
+    'server.crt',
+    'package.json',
+    'tsconfig.json',
+    'appsettings.json',
+    'appsettings.Development.json',
+    'application.properties',
+    'application-dev.yml',
+    'config.json',
+    'docker/config.json',
+    'src/auth.ts',
+    'src/token.ts',
+    'tokenizer.json',
+    'tokens.json',
+    'design/tokens.json',
+    'src/keyboard.ts',
+    'locales/en/auth.json',
+    'src/mcp.json',
+    'src/mcp.ts',
+    'hosts.yml',
+    'ansible/hosts.yml',
+    '.claude/settings.json',
+    'settings.local.json',
+    'src/kubeconfig.go',
+    'pkg/kubeconfig.ts',
+    'wp-config-sample.php',
+    'my.cnf',
+    'src/env.ts',
+    'src/env.d.ts',
+    'environment.prod.ts',
+    'terraform/main.tf',
+    'terraform.lock.hcl',
+    'src/visa-key.json',
+    '.yarnrc.yml.example',
+  ])('%s stays included', (p) => {
+    expect(reasonOf(p)).toBe('included');
   });
 });
 

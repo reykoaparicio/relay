@@ -130,7 +130,7 @@ describe('memory.* handlers (07 G5 / 02 memory ops)', () => {
     const rejected = await x.engine.handle('relay/v1/memory.reject', { suggestionId: s2, reason: 'Not durable.' });
     const rejectAgain = await x.engine.handle('relay/v1/memory.reject', { suggestionId: s2 });
 
-    expect(view.ok && [view.data.proposal, view.data.conflictsWith]).toEqual([{ rationale: 'Seen twice.', suggestedScope: { roles: 'all' }, conflictsWith: [] }, []]);
+    expect(view.ok && [view.data.proposal, view.data.conflictsWith]).toEqual([{ rationale: 'Seen twice.', suggestedScope: { roles: 'all' }, conflictsWith: [], sourceRefs: [] }, []]);
     expect(approved.ok && [approved.data.status, approved.data.title, approved.data.currentRevision]).toEqual(['approved', 'First rule', 2]);
     expect(rejected.ok && rejected.data).toEqual({ status: 'rejected' });
     expect(rejectAgain.ok ? null : rejectAgain.error.code).toBe('CONFLICT');
@@ -160,6 +160,8 @@ describe('memory.* handlers (07 G5 / 02 memory ops)', () => {
     const runId = await x.startRun();
     await tick(x.ctx);
     await tick(x.ctx);
+    // E2 #14: only ENDED runs lose their snapshot copies; end this one first.
+    expect(x.db.repos.runs.updateStatus(runId, ['queued', 'running', 'paused', 'awaiting_approval'], 'cancelled', {})).toBe(true);
 
     const purged = await x.engine.handle('relay/v1/memory.purgeProjectHistory', { projectId: x.projectId, confirmPhrase: 'purge' });
     const unknown = await x.engine.handle('relay/v1/memory.purgeProjectHistory', { projectId: 'prj_01J9ZZZZZZZZZZZZZZZZZZZZZ0', confirmPhrase: 'purge' });
@@ -178,6 +180,10 @@ describe('memory.* handlers (07 G5 / 02 memory ops)', () => {
     await x.engine.start();
     const runId = await x.startRun();
     await x.waitForStatus(runId, ['awaiting_approval']);
+    // E2 #14: an active run keeps its history; cancel it so the purge applies.
+    const cancel = await x.engine.handle('relay/v1/runs.cancel', { runId });
+    expect(cancel.ok).toBe(true);
+    await x.waitForStatus(runId, ['cancelled']);
     const history = x.db.repos.artifacts.listForRun(runId, ['raw_response', 'context_manifest']).length;
     const real = x.ctx.maintenance;
     (x.ctx as { maintenance: EngineCtx['maintenance'] }).maintenance = createMaintenance({ db: x.db, clock: x.clock,

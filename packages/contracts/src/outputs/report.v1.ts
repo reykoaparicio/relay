@@ -94,6 +94,14 @@ export const reportV1Schema = z.object({
       incompleteCause: z.enum(['revision_limit', 'verifier_incomplete']).nullable(),
     })
     .optional(),
+  /**
+   * Per step key (E1): the display name from the workflow spec and, for a model step, the instruction version whose
+   * text the run used (e.g. "reviewer.v2": an edited prompt gets a new version name, the old text stays with the runs
+   * that used it). Optional (additive): earlier reports do not carry it.
+   */
+  stepMeta: z
+    .array(z.object({ stepKey: stepKeySchema, name: z.string().max(60).nullable(), instructionVersion: z.string().nullable() }))
+    .optional(),
 });
 /** `report.v1` value. */
 export type ReportV1 = z.infer<typeof reportV1Schema>;

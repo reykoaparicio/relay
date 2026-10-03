@@ -1,5 +1,6 @@
 {
   "name": "@relay/desktop",
+  "productName": "Relay",
   "version": "0.0.0",
   "private": true,
   "type": "module",

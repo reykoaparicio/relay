@@ -15,7 +15,7 @@ describe('openNodeSqlite', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('rejects a write on a read-only connection', () => {
+  it('rejects a write on a read-only connection with DATABASE_UNAVAILABLE db_readonly (E2 #3)', () => {
     const path = join(dir, 'a.sqlite');
     const rw = openNodeSqlite(path);
     rw.exec('CREATE TABLE t (x INTEGER) STRICT');
@@ -23,9 +23,13 @@ describe('openNodeSqlite', () => {
 
     const ro = openNodeSqlite(path, { readOnly: true });
 
-    expect(() => {
+    let thrown: unknown = null;
+    try {
       ro.exec('INSERT INTO t VALUES (1)');
-    }).toThrow(/readonly/);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toMatchObject({ appError: { code: 'DATABASE_UNAVAILABLE', details: { reason: 'db_readonly' } } });
     ro.close();
   });
 
@@ -74,7 +78,7 @@ describe('openNodeSqlite', () => {
     d.close();
   });
 
-  it('maps SQLITE_BUSY to a retryable RUNNER_UNAVAILABLE and passes other errors through', () => {
+  it('maps SQLITE_BUSY to a retryable DATABASE_UNAVAILABLE database_busy (next action wait) and passes other errors through', () => {
     const path = join(dir, 'e.sqlite');
     const a = openNodeSqlite(path);
     applyPragmas(a);
@@ -92,7 +96,7 @@ describe('openNodeSqlite', () => {
       }
     })();
 
-    expect(busy).toMatchObject({ appError: { code: 'RUNNER_UNAVAILABLE', retryable: true } });
+    expect(busy).toMatchObject({ appError: { code: 'DATABASE_UNAVAILABLE', retryable: true, nextAction: 'wait', details: { reason: 'database_busy' } } });
     expect(() => b.prepare('SELECT * FROM missing_table').get()).toThrow(/no such table/);
     a.exec('ROLLBACK');
     a.close();

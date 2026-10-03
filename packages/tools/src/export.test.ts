@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Result, RunId } from '@relay/contracts';
 import { createIdGen } from '@relay/contracts';
 import { createArtifactStore } from './artifact-store.js';
-import { assertExportDestination, exportArtifacts, isSafeFileName, writeExportFile } from './export.js';
+import { assertExportDestination, exportArtifacts, exportWriteHooks, isSafeFileName, writeExportFile } from './export.js';
 import { artifactIds, fakeClock, tempDirs } from './testing/temp-dirs.js';
 
 const tmp = tempDirs();
@@ -161,8 +161,8 @@ describe('exportArtifacts', () => {
     const first = await exportArtifacts({ files, destinationRealpath: exportsDir, projectRoots: [project], store });
     const again = await exportArtifacts({ files: files.slice(0, 1), destinationRealpath: exportsDir, projectRoots: [project], store });
 
-    expect(first).toEqual({ ok: true, value: { written: ['report.md', 'report (2).md'] } });
-    expect(again).toEqual({ ok: true, value: { written: ['report (3).md'] } });
+    expect(first).toEqual({ ok: true, value: { written: ['report.md', 'report (2).md'], failed: [] } });
+    expect(again).toEqual({ ok: true, value: { written: ['report (3).md'], failed: [] } });
     expect(await fs.promises.readFile(path.join(exportsDir, 'report (2).md'), 'utf8')).toBe('diff');
   });
 
@@ -178,18 +178,40 @@ describe('exportArtifacts', () => {
     expect(reasonOf(contains)).toBe('PERMISSION_DENIED:contains_project');
   });
 
-  it('fails before writing anything when an artifact is purged, and rejects unsafe names', async () => {
+  it('E2 #10: a purged artifact fails on its own; the other file is still written and reported, and unsafe names are rejected', async () => {
     const { project, exportsDir } = await layout();
     const { store, relPaths } = await storeWith(['a', 'b']);
     await store.purge(relPaths[1] ?? '');
     const files = relPaths.map((relPath, i) => ({ relPath, suggestedName: `f${String(i)}.md` }));
 
-    const purged = await exportArtifacts({ files, destinationRealpath: exportsDir, projectRoots: [project], store });
+    const partial = await exportArtifacts({ files, destinationRealpath: exportsDir, projectRoots: [project], store });
+    const onlyPurged = await exportArtifacts({ files: files.slice(1), destinationRealpath: exportsDir, projectRoots: [project], store });
     const unsafe = await exportArtifacts({ files: [{ relPath: relPaths[0] ?? '', suggestedName: '../x' }], destinationRealpath: exportsDir, projectRoots: [project], store });
 
-    expect(purged.ok || [purged.error.code, purged.error.details?.['purged']]).toEqual(['NOT_FOUND', true]);
-    expect(await fs.promises.readdir(exportsDir)).toEqual([]);
+    expect(partial.ok && partial.value).toEqual({ written: ['f0.md'], failed: [{ suggestedName: 'f1.md', code: 'NOT_FOUND' }] });
+    expect(onlyPurged.ok || [onlyPurged.error.code, onlyPurged.error.details?.['purged'], onlyPurged.error.details?.['failed']])
+      .toEqual(['NOT_FOUND', true, [{ suggestedName: 'f1.md', code: 'NOT_FOUND' }]]);
+    expect(await fs.promises.readdir(exportsDir)).toEqual(['f0.md']);
     expect(unsafe.ok || unsafe.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('E2 #9: a write that fails part-way leaves no 0-byte or partial file, and no temp file', async () => {
+    const { project, exportsDir } = await layout();
+    const { store, relPaths } = await storeWith(['a']);
+    exportWriteHooks.beforePublish = () => Promise.reject(Object.assign(new Error('ENOSPC: no space left'), { code: 'ENOSPC' }));
+    try {
+      const r = await exportArtifacts({ files: [{ relPath: relPaths[0] ?? '', suggestedName: 'a.md' }], destinationRealpath: exportsDir, projectRoots: [project], store });
+      const w = await writeExportFile(exportsDir, 'b.csv', new Uint8Array([1, 2, 3]), [project]);
+
+      expect(r.ok || r.error.code).toBe('ARTIFACT_WRITE_FAILED');
+      expect(w.ok || w.error.code).toBe('ARTIFACT_WRITE_FAILED');
+      expect(await fs.promises.readdir(exportsDir)).toEqual([]);
+    } finally {
+      delete exportWriteHooks.beforePublish;
+    }
+    const again = await writeExportFile(exportsDir, 'b.csv', new Uint8Array([1, 2, 3]), [project]);
+    expect(again.ok && again.value.fileName).toBe('b.csv');
+    expect(await fs.promises.readdir(exportsDir)).toEqual(['b.csv']);
   });
 
   it('returns ARTIFACT_WRITE_FAILED when writing fails', async () => {

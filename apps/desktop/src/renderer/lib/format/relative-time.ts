@@ -43,6 +43,19 @@ function absoluteFormatter(locale: string | undefined): Intl.DateTimeFormat {
   return f;
 }
 
+const CLOCK_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+/** Local time of day only ("5:24 PM"), for rows within one run; the full date goes in a tooltip. */
+export function formatClockTime(epochMs: number, locale?: string): string {
+  const key = locale ?? '';
+  let f = CLOCK_FORMATTERS.get(key);
+  if (f === undefined) {
+    f = new Intl.DateTimeFormat(locale, { timeStyle: 'short' });
+    CLOCK_FORMATTERS.set(key, f);
+  }
+  return f.format(new Date(epochMs));
+}
+
 /** ISO string for `<time dateTime>`. */
 export function toIsoString(epochMs: number): string {
   return new Date(epochMs).toISOString();

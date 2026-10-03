@@ -1,7 +1,8 @@
 import { memo, useRef } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import type { StepView } from '@relay/contracts';
 import { statusPresentation } from '../../../lib/format/status-presentation';
+import type { StatusPresentation } from '../../../lib/format/status-presentation';
 import { stepKeyLabel } from '../../../lib/format/labels';
 import { ListItemButton } from '../ListItemButton';
 
@@ -11,6 +12,10 @@ export interface StepTimelineProps {
   readonly onSelect: (stepId: StepView['id']) => void;
   /** Display title per step key; defaults to a humanized key ("plan_fix" → "Plan fix"). */
   readonly titleFor?: (step: StepView) => string;
+  /** Status shown per step (e.g. "Blocked: run budget" for the step a pause holds back); defaults to the step state. */
+  readonly presentationFor?: (step: StepView) => StatusPresentation;
+  /** Extra badges under a step (e.g. the step whose request cost more than reserved). */
+  readonly badgesFor?: (step: StepView) => ReactNode;
   readonly label?: string;
 }
 
@@ -23,7 +28,7 @@ function metaLine(step: StepView): string {
 }
 
 /** Ordered run steps with a state dot and text state; ArrowUp/ArrowDown/Home/End move the selection. */
-function StepTimelineView({ steps, selectedId, onSelect, titleFor, label = 'Run steps' }: StepTimelineProps) {
+function StepTimelineView({ steps, selectedId, onSelect, titleFor, presentationFor, badgesFor, label = 'Run steps' }: StepTimelineProps) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -42,9 +47,10 @@ function StepTimelineView({ steps, selectedId, onSelect, titleFor, label = 'Run 
   return (
     <ol className="timeline" aria-label={label}>
       {steps.map((step, index) => {
-        const p = statusPresentation('step', step.state);
+        const p = presentationFor ? presentationFor(step) : statusPresentation('step', step.state);
         const Icon = p.icon;
         const meta = metaLine(step);
+        const badges = badgesFor?.(step);
         return (
           <li key={step.id} className={p.tone}>
             <span className="dot" aria-hidden="true">
@@ -61,6 +67,7 @@ function StepTimelineView({ steps, selectedId, onSelect, titleFor, label = 'Run 
               onKeyDown={(e) => { onKeyDown(e, index); }}
               title={titleFor ? titleFor(step) : stepKeyLabel(step.stepKey)}
               meta={`${p.label}${meta ? ` · ${meta}` : ''}`}
+              {...(badges === undefined || badges === null ? {} : { badges })}
             />
           </li>
         );

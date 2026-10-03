@@ -4,6 +4,7 @@ import { ROLES } from '@relay/contracts';
 import type { MemoryRecordDetail, MemoryRecordScope, MemoryRecordView, Role } from '@relay/contracts';
 import type { MemoryTab } from '../shell/paths';
 import { ROLE_LABELS } from '../run-setup/model-steps';
+import { runLabel } from '../../lib/format';
 
 export const MEMORY_TABS: readonly MemoryTab[] = ['approved', 'suggested', 'archived'];
 
@@ -73,27 +74,60 @@ export function rolesOfScope(scope: MemoryRecordScope): Set<Role> {
   return new Set(scope.roles === 'all' ? ROLES : scope.roles);
 }
 
-/**
- * True when the review date has passed and the record was not touched since (§5.5 "review date": offer "Confirm
- * still accurate"). Confirming writes `reviewAt = now`, which also moves `updatedAt`, so a confirmed record is not due.
- */
-export function isReviewDue(record: Pick<MemoryRecordView, 'reviewAt' | 'updatedAt'>, now: number): boolean {
-  return record.reviewAt !== null && record.reviewAt <= now && record.updatedAt < record.reviewAt;
-}
-
-/** "you" / "run 0023": the author of a revision or event. */
+/** "you" / "Run 0023": the author of a revision or event (`user` or `run:<runId>`). */
 export function actorText(actor: string): string {
   if (actor === 'user') return 'you';
-  return actor.startsWith('run:') ? `Run ${actor.slice(-4)}` : actor;
+  return actor.startsWith('run:') ? runLabel(actor.slice('run:'.length)) : actor;
 }
 
-/** The most recent file hash recorded for a record's source (stale-source banner). */
+/** The most recent file hash recorded for a record's source (Source row). */
 export function latestFileRef(record: MemoryRecordDetail): { readonly relPath: string; readonly sha256: string } | null {
   for (let i = record.revisions.length - 1; i >= 0; i -= 1) {
     const ref = record.revisions[i]?.sourceRefs.find((r) => r.kind === 'file');
     if (ref?.kind === 'file') return { relPath: ref.relPath, sha256: ref.sha256 };
   }
   return record.source.kind === 'file' ? { relPath: record.source.relPath, sha256: '' } : null;
+}
+
+/** One source file of a stale record: the hash recorded for it, and the earlier hash a confirmation replaced. */
+export interface StaleFileRef {
+  readonly relPath: string;
+  /** Hash recorded at `revision` ('' when no revision recorded one, e.g. a file source without refs). */
+  readonly sha256: string;
+  readonly revision: number | null;
+  /** The hash an earlier revision recorded, when a later confirmation refreshed it (E2 #16). */
+  readonly previous: { readonly sha256: string; readonly revision: number } | null;
+}
+
+/**
+ * The file refs to show for a stale record (E2 #16): the latest revision that records file refs (normally the current
+ * one), each with the earlier differing hash of the same file when a confirmation refreshed it. The contract carries no
+ * live hash, so the file's current hash is never known here.
+ */
+export function staleFileRefs(record: MemoryRecordDetail): StaleFileRef[] {
+  const revs = record.revisions;
+  for (let i = revs.length - 1; i >= 0; i -= 1) {
+    const rev = revs[i];
+    if (rev === undefined) continue;
+    const files = rev.sourceRefs.flatMap((r) => (r.kind === 'file' ? [r] : []));
+    if (files.length === 0) continue;
+    return files.map((f) => {
+      let previous: StaleFileRef['previous'] = null;
+      for (let j = i - 1; j >= 0 && previous === null; j -= 1) {
+        const older = revs[j]?.sourceRefs.find((r) => r.kind === 'file' && r.relPath === f.relPath);
+        if (older?.kind === 'file' && older.sha256 !== f.sha256) previous = { sha256: older.sha256, revision: revs[j]?.revision ?? 0 };
+      }
+      return { relPath: f.relPath, sha256: f.sha256, revision: rev.revision, previous };
+    });
+  }
+  return record.source.kind === 'file' ? [{ relPath: record.source.relPath, sha256: '', revision: null, previous: null }] : [];
+}
+
+/** "used by 2 runs" for a revision (`usedByRuns` is optional: absent → null, nothing shown). */
+export function revisionUsageText(usedByRuns: number | undefined): string | null {
+  if (usedByRuns === undefined) return null;
+  if (usedByRuns === 0) return 'not used by any run';
+  return `used by ${String(usedByRuns)} run${usedByRuns === 1 ? '' : 's'}`;
 }
 
 /** Pairs of records that conflict (each pair once), in list order. Only listed (approved/suggested) records count. */

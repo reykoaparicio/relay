@@ -17,6 +17,7 @@ import type {
 import type { DeferredPause, Repos, RunRow } from '@relay/storage';
 import { logSafe } from './log-safe.js';
 import type { EngineCtx } from './ports.js';
+import { closeSegment, segmentEndAt } from './segments.js';
 
 /** Every event that can move a run (F2). */
 export type RunMachineEvent =
@@ -123,6 +124,9 @@ const TABLE: Readonly<Record<RunStatus, Rules>> = {
   paused: {
     ...STOP_RULES,
     RESUME_RESOLVED: always(to('queued')), // clarification 12
+    // E1 #1: a budget re-check (allowance increase, project allowance edit) that now fails at the OTHER scope moves the
+    // run to the pause of the scope that failed, so the offered action is the one that can unblock it.
+    BUDGET_BLOCKED: (ev) => paused(ev.type === 'BUDGET_BLOCKED' && ev.scope === 'project' ? 'budget_project' : 'budget_run'),
     // Clarification 14 (BH-2/BH-6): once the last unknown attempt of a paused(unknown_outcome) run is resolved, a
     // reconciled overrun or scope change re-pauses it with that reason instead of resuming (never auto-resumed).
     BUDGET_OVERRUN: always(paused('budget_overrun')),
@@ -154,14 +158,37 @@ export interface RunActionFacts {
   readonly unknownAttempts: number;
   readonly hasFailedStep: boolean;
   readonly hasPatchArtifact: boolean;
+  /**
+   * E1 #8: a provider of an open model step has no credential ref. `resume` from `paused(auth_required)` then always
+   * fails (AUTH_REQUIRED), so only `reconnect_provider` is offered until the key is back. Absent = false.
+   */
+  readonly missingCredential?: boolean | undefined;
+  /**
+   * E1 #8: false when an `approval_stale` pause is NOT a project change (plan / scope / provider changed):
+   * `use_preserved_snapshot` only answers PROJECT_CHANGED, so it is not offered then. Absent = offered.
+   */
+  readonly preservableSnapshot?: boolean | undefined;
+  /**
+   * E1 #8: false when no profile can be chosen for the blocked step (no allowed provider with a credential ref and a
+   * supported catalog model): `choose_profile` is then not offered. Absent = offered.
+   */
+  readonly hasProfileOptions?: boolean | undefined;
+}
+
+/**
+ * The non-stop way out of a budget pause. With a FAILED step the blocking step changes profile through
+ * `runs.retryStep` (a new row), so `retry_step` is offered next to `choose_profile` (both accepted there, E1 #8).
+ */
+function budgetActions(raise: 'increase_allowance' | 'edit_project_allowance', f: RunActionFacts): RunAction[] {
+  return f.hasFailedStep ? [raise, 'retry_step', 'choose_profile', 'stop'] : [raise, 'choose_profile', 'stop'];
 }
 
 function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
   switch (reason) {
     case 'budget_run':
-      return ['increase_allowance', 'choose_profile', 'stop'];
+      return budgetActions('increase_allowance', f);
     case 'budget_project':
-      return ['edit_project_allowance', 'choose_profile', 'stop'];
+      return budgetActions('edit_project_allowance', f);
     case 'budget_overrun':
       return ['acknowledge_overrun', 'increase_allowance', 'stop'];
     case 'limit_attempts':
@@ -179,12 +206,12 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
       // run was not re-queued) `resume` continues, so this pause, like every other, has a non-stop way out.
       return f.hasFailedStep ? ['retry_step', 'choose_profile', 'stop'] : ['resume', 'stop'];
     case 'auth_required':
-      return ['reconnect_provider', 'resume', 'stop'];
+      return f.missingCredential === true ? ['reconnect_provider', 'stop'] : ['reconnect_provider', 'resume', 'stop'];
     case 'user':
     case 'rate_limited':
       return ['resume', 'stop'];
     case 'approval_stale':
-      return ['resnapshot_and_replan', 'use_preserved_snapshot', 'stop'];
+      return f.preservableSnapshot === false ? ['resnapshot_and_replan', 'stop'] : ['resnapshot_and_replan', 'use_preserved_snapshot', 'stop'];
   }
 }
 
@@ -192,9 +219,14 @@ function pausedActions(reason: PauseReason, f: RunActionFacts): RunAction[] {
  * Server-computed actions (`RunDetail.availableActions`); the UI renders only these (F2 truth table), and every
  * decision op (`runs.resume`, `runs.retryStep`, `runs.decideUnknown`) refuses an action not listed here for the run's
  * current state (CONFLICT `decision_not_applicable`), so the UI and the server can never disagree. An unresolved
- * unknown attempt is decidable from ANY pause (clarification 15).
+ * unknown attempt is decidable from ANY pause (clarification 15), and from a terminal run (E1 #4: settle only).
  */
 export function allowedRunActions(run: Pick<RunRow, 'status' | 'pauseReason'>, f: RunActionFacts): RunAction[] {
+  const actions = actionsFor(run, f);
+  return f.hasProfileOptions === false ? actions.filter((a) => a !== 'choose_profile') : actions;
+}
+
+function actionsFor(run: Pick<RunRow, 'status' | 'pauseReason'>, f: RunActionFacts): RunAction[] {
   if (run.status === 'paused' && f.unknownAttempts > 0) {
     const base = run.pauseReason === null ? ['stop' as const] : pausedActions(run.pauseReason, f);
     return base.includes('decide_unknown') ? base : [...base.filter((a) => a !== 'stop'), 'decide_unknown', 'stop'];
@@ -209,14 +241,18 @@ export function allowedRunActions(run: Pick<RunRow, 'status' | 'pauseReason'>, f
     case 'paused':
       return run.pauseReason === null ? ['stop'] : pausedActions(run.pauseReason, f);
     case 'interrupted':
-      return f.unknownAttempts > 0 ? ['review_recovery', 'decide_unknown', 'stop'] : ['review_recovery', 'stop'];
+      // E1 #8: review_recovery (RECOVERY_DECIDED) needs every unknown attempt decided first, so it is offered only then.
+      return f.unknownAttempts > 0 ? ['decide_unknown', 'stop'] : ['review_recovery', 'stop'];
     case 'cancelling':
       return [];
     case 'completed':
     case 'incomplete':
     case 'cancelled':
-    case 'failed':
-      return f.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
+    case 'failed': {
+      const exports: RunAction[] = f.hasPatchArtifact ? ['export_report', 'export_patch'] : ['export_report'];
+      // E1 #4: an unknown charge left on a finished run can still be settled (ledger + attempt only, no status change).
+      return f.unknownAttempts > 0 ? ['decide_unknown', ...exports] : exports;
+    }
   }
 }
 
@@ -273,9 +309,12 @@ export function appendRunEvent(
   return event;
 }
 
-/** F12/B1: where a running segment closes — the last sign of life for RUNNER_LOST (downtime never counts), else now. */
-function leaveRunningAt(ev: RunMachineEvent, now: EpochMs): EpochMs {
-  return ev.type === 'RUNNER_LOST' && ev.lastAliveAt !== undefined && ev.lastAliveAt < now ? ev.lastAliveAt : now;
+/**
+ * F12/B1: where a running segment closes — the last sign of life for RUNNER_LOST (downtime never counts), else the
+ * segment's monotonic end (E1: a sleep or a wall-clock jump is never charged), which is `now` without a monotonic clock.
+ */
+function leaveRunningAt(run: RunRow, ev: RunMachineEvent, now: EpochMs): EpochMs {
+  return ev.type === 'RUNNER_LOST' && ev.lastAliveAt !== undefined && ev.lastAliveAt < now ? ev.lastAliveAt : segmentEndAt(run, now);
 }
 
 /**
@@ -343,7 +382,10 @@ export function applyRunEvent(r: Repos, run: RunRow, requested: RunMachineEvent,
   if (!changed) return false;
   if (clearDeferred) r.runs.setDeferredPause(run.id, null);
   if (t.to === 'running') r.runs.enterRunning(run.id, now);
-  if (run.status === 'running' && t.to !== 'running') r.runs.leaveRunning(run.id, leaveRunningAt(ev, now));
+  if (run.status === 'running' && t.to !== 'running') {
+    r.runs.leaveRunning(run.id, leaveRunningAt(run, ev, now));
+    closeSegment(run.id);
+  }
   const terminal = isTerminalRunStatus(t.to);
   if (ev.type === 'USER_PAUSE' || ev.type === 'RESUME_RESOLVED' || terminal) r.runs.setPauseRequested(run.id, false);
   const detail = statusDetailOf(ev);

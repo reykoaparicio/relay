@@ -28,6 +28,8 @@ export interface WorkflowForm {
   readonly steps: Readonly<Record<string, StepForm>>;
   /** instructionVersion → prompt text. */
   readonly prompts: Readonly<Record<string, string>>;
+  /** stepKey → display name ('' = no name), for every step (model and approval; E2 #10). */
+  readonly names: Readonly<Record<string, string>>;
 }
 
 /** Field ids (error-summary anchors and `aria-describedby` targets). */
@@ -37,6 +39,7 @@ export const WF_FIELD = {
   attempts: 'wf-limits-maxAttempts',
   timeout: 'wf-limits-executionTimeoutSeconds',
   step: (key: string) => `wf-step-${key}`,
+  name: (key: string) => `wf-step-${key}-name`,
   profile: (key: string) => `wf-step-${key}-profile`,
   maxOutputTokens: (key: string) => `wf-step-${key}-maxOutputTokens`,
   transport: (key: string) => `wf-step-${key}-retry-transport`,
@@ -53,6 +56,9 @@ export const RETRY_BOUNDS = {
 } as const;
 
 export const OUTPUT_TOKENS_BOUNDS = { min: 1, max: MAX_OUTPUT_TOKENS_CEILING } as const;
+
+/** Step display name bounds (contracts `stepNameSchema`: 1–60 characters, trimmed). */
+export const STEP_NAME_MAX = 60;
 
 export function modelSteps(view: WorkflowVersionView): ModelStep[] {
   return view.spec.steps.filter((s): s is ModelStep => s.kind === 'model');
@@ -85,6 +91,7 @@ export function initialForm(view: WorkflowVersionView): WorkflowForm {
     timeoutMinutes: String(Math.round(limits.executionTimeoutSeconds / 60)),
     steps,
     prompts: Object.fromEntries(Object.entries(view.prompts).map(([iv, p]) => [iv, p.text])),
+    names: Object.fromEntries(view.spec.steps.map((s) => [s.id, s.name ?? ''])),
   };
 }
 
@@ -162,6 +169,15 @@ export function buildPatch(view: WorkflowVersionView, form: WorkflowForm): Patch
     }
     if (Object.keys(edit).length > 0) steps[s.id] = edit;
   }
+  // E2 #10: the optional display name of any step (model or approval). Trimmed; empty = no name (never sent as '').
+  for (const s of view.spec.steps) {
+    const text = (form.names[s.id] ?? '').trim();
+    const was = (base.names[s.id] ?? '').trim();
+    if (text === was) continue;
+    if (text === '') errors[WF_FIELD.name(s.id)] = 'A saved step name cannot be cleared. Enter a name of 1 to 60 characters.';
+    else if (text.length > STEP_NAME_MAX) errors[WF_FIELD.name(s.id)] = `Use at most ${String(STEP_NAME_MAX)} characters.`;
+    else steps[s.id] = { ...steps[s.id], name: text };
+  }
 
   const prompts: Record<string, string> = {};
   for (const [iv, text] of Object.entries(form.prompts)) {
@@ -193,7 +209,7 @@ const STEP_FIELD_LABELS: Readonly<Record<keyof StepForm, string>> = {
 const LIMIT_FIELD_LABELS = {
   allowance: 'Run allowance',
   revisions: 'Revision cycles',
-  attempts: 'Maximum attempts',
+  attempts: 'Max attempts (run)',
   timeoutMinutes: 'Timeout (minutes)',
 } as const;
 
@@ -209,6 +225,9 @@ function formFields(view: WorkflowVersionView, form: WorkflowForm): FormField[] 
   const out: FormField[] = [];
   for (const k of Object.keys(LIMIT_FIELD_LABELS) as Array<keyof typeof LIMIT_FIELD_LABELS>) {
     out.push({ key: `limits.${k}`, label: LIMIT_FIELD_LABELS[k], value: form[k] });
+  }
+  for (const s of view.spec.steps) {
+    out.push({ key: `steps.${s.id}.name`, label: `${stepKeyLabel(s.id)} step: name`, value: (form.names[s.id] ?? '').trim() });
   }
   for (const s of modelSteps(view)) {
     const f = form.steps[s.id];
@@ -263,6 +282,12 @@ export function rebaseForm(base: WorkflowForm, mine: WorkflowForm, theirs: Workf
     const m = mine.prompts[iv];
     prompts[iv] = b === undefined || m === undefined ? t : pick(b, m, t);
   }
+  const names: Record<string, string> = {};
+  for (const [id, t] of Object.entries(theirs.names)) {
+    const b = base.names[id];
+    const m = mine.names[id];
+    names[id] = b === undefined || m === undefined ? t : pick(b, m, t);
+  }
   return {
     allowance: pick(base.allowance, mine.allowance, theirs.allowance),
     revisions: pick(base.revisions, mine.revisions, theirs.revisions),
@@ -270,6 +295,7 @@ export function rebaseForm(base: WorkflowForm, mine: WorkflowForm, theirs: Workf
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     steps,
     prompts,
+    names,
   };
 }
 
@@ -293,6 +319,7 @@ export function issueTarget(view: WorkflowVersionView, path: string): IssueTarge
     const field = m[2];
     const sub = m[3];
     const step = view.spec.steps.find((s) => s.id === stepKey);
+    if (field === 'name') return { fieldId: WF_FIELD.name(stepKey), stepKey };
     if (step?.kind !== 'model' || field === undefined) return { fieldId: WF_FIELD.step(stepKey), stepKey };
     switch (field) {
       case 'profile':
@@ -333,4 +360,54 @@ export function issueTarget(view: WorkflowVersionView, path: string): IssueTarge
     return owner === undefined ? { fieldId: null, stepKey: null } : { fieldId: WF_FIELD.prompt(owner.id), stepKey: owner.id };
   }
   return { fieldId: null, stepKey: null };
+}
+
+/**
+ * Engine `nextInstructionVersion` (E1 instruction versioning): `reviewer.v1` → `reviewer.v{max + 1}` over every name
+ * in `taken` of the same stem.
+ */
+export function nextInstructionVersion(name: string, taken: Iterable<string>): string {
+  const prefix = name.replace(/\.v\d+$/, '');
+  let max = 0;
+  for (const t of taken) {
+    const m = /^(.*)\.v(\d+)$/.exec(t);
+    if (m?.[1] === prefix) max = Math.max(max, Number(m[2]));
+  }
+  return `${prefix}.v${String(max + 1)}`;
+}
+
+/** What editing a step's prompt does to its instruction version (shown next to the prompt). */
+export type PromptVersioning =
+  | { readonly kind: 'published'; readonly current: string; readonly next: string }
+  | { readonly kind: 'draft_only'; readonly current: string }
+  | { readonly kind: 'unknown'; readonly current: string };
+
+/**
+ * A published instruction version (one a validated version carries; runs and reports cite it) is never edited in
+ * place: saving an edit names the new text with the next free version. `published` = null while unknown.
+ */
+export function promptVersioning(view: WorkflowVersionView, iv: string, published: ReadonlySet<string> | null): PromptVersioning {
+  if (published === null) return { kind: 'unknown', current: iv };
+  if (!published.has(iv)) return { kind: 'draft_only', current: iv };
+  return { kind: 'published', current: iv, next: nextInstructionVersion(iv, [...Object.keys(view.prompts), ...published]) };
+}
+
+/**
+ * After a save, the form follows the saved draft's prompt keys: a published prompt edited in this save was renamed
+ * (`reviewer.v1` → `reviewer.v2`), so the form's text moves to the new key (text typed while the save was in flight
+ * is kept). Other fields are unchanged.
+ */
+export function followSavedPrompts(prevBase: WorkflowVersionView, saved: WorkflowVersionView, current: WorkflowForm): WorkflowForm {
+  const renamedFrom = new Map<string, string>();
+  for (const s of modelSteps(saved)) {
+    const before = modelSteps(prevBase).find((x) => x.id === s.id);
+    if (before !== undefined && before.instructionVersion !== s.instructionVersion) renamedFrom.set(s.instructionVersion, before.instructionVersion);
+  }
+  if (renamedFrom.size === 0) return current;
+  const prompts: Record<string, string> = {};
+  for (const [iv, p] of Object.entries(saved.prompts)) {
+    const old = renamedFrom.get(iv) ?? iv;
+    prompts[iv] = current.prompts[old] ?? current.prompts[iv] ?? p.text;
+  }
+  return { ...current, prompts };
 }

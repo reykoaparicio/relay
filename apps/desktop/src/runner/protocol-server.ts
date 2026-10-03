@@ -1,9 +1,10 @@
 // 08 H7: the runner end of the main ↔ runner protocol (02 §B7). Validates every inbound message, routes `op`
 // (public runner-routed and internal channels alike) to the engine, answers with `op.result`, forwards engine push
-// events, requests credentials from main, and heartbeats every 2 s after `ready`.
+// events, requests credentials from main, and heartbeats every 2 s after `ready`. The heartbeat carries the run that
+// may have a provider request in flight (tracked from the `run.status` events it forwards), so main can warn on quit.
 import { RUNNER_HEARTBEAT_MS, appError, epochMs, errors, runnerMessageSchema, runnerRequestSchema } from '@relay/contracts';
 import { randomBytes } from 'node:crypto';
-import type { CorrelationId, ErrorCode, IpcEnvelope, ProviderId, PushEvent, Result, RunnerChannel, RunnerMessage } from '@relay/contracts';
+import type { CorrelationId, ErrorCode, IpcEnvelope, ProviderId, PushEvent, Result, RunId, RunnerChannel, RunnerMaintenanceTask, RunnerMessage } from '@relay/contracts';
 import type { CredentialRequest, EngineApi, Logger, Timers } from '@relay/engine';
 
 /** The part of `MessagePortMain` the runner uses. */
@@ -46,8 +47,20 @@ export interface ProtocolServer {
   attach(runtime: ServedRuntime): void;
   /** Posts `ready` and starts the heartbeat. Call only after `engine.start()` resolved. */
   sendReady(schemaVersion: number): void;
-  sendFatal(code: ErrorCode, message: string): void;
+  /**
+   * Reports a startup failure main cannot recover from by restarting (`fatalInfoOf(err)` from @relay/contracts):
+   * `reason` = the error's closed `details.reason` (e.g. DATABASE_UNAVAILABLE `database_busy`, `schema_too_new`,
+   * `db_corrupt`, `disk_full`, `db_readonly`); main keeps {code, reason, message} as `lastFatal` and shows it.
+   */
+  sendFatal(code: ErrorCode, message: string, reason?: string): void;
+  /** The run that may have a provider request in flight (for the heartbeat), or null. */
+  activeRunId(): RunId | null;
+  /** Maintenance mode: posts the task's result (the runner exits right after). */
+  sendMaintenanceResult(task: RunnerMaintenanceTask, result: Extract<RunnerMessage, { kind: 'maintenance.result' }>['result']): void;
 }
+
+/** Statuses during which a run may have a provider request in flight. */
+const IN_FLIGHT: ReadonlySet<string> = new Set(['running', 'cancelling']);
 
 const DEFAULT_CREDENTIAL_TIMEOUT_MS = 30_000;
 type EngineHandle = (channel: RunnerChannel, input: unknown) => Promise<IpcEnvelope<unknown>>;
@@ -58,6 +71,12 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
   let runtime: ServedRuntime | null = null;
   let heartbeat: unknown = null;
   let seq = 0;
+  /** Runs whose latest status may have a request in flight (insertion order: the oldest is reported). */
+  const active = new Set<RunId>();
+  const activeRunId = (): RunId | null => {
+    for (const id of active) return id;
+    return null;
+  };
   const bootId = deps.bootId ?? randomBytes(8).toString('hex');
   const credentialWaiters = new Map<string, { providerId: ProviderId; resolve: (r: Result<string>) => void; timer: unknown }>();
 
@@ -149,6 +168,10 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
       });
     },
     sendEvent(e) {
+      if (e.type === 'run.status') {
+        if (IN_FLIGHT.has(e.status)) active.add(e.runId);
+        else active.delete(e.runId);
+      }
       post({ kind: 'event', event: e });
     },
     attach(r) {
@@ -158,11 +181,17 @@ export function createProtocolServer(deps: ProtocolServerDeps): ProtocolServer {
       post({ kind: 'ready', schemaVersion, pid: deps.pid });
       logger.info('runner.ready', { schemaVersion, pid: deps.pid, outcome: 'ok' });
       heartbeat = timers.setInterval(() => {
-        post({ kind: 'heartbeat', at: epochMs(Math.floor(deps.now())), activeRunId: null });
+        post({ kind: 'heartbeat', at: epochMs(Math.floor(deps.now())), activeRunId: activeRunId() });
       }, RUNNER_HEARTBEAT_MS);
     },
-    sendFatal(code, message) {
-      post({ kind: 'fatal', code, message });
+    sendFatal(code, message, reason) {
+      // `reason` is an optional field of the fatal message (runner protocol, 02 §B7).
+      const msg = { kind: 'fatal' as const, code, message, ...(reason === undefined || reason === '' ? {} : { reason }) };
+      post(msg);
+    },
+    activeRunId,
+    sendMaintenanceResult(task, result) {
+      post({ kind: 'maintenance.result', task, result });
     },
   };
 }

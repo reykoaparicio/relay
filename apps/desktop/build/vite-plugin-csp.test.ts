@@ -12,11 +12,20 @@ describe('relayCsp (H8)', () => {
   it('production meta equals the H8 policy (no localhost, no unsafe-eval, no frame-ancestors)', () => {
     const out = handlerOf(relayCsp({ mode: 'production' }))(HTML, {});
 
-    expect(PRODUCTION_CSP).toBe("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'");
+    expect(PRODUCTION_CSP).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+    );
     expect(out).toContain(`<meta http-equiv="Content-Security-Policy" content="${PRODUCTION_CSP}" />`);
     expect(out).not.toMatch(/localhost|unsafe-eval|frame-ancestors/);
     expect(out.match(/Content-Security-Policy/g)).toHaveLength(1);
     expect(out.indexOf('Content-Security-Policy')).toBeLessThan(out.indexOf('<script'));
+  });
+
+  it('production forbids every fetch (file:// included), frames and workers by default', () => {
+    expect(PRODUCTION_CSP).toContain("connect-src 'none'");
+    expect(PRODUCTION_CSP).toContain("default-src 'none'"); // worker-src / manifest-src / media-src fall back to it
+    expect(PRODUCTION_CSP).toContain("frame-src 'none'");
+    expect(PRODUCTION_CSP).not.toMatch(/file:|\*/);
   });
 
   it('dev meta includes the preamble sha256 hash and ws/http localhost', () => {

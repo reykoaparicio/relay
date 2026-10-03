@@ -25,6 +25,14 @@ const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
 /** Event types that change `runs.get` / ledger data. Stream progress only updates the live token count. */
 const NON_INVALIDATING: ReadonlySet<RunEventType> = new Set<RunEventType>(['attempt.stream_progress']);
 
+/** Event types that move money: they also refresh the project's month cost ("Usage tracked by Relay"). */
+const LEDGER_EVENTS: ReadonlySet<RunEventType> = new Set<RunEventType>([
+  'ledger.reserved',
+  'ledger.settled',
+  'ledger.blocked',
+  'ledger.overrun',
+]);
+
 /** Invalidation debounce (10 J2). */
 const RUN_INVALIDATE_DEBOUNCE_MS = 250;
 
@@ -185,6 +193,7 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
     let syncing = false;
     let failures = 0;
     let invalidateTimer: unknown;
+    let ledgerMoved = false;
     let retryTimer: unknown;
     let buf: RunEvent[] = [];
     let dropped = 0;
@@ -195,13 +204,19 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
       setState({ runId, buf, len: buf.length, lastSeq: last, loaded: snapshotDone, droppedCount: dropped });
     };
 
-    const scheduleInvalidate = () => {
+    const scheduleInvalidate = (ledger: boolean) => {
+      if (ledger) ledgerMoved = true;
       if (invalidateTimer !== undefined) timers.clearTimeout(invalidateTimer);
       invalidateTimer = timers.setTimeout(() => {
         invalidateTimer = undefined;
         void queryClient.invalidateQueries({ queryKey: qk.run(runId) });
         void queryClient.invalidateQueries({ queryKey: qk.ledger(runId) });
         void queryClient.invalidateQueries({ queryKey: ['step', runId] });
+        if (ledgerMoved) {
+          ledgerMoved = false;
+          const projectId = queryClient.getQueryData<{ projectId?: string }>(qk.run(runId))?.projectId;
+          void queryClient.invalidateQueries({ queryKey: projectId === undefined ? ['project-cost'] : qk.projectCost(projectId) });
+        }
       }, RUN_INVALIDATE_DEBOUNCE_MS);
     };
 
@@ -223,7 +238,7 @@ export function useRunEvents(runId: string | undefined, options: UseRunEventsOpt
     const react = (e: RunEvent) => {
       const message = statusAnnouncement(e);
       if (message !== null) announce(message);
-      if (!NON_INVALIDATING.has(e.type)) scheduleInvalidate();
+      if (!NON_INVALIDATING.has(e.type)) scheduleInvalidate(LEDGER_EVENTS.has(e.type));
     };
 
     const drain = (): boolean => {

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { cx } from './cx';
 
@@ -25,6 +25,27 @@ export function useHorizontalOverflow(ref: RefObject<HTMLElement | null>): boole
   return overflowing;
 }
 
+/** True while an overflowing element is not scrolled to its right edge (more columns to the right). */
+function useMoreToTheRight(ref: RefObject<HTMLElement | null>, overflowing: boolean): boolean {
+  const [more, setMore] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (el === null || !overflowing) {
+      setMore(false);
+      return undefined;
+    }
+    const measure = () => {
+      setMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    };
+    measure();
+    el.addEventListener('scroll', measure, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', measure);
+    };
+  }, [ref, overflowing]);
+  return more;
+}
+
 export interface TableScrollProps {
   /** Id of the element naming the table (usually its `<caption>`); names the scroll region when it overflows. */
   readonly labelledBy?: string;
@@ -44,6 +65,8 @@ export interface TableScrollProps {
 export function TableScroll({ labelledBy, label, className, children }: TableScrollProps) {
   const ref = useRef<HTMLDivElement>(null);
   const overflowing = useHorizontalOverflow(ref);
+  // A right-edge fade while columns are hidden to the right, so a clipped table never reads as complete.
+  const moreRight = useMoreToTheRight(ref, overflowing);
   const regionProps = overflowing
     ? {
         role: 'region',
@@ -52,7 +75,7 @@ export function TableScroll({ labelledBy, label, className, children }: TableScr
       }
     : {};
   return (
-    <div ref={ref} className={cx('table-wrap', overflowing && 'is-overflowing', className)} {...regionProps}>
+    <div ref={ref} className={cx('table-wrap', overflowing && 'is-overflowing', moreRight && 'more-right', className)} {...regionProps}>
       {children}
     </div>
   );

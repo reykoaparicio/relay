@@ -349,13 +349,13 @@ describe.skipIf(isRoot)('B7: scanProject never throws on unreadable entries', ()
     }
   });
 
-  it('a vanished root is NOT_FOUND', async () => {
+  it('a vanished root is PROJECT_ROOT_MISSING (E2 #7)', async () => {
     const { root, dir } = await makeRoot({ 'ok.txt': PUBLIC });
     await fs.promises.rm(dir, { recursive: true });
 
     const r = await scanProject(root);
 
-    expect(r.ok || r.error.code).toBe('NOT_FOUND');
+    expect(r.ok || r.error.code).toBe('PROJECT_ROOT_MISSING');
   });
 });
 

@@ -1,19 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
-import { boot } from './boot.js';
+import { boot, startApp } from './boot.js';
 import type { BootApp, BootServices } from './boot.js';
 import { nullLogger } from './logger.js';
-import { createMainWindow, shouldOpenDevTools } from './window.js';
-import type { MainWindowOptions, WindowLike } from './window.js';
+import { checkDirWritable, unwritableUserDataMessage } from './userdata-check.js';
+import { attachRendererRecovery, createMainWindow, shouldOpenDevTools } from './window.js';
+import type { MainWindowOptions, RecoveryChoice, WebContentsLike, WindowLike } from './window.js';
 
 vi.mock('electron', () => ({ app: {} }));
 
 type Listener = (e: { preventDefault(): void }) => void;
 
 function fakeApp(calls: string[], opts: { lock?: boolean; isPackaged?: boolean } = {}) {
+  let userData = '/default/userData';
   const listeners = new Map<string, Listener>();
   const app: BootApp & { fire(event: string): { prevented: boolean } } = {
     isPackaged: opts.isPackaged ?? false,
-    setPath: (name, p) => calls.push(`setPath:${name}:${p}`),
+    setPath: (name, p) => {
+      calls.push(`setPath:${name}:${p}`);
+      userData = p;
+    },
+    getPath: () => userData,
+    exit: (code) => calls.push(`exit:${String(code)}`),
     requestSingleInstanceLock: () => {
       calls.push('lock');
       return opts.lock ?? true;
@@ -58,6 +65,15 @@ function fakeServices(calls: string[], start: () => Promise<void> = () => Promis
         return new Promise<void>((r) => (resolveShutdown = r));
       },
     },
+    activeRunId: () => null,
+    confirmQuitDuringRun: () => {
+      calls.push('confirm');
+      return true;
+    },
+    recordCleanQuit: (runActive) => {
+      calls.push(`cleanQuit:${String(runActive)}`);
+      return Promise.resolve();
+    },
     flushLogs: () => {
       calls.push('flush');
       return Promise.resolve();
@@ -68,13 +84,16 @@ function fakeServices(calls: string[], start: () => Promise<void> = () => Promis
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+/** Writable userData, no error box (the defaults of most boot tests). */
+const BASE = { checkWritable: () => ({ ok: true as const }), showErrorBox: () => undefined, packagedE2eAllowed: false };
+
 describe('boot @m1', () => {
   it('runs userData override → lock → whenReady → security → layout → ipc.register before createMainWindow → supervisor.start', async () => {
     const calls: string[] = [];
     const app = fakeApp(calls);
     const { services } = fakeServices(calls);
 
-    await boot({ app, env: { RELAY_USER_DATA_DIR: '/tmp/relay-x' }, createServices: () => services });
+    await boot({ ...BASE, app, env: { RELAY_USER_DATA_DIR: '/tmp/relay-x' }, createServices: () => services });
 
     expect(calls).toEqual(['setPath:userData:/tmp/relay-x', 'lock', 'whenReady', 'security', 'layout', 'ipc.register', 'createMainWindow', 'supervisor.start']);
   });
@@ -84,7 +103,7 @@ describe('boot @m1', () => {
     const cfgs: unknown[] = [];
     const { services } = fakeServices(calls);
 
-    await boot({
+    await boot({ ...BASE,
       app: fakeApp(calls, { isPackaged: true }),
       env: { RELAY_USER_DATA_DIR: '/tmp/x', RELAY_PROVIDER_MODE: 'fake' },
       createServices: (cfg) => (cfgs.push(cfg), services),
@@ -98,7 +117,7 @@ describe('boot @m1', () => {
     const calls: string[] = [];
     const create = vi.fn();
 
-    const r = await boot({ app: fakeApp(calls, { lock: false }), env: {}, createServices: create });
+    const r = await boot({ ...BASE, app: fakeApp(calls, { lock: false }), env: {}, createServices: create });
 
     expect(r).toBeNull();
     expect(calls).toEqual(['lock', 'quit']);
@@ -109,7 +128,7 @@ describe('boot @m1', () => {
     const calls: string[] = [];
     const { services } = fakeServices(calls, () => Promise.reject(new Error('boom')));
 
-    await expect(boot({ app: fakeApp(calls), env: {}, createServices: () => services })).resolves.not.toBeNull();
+    await expect(boot({ ...BASE, app: fakeApp(calls), env: {}, createServices: () => services })).resolves.not.toBeNull();
 
     expect(calls).toContain('createMainWindow');
   });
@@ -118,7 +137,7 @@ describe('boot @m1', () => {
     const calls: string[] = [];
     const app = fakeApp(calls);
     const { services, finishShutdown } = fakeServices(calls);
-    await boot({ app, env: {}, createServices: () => services });
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
 
     const first = app.fire('before-quit');
     await flush();
@@ -145,7 +164,7 @@ describe('boot @m1', () => {
       calls.push('layout');
       return new Promise<void>((r) => (finishLayout = r));
     };
-    const booting = boot({ app, env: {}, createServices: () => services });
+    const booting = boot({ ...BASE, app, env: {}, createServices: () => services });
     await flush();
 
     const quit = app.fire('before-quit');
@@ -167,7 +186,7 @@ describe('boot @m1', () => {
     let ready: () => void = () => undefined;
     app.whenReady = () => new Promise<void>((r) => (ready = r));
     const create = vi.fn();
-    const booting = boot({ app, env: {}, createServices: create });
+    const booting = boot({ ...BASE, app, env: {}, createServices: create });
 
     const quit = app.fire('before-quit');
     ready();
@@ -181,11 +200,254 @@ describe('boot @m1', () => {
     const calls: string[] = [];
     const app = fakeApp(calls);
     const { services } = fakeServices(calls);
-    await boot({ app, env: {}, createServices: () => services });
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
 
     app.fire('second-instance');
 
     expect(calls).toContain('focus');
+  });
+
+  it('an unwritable userData shows an error box naming the folder and exits(1) before taking the lock', async () => {
+    const calls: string[] = [];
+    const boxes: { title: string; content: string }[] = [];
+    const create = vi.fn();
+
+    const r = await boot({
+      app: fakeApp(calls), env: { RELAY_USER_DATA_DIR: '/ro/relay' }, createServices: create,
+      checkWritable: (dir) => (calls.push(`check:${dir}`), { ok: false, errno: 'EACCES' }),
+      showErrorBox: (title, content) => boxes.push({ title, content }),
+    });
+
+    expect(r).toBeNull();
+    expect(calls).toEqual(['setPath:userData:/ro/relay', 'check:/ro/relay', 'exit:1']);
+    expect(calls).not.toContain('lock');
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]?.content).toContain('/ro/relay');
+    expect(boxes[0]?.content).toMatch(/permission/i);
+    expect(boxes[0]?.content).toMatch(/Get Info/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('a held lock with a writable userData still quits quietly (another instance is running)', async () => {
+    const calls: string[] = [];
+    const showErrorBox = vi.fn();
+
+    await boot({ ...BASE, showErrorBox, app: fakeApp(calls, { lock: false }), env: {}, createServices: vi.fn() });
+
+    expect(calls).toEqual(['lock', 'quit']);
+    expect(showErrorBox).not.toHaveBeenCalled();
+  });
+
+  it('startApp: a boot rejection shows an error box and exits(1) instead of an unhandled rejection', async () => {
+    const calls: string[] = [];
+    const showErrorBox = vi.fn();
+    const { services } = fakeServices(calls);
+    services.ensureLayout = () => Promise.reject(new Error('EIO: disk gone'));
+
+    const r = await startApp({ ...BASE, showErrorBox, app: fakeApp(calls), env: {}, createServices: () => services });
+
+    expect(r).toBeNull();
+    expect(showErrorBox).toHaveBeenCalledExactlyOnceWith('Relay could not start', expect.stringContaining('EIO: disk gone'));
+    expect(calls.at(-1)).toBe('exit:1');
+  });
+
+  it('before-quit during a run asks first; "keep open" cancels the quit and keeps the runner', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services } = fakeServices(calls);
+    services.activeRunId = () => 'run_01J0000000000000000000000A';
+    services.confirmQuitDuringRun = () => (calls.push('confirm'), false);
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
+
+    const q = app.fire('before-quit');
+    await flush();
+
+    expect(q.prevented).toBe(true);
+    expect(calls).toContain('confirm');
+    expect(calls).not.toContain('supervisor.shutdown');
+    expect(calls.at(-1)).toBe('focus'); // re-shows (or re-creates) the window
+  });
+
+  it('before-quit during a run, confirmed: shuts down, records a clean quit with runActive, then quits', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    services.activeRunId = () => 'run_01J0000000000000000000000A';
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
+
+    app.fire('before-quit');
+    finishShutdown();
+    await flush();
+
+    expect(calls.slice(calls.indexOf('confirm'))).toEqual(['confirm', 'supervisor.shutdown', 'cleanQuit:true', 'flush', 'quit']);
+  });
+
+  it('before-quit with no run in flight never prompts and records a clean quit', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
+
+    app.fire('before-quit');
+    finishShutdown();
+    await flush();
+
+    expect(calls).not.toContain('confirm');
+    expect(calls).toContain('cleanQuit:false');
+  });
+
+  it('packaged: RELAY_E2E is honored only when the build-time flag allows it', async () => {
+    const run = async (packagedE2eAllowed: boolean) => {
+      const calls: string[] = [];
+      const cfgs: unknown[] = [];
+      const { services } = fakeServices(calls);
+      await boot({
+        ...BASE, packagedE2eAllowed, app: fakeApp(calls, { isPackaged: true }),
+        env: { RELAY_E2E: '1', RELAY_USER_DATA_DIR: '/tmp/e2e', RELAY_PROVIDER_MODE: 'fake' },
+        createServices: (cfg) => (cfgs.push(cfg), services),
+      });
+      return { calls, cfg: cfgs[0] };
+    };
+
+    const shipped = await run(false);
+    const verify = await run(true);
+
+    expect(shipped.calls).not.toContain('setPath:userData:/tmp/e2e');
+    expect(shipped.cfg).toMatchObject({ providerMode: 'live', userDataOverridden: false, e2e: false });
+    expect(verify.calls[0]).toBe('setPath:userData:/tmp/e2e');
+    expect(verify.cfg).toMatchObject({ providerMode: 'fake', userDataOverridden: true, e2e: true });
+  });
+});
+
+describe('userData writability probe', () => {
+  it('creates the dir and a probe file, then removes it', () => {
+    const ops: string[] = [];
+    const r = checkDirWritable('/ud', {
+      mkdirSync: (p) => ops.push(`mkdir:${p}`),
+      writeFileSync: (p) => ops.push(`write:${p}`),
+      unlinkSync: (p) => ops.push(`unlink:${p}`),
+    }, 7);
+
+    expect(r).toEqual({ ok: true });
+    expect(ops).toEqual(['mkdir:/ud', 'unlink:/ud/.relay-write-check-7', 'write:/ud/.relay-write-check-7', 'unlink:/ud/.relay-write-check-7']);
+  });
+
+  it('reports the errno of a refused write', () => {
+    const r = checkDirWritable('/ud', {
+      mkdirSync: () => undefined,
+      writeFileSync: () => {
+        throw Object.assign(new Error('nope'), { code: 'EROFS' });
+      },
+      unlinkSync: () => undefined,
+    });
+
+    expect(r).toEqual({ ok: false, errno: 'EROFS' });
+    expect(unwritableUserDataMessage('/ud', 'EROFS').content).toMatch(/read-only/);
+    expect(unwritableUserDataMessage('/ud', 'ENOSPC').content).toMatch(/disk space/);
+  });
+});
+
+describe('renderer recovery', () => {
+  function fakeWin() {
+    const handlers = new Map<string, (...a: unknown[]) => void>();
+    const log = { reloads: 0, destroyed: false };
+    const win = {
+      isDestroyed: () => log.destroyed,
+      webContents: {
+        openDevTools: () => undefined,
+        send: () => undefined,
+        reload: () => {
+          log.reloads += 1;
+        },
+        on: (event: string, l: (...a: unknown[]) => void) => {
+          handlers.set(event, l);
+        },
+      } as unknown as WebContentsLike,
+    };
+    const emit = (event: string, ...args: unknown[]) => handlers.get(event)?.(...args);
+    return { win, log, emit };
+  }
+
+  it('reloads once automatically, then asks Reload/Quit on a second crash soon after', async () => {
+    const { win, log, emit } = fakeWin();
+    let now = 0;
+    const ask = vi.fn<(kind: 'crashed' | 'unresponsive', signal: AbortSignal) => Promise<RecoveryChoice>>(() => Promise.resolve('quit'));
+    const quit = vi.fn();
+    attachRendererRecovery(win, { logger: nullLogger, now: () => now, ask, quit });
+
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    expect(log.reloads).toBe(1);
+    expect(ask).not.toHaveBeenCalled();
+
+    now += 10_000;
+    emit('render-process-gone', {}, { reason: 'oom', exitCode: 1 });
+    await flush();
+
+    expect(log.reloads).toBe(1);
+    expect(ask).toHaveBeenCalledWith('crashed', expect.anything());
+    expect(quit).toHaveBeenCalledOnce();
+  });
+
+  it('a crash long after the last automatic reload is reloaded automatically again; clean exits are ignored', () => {
+    const { win, log, emit } = fakeWin();
+    let now = 0;
+    const ask = vi.fn(() => Promise.resolve<RecoveryChoice>('reload'));
+    attachRendererRecovery(win, { logger: nullLogger, now: () => now, ask, quit: vi.fn(), autoReloadWindowMs: 1_000 });
+
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    now += 5_000;
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 0 });
+
+    expect(log.reloads).toBe(2);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('the dialog\'s Reload choice reloads the window', async () => {
+    const { win, log, emit } = fakeWin();
+    const ask = vi.fn(() => Promise.resolve<RecoveryChoice>('reload'));
+    attachRendererRecovery(win, { logger: nullLogger, now: () => 0, ask, quit: vi.fn() });
+
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    await flush();
+
+    expect(log.reloads).toBe(2);
+  });
+
+  it('unresponsive asks Wait/Reload/Quit (no automatic reload); becoming responsive dismisses it as Wait', async () => {
+    const { win, log, emit } = fakeWin();
+    let aborted = false;
+    const ask = vi.fn((_kind: 'crashed' | 'unresponsive', signal: AbortSignal) =>
+      new Promise<RecoveryChoice>((resolve) => {
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          resolve('quit'); // what a dismissed box reports is overridden: an abort always means "wait"
+        });
+      }));
+    const quit = vi.fn();
+    attachRendererRecovery(win, { logger: nullLogger, now: () => 0, ask, quit });
+
+    emit('unresponsive');
+    emit('unresponsive'); // one dialog at a time
+    emit('responsive');
+    await flush();
+
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask.mock.calls[0]?.[0]).toBe('unresponsive');
+    expect(aborted).toBe(true);
+    expect(quit).not.toHaveBeenCalled();
+    expect(log.reloads).toBe(0);
+  });
+
+  it('never reloads a destroyed window', () => {
+    const { win, log, emit } = fakeWin();
+    log.destroyed = true;
+    attachRendererRecovery(win, { logger: nullLogger, now: () => 0, ask: vi.fn(), quit: vi.fn() });
+
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+
+    expect(log.reloads).toBe(0);
   });
 });
 
@@ -221,6 +483,7 @@ describe('main window', () => {
           log.devtools += 1;
         },
         send: () => undefined,
+        reload: () => undefined,
         on: () => undefined,
       };
     };

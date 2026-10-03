@@ -16,11 +16,12 @@ describe('fake bridge', () => {
   it('rejects invalid input on every channel with VALIDATION_FAILED (inputs are validated with the contracts schemas)', async () => {
     const bridge = createFakeBridge('awaiting-approval');
     for (const op of Object.values(OPERATIONS)) {
-      const res = await bridge.invoke(op.channel, { definitelyNot: 'valid', projectId: 42 } as never);
+      const invalid = { definitelyNot: 'valid', projectId: 42 };
+      const res = await bridge.invoke(op.channel, invalid as never);
       // Channels with an empty input schema accept unknown keys (zod strips them); every other one must reject.
       if (res.ok) {
         expect(op.input.safeParse({}).success, `${op.channel} accepted invalid input`).toBe(true);
-      } else {
+      } else if (!op.input.safeParse(invalid).success) {
         expect(res.error.code, op.channel).toBe('VALIDATION_FAILED');
       }
     }
@@ -28,6 +29,9 @@ describe('fake bridge', () => {
 
   it.each(FAKE_SCENARIOS)('scenario %s serves schema-valid query outputs', async (scenario) => {
     const bridge = createFakeBridge(scenario);
+    // Recovery scenarios: the runner is down / the database is busy; check the outputs of the world behind them.
+    bridge.world.runnerState = 'ready';
+    bridge.world.busyFailures = 0;
     const hasProject = bridge.world.projects.some((p) => p.id === PROJECT);
     const queries = [
       bridge.invoke('relay/v1/app.getInfo', {}),
@@ -324,5 +328,145 @@ describe('fake bridge', () => {
     expect(await ids()).toEqual(approved.map((m) => m.id).sort());
     expect(await ids([])).toEqual([...pinned].sort());
     expect(await ids([other.id])).toEqual([...pinned, other.id].sort());
+  });
+
+  describe('E1/E2 recovery parity (R2)', () => {
+    it('runner-unavailable: runner ops fail, the state is pushed, a restart fails again, a restore brings it back', async () => {
+      const bridge = createFakeBridge('runner-unavailable');
+      const pushed: unknown[] = [];
+      bridge.subscribe((e) => pushed.push(e));
+      await Promise.resolve();
+      expect(pushed).toContainEqual({ type: 'runner.state', state: 'unavailable' });
+      const list = await bridge.invoke('relay/v1/runs.list', { projectId: PROJECT });
+      expect(!list.ok && list.error.code).toBe('RUNNER_UNAVAILABLE');
+      const diag = await bridge.invoke('relay/v1/app.getDiagnostics', {});
+      expect(diag.ok && diag.data.runner.lastFatal?.reason).toBe('db_corrupt');
+      const restart = await bridge.invoke('relay/v1/app.restartRunner', {});
+      expect(!restart.ok && restart.error.details?.['reason']).toBe('db_corrupt');
+      const restore = await bridge.invoke('relay/v1/app.restoreLatestBackup', {});
+      expect(restore.ok && restore.data.restored).toBe(true);
+      expect(pushed).toContainEqual({ type: 'runner.state', state: 'ready' });
+      expect((await bridge.invoke('relay/v1/runs.list', { projectId: PROJECT })).ok).toBe(true);
+      const again = await bridge.invoke('relay/v1/app.restoreLatestBackup', {});
+      expect(!again.ok && again.error.code).toBe('CONFLICT');
+    });
+
+    it('runner-crashed: a restart brings the runner back; with no backup a restore reports restored: false', async () => {
+      const bridge = createFakeBridge('runner-crashed');
+      bridge.world.backupAvailable = false;
+      const restore = await bridge.invoke('relay/v1/app.restoreLatestBackup', {});
+      expect(restore.ok && restore.data).toMatchObject({ restored: false, runnerState: 'unavailable' });
+      const restart = await bridge.invoke('relay/v1/app.restartRunner', {});
+      expect(restart.ok && restart.data).toEqual({ restarted: true, state: 'ready' });
+    });
+
+    it('database-busy: runner queries fail with retryable database_busy (next action wait), then succeed', async () => {
+      const bridge = createFakeBridge('database-busy');
+      const first = await bridge.invoke('relay/v1/projects.list', {});
+      expect(!first.ok && first.error).toMatchObject({ code: 'DATABASE_UNAVAILABLE', retryable: true, nextAction: 'wait', details: { reason: 'database_busy' } });
+      await bridge.invoke('relay/v1/projects.list', {});
+      expect((await bridge.invoke('relay/v1/projects.list', {})).ok).toBe(true);
+    });
+
+    it('project-root-missing: preview fails until relocate; an unverified folder needs confirm: true', async () => {
+      const bridge = createFakeBridge('project-root-missing');
+      const preview = await bridge.invoke('relay/v1/projects.previewFiles', { projectId: PROJECT });
+      expect(!preview.ok && preview.error.code).toBe('PROJECT_ROOT_MISSING');
+      const pick = await bridge.invoke('relay/v1/projects.pickDirectory', {});
+      const selectionId = pick.ok ? (pick.data.selection?.selectionId ?? '') : '';
+      const first = await bridge.invoke('relay/v1/projects.relocate', { projectId: PROJECT, selectionId });
+      expect(!first.ok && first.error.details).toMatchObject({ reason: 'root_unverified', verification: { checkedFiles: 9, matchedFiles: 0 } });
+      const confirmed = await bridge.invoke('relay/v1/projects.relocate', { projectId: PROJECT, selectionId, confirm: true });
+      expect(confirmed.ok && confirmed.data.project.rootDisplayPath).toBe('~/code/my-api');
+      expect((await bridge.invoke('relay/v1/projects.previewFiles', { projectId: PROJECT })).ok).toBe(true);
+      const all = await bridge.invoke('relay/v1/projects.list', { includeArchived: true });
+      expect(all.ok && all.data.filter((p) => p.archivedAt !== null)).toHaveLength(1);
+    });
+
+    it('suspected-secret: preview flags the file; preflight issues and start denial until it is acknowledged', async () => {
+      const bridge = createFakeBridge('suspected-secret');
+      const preview = await bridge.invoke('relay/v1/projects.previewFiles', { projectId: PROJECT });
+      const flagged = preview.ok ? preview.data.included.find((f) => f.suspectedSecret === true) : undefined;
+      expect(flagged).toMatchObject({ relPath: 'src/config/keys.ts', secretLabel: 'anthropic_key', secretLine: 4 });
+      const base = { projectId: PROJECT, workflowId: FAKE_WORKFLOW_ID, workflowVersion: 3, goal: 'Check keys' } as const;
+      const relPaths = ['README.md', 'src/config/keys.ts'];
+      const pf = await bridge.invoke('relay/v1/runs.preflight', { ...base, input: { kind: 'files', relPaths } });
+      expect(pf.ok && pf.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([expect.objectContaining({ path: 'input.relPaths.1' })]);
+      const start = await bridge.invoke('relay/v1/runs.start', { ...base, idempotencyKey: '01JABCDEFGHJKMNPQRSTVWXYZ0', input: { kind: 'files', relPaths } });
+      expect(!start.ok && start.error.details).toMatchObject({ reason: 'suspected_secret', denied: [{ relPath: 'src/config/keys.ts', secretLabel: 'anthropic_key', secretLine: 4 }] });
+      const acked = { kind: 'files' as const, relPaths, acknowledgedSuspectedSecrets: ['src/config/keys.ts'] };
+      const pf2 = await bridge.invoke('relay/v1/runs.preflight', { ...base, input: acked });
+      expect(pf2.ok && pf2.data.issues.some((i) => i.code === 'suspected_secret')).toBe(false);
+    });
+
+    it('unreadable-file: preview lists unreadable entries; preflight denies a selected unreadable file', async () => {
+      const bridge = createFakeBridge('unreadable-file');
+      const preview = await bridge.invoke('relay/v1/projects.previewFiles', { projectId: PROJECT });
+      expect(preview.ok && preview.data.unreadable).toEqual(['config/local.json']);
+      const pf = await bridge.invoke('relay/v1/runs.preflight', {
+        projectId: PROJECT, workflowId: FAKE_WORKFLOW_ID, workflowVersion: 3, goal: 'x', input: { kind: 'files', relPaths: ['src/db/client.ts'] },
+      });
+      expect(!pf.ok && pf.error.details).toMatchObject({ reason: 'unreadable', relPath: 'src/db/client.ts' });
+    });
+
+    it('export-partial: per-part results, and a retry of the failed part writes it', async () => {
+      const bridge = createFakeBridge('export-partial');
+      const runId = bridge.world.runs[0]?.id ?? '';
+      const res = await bridge.invoke('relay/v1/artifacts.export', { runId, what: 'both' });
+      expect(res.ok && res.data).toMatchObject({ exported: true, written: [{ what: 'report' }], failed: [{ what: 'patch', code: 'ARTIFACT_WRITE_FAILED' }] });
+      const retry = await bridge.invoke('relay/v1/artifacts.export', { runId, what: 'patch' });
+      expect(retry.ok && retry.data).toMatchObject({ written: [{ what: 'patch', displayPath: '~/Downloads/patch.diff' }], failed: [] });
+    });
+
+    it('memory confirmCurrent: clears stale, writes a reviewed event and a refreshed revision, keeps reviewAt', async () => {
+      const bridge = createFakeBridge('memory-stale');
+      const rec = bridge.world.memory.find((m) => m.stale);
+      expect(rec?.reviewDue).toBe(true);
+      const res = await bridge.invoke('relay/v1/memory.update', { recordId: rec?.id ?? '', expectedRevision: rec?.currentRevision ?? 1, confirmCurrent: true });
+      expect(res.ok && res.data).toMatchObject({ stale: false, reviewDue: false, reviewAt: rec?.reviewAt, currentRevision: (rec?.currentRevision ?? 0) + 1 });
+      expect(res.ok && res.data.events.at(-1)).toMatchObject({ event: 'reviewed', detail: { fileRefs: 1, refreshed: 1 } });
+    });
+
+    it('run details carry attempts, latestManifest, stepMeta, and profileOptions only while choose_profile is offered', async () => {
+      const paused = createFakeBridge('budget-paused').world.runs[0];
+      expect(paused?.profileOptions?.length).toBe(3);
+      expect(paused?.profileOptions?.every((o) => o.basis === 'step_estimate')).toBe(true);
+      const minimum = createFakeBridge('choose-profile-minimum').world.runs[0];
+      expect(minimum?.profileOptions?.every((o) => o.basis === 'minimum')).toBe(true);
+      const done = createFakeBridge('completed');
+      const run = done.world.runs[0];
+      expect(run?.profileOptions).toEqual([]);
+      expect(run?.stepMeta?.find((m) => m.stepKey === 'review')?.instructionVersion).toBe('reviewer.v1');
+      expect(run?.attempts?.length).toBeGreaterThan(0);
+      const manifest = await done.invoke('relay/v1/artifacts.get', { artifactId: run?.latestManifest?.artifactId ?? '' });
+      expect(manifest.ok && manifest.data.meta.kind).toBe('context_manifest');
+    });
+
+    it('workflows.saveDraft renames an edited published prompt to the next instruction version and applies step names', async () => {
+      const bridge = createFakeBridge('completed');
+      const res = await bridge.invoke('relay/v1/workflows.saveDraft', {
+        workflowId: FAKE_WORKFLOW_ID,
+        expectedDraftRevision: 0,
+        patch: { prompts: { 'reviewer.v1': 'New reviewer text' }, steps: { approve: { name: 'Approve the plan' } } },
+      });
+      const step = res.ok ? res.data.spec.steps.find((s) => s.id === 'review') : undefined;
+      expect(step?.kind === 'model' && step.instructionVersion).toBe('reviewer.v2');
+      expect(res.ok && res.data.prompts['reviewer.v2']?.text).toBe('New reviewer text');
+      expect(res.ok && res.data.prompts['reviewer.v1']).toBeUndefined();
+      expect(res.ok && res.data.spec.steps.find((s) => s.id === 'approve')?.name).toBe('Approve the plan');
+    });
+
+    it('providers report where the last test came from', async () => {
+      const bridge = createFakeBridge('auth-failed');
+      const list = await bridge.invoke('relay/v1/providers.list', {});
+      expect(list.ok && list.data.find((p) => p.providerId === 'openai')?.lastTest?.source).toBe('run');
+      await bridge.invoke('relay/v1/providers.test', { providerId: 'openai' });
+      expect(bridge.world.providers.find((p) => p.providerId === 'openai')?.lastTest?.source).toBe('connection_test');
+    });
+
+    it('interrupted vs interrupted-quit: lastShutdown tells a crash from a clean quit during a run', () => {
+      expect(createFakeBridge('interrupted').world.info.lastShutdown).toMatchObject({ clean: false, runActive: true });
+      expect(createFakeBridge('interrupted-quit').world.info.lastShutdown).toMatchObject({ clean: true, runActive: true });
+    });
   });
 });

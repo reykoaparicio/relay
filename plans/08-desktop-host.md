@@ -242,8 +242,8 @@ export interface RunnerSupervisor {
 ## H8: Security hardening (`src/main/security.ts`, `build/vite-plugin-csp.ts`) — Electron security checklist (§6.5, [S1])
 - **CSP** is generated per mode by the H-owned Vite plugin `apps/desktop/build/vite-plugin-csp.ts` (`relayCsp({ mode })`, a `transformIndexHtml` hook with `order: 'post'`) that injects `<meta http-equiv="Content-Security-Policy">` into `index.html`. The renderer's `index.html` never hand-writes a CSP (10 §J1). The plugin is used by both `electron.vite.config.ts` (renderer) and `vite.renderer.config.ts`.
   - **Production** (strict; this is the policy 00b §6 references):
-    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'`
-  - **Dev** (dev server only): the production policy plus `script-src 'sha256-<hash of the React-Refresh preamble>' http://localhost:*` (the plugin hashes the inline preamble that `@vitejs/plugin-react` injects, which is why it runs `post`) and `connect-src ws://localhost:* http://localhost:*` (HMR).
+    `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'` (resilience F4: deny by default, so the renderer cannot `fetch()` file:// URLs; workers/manifests fall back to `default-src 'none'`)
+  - **Dev** (dev server only): the production policy plus `script-src 'sha256-<hash of the React-Refresh preamble>' http://localhost:*` (the plugin hashes the inline preamble that `@vitejs/plugin-react` injects, which is why it runs `post`) and `connect-src 'self' ws://localhost:* http://localhost:*` (HMR; replaces `'none'`, which cannot be combined with sources).
   - `frame-ancestors` is **ignored in a meta CSP**, so it is not emitted there. Framing is prevented by the navigation/window-open/webview denials below.
   - `session.defaultSession.webRequest.onHeadersReceived` sets the dev CSP header (including `frame-ancestors 'none'`) **only** for responses from the dev server when `!app.isPackaged`. Production loads via `file://` and relies on the meta tag.
   - The dev **header** keeps `script-src 'self' 'unsafe-inline' http://localhost:*` (dev only). The React-Refresh preamble is an inline module script, every CSP in force must allow it, and the static header cannot know its hash. The meta CSP allows only the preamble's `sha256-` hash, and the browser enforces both policies, so the effective dev policy admits exactly that one inline script. Removing `'unsafe-inline'` from the header blocks the preamble and breaks dev HMR.
@@ -296,6 +296,39 @@ export interface RunnerSupervisor {
 
 
 **Sample location (implementation fix).** The copy must live **outside** userData and `~/Library`, which 05 E1 refuses as project roots. When userData is overridden (dev/E2E) use the sibling `<userData>-samples/`; otherwise `~/Documents/Relay Samples/`. The copy is idempotent per idempotency key.
+
+## H11: Resilience (audit 2, agent M)
+
+- **Manual runner recovery.** `supervisor.restart()` clears `fatal`, the restart window and `lastFatal`, waits for a
+  condemned child to exit, forks a fresh runner and resolves `{ restarted, state }` once it is `ready` / `unavailable`.
+  A no-op while a runner is starting/restarting/ready; concurrent calls share one attempt. Exposed as main-routed
+  `app.restartRunner` (rate limit 3, then 1/10 s; RUNNER_UNAVAILABLE `details.{reason, fatalCode}` when it fails
+  again) and `app.relaunch` (renderer confirms; main answers, then quits gracefully through before-quit and calls
+  `app.relaunch()`, with `app.exit(0)` as a backstop).
+- **Fatal cause.** The runner's `fatal` message carries an optional `reason` (`details.reason` of the RelayError that
+  stopped boot, snake_case). The supervisor keeps `lastFatal { code, reason, message, at }` (main's own:
+  `RUNNER_UNAVAILABLE` / `restart_limit`), reported in `app.getDiagnostics().runner.lastFatal`. Diagnostics always
+  report `db.displayPath` and `db.sizeBytes` = `relay.sqlite` + `-wal` measured by main, also while the runner is down.
+- **Backup restore.** `app.restoreLatestBackup` (only while `unavailable`; CONFLICT otherwise) forks a maintenance
+  runner (`RELAY_RUNNER_TASK=restore_latest_backup`) that never opens the live DB, answers `maintenance.result`, and
+  exits; a restored DB is followed by `restart()`.
+- **Boot.** userData must be writable before the single-instance lock (`checkDirWritable` probe); otherwise an error
+  box names the folder and the fix, and the app exits(1). Any boot rejection (`startApp`) shows an error box, exit(1).
+- **Quit.** With a run in flight (heartbeat `activeRunId`, tracked by the runner from the `run.status` events it
+  forwards, and by the supervisor between heartbeats), quitting asks "A run is in progress. Quitting may leave a request
+  with an unknown charge." (skipped under E2E and for a renderer-confirmed relaunch). `<userData>/last-shutdown.json`:
+  each launch reads the previous marker and writes `{ clean: false }`; a completed quit writes `{ clean: true, at,
+  runActive }`. Exposed as `app.getInfo().lastShutdown` / `diagnostics.lastShutdown`.
+- **Renderer recovery.** `render-process-gone`: logged, reloaded automatically once; another crash within 5 minutes
+  shows Reload / Quit. `unresponsive`: Wait / Reload / Quit (never an automatic reload; dismissed on `responsive`).
+- **Logging.** A refused write to `logs/` goes to `<os tmp>/relay-logs/` (then stderr); `diagnostics.loggingDegraded`
+  is true until a write to `logs/` succeeds again. The runner logger falls back to stderr (drained into main's logger).
+- **Exports.** The diagnostics export writes a temp file and hard-links it under the final name (never overwrites,
+  never follows a symlink; ` (2)`, ` (3)`, … on a clash; `O_EXCL` fallback where hard links are unsupported).
+- **Sample project.** `projects.createSample` returns the existing non-archived demo project instead of copying again.
+- **RELAY_E2E in packaged builds** is honored only when the build was made with `MAIN_VITE_RELAY_PACKAGED_E2E=1`
+  (inlined by electron-vite). `scripts/verify-package.ts` therefore needs a package built with that flag; release
+  builds ignore RELAY_E2E and every override it unlocks.
 
 ## Unit tests (owned by H, colocated; `vi.mock('electron')`)
 

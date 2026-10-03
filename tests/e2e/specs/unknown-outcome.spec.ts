@@ -6,7 +6,7 @@ import { RunInspector } from '../pages/run-inspector.js';
 
 const GOAL = 'Validate the user id parameter in the user handler.';
 const RETRY = 'Retry (may incur another charge)';
-const ACCEPT = 'Accept the estimated charge';
+const ACCEPT = /^Accept \$[\d.,]+ as the charge$/;
 
 // unknown-outcome: the implement request is dispatched, then the connection resets (sent_no_response, §7.5).
 test.use({ scenario: 'unknown-outcome' });

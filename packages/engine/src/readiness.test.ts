@@ -151,7 +151,7 @@ describe('runChecks: a queued run pauses before any reservation (F13, F2 clarifi
     expect([run.status, run.pauseReason, run.statusDetail?.code, run.statusDetail?.details?.['providerId']]).toEqual(['paused', 'auth_required', 'AUTH_REQUIRED', 'anthropic']);
     expect(nothingDispatched(x, runId)).toEqual([0, 0, 0]);
     const detail = await x.engine.handle('relay/v1/runs.get', { runId });
-    expect(detail.ok && detail.data.availableActions).toEqual(['reconnect_provider', 'resume', 'stop']);
+    expect(detail.ok && detail.data.availableActions).toEqual(['reconnect_provider', 'stop']); // E1 #8: no resume without a ref
     const early = await x.engine.handle('relay/v1/runs.resume', { idempotencyKey: 'ready-resume-0001', runId, decision: { kind: 'continue' } });
     expect(early.ok ? null : early.error.code).toBe('AUTH_REQUIRED'); // still no ref
 

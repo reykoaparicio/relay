@@ -1,13 +1,21 @@
 import { useId, useState } from 'react';
 import { FileSearch } from 'lucide-react';
 import type { ValidationIssue } from '@relay/contracts';
-import { Button, Skeleton } from '../../components/ui';
+import { Button, Disclosure, Skeleton } from '../../components/ui';
 import { useArtifact } from '../../hooks/useArtifact';
 
+export interface ValidationIssueListProps {
+  readonly issues: readonly ValidationIssue[];
+  /** Behind a disclosure (the plain summary leads; the field list is for whoever wants it). */
+  readonly collapsed?: boolean;
+  /** Disclosure text when collapsed (default "Fields that did not match (n)"). */
+  readonly summary?: string;
+}
+
 /** The validation issues of an invalid output, with their JSON paths as text (§5.4 schema-invalid). */
-export function ValidationIssueList({ issues }: { readonly issues: readonly ValidationIssue[] }) {
+export function ValidationIssueList({ issues, collapsed = false, summary }: ValidationIssueListProps) {
   if (issues.length === 0) return <p className="subtle">The provider response could not be read as the expected output.</p>;
-  return (
+  const list = (
     <ul className="list" aria-label="Validation issues">
       {issues.map((i, n) => (
         <li key={`${i.path}-${String(n)}`} className="list-item static">
@@ -17,6 +25,8 @@ export function ValidationIssueList({ issues }: { readonly issues: readonly Vali
       ))}
     </ul>
   );
+  if (!collapsed) return list;
+  return <Disclosure summary={summary ?? `Fields that did not match (${String(issues.length)})`}>{list}</Disclosure>;
 }
 
 /** "Repair attempts used: 1 of 1" (max shown only when the runner reports it). */
@@ -76,3 +86,22 @@ export function RawResponseToggle({ artifactId }: { readonly artifactId: string 
     </div>
   );
 }
+
+/** Error code (and support reference) behind a "Technical details" toggle: never the lead of a message. */
+export function TechnicalDetails({ error }: { readonly error: { readonly code: string; readonly correlationId?: string | undefined } | null | undefined }) {
+  if (error === null || error === undefined) return null;
+  return (
+    <Disclosure summary="Technical details">
+      <p className="subtle">
+        Error code <code>{error.code}</code>
+        {error.correlationId === undefined ? null : (
+          <>
+            {' '}· reference <code>{error.correlationId}</code> (include it if you report the problem; it contains no
+            project data)
+          </>
+        )}
+      </p>
+    </Disclosure>
+  );
+}
+

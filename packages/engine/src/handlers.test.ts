@@ -64,7 +64,7 @@ describe('projects', () => {
     expect(replay.ok && replay.data.id).toBe(x.projectId);
     expect(reused.ok ? null : reused.error.details?.['reason']).toBe('idempotency_key_reused');
     expect(dup.ok ? null : dup.error.details?.['reason']).toBe('root_already_used');
-    expect(missing.ok ? null : missing.error.code).toBe('NOT_FOUND');
+    expect(missing.ok ? null : missing.error.code).toBe('PROJECT_ROOT_MISSING'); // E2 #7
   });
 
   it('lists, gets (with stats, never the realpath), and previews by project or root', async () => {
@@ -95,7 +95,7 @@ describe('providers, profiles, workflows, settings, diagnostics', () => {
     const x = await harness({ credentialRefs: [] });
 
     const rec = await x.engine.handle('relay/v1/providers.recordCredentialRef', { providerId: 'anthropic', storageMode: 'session', vaultFile: null, redactedLabel: 'sk-…a1F9' });
-    x.db.repos.credentials.recordTest('anthropic', false, 'AUTH_REQUIRED', x.clock.now());
+    x.db.repos.credentials.recordTest('anthropic', false, 'AUTH_REQUIRED', x.clock.now(), 'run');
     const listed = await x.engine.handle('relay/v1/providers.listCredentialRefs', {});
     const status = await x.engine.handle('relay/v1/providers.list', {});
     const del = await x.engine.handle('relay/v1/providers.deleteCredentialRef', { providerId: 'anthropic' });
@@ -104,7 +104,7 @@ describe('providers, profiles, workflows, settings, diagnostics', () => {
     expect(rec.ok && rec.data.redactedLabel).toBe('sk-…a1F9');
     expect(listed.ok && listed.data.map((r) => r.providerId)).toEqual(['anthropic']);
     expect(status.ok && status.data.map((s) => [s.providerId, s.connected])).toEqual([['anthropic', true], ['openai', false], ['gemini', false]]);
-    expect(status.ok && status.data[0]?.lastTest).toEqual({ at: x.clock.now(), ok: false, code: 'AUTH_REQUIRED' });
+    expect(status.ok && status.data[0]?.lastTest).toEqual({ at: x.clock.now(), ok: false, code: 'AUTH_REQUIRED', source: 'run' });
     expect(del.ok && del.data.deleted).toBe(true);
     expect(after.ok && after.data[0]?.connected).toBe(false);
   });

@@ -10,6 +10,7 @@ import { installBridge } from '../api/bridge';
 import { newIdempotencyKey } from '../api/idempotency';
 import { useRun } from '../hooks/useRun';
 import { useRunEvents } from '../hooks/useRunEvents';
+import { useStep } from '../hooks/useStep';
 import { PUSH_INVALIDATE_DEBOUNCE_MS, startPushSync } from './push-sync';
 
 const settle = () => new Promise((r) => setTimeout(r, PUSH_INVALIDATE_DEBOUNCE_MS * 2 + 100));
@@ -51,6 +52,24 @@ describe('push-sync: mounted run details', () => {
     // …then refetched, so pendingApproval, steps and availableActions are the runner's, not the pre-push ones.
     expect(gets()).toBe(before + 1);
     expect(queryClient.getQueryState(['run', run.id])?.isInvalidated).toBe(false);
+  });
+
+  it('refetches a mounted step detail without an event stream (a second window\'s approval card) after a run.status push', async () => {
+    const { bridge, run, wrapper } = setup();
+    const step = run.steps[0];
+    if (step === undefined) throw new Error('no step');
+    const invoke = vi.spyOn(bridge, 'invoke');
+    const { result } = renderHook(() => useStep(run.id, step.id), { wrapper });
+    await waitFor(() => {
+      expect(result.current.data).toBeDefined();
+    });
+    const stepGets = () => invoke.mock.calls.filter((c) => c[0] === 'relay/v1/runs.getStep').length;
+    const before = stepGets();
+    act(() => {
+      bridge.emit({ type: 'run.status', runId: run.id, status: 'running', pauseReason: null, seq: 999 });
+    });
+    await settle();
+    expect(stepGets()).toBe(before + 1);
   });
 
   it('a burst of status pushes refetches the detail once, at the end of the burst', async () => {

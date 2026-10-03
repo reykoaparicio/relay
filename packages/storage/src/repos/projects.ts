@@ -115,6 +115,38 @@ export function createProjectRepo(driver: SqlDriver, deps: RepoDeps): ProjectRep
         );
       });
     },
+    unarchive(id) {
+      return deps.inTx((): Result<ProjectRow> => {
+        const current = find(id);
+        if (current === undefined) return err(errors.notFound('project'));
+        if (current.archivedAt === null) return err(errors.conflict({ entity: 'project', reason: 'not_archived' }));
+        const root = mapProjectWithRoot(driver.prepare('SELECT * FROM projects WHERE id = ?').get(id)).rootRealpath;
+        const clash = driver.prepare('SELECT id FROM projects WHERE root_realpath = ? AND archived_at IS NULL').get(root);
+        if (clash !== undefined) {
+          // projects_root_active_uq: one active project per folder.
+          return err(errors.conflict({ entity: 'project', reason: 'root_already_used', projectId: new RowReader('projects', clash).as('id', idSchema('project')) }));
+        }
+        const updatedAt = Math.max(deps.clock.now(), current.updatedAt + 1);
+        driver.prepare('UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ? AND archived_at IS NOT NULL').run(updatedAt, id);
+        return ok(get(id));
+      });
+    },
+    setRoot(id, root, expectedUpdatedAt) {
+      return deps.inTx((): Result<ProjectRow> => {
+        const current = find(id);
+        if (current === undefined) return err(errors.notFound('project'));
+        if (current.archivedAt !== null) return err(errors.conflict({ entity: 'project', reason: 'archived' }));
+        if (expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) {
+          return err(errors.conflict({ entity: 'project', currentUpdatedAt: current.updatedAt }));
+        }
+        const clash = driver.prepare('SELECT id FROM projects WHERE root_realpath = ? AND archived_at IS NULL AND id <> ?').get(root.rootRealpath, id);
+        if (clash !== undefined) return err(errors.conflict({ entity: 'project', reason: 'root_already_used' }));
+        const updatedAt = Math.max(deps.clock.now(), current.updatedAt + 1);
+        driver.prepare('UPDATE projects SET root_realpath = ?, root_display_path = ?, updated_at = ? WHERE id = ?')
+          .run(root.rootRealpath, root.rootDisplayPath, updatedAt, id);
+        return ok(get(id));
+      });
+    },
     stats(id, monthStart) {
       const row = driver
         .prepare(

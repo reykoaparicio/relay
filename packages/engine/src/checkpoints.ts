@@ -155,17 +155,22 @@ function abortedBeforeSend(): ModelResult {
   return { kind: 'error', error: errors.providerUnavailable(), phase: 'not_sent' };
 }
 
-/** Release a reservation that was never sent (caller's tx): `release −N`, attempt → failed_before_dispatch, step → ready. */
+/**
+ * Release a reservation that was never sent (caller's tx): the attempt CAS `created | reserved → failed_before_dispatch`
+ * FIRST, and only when it wins `release −N` and step → ready (E1 #6: recovery or a new runner may have released it
+ * already; an attempt's reservation is released once).
+ */
 function releaseNotSent(
   r: Repos,
   fx: PostCommitEffect[],
   i: { readonly run: RunRow; readonly attemptId: AttemptId; readonly stepRunId: StepRunId; readonly N: Microusd; readonly priceCatalogVersion: string; readonly now: EpochMs },
-): void {
+): boolean {
+  if (!r.attempts.transition(i.attemptId, ['created', 'reserved'], 'failed_before_dispatch', { finishedAt: i.now })) return false;
   r.ledger.append(settlementEntries({ reservation: i.N, cost: { kind: 'not_charged' }, attemptId: i.attemptId, runId: i.run.id,
     projectId: i.run.projectId, priceCatalogVersion: i.priceCatalogVersion, createdAt: i.now }));
-  r.attempts.transition(i.attemptId, ['created', 'reserved'], 'failed_before_dispatch', { finishedAt: i.now });
   const s = r.steps.get(i.stepRunId);
   if (s.state === 'reserved') applyStepEvent(r, fx, s, 'RESERVATION_RELEASED');
+  return true;
 }
 
 /** Best-effort: never leave `dispatching` in-process (F4 finally). Recovery (F9) repeats this if it fails. */
@@ -261,7 +266,9 @@ function reserve(ctx: EngineCtx, fx: PostCommitEffect[], i: ReserveInput): Admit
     if (!decision.ok) {
       appendRunEvent(r, fx, i.runId, 'ledger.blocked', { ...decision.breakdown, stepRunId: i.stepRunId });
       const scope = decision.breakdown.scope === 'project' ? 'project' : 'run';
-      applyRunEvent(r, cur, { type: 'BUDGET_BLOCKED', scope, error: errors.budgetBlocked(decision.breakdown) }, now, fx);
+      // The blocked step and its estimated input tokens: the inspector prices the choose-profile options from them.
+      const error = errors.budgetBlocked(decision.breakdown, { details: { stepKey: step.stepKey, estimatedInputTokens: i.estimate.inputTokens } });
+      applyRunEvent(r, cur, { type: 'BUDGET_BLOCKED', scope, error }, now, fx);
       return { ok: false, why: 'paused' };
     }
     return { ok: true, seq: insertReservedAttempt(r, fx, i, cur, step, now) };
@@ -312,6 +319,11 @@ async function prepare(ctx: EngineCtx, runId: RunId, stepRunId: StepRunId): Prom
   const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId, runId, stepKey: step.stepKey, purpose },
     project.providerPolicy.providerOptions); // per-project data handling (e.g. OpenAI storeResponses)
   const providerId = stepSnap.profile.providerId;
+  // F2 (security): a provider the project no longer allows is refused BEFORE the key is resolved or the adapter
+  // estimates (a provider-counted estimate sends the context) — the same check #2 the policy runs below.
+  if (!project.providerPolicy.allowedProviderIds.includes(providerId)) {
+    return pauseRun(ctx, runId, eventForError(errors.permissionDenied('provider_not_allowed', { details: { providerId } })));
+  }
   const found = adapterOf(ctx, providerId);
   if (!found.ok) return pauseRun(ctx, runId, eventForError(found.error));
   const adapter = found.value;
@@ -390,6 +402,8 @@ function settle(
     if (!won) return null;
     r.ledger.append(settlementEntries({ reservation: N, cost: i.cost, attemptId, runId: run.id, projectId: run.projectId,
       priceCatalogVersion: p.estimate.priceCatalogVersion, createdAt: now }));
+    // E1: a key rejected during a run marks the provider failing (Settings / shell), like a failed connection test.
+    if (o.error?.code === 'AUTH_REQUIRED') r.credentials.recordTest(p.stepSnap.profile.providerId, false, 'AUTH_REQUIRED', now, 'run');
     for (const put of i.puts) {
       if (put.ok) {
         r.artifacts.insertIfAbsent({ ...put.meta, stepRunId: p.step.id, attemptId });
@@ -496,16 +510,20 @@ function ownsLeaseInTx(ctx: Pick<EngineCtx, 'lease'>, r: Repos): boolean {
  * 3. Durable dispatch intent, in one tx: `reserved → dispatching` (+ step DISPATCHING), or — when the run stopped
  * running or the call was already aborted — the reservation is released unsent. Returns the dispatch time, or null
  * when nothing will be sent. The caller runs `fx` (and marks the attempt dispatched) after it returns.
+ * E1 #6: the lease is re-checked INSIDE the tx before any write (a runner that stalled past the stale window and was
+ * taken over writes nothing: the new owner's recovery already released or reconciled this attempt), and every write
+ * follows a won attempt CAS.
  */
 function recordDispatchIntent(ctx: EngineCtx, fx: PostCommitEffect[], p: Prepared, controller: AbortController): EpochMs | null {
   const { run, attemptId, step } = p;
   return ctx.db.tx('immediate', (r): EpochMs | null => {
+    if (!ownsLeaseInTx(ctx, r)) return null;
     const now = ctx.clock.now();
     if (r.runs.get(run.id).status !== 'running' || controller.signal.aborted) {
       releaseNotSent(r, fx, { run, attemptId, stepRunId: step.id, N: p.estimate.upperAllowanceMicrousd, priceCatalogVersion: p.estimate.priceCatalogVersion, now });
       return null;
     }
-    r.attempts.transition(attemptId, ['reserved'], 'dispatching', { dispatchedAt: now });
+    if (!r.attempts.transition(attemptId, ['reserved'], 'dispatching', { dispatchedAt: now })) return null;
     applyStepEvent(r, fx, r.steps.get(step.id), 'DISPATCHING');
     appendRunEvent(r, fx, run.id, 'attempt.dispatching', { attemptId, stepRunId: step.id });
     return now;

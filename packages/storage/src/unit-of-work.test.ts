@@ -107,7 +107,7 @@ describe('unit of work', () => {
     expect(typeof typed).toBe('function');
   });
 
-  it('maps SQLITE_BUSY on a second connection to a retryable RUNNER_UNAVAILABLE', () => {
+  it('maps SQLITE_BUSY on a second connection to a retryable DATABASE_UNAVAILABLE database_busy', () => {
     const b = openNodeSqlite(f.db.path);
     b.exec('PRAGMA busy_timeout = 50');
     const dbB = createDb(b, { clock: f.clock, ids: createIdGen(systemClock, (n) => randomBytes(n)) });
@@ -125,7 +125,7 @@ describe('unit of work', () => {
     });
 
     expect(isRelayError(caught)).toBe(true);
-    expect(caught).toMatchObject({ appError: { code: 'RUNNER_UNAVAILABLE', retryable: true } });
+    expect(caught).toMatchObject({ appError: { code: 'DATABASE_UNAVAILABLE', retryable: true, details: { reason: 'database_busy' } } });
     expect(f.db.repos.settings.get('writer')).toBeUndefined();
     dbB.close();
   });

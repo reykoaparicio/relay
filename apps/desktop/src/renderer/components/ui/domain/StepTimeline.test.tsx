@@ -21,7 +21,7 @@ describe('StepTimeline', () => {
     render(<Harness />);
 
     expect(screen.getByRole('list', { name: 'Run steps' }).tagName).toBe('OL');
-    expect(screen.getByRole('button', { name: 'Plan', description: /Awaiting your approval/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Plan a fix', description: /Awaiting your approval/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Patch', description: /Failed/ })).toBeInTheDocument();
   });
 

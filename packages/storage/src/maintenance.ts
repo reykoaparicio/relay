@@ -24,7 +24,10 @@ export interface ProjectHistoryPurgeSummary extends PurgeSummary {
 }
 
 export interface Maintenance {
-  /** §10.4 separate project-history purge: snapshot rows, then raw responses and context manifests of its runs. */
+  /**
+   * §10.4 separate project-history purge: snapshot rows, then raw responses and context manifests of its ENDED runs.
+   * Runs that are still active (queued, running, paused, awaiting approval, …) keep theirs (E2 #14).
+   */
   purgeProjectHistory(projectId: ProjectId): Promise<ProjectHistoryPurgeSummary>;
   /** §12.3 retention: purges `raw_response` files older than `retentionDays`. */
   sweepRawResponses(now: EpochMs, retentionDays: number): Promise<PurgeSummary>;
@@ -74,9 +77,12 @@ export function createMaintenance(deps: MaintenanceDeps): Maintenance {
         }
         return deleted;
       });
+      // Only artifacts of ENDED runs (E2 #14): an active run's raw responses and context manifests are still its
+      // evidence (approval binding, report); they are purged by the next purge / retention sweep after it ends.
+      const ended = new Set<string>(db.repos.runs.listTerminalIdsForProject(projectId));
       const rows = db.repos.artifacts
         .listWhere({ projectId, kinds: HISTORY_KINDS, unpurgedOnly: true })
-        .filter((a) => a.runId !== null);
+        .filter((a) => a.runId !== null && ended.has(a.runId));
       const files = await purgeFiles(rows);
       return { purgedSnapshots, ...files };
     },

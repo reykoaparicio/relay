@@ -18,6 +18,8 @@ export interface InlineAlertProps {
   readonly title: ReactNode;
   readonly children?: ReactNode;
   readonly actions?: ReactNode;
+  /** Secondary content after the actions (e.g. a "Technical details" disclosure), so actions sit under the cause. */
+  readonly footer?: ReactNode;
   readonly className?: string;
   /**
    * Live-region behaviour (default `'off'`: a banner that is part of the page is read in place, not announced).
@@ -37,7 +39,7 @@ const LIVE_ROLE: Readonly<Record<InlineAlertLive, 'alert' | 'status' | undefined
 };
 
 /** A tinted banner (09 I3 `.banner`). Silent by default; see `live`. */
-export function InlineAlert({ tone, title, children, actions, className, live = 'off' }: InlineAlertProps) {
+export function InlineAlert({ tone, title, children, actions, footer, className, live = 'off' }: InlineAlertProps) {
   const Icon = TONE_ICON[tone];
   return (
     <div className={cx('banner', tone, className)} role={LIVE_ROLE[live]}>
@@ -46,6 +48,7 @@ export function InlineAlert({ tone, title, children, actions, className, live = 
         <strong>{title}</strong>
         {children === undefined ? null : <div className="stack small">{children}</div>}
         {actions === undefined ? null : <div className="actions">{actions}</div>}
+        {footer === undefined || footer === null ? null : <div className="stack small">{footer}</div>}
       </div>
     </div>
   );

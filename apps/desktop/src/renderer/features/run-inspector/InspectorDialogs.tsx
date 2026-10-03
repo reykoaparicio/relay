@@ -6,8 +6,9 @@ import type { RefObject } from 'react';
 import { assertNever } from '@relay/contracts';
 import type { ProfileWithWarnings, ProjectDetail, RunAction, RunDetail, StepView } from '@relay/contracts';
 import { ConfirmDialog } from '../../components/ui';
-import { RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_HINTS, UNKNOWN_OUTCOME_DECISION_LABELS } from '../../lib/format';
+import { formatMoney, RUN_ACTION_LABELS, UNKNOWN_OUTCOME_DECISION_HINTS, UNKNOWN_OUTCOME_DECISION_LABELS } from '../../lib/format';
 import type { UnknownOutcomeDecision } from '../../lib/format';
+import { stepTitle } from './inspector-model';
 import type { RunActionRequest } from './run-actions';
 import {
   ChooseProfileDialog,
@@ -40,18 +41,36 @@ const CONFIRM_COPY: Readonly<Record<ConfirmKind, { title: string; consequences: 
   },
 };
 
-/** Confirmation copy of a per-attempt unknown-outcome decision (§4.4: a retry may incur another charge). */
-function unknownDecisionCopy(decision: UnknownOutcomeDecision): { title: string; consequences: string } {
+/**
+ * Confirmation copy of a per-attempt unknown-outcome decision (§4.4: a retry may incur another charge), stating the
+ * cost impact with the attempt's possible charge when it is known.
+ */
+function unknownDecisionCopy(decision: UnknownOutcomeDecision, run: RunDetail, attemptId: string): { title: string; consequences: string; confirmLabel: string } {
+  const attempt = run.unresolvedAttempts.find((a) => a.id === attemptId);
+  const amount = attempt?.cost === null || attempt?.cost === undefined ? null : formatMoney(attempt.cost.microusd);
+  const held = amount === null ? 'The possible charge' : `The possible charge of ${amount}`;
   switch (decision) {
     case 'retry_acknowledging_charge':
       return {
         title: 'Retry this request?',
-        consequences: `The retry may incur another charge: the provider may already have processed the earlier request. ${UNKNOWN_OUTCOME_DECISION_HINTS[decision]}`,
+        consequences: `The retry may incur another charge: the provider may already have processed the earlier request. ${held} stays as unknown liability until it is resolved, and the retry reserves budget for a new request. Run allowance remaining now: ${formatMoney(run.cost.remaining)}.`,
+        confirmLabel: UNKNOWN_OUTCOME_DECISION_LABELS[decision],
       };
     case 'mark_failed_keep_liability':
-      return { title: 'Mark this request as failed?', consequences: UNKNOWN_OUTCOME_DECISION_HINTS[decision] };
+      return {
+        title: 'Mark this request as failed?',
+        consequences: `The step is marked failed. ${held} stays recorded as unknown liability; nothing is retried.`,
+        confirmLabel: UNKNOWN_OUTCOME_DECISION_LABELS[decision],
+      };
     case 'accept_estimated_charge':
-      return { title: 'Accept the estimated charge?', consequences: UNKNOWN_OUTCOME_DECISION_HINTS[decision] };
+      return {
+        title: amount === null ? 'Accept the estimated charge?' : `Accept ${amount} as the charge?`,
+        consequences:
+          amount === null
+            ? UNKNOWN_OUTCOME_DECISION_HINTS[decision]
+            : `${amount} (estimated) is recorded as the charge for this request: it moves from unknown liability to settled usage, so the run total does not change. Nothing is retried.`,
+        confirmLabel: amount === null ? UNKNOWN_OUTCOME_DECISION_LABELS[decision] : `Accept ${amount} as the charge`,
+      };
     default:
       return assertNever(decision);
   }
@@ -112,6 +131,7 @@ export function InspectorDialogs({
   submitDialog,
 }: InspectorDialogsProps) {
   const { dialog, confirm, unknownChoice } = state;
+  const unknownCopy = unknownChoice === null ? null : unknownDecisionCopy(unknownChoice.decision, run, unknownChoice.attemptId);
   const dialogError = dialog === null ? null : error;
   const onOpenChange = (o: boolean) => {
     if (!o) state.openDialog(null);
@@ -170,6 +190,9 @@ export function InspectorDialogs({
           error={dialogError}
           step={blocked}
           profiles={permittedProfiles}
+          profileOptions={run.profileOptions}
+          allowedProviderIds={allowedProviderIds}
+          stepName={blocked === undefined ? undefined : stepTitle(blocked, run.stepMeta)}
           {...(allowedProviderIds?.length === 0
             ? { emptyMessage: 'This project allows no provider, so no profile can be used. Allow a provider in Settings → Projects.' }
             : {})}
@@ -216,9 +239,9 @@ export function InspectorDialogs({
         onOpenChange={(open) => {
           if (!open) state.chooseUnknown(null);
         }}
-        title={unknownChoice === null ? '' : unknownDecisionCopy(unknownChoice.decision).title}
-        consequences={unknownChoice === null ? '' : unknownDecisionCopy(unknownChoice.decision).consequences}
-        confirmLabel={unknownChoice === null ? 'Confirm' : UNKNOWN_OUTCOME_DECISION_LABELS[unknownChoice.decision]}
+        title={unknownCopy?.title ?? ''}
+        consequences={unknownCopy?.consequences ?? ''}
+        confirmLabel={unknownCopy?.confirmLabel ?? 'Confirm'}
         cancelLabel="Not now"
         destructive={false}
         returnFocusFallback={returnFocusFallback}

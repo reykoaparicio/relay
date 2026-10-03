@@ -59,6 +59,8 @@ module.exports = {
           '(^|/)(index|main)\\.(ts|tsx)$',
           '\\.test\\.(ts|tsx)$',
           '(^|/)(electron\\.vite|vite\\.renderer)\\.config\\.ts$',
+          // Reached only through the build alias in electron.vite.config.ts (ws optional native add-ons).
+          '^apps/desktop/build/ws-optional-native\\.cjs$',
         ],
       },
       to: {},

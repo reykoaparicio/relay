@@ -3,6 +3,7 @@
 import { useId } from 'react';
 import type { ReactNode } from 'react';
 import { CircleCheck, CircleX } from 'lucide-react';
+import { Link } from 'react-router';
 import type { FindingsV1, PatchV1, PlanV1, ReviewV1, StepOutput } from '@relay/contracts';
 import { LazyDiffViewer, OpenQuestions, PlanBody, SourceRefs } from '../../components/ui';
 
@@ -113,17 +114,31 @@ const REVIEW_OUTCOME_LABEL: Readonly<Record<ReviewV1['outcome'], string>> = {
   incomplete: 'Incomplete',
 };
 
+export interface ReviewViewProps {
+  readonly value: ReviewV1;
+  /**
+   * Where the memory suggestions this review proposed are reviewed (the Memory page's Suggested tab); `null` hides the
+   * note (a page that lists the run's suggestions elsewhere, e.g. the completed run's banner).
+   */
+  readonly memoryHref?: string | null;
+  /** False when the page already says what "accepted" means (the completed run's banner). */
+  readonly showDisclaimer?: boolean;
+}
+
 /** `review.v1`: the verifier's verdict, checks, and requested changes. */
-export function ReviewView({ value }: { readonly value: ReviewV1 }) {
+export function ReviewView({ value, memoryHref, showDisclaimer = true }: ReviewViewProps) {
   const checksId = useId();
+  const proposals = value.memoryProposals.length;
   return (
     <div className="stack">
       <p>
         <strong>{REVIEW_OUTCOME_LABEL[value.outcome]}.</strong> {value.verdictRationale}
       </p>
-      <p className="subtle">
-        Accepted means the configured workflow accepted the output. It does not guarantee the code is correct.
-      </p>
+      {showDisclaimer ? (
+        <p className="subtle">
+          Accepted means the configured workflow accepted the output. It does not guarantee the code is correct.
+        </p>
+      ) : null}
       {value.checks.length > 0 ? (
         <div className="stack">
           <h3 id={checksId} className="section-label">
@@ -160,19 +175,37 @@ export function ReviewView({ value }: { readonly value: ReviewV1 }) {
           </ul>
         </div>
       ) : null}
-      {value.memoryProposals.length > 0 ? (
+      {proposals > 0 && memoryHref !== null ? (
         <p className="small">
-          {value.memoryProposals.length === 1 ? '1 memory suggestion was' : `${String(value.memoryProposals.length)} memory suggestions were`}{' '}
-          proposed. Suggestions are not used by runs until you approve them.
+          {proposals === 1 ? '1 memory suggestion was' : `${String(proposals)} memory suggestions were`} proposed.
+          Suggestions are not used by runs until you approve them.
+          {memoryHref === undefined ? null : (
+            <>
+              {' '}
+              <Link to={memoryHref}>{proposals === 1 ? 'Review suggestion' : 'Review suggestions'}</Link>
+            </>
+          )}
         </p>
       ) : null}
-      <SourceRefs refs={value.sourceRefs} />
+      {value.sourceRefs.length === 0 ? null : (
+        <div className="stack">
+          <h3 className="section-label">Sources the reviewer cited</h3>
+          <SourceRefs refs={value.sourceRefs} />
+        </div>
+      )}
     </div>
   );
 }
 
 /** Any step output, by schema id. `report.v1` (the finalize step) is summarized; the report page shows it in full. */
-export function StepOutputView({ output, reportLink }: { readonly output: StepOutput; readonly reportLink?: ReactNode }) {
+export interface StepOutputViewProps {
+  readonly output: StepOutput;
+  readonly reportLink?: ReactNode;
+  /** `review.v1` options (see {@link ReviewViewProps}). */
+  readonly review?: Omit<ReviewViewProps, 'value'>;
+}
+
+export function StepOutputView({ output, reportLink, review = {} }: StepOutputViewProps) {
   switch (output.schemaId) {
     case 'findings.v1':
       return <FindingsView value={output.value} />;
@@ -181,7 +214,7 @@ export function StepOutputView({ output, reportLink }: { readonly output: StepOu
     case 'patch.v1':
       return <PatchView value={output.value} />;
     case 'review.v1':
-      return <ReviewView value={output.value} />;
+      return <ReviewView value={output.value} {...review} />;
     case 'report.v1':
       return (
         <div className="stack">

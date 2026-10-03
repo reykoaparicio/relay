@@ -107,11 +107,12 @@ Hooks (`hooks/`), one file each: `useProject`, `useRuns` (infinite query with `n
 - It is used by page tests (J11) and lets J build every screen before H lands. It is **excluded from production bundles**: the import is guarded by `import.meta.env.DEV || import.meta.env.MODE === 'test'`, and `getBridge()` throws in production if `window.relay` is missing.
 
 ## J4: Shell & Overview (`pages/OverviewPage.tsx`, `features/shell/*`)
-- `features/shell/Shell.tsx` composes `AppShell` + `SideNav` (the Runs badge shows the count of `awaiting_approval` runs) + `ProjectSwitcher` + provider status line ("2 providers connected" / warning) + `FakeProviderBadge` + runner banner.
+- `features/shell/Shell.tsx` composes `AppShell` + `SideNav` (the Runs badge counts the runs that wait for the user: `awaiting_approval` plus `paused` for any reason; its screen-reader text says which, e.g. "1 waiting for approval", "1 paused run needs you") + `ProjectSwitcher` + provider status line ("2 providers connected" / warning) + `FakeProviderBadge` + runner banner.
 - Overview content (§5.2):
   - Stat tiles: Active runs (sub: "Waiting for your approval"), Tracked usage (sub: "$0.36 reserved in flight", caption "tracked by Relay", links to the latest run's ledger `/p/:projectId/runs/:latestRunId?tab=ledger`; no link when there are no runs), Project memory (sub: "2 suggestions to review", links to `/memory?tab=suggested`).
   - Every budget value shown on Overview (tile amounts, run-controls budget) links to `/p/:projectId/runs/:runId?tab=ledger` for the run it belongs to. The project-month ledger export lives in Settings → Data.
   - "Needs your attention" card: the **exact pending step**. Clicking goes to `/runs/:id?step=<approval step>` (§5.2 "Clicking the active-run card opens the exact pending step"). It also shows "No project files have been modified."
+  - A paused run (any pause reason other than `unknown_outcome`, which gets the RecoveryPanel) also gets a "Needs your attention" card: the pause label and detail, the step it is blocked on, and "Open blocked step" (`/runs/:id?step=<blocked step>`). The Active runs tile hint reads "1 paused run needs you" when nothing is running or awaiting approval.
   - Run controls card: run budget, revision cycles, actions "Draft patch only", execution "One step at a time".
   - Recent runs: the 3 latest via `useRuns(limit 3)`.
 - Empty state: "Try the sample project" (`projects.createSample`) + "Start: Review & propose a fix" (§5.2).

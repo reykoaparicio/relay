@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Download, FileText, Pause, XCircle } from 'lucide-react';
+import { Download, FileText, Pause, TrendingUp, XCircle } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ApprovalDecision, ExportWhat, RunAction, RunDetail } from '@relay/contracts';
@@ -9,6 +9,7 @@ import {
   EmptyState,
   ErrorView,
   PageHeader,
+  PresentationBadge,
   ResponsivePanels,
   Skeleton,
   StatusBadge,
@@ -19,20 +20,26 @@ import {
 import type { ApprovalDecisionInput, RecoveryDecisionDetail } from '../components/ui';
 import { isAppErrorException } from '../api/client';
 import { toViewError } from '../api/errors';
-import { RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS } from '../lib/format';
+import { RUN_ACTION_DONE_LABELS, RUN_ACTION_LABELS, statusPresentation } from '../lib/format';
 import { runLabel } from '../features/runs/run-display';
 import { href, paths } from '../features/shell/paths';
 import { ActionErrorNotice } from '../features/run-inspector/ActionErrorNotice';
+import { exportToast } from '../features/run-inspector/export-toast';
 import { InspectorDialogs, useInspectorDialogs } from '../features/run-inspector/InspectorDialogs';
 import {
   APPROVAL_ACTIONS,
   blockedStep,
   defaultStep,
   HEADER_ACTIONS,
+  instructionVersionOf,
   isLatestRow,
   latestRowOf,
+  overrunStep,
   parseInspectorTab,
+  pauseBlockedStep,
+  signInResumeBlockedReason,
   stepEventsOf,
+  stepPresentation,
   stepTitle,
 } from '../features/run-inspector/inspector-model';
 import type { RunActionRequest } from '../features/run-inspector/run-actions';
@@ -44,6 +51,7 @@ import { useLedger } from '../hooks/useLedger';
 import { useNavPerf } from '../hooks/useNavPerf';
 import { useProfiles } from '../hooks/useProfiles';
 import { useProject } from '../hooks/useProject';
+import { useProviders } from '../hooks/useProviders';
 import { useRun } from '../hooks/useRun';
 import { useRunEvents } from '../hooks/useRunEvents';
 import { StreamProgressContext } from '../hooks/useStreamProgress';
@@ -75,11 +83,13 @@ export function RunInspectorPage() {
   const runQ = useRun(runId);
   const run = runQ.data;
   const stream = useRunEvents(runId);
-  const selected = run === undefined ? undefined : (run.steps.find((s) => s.id === search.get('step')) ?? defaultStep(run));
+  const selected =
+    run === undefined ? undefined : (run.steps.find((s) => s.id === search.get('step')) ?? defaultStep(run, stream.events));
   const stepQ = useStep(runId, selected?.id);
   const ledger = useLedger(runId);
   const project = useProject(projectId);
   const profiles = useProfiles();
+  const providers = useProviders();
   const actions = useRunActions({ runId, projectId });
   const artifactExport = useArtifactExport(runId);
   const ledgerExport = useLedgerExport(runId);
@@ -176,9 +186,8 @@ export function RunInspectorPage() {
       setLastAction(action);
       artifactExport.mutate(what, {
         onSuccess: (res) => {
-          if (res.exported) {
-            toast.show({ key: `export:${runId}:${what}`, title: 'Export saved', body: res.displayPaths.join(', '), tone: 'success' });
-          }
+          const t = exportToast(res);
+          if (t !== null) toast.show({ key: `export:${runId}:${what}`, ...t });
         },
       });
     },
@@ -257,10 +266,15 @@ export function RunInspectorPage() {
     },
     [trigger],
   );
-  const disabledReasons = useMemo(
-    () => (chooseProfileBlocked === null ? undefined : { choose_profile: chooseProfileBlocked }),
-    [chooseProfileBlocked],
-  );
+  // A sign-in pause cannot resume until the provider is reconnected: Resume stays disabled, with the reason shown.
+  const resumeBlocked = run === undefined ? null : signInResumeBlockedReason(run, providers.data, stream.events);
+  const disabledReasons = useMemo(() => {
+    if (chooseProfileBlocked === null && resumeBlocked === null) return undefined;
+    return {
+      ...(chooseProfileBlocked === null ? {} : { choose_profile: chooseProfileBlocked }),
+      ...(resumeBlocked === null ? {} : { resume: resumeBlocked }),
+    };
+  }, [chooseProfileBlocked, resumeBlocked]);
 
   const onDecide = useCallback(
     async (input: ApprovalDecisionInput) => {
@@ -288,6 +302,27 @@ export function RunInspectorPage() {
   );
 
   const liveEvents = stream.events;
+  // The step a pause holds back reads "Blocked: …" (timeline and step header); the step that overran gets a badge.
+  const pauseBlocked = run === undefined ? undefined : pauseBlockedStep(run);
+  const overranId = run?.status === 'paused' && run.pauseReason === 'budget_overrun' ? overrunStep(run, liveEvents)?.id : undefined;
+  // E1: step display names from the workflow spec (`stepMeta`), else the key label.
+  const stepMeta = run?.stepMeta;
+  const titleFor = useCallback((step: { readonly stepKey: string }) => stepTitle(step, stepMeta), [stepMeta]);
+  const presentationFor = useCallback(
+    (step: RunDetail['steps'][number]) =>
+      run === undefined ? statusPresentation('step', step.state) : stepPresentation(run, step, pauseBlocked),
+    [run, pauseBlocked],
+  );
+  const badgesFor = useCallback(
+    (step: RunDetail['steps'][number]) =>
+      step.id === overranId ? (
+        <span className="badge warning">
+          <TrendingUp aria-hidden="true" />
+          Cost over reservation
+        </span>
+      ) : null,
+    [overranId],
+  );
   const selectedEvents = useMemo(
     () => (selected === undefined ? { events: [], runLevel: [] } : stepEventsOf([stepQ.data?.events, liveEvents], selected)),
     [liveEvents, selected, stepQ.data?.events],
@@ -317,6 +352,7 @@ export function RunInspectorPage() {
     detailError: stepQ.error,
     selectedEvents,
     eventsLoaded: stream.loaded || stepQ.data !== undefined,
+    runEvents: liveEvents,
     ledger,
     ledgerExport,
     approval: {
@@ -362,6 +398,7 @@ export function RunInspectorPage() {
   const allowedProviders = new Set<string>(allowedProviderIds ?? []);
   // An empty allowlist permits no provider (never "everything").
   const permittedProfiles = (profiles.data ?? []).filter((p) => allowedProviders.has(p.profile.providerId));
+  const instructionVersion = instructionVersionOf(run, selected.stepKey);
   const newerRow =
     search.get('step') === selected.id && !isLatestRow(selected, run.steps) ? latestRowOf(run.steps, selected.stepKey) : undefined;
   if (panels === null) return null;
@@ -372,7 +409,14 @@ export function RunInspectorPage() {
       <div className="grid grid-cols-[minmax(220px,280px)_minmax(0,1fr)] items-start gap-5 max-[900px]:grid-cols-1">
         <section className="card" aria-labelledby="inspector-timeline-heading">
           <h2 id="inspector-timeline-heading">Timeline</h2>
-          <StepTimeline steps={run.steps} selectedId={selected.id} onSelect={selectStep} titleFor={stepTitle} />
+          <StepTimeline
+            steps={run.steps}
+            selectedId={selected.id}
+            onSelect={selectStep}
+            titleFor={titleFor}
+            presentationFor={presentationFor}
+            badgesFor={badgesFor}
+          />
         </section>
         <div className="stack min-w-0">
           <StatusBanner
@@ -389,10 +433,15 @@ export function RunInspectorPage() {
           <section className="stack" aria-labelledby="inspector-step-heading">
             <div className="card-header">
               <h2 id="inspector-step-heading" ref={stepHeadingRef} tabIndex={-1} className="section-heading">
-                {stepTitle(selected)}
+                {titleFor(selected)}
               </h2>
-              <StatusBadge kind="step" value={selected.state} showDetail />
+              <PresentationBadge presentation={stepPresentation(run, selected, pauseBlocked)} showDetail />
             </div>
+            {instructionVersion === null ? null : (
+              <p className="subtle small" data-testid="step-instruction-version">
+                Instructions <span className="mono">{instructionVersion}</span>
+              </p>
+            )}
             {newerRow === undefined ? null : (
               <p className="subtle" data-testid="newer-attempt-notice">
                 A newer attempt of this step exists.{' '}

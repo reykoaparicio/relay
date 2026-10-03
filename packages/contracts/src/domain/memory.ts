@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { MEMORY_LIMITS } from '../defaults.js';
 import { idBodyPattern, idSchema } from '../ids.js';
+import { sourceRefSchema } from '../outputs/common.js';
 import { epochMsSchema, relPathSchema, sha256Schema } from '../primitives.js';
 import { memoryEventTypeSchema, memoryStatusSchema, memoryTypeSchema, roleSchema } from '../status.js';
 
@@ -57,6 +58,16 @@ export const memoryRecordViewSchema = z.object({
   supersededById: idSchema('memory').nullable(),
   stale: z.boolean(),
   conflictsWith: z.array(idSchema('memory')),
+  /**
+   * E2 #16: when the user last confirmed the record ("Confirm still accurate" → a `reviewed` event); null = never.
+   * Optional (additive): older runners omit it.
+   */
+  lastReviewedAt: epochMsSchema.nullable().optional(),
+  /**
+   * E2 #16: review is due — `reviewAt` has passed and no review happened since it was set (based on the last
+   * `reviewed` / review-date change, not `updatedAt`, so an unrelated edit no longer hides a due review).
+   */
+  reviewDue: z.boolean().optional(),
 });
 /** Memory record view. */
 export type MemoryRecordView = z.infer<typeof memoryRecordViewSchema>;
@@ -72,6 +83,8 @@ export const memoryRecordDetailSchema = memoryRecordViewSchema.extend({
       author: memoryActorSchema,
       createdAt: epochMsSchema,
       sourceRefs: z.array(memorySourceRefSchema),
+      /** E2 #17: runs whose snapshot used exactly this revision (optional, additive). */
+      usedByRuns: z.number().int().nonnegative().optional(),
     }),
   ),
   events: z.array(
@@ -80,6 +93,11 @@ export const memoryRecordDetailSchema = memoryRecordViewSchema.extend({
       revision: z.number().int().positive(),
       actor: memoryActorSchema,
       createdAt: epochMsSchema,
+      /**
+       * E2 #17 (audit trail, optional): the event's stored detail, e.g. `{ reason }` (reject), `{ supersededById }`
+       * (archive by a resolution), `{ resolution, with }`, `{ runId, status }` (skipped), `{ refs }` (reviewed).
+       */
+      detail: z.record(z.string(), z.unknown()).nullable().optional(),
     }),
   ),
   usedByRuns: z.number().int().nonnegative(),
@@ -88,6 +106,8 @@ export const memoryRecordDetailSchema = memoryRecordViewSchema.extend({
       rationale: z.string(),
       suggestedScope: memoryRecordScopeSchema,
       conflictsWith: z.array(idSchema('memory')),
+      /** E2 #17: the proposing step's source references (file + lines), so the user can check the evidence. */
+      sourceRefs: z.array(sourceRefSchema).max(10).optional(),
     })
     .optional(),
 });

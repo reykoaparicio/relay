@@ -1,7 +1,7 @@
 // Time helpers (00b §2.4: clock and timers are injected; nothing here reads the wall clock).
 import { epochMs } from '@relay/contracts';
 import type { EpochMs } from '@relay/contracts';
-import type { Timers, WakeSignal } from './ports.js';
+import type { MonotonicClock, Timers, WakeSignal } from './ports.js';
 
 /**
  * The local calendar month containing `now` as `[start, end)` (R4-4 project month).
@@ -33,6 +33,12 @@ export const globalTimers: Timers = Object.freeze({
     globalThis.clearInterval(h as ReturnType<typeof globalThis.setInterval>);
   },
 });
+
+/**
+ * The process monotonic clock (composition roots only): `performance.now()` (libuv hrtime — on macOS it does not
+ * advance while the Mac sleeps, and it never jumps with wall-clock changes).
+ */
+export const systemMonotonic: MonotonicClock = Object.freeze({ now: (): number => performance.now() });
 
 /**
  * Creates the loop's wake-up signal. `wait(ms)` resolves after `ms` on the injected timers or as soon as `signal()`

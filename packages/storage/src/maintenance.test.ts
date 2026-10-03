@@ -44,11 +44,15 @@ describe('maintenance (C8)', () => {
     const other = seedProject(f.db, f.clock);
     const run = seedRun(f.db, f.clock, p.id);
     const otherRun = seedRun(f.db, f.clock, other.id);
+    const activeRun = seedRun(f.db, f.clock, p.id); // E2 #14: still queued → keeps its snapshot and evidence
+    expect(f.db.repos.runs.updateStatus(run.id, ['queued'], 'completed', {})).toBe(true);
     const m = f.db.repos.memory.insertRecord(
       { id: newId('memory'), projectId: p.id, type: 'user_rule', status: 'approved', scope: { roles: 'all' }, createdAt: f.clock.now() },
       { id: newId('memoryRevision'), title: 'T', content: 'C', sourceRefs: [], author: 'user', createdAt: f.clock.now() },
     );
     f.db.repos.memory.snapshotForRun(run.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
+    f.db.repos.memory.snapshotForRun(activeRun.id, [{ recordId: m.record.id, revision: 1, title: 'T', content: 'C', type: 'user_rule', pinned: false, scope: { roles: 'all' }, included: true }]);
+    const activeRaw = art(activeRun.id, p.id, 'raw_response', 1, '6');
     const raw = art(run.id, p.id, 'raw_response', 1, '1');
     const manifest = art(run.id, p.id, 'context_manifest', 1, '2');
     const plan = art(run.id, p.id, 'plan', 1, '3');
@@ -66,6 +70,9 @@ describe('maintenance (C8)', () => {
     expect(f.db.repos.artifacts.get(plan.id)?.purgedAt).toBeNull();
     expect(f.db.repos.artifacts.get(foreign.id)?.purgedAt).toBeNull();
     expect(f.db.repos.artifacts.get(failing.id)?.purgedAt).toBeNull();
+    expect(f.db.repos.artifacts.get(activeRaw.id)?.purgedAt).toBeNull();
+    expect(f.db.repos.memory.runSnapshot(activeRun.id)).toHaveLength(1);
+    expect(store.calls).not.toContain(activeRaw.relPath);
     expect(f.db.repos.memory.getWithRevisions(m.record.id)?.events.map((e) => [e.event, e.detail])).toEqual([['history_purged', null]]);
     expect(f.db.repos.ledger.runBalances(run.id).L).toBe(1);
   });

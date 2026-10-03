@@ -40,7 +40,8 @@ import type { RelayBridge } from './bridge';
 import { allowedRunActions } from './fake-scenarios/allowed-actions';
 import { buildScenario, DEFAULT_FAKE_SCENARIO, isFakeScenarioName } from './fake-scenarios/scenarios';
 import type { FakeScenarioName } from './fake-scenarios/scenarios';
-import { buildRun, costSummary, PROJECT_ID, sha, sid, WORKFLOW_ID } from './fake-scenarios/world';
+import { buildRun, costSummary, fakeProfileOptions, PROJECT_ID, reviewDueAt, sha, sid, WORKFLOW_ID } from './fake-scenarios/world';
+import type { StepKeyName } from './fake-scenarios/world';
 import type { FakeWorld } from './fake-scenarios/world';
 
 export { FAKE_SCENARIOS, DEFAULT_FAKE_SCENARIO, isFakeScenarioName } from './fake-scenarios/scenarios';
@@ -117,6 +118,16 @@ function setRunStatus(
 ): RunDetail {
   const merged = { ...run, ...patch };
   const terminal = ['completed', 'incomplete', 'cancelled', 'failed'].includes(status);
+  const availableActions = allowedRunActions(status, pauseReason, {
+    unknownAttempts: merged.unresolvedAttempts.length,
+    hasFailedStep: merged.steps.some((s) => s.state === 'failed'),
+    hasPatchArtifact: hasPatchArtifact(w, run.id),
+  });
+  const blocked = merged.steps.find((s) => s.state === 'failed') ?? merged.steps.find((s) => s.profileName !== null && s.state !== 'succeeded');
+  const profileOptions =
+    availableActions.includes('choose_profile') && blocked !== undefined
+      ? (merged.profileOptions?.length ? merged.profileOptions : (fakeProfileOptions(blocked.stepKey as StepKeyName, merged.startedAt === null) as unknown as RunDetail['profileOptions']))
+      : [];
   const next = replaceRun(w, {
     ...merged,
     status,
@@ -126,11 +137,8 @@ function setRunStatus(
     endedAt: terminal ? (merged.endedAt ?? (ctx.now() as RunDetail['createdAt'])) : null,
     // A run paused from `queued` has never started; it starts when it first runs.
     startedAt: status === 'running' && merged.startedAt === null ? (ctx.now() as RunDetail['createdAt']) : merged.startedAt,
-    availableActions: allowedRunActions(status, pauseReason, {
-      unknownAttempts: merged.unresolvedAttempts.length,
-      hasFailedStep: merged.steps.some((s) => s.state === 'failed'),
-      hasPatchArtifact: hasPatchArtifact(w, run.id),
-    }),
+    availableActions,
+    profileOptions,
   });
   appendEvent(w, ctx, run.id, 'run.status_changed', { from: run.status, to: status, pauseReason: next.pauseReason });
   const lastSeq = w.events.get(run.id)?.at(-1)?.seq ?? 0;
@@ -197,9 +205,16 @@ function toView(m: MemoryRecordDetail) {
   return memoryRecordViewSchema.parse(m);
 }
 
-function updateMemory(w: FakeWorld, ctx: HandlerContext, id: string, patch: Partial<MemoryRecordDetail>, event: MemoryRecordDetail['events'][number]['event']): MemoryRecordDetail {
+function updateMemory(
+  w: FakeWorld,
+  ctx: HandlerContext,
+  id: string,
+  patch: Partial<MemoryRecordDetail>,
+  event: MemoryRecordDetail['events'][number]['event'],
+  opts: { readonly detail?: Record<string, unknown>; readonly newRevision?: boolean } = {},
+): MemoryRecordDetail {
   const current = findMemory(w, id);
-  const contentChanged = patch.content !== undefined || patch.title !== undefined;
+  const contentChanged = patch.content !== undefined || patch.title !== undefined || opts.newRevision === true;
   const revision = contentChanged ? current.currentRevision + 1 : current.currentRevision;
   const at = ctx.now();
   const next = memoryRecordDetailSchema.parse({
@@ -211,26 +226,67 @@ function updateMemory(w: FakeWorld, ctx: HandlerContext, id: string, patch: Part
     revisions: contentChanged
       ? [
           ...current.revisions,
-          { revision, title: patch.title ?? current.title, content: patch.content ?? current.content, author: 'user', createdAt: at, sourceRefs: [] },
+          {
+            revision,
+            title: patch.title ?? current.title,
+            content: patch.content ?? current.content,
+            author: 'user',
+            createdAt: at,
+            // A confirmation re-hashes the file refs (fake: the current hash is the refreshed one).
+            sourceRefs:
+              opts.newRevision === true
+                ? (current.revisions.at(-1)?.sourceRefs ?? []).map((r) => (r.kind === 'file' ? { ...r, sha256: sha(`f7e5${r.relPath.length.toString(16)}`) } : r))
+                : [],
+            usedByRuns: 0,
+          },
         ]
       : current.revisions,
-    events: [...current.events, { event, revision, actor: 'user', createdAt: at }],
+    events: [...current.events, { event, revision, actor: 'user', createdAt: at, ...(opts.detail === undefined ? {} : { detail: opts.detail }) }],
   });
+  const lastReviewedAt = next.lastReviewedAt ?? null;
+  next.reviewDue = reviewDueAt(next.reviewAt, lastReviewedAt, at);
   w.memory = w.memory.map((m) => (m.id === id ? next : m));
   ctx.emit({ type: 'memory.changed', projectId: next.projectId });
   return next;
 }
 
-/** The fake engine's `saveDraft`: the P0-editable fields of `patch` applied to `base` as a new draft revision. */
-function applyDraftPatch(base: WorkflowVersionView, patch: WorkflowDraftPatch, draftRevision: number): WorkflowVersionView {
-  const prompts = Object.fromEntries(
-    Object.entries(base.prompts).map(([iv, p]) => [iv, { ...p, text: patch.prompts?.[iv] ?? p.text }]),
-  );
+/** Engine `nextInstructionVersion`: `reviewer.v1` → the first free `reviewer.vN`. */
+function nextInstructionVersion(iv: string, taken: ReadonlySet<string>): string {
+  const m = /^(.*)\.v(\d+)$/.exec(iv);
+  const stem = m?.[1] ?? iv;
+  let n = Number(m?.[2] ?? '1') + 1;
+  while (taken.has(`${stem}.v${String(n)}`)) n += 1;
+  return `${stem}.v${String(n)}`;
+}
+
+/**
+ * The fake engine's `saveDraft` (`applyDraftPatch` + `versionPrompts`): the P0-editable fields of `patch` applied to
+ * `base` as a new draft revision. Editing a prompt that a validated version already carries gives it a new instruction
+ * version (`reviewer.v1` → `reviewer.v2`); runs that used the old one keep it.
+ */
+function applyDraftPatch(base: WorkflowVersionView, patch: WorkflowDraftPatch, draftRevision: number, published: ReadonlySet<string>): WorkflowVersionView {
+  const renamed = new Map<string, string>();
+  const taken = new Set([...Object.keys(base.prompts), ...published]);
+  const prompts: Record<string, WorkflowVersionView['prompts'][string]> = {};
+  for (const [iv, p] of Object.entries(base.prompts)) {
+    const text = patch.prompts?.[iv];
+    if (text === undefined || text === p.text || !published.has(iv)) {
+      prompts[iv] = { ...p, text: text ?? p.text };
+      continue;
+    }
+    const next = nextInstructionVersion(iv, taken);
+    taken.add(next);
+    renamed.set(iv, next);
+    prompts[next] = { ...p, instructionVersion: next, text };
+  }
   const steps = base.spec.steps.map((step) => {
     const edit = patch.steps?.[step.id];
-    if (step.kind !== 'model' || edit === undefined) return step;
+    const named = edit?.name === undefined ? step : { ...step, name: edit.name };
+    if (named.kind !== 'model') return named;
+    const versioned = { ...named, instructionVersion: renamed.get(named.instructionVersion) ?? named.instructionVersion };
+    if (edit === undefined) return versioned;
     return {
-      ...step,
+      ...versioned,
       ...(edit.profile === undefined ? {} : { profile: edit.profile }),
       ...(edit.maxOutputTokens === undefined ? {} : { maxOutputTokens: edit.maxOutputTokens }),
       ...(edit.retryPolicy === undefined ? {} : { retryPolicy: edit.retryPolicy }),
@@ -336,13 +392,76 @@ function firstMissingCredential(w: FakeWorld, input: InputOf<'relay/v1/runs.pref
   return { stepKey, providerId: profile?.profile.providerId ?? 'anthropic' };
 }
 
+/** PROJECT_ROOT_MISSING while the project's folder is gone (E2 #7). */
+function failIfRootMissing(w: FakeWorld, projectId: string): void {
+  if (w.rootMissing.has(projectId)) fail(errors.projectRootMissing());
+}
+
+type RunInputIn = InputOf<'relay/v1/runs.preflight'>['input'];
+
+/** PERMISSION_DENIED `unreadable` naming the selected file that cannot be read (E2 #8, tools `deniedError`). */
+function failIfUnreadable(w: FakeWorld, input: RunInputIn): void {
+  if (input.kind !== 'files') return;
+  const relPath = input.relPaths.find((p) => w.unreadableOnRead.has(p));
+  if (relPath === undefined) return;
+  fail(
+    errors.permissionDenied('unreadable', {
+      userMessage: `Relay cannot read ${relPath}. Check the file permissions, or exclude it from this run.`,
+      details: { relPath, denied: [{ relPath, reason: 'unreadable' }] },
+    }),
+  );
+}
+
+/** Selected files that look like they hold a secret and are not acknowledged (E2 #11). */
+function unacknowledgedSecrets(w: FakeWorld, input: RunInputIn) {
+  if (input.kind !== 'files') return [];
+  const acked = new Set(input.acknowledgedSuspectedSecrets ?? []);
+  return w.preview.included.filter((f) => f.suspectedSecret === true && input.relPaths.includes(f.relPath) && !acked.has(f.relPath));
+}
+
+/** Engine `suspectedSecretIssues`: one preflight issue per unacknowledged suspected file (never the value). */
+function suspectedSecretIssues(w: FakeWorld, input: RunInputIn): ValidationIssue[] {
+  if (input.kind !== 'files') return [];
+  return unacknowledgedSecrets(w, input).map((f) => ({
+    path: `input.relPaths.${String(input.relPaths.indexOf(f.relPath))}`,
+    code: 'suspected_secret',
+    message: `"${f.relPath}" looks like it contains a secret. Remove it or confirm sending it.`,
+  }));
+}
+
+/** Intake's PERMISSION_DENIED `suspected_secret` with `details.denied` (label and line, never the value). */
+function failIfSuspectedSecret(w: FakeWorld, input: RunInputIn): void {
+  const hits = unacknowledgedSecrets(w, input);
+  const first = hits[0];
+  if (first === undefined) return;
+  fail(
+    errors.permissionDenied('suspected_secret', {
+      userMessage: `${first.relPath}${hits.length > 1 ? ` and ${String(hits.length - 1)} more` : ''} looks like it contains a credential. Exclude it, or include it explicitly to send it anyway.`,
+      details: {
+        denied: hits.map((f) => ({ relPath: f.relPath, reason: 'suspected_secret', secretLabel: f.secretLabel, secretLine: f.secretLine })),
+        ...(hits.length === 1 ? { relPath: first.relPath } : {}),
+      },
+    }),
+  );
+}
+
+/** The runner came back: clear the fatal and push the state. */
+function setRunnerReady(w: FakeWorld, ctx: HandlerContext): void {
+  w.runnerState = 'ready';
+  w.diagnostics = {
+    ...w.diagnostics,
+    runner: { ...w.diagnostics.runner, state: 'ready', pid: 4343, lastHeartbeatAt: ctx.now() as RunDetail['createdAt'], restarts: w.diagnostics.runner.restarts + 1, lastFatal: null },
+  };
+  ctx.emit({ type: 'runner.state', state: 'ready' });
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Handlers: one per OPERATIONS key (a missing key is a compile error; fake-bridge.test.ts checks at runtime).
 
 const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   // ---------- app ----------
   'app.getInfo': (w) => w.info,
-  'app.getDiagnostics': (w) => w.diagnostics,
+  'app.getDiagnostics': (w) => ({ ...w.diagnostics, runner: { ...w.diagnostics.runner, state: w.runnerState } }),
   'app.createBackup': (w, _i, ctx) => ({
     backupDisplayPath: `${w.info.userDataDisplayPath}/backups/relay-${String(ctx.now())}.sqlite`,
     createdAt: ctx.now(),
@@ -351,6 +470,33 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'app.exportDiagnostics': (w) =>
     w.dialogCancels.has('app.exportDiagnostics') ? { exported: false } : { exported: true, displayPath: '~/Downloads/relay-diagnostics.zip' },
   'app.openExternal': () => ({ opened: true }),
+  // Runner recovery (main-routed). A restart is a no-op while the runner is up; a database fatal survives a restart
+  // (only a restore helps), a crash loop (`restartFixes`) does not.
+  'app.restartRunner': (w, _i, ctx) => {
+    if (w.runnerState !== 'unavailable') return { restarted: false, state: w.runnerState };
+    const fatal = w.diagnostics.runner.lastFatal ?? null;
+    if (!w.restartFixes) {
+      fail(errors.runnerUnavailable({ details: { reason: fatal?.reason ?? null, fatalCode: fatal?.code ?? 'RUNNER_UNAVAILABLE' } }));
+    }
+    setRunnerReady(w, ctx);
+    return { restarted: true, state: 'ready' as const };
+  },
+  'app.relaunch': () => ({ relaunching: true }),
+  'app.restoreLatestBackup': (w, _i, ctx) => {
+    if (w.runnerState !== 'unavailable') fail(errors.conflict({ reason: 'runner_running' }));
+    if (!w.backupAvailable) {
+      return { restored: false, restoredFromDisplayPath: null, backupCreatedAt: null, previousMovedToDisplayPath: null, runnerState: 'unavailable' as const };
+    }
+    setRunnerReady(w, ctx);
+    const backupAt = ctx.now() - 26 * 60 * 60_000;
+    return {
+      restored: true,
+      restoredFromDisplayPath: `${w.info.userDataDisplayPath}/backups/relay-${String(backupAt)}.sqlite`,
+      backupCreatedAt: backupAt,
+      previousMovedToDisplayPath: `${w.info.userDataDisplayPath}/damaged-${String(ctx.now())}`,
+      runnerState: 'ready' as const,
+    };
+  },
   'app.getSettings': (w) => w.settings,
   'app.updateSettings': (w, patch) => {
     const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
@@ -359,10 +505,13 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   },
 
   // ---------- projects ----------
-  'projects.pickDirectory': (_w, _i, ctx) => ({
-    selection: { selectionId: ctx.newId('selection'), displayPath: '~/code/my-api', expiresAt: ctx.now() + 10 * 60_000 },
-  }),
+  'projects.pickDirectory': (w, _i, ctx) => {
+    const selectionId = ctx.newId('selection');
+    w.selections.set(selectionId, '~/code/my-api');
+    return { selection: { selectionId, displayPath: '~/code/my-api', expiresAt: ctx.now() + 10 * 60_000 } };
+  },
   'projects.previewFiles': (w, input) => {
+    if ('projectId' in input) failIfRootMissing(w, input.projectId);
     // Like the runner: a project's saved exclusions plus `extraExclusions` move matching files to excluded.
     const saved = 'projectId' in input ? (w.projects.find((p) => p.id === input.projectId)?.exclusions ?? []) : [];
     const patterns = [...saved, ...(input.extraExclusions ?? [])].filter((g) => g.trim() !== '');
@@ -373,6 +522,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     return {
       included,
       excluded: [...w.preview.excluded, ...moved],
+      ...(w.preview.unreadable === undefined ? {} : { unreadable: w.preview.unreadable.filter((p) => !hit(p)) }),
       totals: { ...w.preview.totals, files: included.length, bytes: included.reduce((sum, f) => sum + f.sizeBytes, 0) },
     };
   },
@@ -420,6 +570,33 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const next = projectSchema.parse({ ...project, archivedAt: ctx.now(), updatedAt: ctx.now() });
     w.projects = w.projects.map((p) => (p.id === next.id ? next : p));
     return next;
+  },
+  'projects.unarchive': (w, input, ctx) => {
+    const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
+    if (project.archivedAt === null) fail(errors.conflict({ reason: 'not_archived' }));
+    const next = projectSchema.parse({ ...project, archivedAt: null, updatedAt: ctx.now() });
+    w.projects = w.projects.map((p) => (p.id === next.id ? next : p));
+    return next;
+  },
+  // Engine `relocateRoot`: archived → CONFLICT; an unverified folder (no earlier file matches) needs `confirm`.
+  'projects.relocate': (w, input, ctx) => {
+    const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
+    if (project.archivedAt !== null) fail(errors.conflict({ entity: 'project', reason: 'archived' }));
+    const displayPath = w.selections.get(input.selectionId) ?? fail(errors.notFound('selection'));
+    const unverified = { checkedFiles: 9, matchedFiles: 0, mismatched: ['src/routes/users.ts', 'src/validation/schemas.ts', 'src/errors.ts'] };
+    if (w.relocateUnverified && input.confirm !== true) {
+      fail(
+        errors.conflict(
+          { entity: 'project', reason: 'root_unverified', verification: unverified },
+          { userMessage: 'None of the files Relay used before match this folder. Confirm that it is the same project.' },
+        ),
+      );
+    }
+    w.selections.delete(input.selectionId);
+    w.rootMissing.delete(project.id);
+    const next = projectSchema.parse({ ...project, rootDisplayPath: displayPath, updatedAt: Math.max(ctx.now(), project.updatedAt + 1) });
+    w.projects = w.projects.map((p) => (p.id === next.id ? next : p));
+    return { project: next, verification: w.relocateUnverified ? unverified : { checkedFiles: 9, matchedFiles: 9, mismatched: [] } };
   },
   'projects.export': (w, input) => {
     const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
@@ -478,7 +655,10 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     };
     w.providers = w.providers.map((p) =>
       p.providerId === input.providerId
-        ? providerStatusSchema.parse({ ...p, lastTest: ok ? { at: ctx.now(), ok } : { at: ctx.now(), ok, code: 'AUTH_REQUIRED' } })
+        ? providerStatusSchema.parse({
+            ...p,
+            lastTest: ok ? { at: ctx.now(), ok, source: 'connection_test' } : { at: ctx.now(), ok, code: 'AUTH_REQUIRED', source: 'connection_test' },
+          })
         : p,
     );
     ctx.emit({ type: 'providers.changed' });
@@ -550,7 +730,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     const draft = w.workflowVersions.find((v) => v.version === 'draft');
     if ((draft?.draftRevision ?? 0) !== input.expectedDraftRevision) fail(errors.conflict({ reason: 'draft_changed' }));
     const base = draft ?? w.workflowVersions.find((v) => v.version === summary.latestValidatedVersion) ?? fail(errors.notFound('workflow version'));
-    const next = applyDraftPatch(base, input.patch, (draft?.draftRevision ?? 0) + 1);
+    const published = new Set(w.workflowVersions.filter((v) => v.status === 'validated').flatMap((v) => Object.keys(v.prompts)));
+    const next = applyDraftPatch(base, input.patch, (draft?.draftRevision ?? 0) + 1, published);
     w.workflowVersions = [...w.workflowVersions.filter((v) => v.version !== 'draft'), next];
     // A saved edit is a new draft: the engine re-validates it, so earlier validation issues no longer apply.
     w.workflowIssues = [];
@@ -583,6 +764,8 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
 
   // ---------- runs ----------
   'runs.preflight': (w, input) => {
+    failIfRootMissing(w, input.projectId);
+    failIfUnreadable(w, input.input);
     const files = input.input.kind === 'files' ? input.input.relPaths.length : 1;
     const budget = fakeBudget(w, input.limitOverrides?.budgetMicrousd);
     return {
@@ -605,11 +788,15 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
           ? []
           : [{ path: 'limitOverrides.budgetMicrousd', code: 'budget_run', message: 'The run allowance cannot cover the first reservation.' }]),
         ...w.preflightIssues,
+        ...suspectedSecretIssues(w, input.input),
       ],
     };
   },
   'runs.start': (w, input, ctx) => {
     if (w.preflightIssues.length > 0) fail(errors.validationFailed(w.preflightIssues));
+    failIfRootMissing(w, input.projectId);
+    failIfUnreadable(w, input.input);
+    failIfSuspectedSecret(w, input.input);
     // runs.start stays strict about profiles and the provider policy (06 F14); a missing credential is not an error:
     // the run pauses auth_required while queued, before any reservation or call.
     const readiness = readinessIssues(w, input);
@@ -850,13 +1037,23 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     if (input.unarchive === true || titleChanged || input.scope !== undefined) {
       failMemoryConflict(titleConflicts(w, current.projectId, input.title ?? current.title, input.scope ?? current.scope, current.id));
     }
+    if (input.confirmCurrent === true) {
+      // Engine `confirmRecord` (E2 #16): re-hash the file refs (a new revision only when a hash changed), clear
+      // `stale`, keep `reviewAt`, write a `reviewed` event.
+      if (current.status !== 'approved') fail(errors.conflict({ entity: 'memory', reason: 'not_approved' }));
+      const fileRefs = (current.revisions.at(-1)?.sourceRefs ?? []).filter((r) => r.kind === 'file').length;
+      const refreshed = current.stale ? fileRefs : 0;
+      return updateMemory(w, ctx, input.recordId, { stale: false, lastReviewedAt: ctx.now() as RunDetail['createdAt'] }, 'reviewed', {
+        detail: { fileRefs, refreshed },
+        newRevision: refreshed > 0,
+      });
+    }
     const patch: Partial<MemoryRecordDetail> = {
       ...(input.title === undefined ? {} : { title: input.title }),
       ...(input.content === undefined ? {} : { content: input.content }),
       ...(input.scope === undefined ? {} : { scope: input.scope }),
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
-      // Recording a review ("Confirm still accurate") also re-tracks the cited source hash: no longer stale.
-      ...(input.reviewAt === undefined ? {} : { reviewAt: input.reviewAt, stale: false }),
+      ...(input.reviewAt === undefined ? {} : { reviewAt: input.reviewAt }),
       ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
       ...(input.unarchive === true ? { status: 'approved' as const } : {}),
     };
@@ -980,9 +1177,21 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   'artifacts.export': (w, input) => {
     findRun(w, input.runId);
     if (w.exportFails) fail(errors.artifactWriteFailed());
-    if (w.dialogCancels.has('artifacts.export')) return { exported: false, displayPaths: [] };
-    const names = input.what === 'both' ? ['report.md', 'patch.diff'] : [input.what === 'report' ? 'report.md' : 'patch.diff'];
-    return { exported: true, displayPaths: names.map((n) => `~/Downloads/${n}`) };
+    if (w.dialogCancels.has('artifacts.export')) return { exported: false, displayPaths: [], written: [], failed: [] };
+    // E2 #10: per-part results. A part in `exportFailParts` fails once (ARTIFACT_WRITE_FAILED); a retry writes it.
+    const parts = input.what === 'both' ? (['report', 'patch'] as const) : ([input.what] as const);
+    const fileName = { report: 'report.md', patch: 'patch.diff' } as const;
+    const failed = parts
+      .filter((part) => w.exportFailParts.includes(part))
+      .map((part) => ({ what: part, code: 'ARTIFACT_WRITE_FAILED' as const, userMessage: `Relay could not write ${fileName[part]}. The folder may be read-only or full.` }));
+    w.exportFailParts = w.exportFailParts.filter((part) => !parts.includes(part));
+    const written = parts.filter((part) => !failed.some((f) => f.what === part)).map((part) => ({ what: part, displayPath: `~/Downloads/${fileName[part]}` }));
+    // Engine `exportArtifacts`: only when NOTHING was written is it an error (the first failure, with `details.failed`).
+    const firstFailure = failed[0];
+    if (written.length === 0 && firstFailure !== undefined) {
+      fail(errors.artifactWriteFailed({ userMessage: firstFailure.userMessage, details: { failed } }));
+    }
+    return { exported: true, displayPaths: written.map((x) => x.displayPath), written, failed };
   },
 
   // ---------- ledger ----------
@@ -1085,6 +1294,17 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
       return { ok: true, data: world.idempotency.get(idemKey) } as IpcResult<C>;
     }
     const key = channel.slice(CHANNEL_PREFIX.length) as OperationKey;
+    if (op.route === 'runner' && world.runnerState === 'unavailable') {
+      return { ok: false, error: errors.runnerUnavailable() };
+    }
+    if (op.route === 'runner' && op.kind === 'query' && world.busyFailures > 0) {
+      // Storage `mapSqliteError`: a lock held by another program → retryable database_busy, next action wait.
+      world.busyFailures -= 1;
+      return {
+        ok: false,
+        error: { ...errors.databaseUnavailable('database_busy'), nextAction: 'wait', userMessage: 'The Relay database is busy. Try again in a moment.' },
+      };
+    }
     if (world.notImplemented.has(key)) {
       // Test hook: answers like a runner channel that is stubbed (engine services.ts `notImplemented`), so the
       // generic error path for INTERNAL `not_implemented` stays covered.
@@ -1117,6 +1337,13 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
     invoke,
     subscribe(listener) {
       listeners.add(listener);
+      // Main pushes the current runner state to a new window when it is not `ready`.
+      if (world.runnerState !== 'ready') {
+        const state = world.runnerState;
+        queueMicrotask(() => {
+          if (listeners.has(listener)) listener({ type: 'runner.state', state });
+        });
+      }
       return () => {
         listeners.delete(listener);
       };

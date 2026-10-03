@@ -9,6 +9,7 @@ import {
   ApprovalAttentionCard,
   InterruptedBanner,
   OverviewStats,
+  PausedAttentionCard,
   ProviderBanner,
   RecentRunsCard,
   RecoveryAttention,
@@ -17,6 +18,8 @@ import {
 } from '../features/overview/OverviewCards';
 import { deriveOverview, disconnectedProviders, OVERVIEW_ACTIVE_STATUSES } from '../features/overview/overview-model';
 import type { OverviewModel } from '../features/overview/overview-model';
+import { ProjectRootMissing } from '../features/projects/ProjectRootMissing';
+import { useProjectRootMissing } from '../features/projects/useProjectRootCheck';
 import { prefetchRunInspector } from '../features/shell/prefetch';
 import { paths } from '../features/shell/paths';
 import { useNavPerf } from '../hooks/useNavPerf';
@@ -37,6 +40,8 @@ function activeHint(model: OverviewModel): string {
     return `Running · step ${String(Math.min(done + 1, total))} of ${String(total)}`;
   }
   if (model.interrupted !== undefined) return '1 interrupted run needs a decision';
+  const paused = model.paused.length;
+  if (paused > 0) return `${String(paused)} paused run${paused === 1 ? ' needs' : 's need'} you`;
   if (model.empty) return 'No runs yet';
   return 'Nothing in progress';
 }
@@ -62,6 +67,7 @@ export function OverviewPage() {
   const workflows = useWorkflows();
   const workflow = workflows.data?.[0];
   const workflowVersion = useWorkflow(workflow?.id, workflow?.latestValidatedVersion);
+  const rootMissing = useProjectRootMissing(projectId);
 
   const model =
     project.data === undefined ||
@@ -90,7 +96,15 @@ export function OverviewPage() {
   const header = (
     <PageHeader
       title="Project overview"
-      breadcrumbs={project.data === undefined ? [] : [{ label: project.data.name }, { label: project.data.rootDisplayPath }]}
+      breadcrumbs={
+        project.data === undefined
+          ? []
+          : [
+              { label: project.data.name },
+              // The mock's "Local project": the folder path (often a long temp path) is in the tooltip.
+              { label: project.data.isDemo ? 'Sample project' : 'Local project', title: project.data.rootDisplayPath },
+            ]
+      }
       actions={
         <ButtonLink as={Link} variant="primary" icon={Play} to={paths.newRun(projectId)}>
           Start a workflow
@@ -132,7 +146,11 @@ export function OverviewPage() {
   // Whether an attention card belongs here (its run detail may still be loading): decides the layout up front, so
   // the cards don't jump when the detail arrives.
   const expectsAttention =
-    model.empty || model.awaiting !== undefined || model.running !== undefined || model.interrupted !== undefined;
+    model.empty ||
+    model.awaiting !== undefined ||
+    model.running !== undefined ||
+    model.interrupted !== undefined ||
+    model.pausedFocus !== undefined;
   let attention: ReactNode = null;
   if (model.empty) {
     attention = <StartCard project={p} templateVersion={workflow?.latestValidatedVersion ?? null} />;
@@ -142,14 +160,17 @@ export function OverviewPage() {
     attention = <ActiveRunCard projectId={p.id} run={focus} />;
   } else if (model.interrupted !== undefined && interruptedDetail.data !== undefined) {
     attention = <RecoveryAttention projectId={p.id} run={interruptedDetail.data} />;
+  } else if (model.pausedFocus !== undefined && focus?.id === model.pausedFocus.id) {
+    attention = <PausedAttentionCard projectId={p.id} run={focus} otherPaused={model.paused.length - 1} />;
   }
 
   return (
     <>
       {header}
+      {rootMissing ? <ProjectRootMissing project={p} /> : null}
       {interruptedDetail.data === undefined ? null : <InterruptedBanner projectId={p.id} run={interruptedDetail.data} />}
       {disconnected.map((d) => (
-        <ProviderBanner key={d.providerId} provider={d} />
+        <ProviderBanner key={d.providerId} projectId={p.id} provider={d} />
       ))}
       <OverviewStats
         project={p}
@@ -162,9 +183,10 @@ export function OverviewPage() {
       />
       {/* With an attention card: [attention | run controls], then recent runs full width. Without one (a project
           whose runs need nothing from the user), recent runs move up beside run controls so no grid cell is empty. */}
-      <div className="grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] items-start gap-5 max-[1180px]:grid-cols-1">
+      {/* Peer cards share the row height (stretch); the attention card fills its column. */}
+      <div className="grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] gap-5 max-[1180px]:grid-cols-1">
         {expectsAttention ? (
-          <div className="stack">
+          <div className="stack [&>:first-child]:flex-1">
             {attention ??
               (focusDetail.isLoading || interruptedDetail.isLoading ? (
                 <div aria-busy="true">

@@ -38,7 +38,7 @@ export function ProfilesTable({ rows, onEdit, onDelete }: ProfilesTableProps) {
               <td className="mono nowrap">{profile.modelId}</td>
               <td className="num">{profile.params.maxOutputTokens.toLocaleString()}</td>
               <td>
-                <WarningList warnings={warnings} />
+                <WarningList warnings={warnings} providerId={profile.providerId} />
               </td>
               <td>
                 <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>

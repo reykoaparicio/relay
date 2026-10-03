@@ -1,7 +1,10 @@
 // 08 logging: structured JSONL lines (00b §3 fields incl. `outcome`) in logs/<YYYY-MM-DD>.jsonl, redacted before
 // writing (02 §B8). Daily files; 14 days kept. The file logger is buffered (one async append per flush window, per
 // day file); error lines and flushSync() write synchronously so the lines that explain a crash survive it.
+// When logs/ cannot be written (disk full, permissions), lines go to `<os tmp>/relay-logs/` and stderr instead, and
+// the logger reports itself degraded (diagnostics `loggingDegraded`) until a write to logs/ succeeds again.
 import { appendFileSync, mkdirSync, promises as fsp, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { redactDeep } from '@relay/contracts';
 
@@ -61,6 +64,8 @@ export interface FileLogger extends MainLogger {
    * flush cannot be recalled; it completes on its own.
    */
   flushSync(): void;
+  /** True while the last write to the logs directory failed (lines went to the fallback file / stderr). */
+  isDegraded(): boolean;
 }
 
 /** Tunables of {@link createFileLogger} (tests inject a fake fs). */
@@ -72,7 +77,24 @@ export interface FileLoggerOptions {
     appendFile(path: string, data: string): Promise<void>;
     mkdirSync(path: string, opts: { recursive: true }): unknown;
   };
+  /** Where lines go when `dir` cannot be written. Default `<os tmp>/relay-logs`. */
+  readonly fallbackDir?: string;
+  /** Last resort for lines neither directory accepts. Default `process.stderr.write`. */
+  readonly stderr?: (text: string) => void;
 }
+
+/** Default {@link FileLoggerOptions.fallbackDir}. */
+export function defaultLogFallbackDir(): string {
+  return join(tmpdir(), 'relay-logs');
+}
+
+const realStderr = (text: string): void => {
+  try {
+    process.stderr.write(text);
+  } catch {
+    // stderr closed: nothing left to try
+  }
+};
 
 /** Default flush window of the buffered file logger. */
 export const LOG_FLUSH_INTERVAL_MS = 100;
@@ -95,7 +117,11 @@ const realFs: NonNullable<FileLoggerOptions['fs']> = {
 export function createFileLogger(dir: string, now: () => number = Date.now, opts: FileLoggerOptions = {}): FileLogger {
   const fs = opts.fs ?? realFs;
   const intervalMs = opts.flushIntervalMs ?? LOG_FLUSH_INTERVAL_MS;
+  const fallbackDir = opts.fallbackDir ?? defaultLogFallbackDir();
+  const stderr = opts.stderr ?? realStderr;
   let ensured = false;
+  let fallbackEnsured = false;
+  let degraded = false;
   /** Queued lines in call order: [file, line]. */
   let queue: [string, string][] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -128,13 +154,43 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
     return batch;
   };
 
+  const setDegraded = (next: boolean): void => {
+    if (next === degraded) return;
+    degraded = next;
+    stderr(
+      next
+        ? `relay: cannot write logs to ${dir}; writing to ${fallbackDir} and stderr\n`
+        : `relay: logging to ${dir} again\n`,
+    );
+  };
+
+  /** Lines logs/ refused: the OS temp fallback file, else stderr. Never throws. */
+  const writeFallback = (file: string, data: string): void => {
+    setDegraded(true);
+    try {
+      if (!fallbackEnsured) {
+        fs.mkdirSync(fallbackDir, { recursive: true });
+        fallbackEnsured = true;
+      }
+      fs.appendFileSync(join(fallbackDir, file), data);
+    } catch {
+      stderr(data);
+    }
+  };
+
   const writeSync = (batch: [string, string][]): void => {
-    if (batch.length === 0 || !ensureDir()) return;
+    if (batch.length === 0) return;
+    const primary = ensureDir();
     for (const [file, data] of group(batch)) {
+      if (!primary) {
+        writeFallback(file, data);
+        continue;
+      }
       try {
         fs.appendFileSync(join(dir, file), data);
+        setDegraded(false);
       } catch {
-        // dropped (never throws)
+        writeFallback(file, data);
       }
     }
   };
@@ -142,13 +198,18 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
   const flushAsync = (): Promise<void> => {
     if (inflight !== null) return inflight.then(flushAsync);
     const batch = takeQueue();
-    if (batch.length === 0 || !ensureDir()) return Promise.resolve();
+    if (batch.length === 0) return Promise.resolve();
+    if (!ensureDir()) {
+      for (const [file, data] of group(batch)) writeFallback(file, data);
+      return Promise.resolve();
+    }
     const run = async (): Promise<void> => {
       for (const [file, data] of group(batch)) {
         try {
           await fs.appendFile(join(dir, file), data);
+          setDegraded(false);
         } catch {
-          // dropped (never throws)
+          writeFallback(file, data);
         }
       }
     };
@@ -195,6 +256,7 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
     flushSync: () => {
       writeSync(takeQueue());
     },
+    isDegraded: () => degraded,
   };
 }
 

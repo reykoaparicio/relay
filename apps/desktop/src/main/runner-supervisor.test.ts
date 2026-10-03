@@ -488,6 +488,201 @@ describe('runner supervisor — sleep/resume and races (injected clocks)', () =>
   });
 });
 
+describe('runner supervisor: manual recovery, lastFatal, activeRunId, maintenance (resilience)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Boots to `unavailable` through a fatal startup error (e.g. a locked / corrupt DB). */
+  async function fatalBoot() {
+    const h = setup();
+    const started = h.sup.start();
+    started.catch(() => undefined);
+    h.latest().port.deliver({ kind: 'fatal', code: 'DATABASE_UNAVAILABLE', reason: 'database_busy', message: 'The database is locked by another process.' });
+    h.latest().emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(0);
+    return h;
+  }
+
+  it('keeps lastFatal {code, reason, message, at} from the fatal message and logs the reason', async () => {
+    const { sup, lines } = await fatalBoot();
+
+    expect(sup.state().state).toBe('unavailable');
+    expect(sup.state().lastFatal).toEqual({ code: 'DATABASE_UNAVAILABLE', reason: 'database_busy', message: 'The database is locked by another process.', at: expect.any(Number) as number });
+    expect(lines.find((l) => l.event === 'runner.fatal')).toMatchObject({ reason: 'database_busy' });
+  });
+
+  it('a fatal message without a reason (older runner) keeps reason: null', () => {
+    const { sup, latest } = setup();
+    void sup.start().catch(() => undefined);
+
+    latest().port.deliver({ kind: 'fatal', code: 'INTERNAL', message: 'boom' });
+
+    expect(sup.state().lastFatal).toMatchObject({ code: 'INTERNAL', reason: null, message: 'boom' });
+  });
+
+  it('restart() from unavailable (cause fixed) forks a fresh runner, clears lastFatal, and resolves ready', async () => {
+    const { sup, children, ready, events } = await fatalBoot();
+    expect(children).toHaveLength(1);
+
+    const p = sup.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children).toHaveLength(2);
+    expect(sup.state().state).toBe('starting');
+    expect(sup.state().lastFatal).toBeNull();
+    ready(children[1]);
+
+    await expect(p).resolves.toEqual({ restarted: true, state: 'ready' });
+    expect(events.filter((e) => e.type === 'runner.state').map((e) => (e as { state: string }).state)).toEqual(['unavailable', 'starting', 'ready']);
+    const r = sup.request('relay/v1/projects.list', {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children[1]?.port.sent.at(-1)).toMatchObject({ kind: 'op', channel: 'relay/v1/projects.list' });
+    void r.catch(() => undefined);
+  });
+
+  it('restart() when the cause persists ends unavailable again with the new lastFatal', async () => {
+    const { sup, children } = await fatalBoot();
+
+    const p = sup.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    children[1]?.port.deliver({ kind: 'fatal', code: 'DATABASE_UNAVAILABLE', reason: 'schema_too_new', message: 'newer schema' });
+    children[1]?.emit('exit', 1);
+
+    await expect(p).resolves.toEqual({ restarted: true, state: 'unavailable' });
+    expect(sup.state().lastFatal?.reason).toBe('schema_too_new');
+  });
+
+  it('restart() also recovers from the restart limit (restart window cleared)', async () => {
+    const { sup, children, ready } = setup();
+    void sup.start().catch(() => undefined);
+    for (let i = 0; i < 4; i += 1) {
+      children[i]?.emit('exit', 1);
+      await vi.advanceTimersByTimeAsync(8_000);
+    }
+    expect(sup.state()).toMatchObject({ state: 'unavailable', lastFatal: { code: 'RUNNER_UNAVAILABLE', reason: 'restart_limit' } });
+
+    const p = sup.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    ready(children[4]);
+
+    await expect(p).resolves.toEqual({ restarted: true, state: 'ready' });
+    children[4]?.emit('exit', 1); // a later crash restarts automatically again (fresh window)
+    await vi.advanceTimersByTimeAsync(500);
+    expect(children).toHaveLength(6);
+  });
+
+  it('restart() while a runner is alive (ready / starting) is a no-op and forks nothing', async () => {
+    const { sup, children, ready } = setup();
+    void sup.start();
+    await expect(sup.restart()).resolves.toEqual({ restarted: false, state: 'starting' });
+    ready();
+
+    await expect(sup.restart()).resolves.toEqual({ restarted: false, state: 'ready' });
+    expect(children).toHaveLength(1);
+  });
+
+  it('concurrent restart() calls share one attempt (never two runners)', async () => {
+    const { sup, children, ready } = await fatalBoot();
+
+    const a = sup.restart();
+    const b = sup.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    ready(children[1]);
+
+    expect(await a).toEqual(await b);
+    expect(children).toHaveLength(2);
+  });
+
+  it('restart() waits for a condemned child that has not exited yet before forking', async () => {
+    const { sup, latest, children } = setup();
+    void sup.start().catch(() => undefined);
+    latest().port.deliver({ kind: 'fatal', code: 'INTERNAL', message: 'x' }); // killed, exit not yet observed
+
+    const p = sup.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children).toHaveLength(1);
+    children[0]?.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children).toHaveLength(2);
+    children[1]?.port.deliver({ kind: 'ready', schemaVersion: 1, pid: 2 });
+
+    await expect(p).resolves.toEqual({ restarted: true, state: 'ready' });
+  });
+
+  it('restart() after shutdown is a no-op', async () => {
+    const { sup, children } = await fatalBoot();
+    await sup.shutdown({ graceMs: 0 });
+
+    await expect(sup.restart()).resolves.toEqual({ restarted: false, state: 'unavailable' });
+    expect(children).toHaveLength(1);
+  });
+
+  it('activeRunId follows heartbeats and run.status events, and clears on exit', () => {
+    const { sup, latest, ready } = setup();
+    void sup.start();
+    ready();
+    const RUN = 'run_01J0000000000000000000000A';
+
+    latest().port.deliver({ kind: 'event', event: { type: 'run.status', runId: RUN, status: 'running', pauseReason: null, seq: 3 } });
+    expect(sup.state().activeRunId).toBe(RUN);
+    latest().port.deliver({ kind: 'event', event: { type: 'run.status', runId: RUN, status: 'completed', pauseReason: null, seq: 9 } });
+    expect(sup.state().activeRunId).toBeNull();
+    latest().port.deliver({ kind: 'heartbeat', at: 1, activeRunId: RUN });
+    expect(sup.state().activeRunId).toBe(RUN);
+    latest().emit('exit', 1);
+    expect(sup.state().activeRunId).toBeNull();
+  });
+
+  it('runMaintenance forks a task runner (RELAY_RUNNER_TASK) only while unavailable and resolves its result', async () => {
+    const { sup, children } = await fatalBoot();
+    expect(await setup().sup.runMaintenance('restore_latest_backup')).toEqual({ ok: false, reason: 'runner_active' }); // idle supervisor: not unavailable
+
+    const p = sup.runMaintenance('restore_latest_backup');
+    const child = children[1];
+    expect(child).toBeDefined();
+    child?.port.deliver({
+      kind: 'maintenance.result', task: 'restore_latest_backup',
+      result: { ok: true, restored: true, restoredFromDisplayPath: '~/b', backupCreatedAt: 5, previousMovedToDisplayPath: null },
+    });
+    child?.emit('exit', 0);
+
+    await expect(p).resolves.toMatchObject({ ok: true, result: { ok: true, restored: true } });
+    expect(sup.state().state).toBe('unavailable'); // the caller restarts
+  });
+
+  it('runMaintenance passes the task in the env and reports an exit without a result', async () => {
+    const envs: Record<string, string>[] = [];
+    const children: FakeChild[] = [];
+    const h = setup({
+      fork: (_e, _a, opts) => {
+        envs.push(opts.env);
+        const c = new FakeChild();
+        children.push(c);
+        return c;
+      },
+      createChannel: () => {
+        const port1 = new FakePort();
+        const c = children.at(-1);
+        if (c !== undefined) c.port = port1;
+        return { port1, port2: {} };
+      },
+    });
+    void h.sup.start().catch(() => undefined);
+    children[0]?.port.deliver({ kind: 'fatal', code: 'INTERNAL', message: 'x' });
+    children[0]?.emit('exit', 1);
+
+    const p = h.sup.runMaintenance('restore_latest_backup');
+    expect(envs[1]).toMatchObject({ RELAY_USER_DATA_DIR: '/ud', RELAY_RUNNER_TASK: 'restore_latest_backup' });
+    expect(envs[0]).not.toHaveProperty('RELAY_RUNNER_TASK');
+    children[1]?.emit('exit', 1);
+
+    await expect(p).resolves.toEqual({ ok: false, reason: 'exited' });
+  });
+});
+
 describe('minimalEnv', () => {
   const base = { userDataDir: '/ud', homeDir: '/Users/a', tmpDir: '/tmp', providerMode: 'fake' as const, fakeScenario: 'happy', nodeEnv: undefined };
 

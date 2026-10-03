@@ -421,7 +421,8 @@ describe('Settings → Storage & data: the project acted on (B13)', () => {
     const user = userEvent.setup();
     renderApp('/settings/data', { scenario: 'awaiting-approval' });
     await section('Purge project history');
-    expect(screen.getAllByText('Acts on project “Example API”').length).toBe(2);
+    // A neutral "Project: Example API (the active project) (change)" line on each card that acts on the project.
+    expect(screen.getAllByText('(the active project)').length).toBe(2);
     await user.click(screen.getByRole('button', { name: 'Purge project history…' }));
     const dialog = await screen.findByRole('dialog', { name: 'Purge the history of “Example API”?' });
     expect(within(dialog).getByRole('textbox', { name: /Type “purge” to confirm purging the history of “Example API”/ })).toBeInTheDocument();
@@ -430,6 +431,6 @@ describe('Settings → Storage & data: the project acted on (B13)', () => {
   it('an explicit ?project= is used and needs no fallback note', async () => {
     renderApp(`/settings/data?project=${FAKE_PROJECT_ID}`, { scenario: 'awaiting-approval' });
     await section('Purge project history');
-    expect(screen.queryByText('Acts on project “Example API”')).not.toBeInTheDocument();
+    expect(screen.queryByText('(the active project)')).not.toBeInTheDocument();
   });
 });

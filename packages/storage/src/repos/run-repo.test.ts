@@ -187,6 +187,16 @@ describe('RunRepo', () => {
     expect(() => repo.get(newId('run'))).toThrow();
   });
 
+  it('findByIdempotencyKey returns the run created with that key, undefined for an unknown key', () => {
+    const p = seedProject(f.db, f.clock);
+    const a = seedRun(f.db, f.clock, p.id);
+    const b = seedRun(f.db, f.clock, p.id);
+
+    expect(f.db.repos.runs.findByIdempotencyKey(a.idempotencyKey)?.id).toBe(a.id);
+    expect(f.db.repos.runs.findByIdempotencyKey(b.idempotencyKey)?.id).toBe(b.id);
+    expect(f.db.repos.runs.findByIdempotencyKey('no-such-key')).toBeUndefined();
+  });
+
   it('returns the oldest queued run and the active runs', () => {
     const p = seedProject(f.db, f.clock);
     const a = seedRun(f.db, f.clock, p.id, { createdAt: epochMs(10) });

@@ -1,6 +1,6 @@
 import { Pin, TriangleAlert } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
-import { MEMORY_TYPE_LABELS } from '../../../lib/format/labels';
+import { MEMORY_TYPE_LABELS, runLabel } from '../../../lib/format/labels';
 import { ListItemButton } from '../ListItemButton';
 import { StatusBadge } from '../StatusBadge';
 
@@ -15,7 +15,7 @@ function sourceText(source: MemoryRecordView['source']): string {
     case 'user':
       return 'Added by you';
     case 'run':
-      return `From run ${source.runId}`;
+      return `From ${runLabel(source.runId)}`;
     case 'file':
       return `From file ${source.relPath}`;
   }

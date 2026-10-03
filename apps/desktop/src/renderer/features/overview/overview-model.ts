@@ -34,6 +34,10 @@ export interface OverviewModel {
   readonly interrupted: RunSummary | undefined;
   /** Runs paused for provider sign-in. */
   readonly authPaused: RunSummary | undefined;
+  /** Paused runs (every pause reason) that wait for the user; `unknown_outcome` runs are in `interrupted` instead. */
+  readonly paused: readonly RunSummary[];
+  /** The paused run the "Needs your attention" card shows when nothing more urgent does. */
+  readonly pausedFocus: RunSummary | undefined;
   /** The run the attention card and run controls describe. */
   readonly focus: RunSummary | undefined;
 }
@@ -44,6 +48,7 @@ export function deriveOverview(project: ProjectDetail, heads: OverviewRunHeads):
   const interrupted = heads.interrupted[0] ?? heads.paused.find((r) => r.pauseReason === 'unknown_outcome');
   const authPaused = heads.paused.find((r) => r.pauseReason === 'auth_required');
   const active = heads.active.items.filter(isActiveRun);
+  const paused = heads.paused.filter((r) => r.id !== interrupted?.id);
   return {
     empty: project.stats.runs === 0,
     activeCount: active.length,
@@ -52,6 +57,8 @@ export function deriveOverview(project: ProjectDetail, heads: OverviewRunHeads):
     running,
     interrupted,
     authPaused,
+    paused,
+    pausedFocus: authPaused ?? paused[0],
     focus: awaiting ?? running ?? interrupted ?? authPaused ?? heads.paused[0] ?? active[0],
   };
 }
@@ -61,30 +68,39 @@ export interface DisconnectedProvider {
   readonly providerId: ProviderId;
   readonly displayName: string;
   readonly redactedLabel: string | null;
+  /**
+   * What found the problem: a run that paused for sign-in (`run`, with its id), or the last connection test. The banner
+   * words it by source; a run pause wins (it is what the user is waiting on).
+   */
+  readonly source: 'run' | 'connection_test';
+  readonly runId?: string;
 }
 
 /**
- * Providers needing reconnection: `lastTest.ok === false && code === 'AUTH_REQUIRED'`, plus the provider named by a
- * run paused `auth_required` (its `statusDetail.details.providerId`).
+ * Providers needing reconnection: the provider named by a run paused `auth_required` (its
+ * `statusDetail.details.providerId`), plus `lastTest.ok === false && code === 'AUTH_REQUIRED'`.
  */
 export function disconnectedProviders(
   providers: readonly ProviderStatus[],
   authPausedRun: RunDetail | undefined,
 ): DisconnectedProvider[] {
   const out = new Map<ProviderId, DisconnectedProvider>();
-  for (const p of providers) {
-    if (p.lastTest?.ok === false && p.lastTest.code === 'AUTH_REQUIRED') {
-      out.set(p.providerId, { providerId: p.providerId, displayName: p.displayName, redactedLabel: p.redactedLabel });
-    }
-  }
   const fromRun = providerIdSchema.safeParse(authPausedRun?.statusDetail?.details?.['providerId']);
-  if (fromRun.success && !out.has(fromRun.data)) {
+  if (authPausedRun !== undefined && fromRun.success) {
     const p = providers.find((x) => x.providerId === fromRun.data);
     out.set(fromRun.data, {
       providerId: fromRun.data,
       displayName: p?.displayName ?? fromRun.data,
       redactedLabel: p?.redactedLabel ?? null,
+      source: 'run',
+      runId: authPausedRun.id,
     });
+  }
+  for (const p of providers) {
+    if (out.has(p.providerId)) continue;
+    if (p.lastTest?.ok === false && p.lastTest.code === 'AUTH_REQUIRED') {
+      out.set(p.providerId, { providerId: p.providerId, displayName: p.displayName, redactedLabel: p.redactedLabel, source: 'connection_test' });
+    }
   }
   return [...out.values()];
 }

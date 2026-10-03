@@ -40,7 +40,7 @@ export class WorkflowEditor {
     return this.page.getByRole('region', { name: 'Workflow limits' });
   }
 
-  limitField(label: 'Run allowance (USD)' | 'Revision cycles' | 'Maximum attempts' | 'Execution timeout (minutes)'): Locator {
+  limitField(label: 'Run allowance (USD)' | 'Revision cycles' | 'Max attempts (run)' | 'Timeout (minutes)'): Locator {
     return this.limits().getByLabel(label, { exact: true });
   }
 

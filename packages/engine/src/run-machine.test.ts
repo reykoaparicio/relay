@@ -57,6 +57,9 @@ const TABLE: readonly Row[] = [
   ['running', sb('auth_required'), 'paused', 'auth_required'],
   ['running', { type: 'BUDGET_BLOCKED', scope: 'run', error: E }, 'paused', 'budget_run'],
   ['running', { type: 'BUDGET_BLOCKED', scope: 'project', error: E }, 'paused', 'budget_project'],
+  // E1 #1: a budget re-check of a paused run moves it to the pause of the scope that failed.
+  ['paused', { type: 'BUDGET_BLOCKED', scope: 'run', error: E }, 'paused', 'budget_run'],
+  ['paused', { type: 'BUDGET_BLOCKED', scope: 'project', error: E }, 'paused', 'budget_project'],
   ['running', SAMPLES.BUDGET_OVERRUN, 'paused', 'budget_overrun'],
   ['running', SAMPLES.USER_PAUSE, 'paused', 'user'],
   ['running', SAMPLES.AUTH_FAILED, 'paused', 'auth_required'],
@@ -226,6 +229,16 @@ describe('allowedRunActions truth table', () => {
     }
   });
 
+  it('E1 #8: budget pauses with a failed step offer retry_step; auth_required without a credential ref offers no resume', () => {
+    expect(allowedRunActions(paused('budget_run'), { ...none, hasFailedStep: true })).toEqual(['increase_allowance', 'retry_step', 'choose_profile', 'stop']);
+    expect(allowedRunActions(paused('budget_project'), { ...none, hasFailedStep: true })).toEqual(['edit_project_allowance', 'retry_step', 'choose_profile', 'stop']);
+    expect(allowedRunActions(paused('auth_required'), { ...none, missingCredential: true })).toEqual(['reconnect_provider', 'stop']);
+    expect(allowedRunActions(paused('auth_required'), none)).toEqual(['reconnect_provider', 'resume', 'stop']);
+    expect(allowedRunActions(paused('approval_stale'), { ...none, preservableSnapshot: false })).toEqual(['resnapshot_and_replan', 'stop']);
+    expect(allowedRunActions(paused('output_invalid'), { ...none, hasFailedStep: true, hasProfileOptions: false })).toEqual(['retry_step', 'stop']);
+    expect(allowedRunActions(paused('budget_run'), { ...none, hasProfileOptions: false })).toEqual(['increase_allowance', 'stop']);
+  });
+
   it('offers decide_unknown only while unknown attempts remain, then retry_step once the step failed', () => {
     expect(allowedRunActions(paused('unknown_outcome'), { ...none, unknownAttempts: 2 })).toEqual(['decide_unknown', 'stop']);
     expect(allowedRunActions(paused('unknown_outcome'), { ...none, hasFailedStep: true })).toEqual(['retry_step', 'choose_profile', 'stop']);
@@ -237,12 +250,15 @@ describe('allowedRunActions truth table', () => {
     expect(at('running')).toEqual(['pause', 'cancel']);
     expect(at('awaiting_approval')).toEqual(['approve', 'request_revision', 'reject', 'cancel']);
     expect(at('interrupted')).toEqual(['review_recovery', 'stop']);
-    expect(at('interrupted', { ...none, unknownAttempts: 1 })).toEqual(['review_recovery', 'decide_unknown', 'stop']);
+    // E1 #8: review_recovery is only offered once every unknown attempt is decided (it always failed before that).
+    expect(at('interrupted', { ...none, unknownAttempts: 1 })).toEqual(['decide_unknown', 'stop']);
     expect(at('cancelling')).toEqual([]);
     expect(at('paused')).toEqual(['stop']);
     for (const s of ['completed', 'incomplete', 'cancelled', 'failed'] as const) {
       expect(at(s)).toEqual(['export_report']);
       expect(at(s, { ...none, hasPatchArtifact: true })).toEqual(['export_report', 'export_patch']);
+      // E1 #4: an unknown charge left on a finished run stays decidable (settle only).
+      expect(at(s, { ...none, unknownAttempts: 1 })).toEqual(['decide_unknown', 'export_report']);
     }
   });
 });

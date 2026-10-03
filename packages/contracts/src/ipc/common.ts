@@ -52,13 +52,16 @@ export function op<
 
 /**
  * Error codes any op may return without listing them: bad input (router validation), rate limiting, runner loss,
- * a refused sender (`PERMISSION_DENIED untrusted_sender`, router), and internal errors.
+ * a refused sender (`PERMISSION_DENIED untrusted_sender`, router), an unusable database, a missing project folder,
+ * and internal errors.
  */
 export const UNIVERSAL_ERROR_CODES = [
   'VALIDATION_FAILED',
   'RATE_LIMITED',
   'RUNNER_UNAVAILABLE',
   'PERMISSION_DENIED',
+  'DATABASE_UNAVAILABLE', // any op can hit a full disk / read-only / damaged database (E2 #3)
+  'PROJECT_ROOT_MISSING', // any op that touches project files can find the folder gone (E2 #7)
   'INTERNAL',
 ] as const satisfies readonly ErrorCode[];
 

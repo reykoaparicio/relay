@@ -240,6 +240,8 @@ interface UpdateInput {
   readonly reviewAt?: EpochMs | null | undefined;
   readonly pinned?: boolean | undefined;
   readonly unarchive?: true | undefined;
+  /** Handled by {@link confirmRecord} (memory-handlers.ts runs it after this update, in the same transaction). */
+  readonly confirmCurrent?: true | undefined;
 }
 
 /**
@@ -281,6 +283,47 @@ export function updateRecord(r: Repos, env: MemoryEnv, i: UpdateInput): Result<M
     r.memory.recordEvent({ recordId: item.record.id, event: 'edited', revision: item.record.currentRevision + (revised.value ? 1 : 0), actor: env.actor, createdAt: env.now });
   }
   return getItem(r, item.record.id);
+}
+
+/**
+ * "Confirm still accurate" (E2 #16): records that the user reviewed an approved record. When the live hashes of its
+ * `file` source refs (`freshRefs`, read by the caller) differ from the current revision's, a new revision with the same
+ * title / content and the refreshed refs is written (revisions are immutable), which clears `stale`. Always writes a
+ * `reviewed` event. `reviewAt` is never touched (a future review date stays; a past one stops being due because the
+ * review is newer than it). CONFLICT on a stale `expectedRevision` or a non-approved record.
+ */
+export function confirmRecord(r: Repos, env: MemoryEnv, recordId: MemoryId, expectedRevision: number,
+  freshRefs: readonly Extract<MemorySourceRef, { kind: 'file' }>[]): Result<MemoryItem> {
+  const got = getItem(r, recordId);
+  if (!got.ok) return got;
+  const item = got.value;
+  if (transitionMemory(item.record.status, 'edit') === null) return err(illegal(item, 'edit'));
+  const rev = checkRevision(item, expectedRevision);
+  if (!rev.ok) return rev;
+  const fresh = new Map(freshRefs.map((f) => [f.relPath as string, f.sha256]));
+  let refreshed = 0;
+  const refs = item.current.sourceRefs.map((s): MemorySourceRef => {
+    const sha = s.kind === 'file' ? fresh.get(s.relPath) : undefined;
+    if (s.kind !== 'file' || sha === undefined || sha === s.sha256) return s;
+    refreshed += 1;
+    return { ...s, sha256: sha };
+  });
+  let revision = item.record.currentRevision;
+  if (refreshed > 0) {
+    const added = r.memory.addRevision(item.record.id, { id: env.ids.next('memoryRevision'), title: item.current.title, content: item.current.content,
+      sourceRefs: refs, author: env.actor, createdAt: env.now }, item.record.currentRevision);
+    if (!added.ok) return added;
+    revision = added.value.revision;
+  }
+  r.memory.recordEvent({ recordId: item.record.id, event: 'reviewed', revision, actor: env.actor, createdAt: env.now,
+    detail: { fileRefs: freshRefs.length, refreshed } });
+  return getItem(r, item.record.id);
+}
+
+/** E2 #16: a review is due once `reviewAt` has passed and no `reviewed` event is at or after it. Pure. */
+export function isReviewDue(reviewAt: EpochMs | null, lastReviewedAt: EpochMs | null | undefined, now: EpochMs): boolean {
+  if (reviewAt === null || reviewAt > now) return false;
+  return lastReviewedAt === null || lastReviewedAt === undefined || lastReviewedAt < reviewAt;
 }
 
 /** Applies a single-record lifecycle action (`memory.reject` / `archive` / `delete`). */
@@ -413,19 +456,45 @@ export function selectRunMemory(r: Repos, projectId: ProjectId, now: EpochMs, in
   return ok(candidates.filter((c) => wanted.has(c.record.id) || isMandatory(c.record)));
 }
 
+/** Options of {@link snapshotMemoryForRun}. */
+export interface SnapshotMemoryOptions {
+  /**
+   * Intake (E2 #15): drop ticked records that are no longer approved / retrievable (archived, deleted, expired, …
+   * since `runs.start`) instead of failing — a failure here could only pause the run as setup_blocked with no action
+   * that fixes it. Each dropped record gets a `skipped` memory event (detail `{ runId }`) and is returned.
+   */
+  readonly dropUnavailable?: boolean;
+  /** Actor of the `skipped` events (`run:<id>`). */
+  readonly actor?: string;
+}
+
 /**
  * Intake: copies the {@link selectRunMemory} records into `run_memory_snapshot` with their current revision AND their
  * attributes (type, pinned, role scope) as of now, so later edits never reach this run's context or manifest.
- * Idempotent: a retried intake keeps the first snapshot.
+ * Idempotent: a retried intake keeps the first snapshot. Returns the ids dropped under `dropUnavailable`.
  */
-export function snapshotMemoryForRun(r: Repos, runId: RunId, projectId: ProjectId, now: EpochMs, includeIds?: readonly MemoryId[] | null): Result<void> {
-  if (r.memory.runSnapshot(runId).length > 0) return ok(undefined);
-  const selected = selectRunMemory(r, projectId, now, includeIds);
+export function snapshotMemoryForRun(r: Repos, runId: RunId, projectId: ProjectId, now: EpochMs, includeIds?: readonly MemoryId[] | null,
+  o: SnapshotMemoryOptions = {}): Result<{ readonly skipped: readonly MemoryId[] }> {
+  if (r.memory.runSnapshot(runId).length > 0) return ok({ skipped: [] });
+  let wanted = includeIds;
+  let skipped: MemoryId[] = [];
+  if (o.dropUnavailable === true && includeIds !== null && includeIds !== undefined) {
+    const known = new Set(retrievableForProject(r, projectId, now).map((c) => c.record.id));
+    skipped = includeIds.filter((id) => !known.has(id));
+    wanted = includeIds.filter((id) => known.has(id));
+  }
+  const selected = selectRunMemory(r, projectId, now, wanted);
   if (!selected.ok) return selected;
   const rows = selected.value.map((c) => ({ recordId: c.record.id, revision: c.current.revision, title: c.current.title, content: c.current.content,
     type: c.record.type, pinned: c.record.pinned, scope: c.record.scope, included: true }));
   if (rows.length > 0) r.memory.snapshotForRun(runId, rows);
-  return ok(undefined);
+  for (const id of skipped) {
+    const item = r.memory.get(id);
+    if (item === undefined) continue; // never existed: nothing to attach an event to
+    r.memory.recordEvent({ recordId: id, event: 'skipped', revision: item.record.currentRevision, actor: o.actor ?? `run:${runId}`, createdAt: now,
+      detail: { runId, status: item.record.status } });
+  }
+  return ok({ skipped });
 }
 
 /** One memory candidate from a run's outputs. */
@@ -583,8 +652,13 @@ async function recordRunSummary(deps: MemoryServiceDeps, runId: RunId): Promise<
 /** Creates the memory service (07 G5). */
 export function createMemoryService(deps: MemoryServiceDeps): MemoryServicePort {
   return {
-    snapshotForRun: (runId, projectId, o) =>
-      deps.db.txResult('immediate', (tx) => snapshotMemoryForRun(tx, runId, projectId, deps.clock.now(), o.includeIds)),
+    snapshotForRun: (runId, projectId, o) => {
+      const res = deps.db.txResult('immediate', (tx) => snapshotMemoryForRun(tx, runId, projectId, deps.clock.now(), o.includeIds, { dropUnavailable: true }));
+      if (!res.ok) return res;
+      for (const recordId of res.value.skipped) deps.logger.warn('memory_record_skipped', { runId, recordId, reason: 'not_approved' });
+      if (res.value.skipped.length > 0) deps.emit?.({ type: 'memory.changed', projectId });
+      return ok(undefined);
+    },
     proposeFromRun: (runId) => proposeFromRun(deps, runId),
     recordRunSummary: (runId) => recordRunSummary(deps, runId),
   };

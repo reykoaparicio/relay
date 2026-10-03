@@ -8,6 +8,9 @@ import { attempt, runDetail } from '../test-fixtures';
 import { axe, describeViolations, renderWithProviders } from '../test-utils';
 import { RecoveryPanel } from './RecoveryPanel';
 
+/** The accept decision names its amount ("Accept $0.39 as the charge"). */
+const ACCEPT = /^Accept \$[\d.,]+ as the charge$/;
+
 describe('RecoveryPanel', () => {
   it('keeps focus in the panel (not <body>) after confirming a destructive action @a11y', async () => {
     const user = userEvent.setup();
@@ -58,7 +61,7 @@ describe('RecoveryPanel', () => {
     const retry = within(first).getByRole('button', { name: /may incur another charge/ });
     expect(retry).toHaveTextContent('Retry (may incur another charge)');
     expect(within(first).getByRole('button', { name: 'Mark as failed without retry' })).toBeVisible();
-    expect(within(first).getByRole('button', { name: 'Accept the estimated charge' })).toBeVisible();
+    expect(within(first).getByRole('button', { name: ACCEPT })).toBeVisible();
     // The single "Decide on unknown charge" button is replaced by the rows.
     expect(screen.queryByRole('button', { name: 'Decide on unknown charge' })).toBeNull();
 
@@ -74,7 +77,7 @@ describe('RecoveryPanel', () => {
     render(<RecoveryPanel run={twoUnknown()} onDecide={() => undefined} attemptDecisions={UNKNOWN_OUTCOME_DECISIONS} />);
 
     const second = screen.getByRole('group', { name: /attempt 3/ });
-    expect(within(second).queryByRole('button', { name: 'Accept the estimated charge' })).toBeNull();
+    expect(within(second).queryByRole('button', { name: ACCEPT })).toBeNull();
     expect(within(second).getAllByRole('button')).toHaveLength(2);
   });
 
@@ -87,9 +90,9 @@ describe('RecoveryPanel', () => {
     render(<Harness />);
 
     const first = screen.getByRole('group', { name: /attempt 2/ });
-    await user.click(within(first).getByRole('button', { name: 'Accept the estimated charge' }));
+    await user.click(within(first).getByRole('button', { name: ACCEPT }));
 
-    expect(within(first).getByRole('button', { name: 'Accept the estimated charge' })).toHaveAttribute('aria-busy', 'true');
+    expect(within(first).getByRole('button', { name: ACCEPT })).toHaveAttribute('aria-busy', 'true');
     expect(within(first).getByRole('button', { name: /may incur another charge/ })).toBeDisabled();
     expect(within(first).getByRole('button', { name: /may incur another charge/ })).not.toHaveAttribute('aria-busy');
     expect(screen.getByRole('button', { name: 'Stop run' })).toBeDisabled();
@@ -100,7 +103,7 @@ describe('RecoveryPanel', () => {
   it('limits the offered decisions with attemptDecisions', () => {
     render(<RecoveryPanel run={twoUnknown()} onDecide={() => undefined} attemptDecisions={['retry_acknowledging_charge', 'mark_failed_keep_liability']} />);
 
-    expect(screen.queryByRole('button', { name: 'Accept the estimated charge' })).toBeNull();
+    expect(screen.queryByRole('button', { name: ACCEPT })).toBeNull();
     expect(screen.getAllByRole('button', { name: /may incur another charge/ })).toHaveLength(2);
   });
 

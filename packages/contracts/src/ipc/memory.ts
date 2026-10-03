@@ -128,9 +128,17 @@ export const memoryOps = {
       reviewAt: epochMsSchema.nullable().optional(),
       pinned: z.boolean().optional(),
       unarchive: z.literal(true).optional(),
+      /**
+       * E2 #16 "Confirm still accurate": re-hashes the record's `file` source refs against the live files (clearing
+       * `stale`; a new revision with the same text is written only when a hash changed) and writes a `reviewed` event.
+       * `reviewAt` is NOT changed: a future review date is kept, and a past one stops being due because the review is
+       * newer (`reviewDue` / `lastReviewedAt` on the view). Do not send `reviewAt: now` for a confirmation any more.
+       * A missing / unreadable source file → NOT_FOUND / PERMISSION_DENIED (nothing is written).
+       */
+      confirmCurrent: z.literal(true).optional(),
     }),
     output: memoryRecordDetailSchema,
-    errors: ['CONFLICT', 'VALIDATION_FAILED', 'NOT_FOUND'],
+    errors: ['CONFLICT', 'VALIDATION_FAILED', 'NOT_FOUND', 'PERMISSION_DENIED'],
     idempotent: false,
   }),
   'memory.approve': op({

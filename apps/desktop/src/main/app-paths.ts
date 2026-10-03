@@ -15,15 +15,35 @@ export interface AppPaths {
   readonly dbFile: string;
 }
 
-/** Only an unpackaged build, or an E2E run, may honor RELAY_* dev overrides (08 H1 steps 1 and 3). */
-export function areDevOverridesAllowed(isPackaged: boolean, env: NodeJS.ProcessEnv): boolean {
-  return !isPackaged || env['RELAY_E2E'] === '1';
+/**
+ * True when this build was made with `MAIN_VITE_RELAY_PACKAGED_E2E=1` (inlined at build time; never read from the
+ * runtime environment). Only such a build honors RELAY_E2E=1 once packaged.
+ */
+export function packagedE2eAllowedByBuild(): boolean {
+  try {
+    return import.meta.env.MAIN_VITE_RELAY_PACKAGED_E2E === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * RELAY_E2E=1 is honored by unpackaged builds (Playwright launches out/main/index.js), and by a packaged build only
+ * when the build-time flag allows it — a shipped app ignores it, with every override it unlocks.
+ */
+export function isE2eAllowed(isPackaged: boolean, env: NodeJS.ProcessEnv, packagedE2eAllowed: boolean = packagedE2eAllowedByBuild()): boolean {
+  return env['RELAY_E2E'] === '1' && (!isPackaged || packagedE2eAllowed);
+}
+
+/** Only an unpackaged build, or an allowed E2E run, may honor RELAY_* dev overrides (08 H1 steps 1 and 3). */
+export function areDevOverridesAllowed(isPackaged: boolean, env: NodeJS.ProcessEnv, packagedE2eAllowed: boolean = packagedE2eAllowedByBuild()): boolean {
+  return !isPackaged || isE2eAllowed(isPackaged, env, packagedE2eAllowed);
 }
 
 /** The userData override (absolute), or null when unset or not allowed. */
-export function resolveUserDataOverride(isPackaged: boolean, env: NodeJS.ProcessEnv): string | null {
+export function resolveUserDataOverride(isPackaged: boolean, env: NodeJS.ProcessEnv, packagedE2eAllowed: boolean = packagedE2eAllowedByBuild()): string | null {
   const dir = env['RELAY_USER_DATA_DIR'];
-  if (dir === undefined || dir.trim() === '' || !areDevOverridesAllowed(isPackaged, env)) return null;
+  if (dir === undefined || dir.trim() === '' || !areDevOverridesAllowed(isPackaged, env, packagedE2eAllowed)) return null;
   return isAbsolute(dir) ? dir : resolve(dir);
 }
 
@@ -34,8 +54,8 @@ export interface ProviderModeConfig {
 }
 
 /** 08 H1 step 3: RELAY_PROVIDER_MODE=fake is honored only when dev overrides are allowed; otherwise `live`. */
-export function resolveProviderMode(isPackaged: boolean, env: NodeJS.ProcessEnv): ProviderModeConfig {
-  const fake = env['RELAY_PROVIDER_MODE'] === 'fake' && areDevOverridesAllowed(isPackaged, env);
+export function resolveProviderMode(isPackaged: boolean, env: NodeJS.ProcessEnv, packagedE2eAllowed: boolean = packagedE2eAllowedByBuild()): ProviderModeConfig {
+  const fake = env['RELAY_PROVIDER_MODE'] === 'fake' && areDevOverridesAllowed(isPackaged, env, packagedE2eAllowed);
   if (!fake) return { providerMode: 'live', fakeScenario: null };
   const scenario = env['RELAY_FAKE_SCENARIO'];
   return { providerMode: 'fake', fakeScenario: scenario === undefined || scenario === '' ? null : scenario };

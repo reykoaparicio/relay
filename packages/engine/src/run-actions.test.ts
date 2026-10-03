@@ -108,7 +108,7 @@ describe('runs.resume continue', () => {
     expect(res.ok && res.data.status).toBe('queued');
   });
 
-  it('review_recovery with an unknown attempt → CONFLICT(unknownAttempts); decide it first', async () => {
+  it('review_recovery with an unknown attempt → CONFLICT (not offered, E1 #8); decide it first', async () => {
     const x = await createHarness({ scenario: 'midstream-error' });
     h = x;
     const runId = await x.startRun();
@@ -123,7 +123,7 @@ describe('runs.resume continue', () => {
     expect(x.db.repos.runs.get(runId).status).toBe('interrupted');
     const after = await resume(x, runId, 'recovery-key-0003', { kind: 'continue' });
 
-    expect(res.ok ? null : [res.error.code, res.error.details?.['unknownAttempts']]).toEqual(['CONFLICT', 1]);
+    expect(res.ok ? null : [res.error.code, res.error.details?.['reason']]).toEqual(['CONFLICT', 'decision_not_applicable']);
     expect(after.ok && after.data.status).toBe('queued'); // deciding on an interrupted run never auto-resumes (§4.4)
   });
 });

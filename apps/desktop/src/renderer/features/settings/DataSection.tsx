@@ -5,8 +5,10 @@ import { DatabaseBackup, FileDown, FileJson, FileSpreadsheet, Trash2 } from 'luc
 import type { Microusd, Project } from '@relay/contracts';
 import {
   Button,
+  Checkbox,
   Dialog,
   DialogFooter,
+  Disclosure,
   ErrorView,
   Field,
   InlineAlert,
@@ -23,6 +25,8 @@ import { qk } from '../../api/keys';
 import { formatAbsoluteTime, formatBytes, formatMonth } from '../../lib/format';
 import { useAppInfo } from '../../hooks/useAppInfo';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
+import { RUNS_MAX_PAGE, useRuns } from '../../hooks/useRuns';
+import { runLabel } from '../../lib/format';
 import { MutationError } from '../common/MutationError';
 import { useRetryAction } from '../common/useNextAction';
 import { dollarsText } from '../run-setup/limits';
@@ -136,6 +140,74 @@ function BackupCard() {
   );
 }
 
+/** Which runs a project export includes: every run (default), or the ones ticked here (`projects.export.runIds`). */
+function ExportRunPicker({
+  projectId,
+  picked,
+  onChange,
+}: {
+  readonly projectId: string;
+  readonly picked: readonly string[] | null;
+  readonly onChange: (ids: readonly string[] | null) => void;
+}) {
+  const runs = useRuns(projectId, { limit: RUNS_MAX_PAGE });
+  const list = runs.data?.pages.flatMap((p) => p.items) ?? [];
+  const chosen = new Set(picked ?? list.map((r) => r.id));
+  const summary =
+    picked === null ? 'Runs: all runs are included (choose runs…)' : `Runs: ${String(picked.length)} of ${String(list.length)} chosen`;
+  return (
+    <Disclosure summary={summary}>
+      {runs.error !== null ? (
+        <MutationError error={runs.error} handlers={{ reload: () => void runs.refetch() }} />
+      ) : runs.data === undefined ? (
+        <Skeleton lines={3} />
+      ) : list.length === 0 ? (
+        <p className="subtle">This project has no runs yet.</p>
+      ) : (
+        <fieldset className="fieldset field">
+          <legend>Runs to include</legend>
+          <div className="row" style={{ gap: 8 }}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                onChange(null);
+              }}
+            >
+              All runs
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                onChange([]);
+              }}
+            >
+              None
+            </Button>
+          </div>
+          <ul className="stack small" style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: 240, overflow: 'auto' }}>
+            {list.map((r) => (
+              <li key={r.id}>
+                <Checkbox
+                  label={`${runLabel(r.id)} · ${r.goal}`}
+                  checked={chosen.has(r.id)}
+                  onCheckedChange={(checked) => {
+                    const next = list.map((x) => x.id).filter((id) => (id === r.id ? checked : chosen.has(id)));
+                    onChange(next.length === list.length ? null : next);
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+          {picked !== null && picked.length === 0 ? <span className="error">Choose at least one run, or All runs.</span> : null}
+          {runs.hasNextPage ? <p className="subtle">The newest {String(list.length)} runs are listed; All runs exports every run.</p> : null}
+        </fieldset>
+      )}
+    </Disclosure>
+  );
+}
+
 function ExportsCard({ project, explicit }: { readonly project: Project | undefined; readonly explicit: boolean }) {
   const titleId = useId();
   const monthId = useId();
@@ -143,8 +215,12 @@ function ExportsCard({ project, explicit }: { readonly project: Project | undefi
   const [months] = useState(() => recentMonths(Date.now()));
   const [month, setMonth] = useState(months[0] ?? '');
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  // null = every run (no `runIds` sent); a list = only the runs the user ticked.
+  const [pickedRuns, setPickedRuns] = useState<{ readonly projectId: string; readonly ids: readonly string[] } | null>(null);
+  const runIds = pickedRuns !== null && pickedRuns.projectId === project?.id ? pickedRuns.ids : null;
   const projectExport = useMutation({
-    mutationFn: (projectId: string) => call('relay/v1/projects.export', { projectId }),
+    mutationFn: (input: { readonly projectId: string; readonly runIds: readonly string[] | null }) =>
+      call('relay/v1/projects.export', { projectId: input.projectId, ...(input.runIds === null ? {} : { runIds: [...input.runIds] }) }),
     onSuccess: (res) => {
       exportToast('export:project', 'Project export', res);
     },
@@ -180,15 +256,24 @@ function ExportsCard({ project, explicit }: { readonly project: Project | undefi
           </div>
           <Button
             icon={FileJson}
-            disabled={project === undefined}
+            disabled={project === undefined || runIds?.length === 0}
             pending={projectExport.isPending}
             onClick={() => {
-              if (project !== undefined) projectExport.mutate(project.id);
+              if (project !== undefined) projectExport.mutate({ projectId: project.id, runIds });
             }}
           >
             Export project…
           </Button>
         </div>
+        {project === undefined ? null : (
+          <ExportRunPicker
+            projectId={project.id}
+            picked={runIds}
+            onChange={(ids) => {
+              setPickedRuns(ids === null ? null : { projectId: project.id, ids });
+            }}
+          />
+        )}
         <MutationError error={projectExport.error} />
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
           <Field label="Ledger month (CSV)" id={monthId} hint="Every ledger entry of the project in that month, tracked by Relay.">
@@ -313,7 +398,7 @@ function RetentionCard({ retentionDays, setupAllowance }: { readonly retentionDa
           <Field
             label="Keep raw provider responses (days)"
             id={retentionId}
-            hint="Redacted raw responses older than this are deleted. Structured outputs, reports and the ledger are kept."
+            hint="Redacted raw responses older than this are deleted at the next cleanup, so lowering it takes effect then, not at once. Structured outputs, reports and the ledger are kept."
             error={submitted ? daysError : undefined}
             required
           >

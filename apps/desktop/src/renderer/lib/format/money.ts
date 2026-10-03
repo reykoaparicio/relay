@@ -85,3 +85,25 @@ export function formatMoneyPair(a: Microusd, b: Microusd): readonly [string, str
   }
   return [formatUsdAtPrecision(a, MAX_PRECISION), formatUsdAtPrecision(b, MAX_PRECISION)];
 }
+
+/** Rounded units of `m` at `digits` dp (half away from zero), as the display shows them. */
+function unitsAt(m: number, digits: number): bigint {
+  const step = 10n ** BigInt(MAX_PRECISION - digits);
+  const abs = BigInt(Math.abs(m));
+  const units = (abs + step / 2n) / step;
+  return m < 0 ? -units : units;
+}
+
+/**
+ * One precision (2–6 dp) for amounts read as a sum, `parts[0] + parts[1] + … = total`, at which the displayed parts
+ * visibly add up to the displayed total ("$0.06 + $0.44 = $0.50", never "$0.06 + $0.45 = $0.50"). 2 dp unless
+ * rounding would break the sum; µUSD at 6 dp is exact, so the sum always holds there.
+ */
+export function sumConsistentPrecision(parts: readonly number[], total: number): number {
+  const base = moneyColumnPrecision([...parts, total] as Microusd[]);
+  for (let digits = base; digits < MAX_PRECISION; digits++) {
+    const sum = parts.reduce((acc, p) => acc + unitsAt(p, digits), 0n);
+    if (sum === unitsAt(total, digits)) return digits;
+  }
+  return MAX_PRECISION;
+}

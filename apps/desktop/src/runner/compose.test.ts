@@ -21,6 +21,8 @@ function protocol(order: string[] = []): ProtocolServer {
     attach: vi.fn(() => order.push('attach')),
     sendReady: vi.fn(() => order.push('ready')),
     sendFatal: vi.fn(),
+    activeRunId: vi.fn(() => null),
+    sendMaintenanceResult: vi.fn(),
   };
 }
 

@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Check, Combine, Pencil, X } from 'lucide-react';
 import type { MemoryRecordView } from '@relay/contracts';
-import { Button, ErrorView, Field, Hash, KeyValueList, Select, Skeleton, useFocusRescue } from '../../components/ui';
+import { Button, ErrorView, Field, Hash, KeyValueList, Select, Skeleton, SourceRefs, useFocusRescue } from '../../components/ui';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { MEMORY_TYPE_LABELS } from '../../lib/format';
@@ -95,6 +95,8 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
   };
 
   const fileRefs = (record?.revisions.at(-1)?.sourceRefs ?? []).flatMap((r) => (r.kind === 'file' ? [r] : []));
+  // E2 #17: the proposing step's evidence (file + lines; a whole file when lines are null).
+  const evidence = record?.proposal?.sourceRefs ?? [];
   const items = [
     { id: 'why', term: 'Why reusable', value: rationale ?? (detail.isPending ? 'Loading…' : 'No reason was given.') },
     {
@@ -118,6 +120,7 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
         </span>
       ),
     },
+    ...(evidence.length === 0 ? [] : [{ id: 'evidence', term: 'Based on', value: <SourceRefs refs={evidence} /> }]),
     { id: 'type', term: 'Type', value: MEMORY_TYPE_LABELS[suggestion.type] },
   ];
 

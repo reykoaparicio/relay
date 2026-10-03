@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router';
 import { PageHeader } from '../components/ui';
+import { AppearanceCard } from '../features/settings/AppearanceCard';
 import { AboutSection, DiagnosticsSection } from '../features/settings/DiagnosticsSection';
 import { DataSection } from '../features/settings/DataSection';
 import { ProfilesSection } from '../features/settings/ProfilesSection';
@@ -29,7 +30,12 @@ function isSection(v: string): v is SettingsSection {
 const CONTENT: Readonly<Record<SettingsSection, () => ReactNode>> = {
   providers: () => <ProvidersSection />,
   diagnostics: () => <DiagnosticsSection />,
-  about: () => <AboutSection />,
+  about: () => (
+    <>
+      <AppearanceCard />
+      <AboutSection />
+    </>
+  ),
   profiles: () => <ProfilesSection />,
   projects: () => <ProjectsSection />,
   data: () => <DataSection />,

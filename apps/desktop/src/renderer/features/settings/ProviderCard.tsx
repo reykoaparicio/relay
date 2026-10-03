@@ -25,6 +25,21 @@ export function providerState(p: ProviderStatus): ProviderState {
   return p.lastTest.code === 'AUTH_REQUIRED' ? 'auth-failed' : 'test-failed';
 }
 
+/**
+ * Where a rejected key was rejected (E2 #10 `lastTest.source`): during a run, or during the last connection test.
+ * Absent (older mains) = null; callers keep their earlier wording.
+ */
+export function rejectedDuring(p: ProviderStatus): string | null {
+  switch (p.lastTest?.source) {
+    case 'run':
+      return 'The key was rejected during a run';
+    case 'connection_test':
+      return 'The key was rejected during the last connection test';
+    case undefined:
+      return null;
+  }
+}
+
 const STATE_BADGE: Readonly<
   Record<ProviderState, { label: string; tone: string; icon: typeof CircleCheck }>
 > = {
@@ -169,12 +184,17 @@ export function ProviderCard({ provider: p, secureStorageAvailable, now }: Provi
                     <RelativeTime epochMs={lastTest.at} now={now} /> ·{' '}
                     {lastTest.ok
                       ? 'passed'
-                      : `failed${lastTest.code === undefined ? '' : ` · ${lastTest.code}`}`}
+                      : `failed${lastTest.source === 'run' ? ' during a run' : ''}${lastTest.code === undefined ? '' : ` · ${lastTest.code}`}`}
                   </>
                 ),
             },
           ]}
         />
+      ) : null}
+      {state === 'auth-failed' && rejectedDuring(p) !== null ? (
+        <p className="small" data-testid="provider-rejected-during">
+          {rejectedDuring(p)}. Replace the key to start runs with {p.displayName} again.
+        </p>
       ) : null}
       {p.providerId === 'openai' ? (
         <p className="small muted">

@@ -23,12 +23,21 @@ export interface ToastInput {
 
 interface ToastEntry extends ToastInput {
   readonly id: number;
+  readonly shownAt: number;
 }
 
 interface ToastApi {
   /** Returns false when the toast was suppressed as a duplicate. */
   readonly show: (toast: ToastInput) => boolean;
+  /**
+   * Dismisses the toasts that belong to the page the user left (route change). A toast shown in the last
+   * {@link ROUTE_CHANGE_GRACE_MS} is kept: it was raised by the action that navigated ("Project created" → Overview).
+   */
+  readonly dismissStale: () => void;
 }
+
+/** Toasts younger than this survive a route change (they announce the navigation itself). */
+export const ROUTE_CHANGE_GRACE_MS = 1_500;
 
 const ToastContext = createContext<ToastApi | null>(null);
 
@@ -52,7 +61,7 @@ export function ToastProvider({ children, now = Date.now }: ToastProviderProps) 
       if (previous !== undefined && t - previous < TOAST_DEDUPE_MS) return false;
       lastShown.current.set(toast.key, t);
       const id = nextId.current++;
-      setToasts((list) => [...list.filter((x) => x.key !== toast.key), { ...toast, id }]);
+      setToasts((list) => [...list.filter((x) => x.key !== toast.key), { ...toast, id, shownAt: t }]);
       return true;
     },
     [now],
@@ -60,7 +69,14 @@ export function ToastProvider({ children, now = Date.now }: ToastProviderProps) 
   const dismiss = useCallback((id: number) => {
     setToasts((list) => list.filter((x) => x.id !== id));
   }, []);
-  const api = useMemo(() => ({ show }), [show]);
+  const dismissStale = useCallback(() => {
+    const t = now();
+    setToasts((list) => {
+      const kept = list.filter((x) => t - x.shownAt < ROUTE_CHANGE_GRACE_MS);
+      return kept.length === list.length ? list : kept;
+    });
+  }, [now]);
+  const api = useMemo(() => ({ show, dismissStale }), [show, dismissStale]);
 
   return (
     <ToastContext.Provider value={api}>

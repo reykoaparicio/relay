@@ -38,6 +38,11 @@ export const runnerRequestSchema = z.discriminatedUnion('kind', [
 /** Main → runner message. */
 export type RunnerRequest = z.infer<typeof runnerRequestSchema>;
 
+/** One-shot runner tasks that run INSTEAD of booting the engine (selected by main via `RELAY_RUNNER_TASK`). */
+export const RUNNER_MAINTENANCE_TASKS = ['restore_latest_backup'] as const;
+/** Runner maintenance task. */
+export type RunnerMaintenanceTask = (typeof RUNNER_MAINTENANCE_TASKS)[number];
+
 /** Runner → main messages. */
 export const runnerMessageSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('ready'), schemaVersion: z.number().int(), pid: z.number().int() }), // after migrations (§6.4)
@@ -51,7 +56,25 @@ export const runnerMessageSchema = z.discriminatedUnion('kind', [
   }),
   z.object({ kind: z.literal('heartbeat'), at: epochMsSchema, activeRunId: idSchema('run').nullable() }),
   z.object({ kind: z.literal('event'), event: pushEventSchema }),
-  z.object({ kind: z.literal('fatal'), code: errorCodeSchema, message: z.string() }), // e.g. migration failure
+  // e.g. migration failure. `reason` (optional, additive) is the closed `details.reason` of the error when it has one,
+  // e.g. DATABASE_UNAVAILABLE `schema_too_new` / `disk_full` / `database_busy` (E2 #3); main stores and shows it.
+  z.object({ kind: z.literal('fatal'), code: errorCodeSchema, message: z.string(), reason: z.string().max(64).optional() }),
+  // E2 #4: result of a runner started in maintenance mode (`RELAY_RUNNER_TASK=restore_latest_backup`), which never opens
+  // the database (so it works when the DB is corrupt) and exits after posting this. Paths are display paths.
+  z.object({
+    kind: z.literal('maintenance.result'),
+    task: z.enum(RUNNER_MAINTENANCE_TASKS),
+    result: z.discriminatedUnion('ok', [
+      z.object({
+        ok: z.literal(true),
+        restored: z.boolean(), // false = no usable backup; nothing was changed
+        restoredFromDisplayPath: z.string().nullable(),
+        backupCreatedAt: epochMsSchema.nullable(),
+        previousMovedToDisplayPath: z.string().nullable(),
+      }),
+      z.object({ ok: z.literal(false), error: appErrorSchema }),
+    ]),
+  }),
 ]);
 /** Runner → main message. */
 export type RunnerMessage = z.infer<typeof runnerMessageSchema>;

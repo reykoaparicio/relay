@@ -31,6 +31,7 @@ import { toApprovalView } from './approvals.js';
 import { remaining } from './budget.js';
 import type { RunActionFacts } from './run-machine.js';
 import { allowedRunActions } from './run-machine.js';
+import { latestManifestOf, missingCredentialFact, profileOptionsOf, stepMetaOf } from './run-views.js';
 import { SnapshotError, effectiveModelSteps } from './snapshot.js';
 
 /**
@@ -255,8 +256,15 @@ export function toRunSummary(p: RunSummaryProjection): RunSummary {
 }
 
 /** F2 `allowedRunActions` facts, shared by `RunDetail.availableActions` and the run-action gate (run-actions `offered`). */
-export function runActionFacts(latest: readonly StepRow[], unknownAttempts: number, hasPatchArtifact: boolean): RunActionFacts {
-  return { unknownAttempts, hasFailedStep: latest.some((s) => s.state === 'failed'), hasPatchArtifact };
+export function runActionFacts(
+  latest: readonly StepRow[],
+  unknownAttempts: number,
+  hasPatchArtifact: boolean,
+  missingCredential = false,
+  run?: Pick<RunRow, 'statusDetail'>,
+): RunActionFacts {
+  return { unknownAttempts, hasFailedStep: latest.some((s) => s.state === 'failed'), hasPatchArtifact, missingCredential,
+    ...(run === undefined ? {} : { preservableSnapshot: run.statusDetail?.code === 'PROJECT_CHANGED' }) };
 }
 
 /** The step key of every step row id of a run. @throws invariant when an attempt's step row is not one of `steps` (FK). */
@@ -274,9 +282,14 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
   const stepKeyOf = stepKeyLookup(p.steps);
   const unresolved = p.attempts.filter((a) => a.state === 'unknown');
   const latest = latestPerKey(p.steps);
-  // The ledger is only read when an unresolved attempt needs its cost view (10: no full read for most runs).
-  const entries = unresolved.length === 0 ? [] : r.ledger.listForRun(p.run.id).map((x) => x.entry);
+  // The ledger is read once (one statement) when the run has attempts: their cost views (run-level Attempts tab, E1).
+  const entries = p.attempts.length === 0 ? [] : r.ledger.listForRun(p.run.id).map((x) => x.entry);
   const modelOf = modelsOf(r, p.run);
+  // Choose-profile options exist only for a paused run; none → choose_profile is not offered (E1 #8).
+  const options = p.run.status === 'paused' ? profileOptionsOf(r, p.run, latest, p.attempts, true) : [];
+  const facts = runActionFacts(latest, unresolved.length, isTerminalRunStatus(p.run.status) && r.artifacts.listForRun(p.run.id, ['patch']).length > 0,
+    missingCredentialFact(r, p.run, latest), p.run);
+  const availableActions = allowedRunActions(p.run, { ...facts, hasProfileOptions: options.length > 0 });
   return {
     ...toRunSummary({ ...p, stepProgress: stepProgressOf(latest) }),
     limits: p.run.limits,
@@ -289,8 +302,11 @@ export function toRunDetail(r: Repos, p: InspectorProjection): RunDetail {
     revisionCycle: p.run.revisionCycle,
     statusDetail: p.run.statusDetail,
     reportArtifactId: p.reportArtifactId,
-    availableActions: allowedRunActions(p.run, runActionFacts(latest, unresolved.length,
-      isTerminalRunStatus(p.run.status) && r.artifacts.listForRun(p.run.id, ['patch']).length > 0)),
+    availableActions,
+    attempts: p.attempts.map((a) => toAttemptView(a, stepKeyOf(a.stepRunId), entries)),
+    latestManifest: latestManifestOf(r, p.run, p.steps),
+    profileOptions: availableActions.includes('choose_profile') ? options : [],
+    stepMeta: stepMetaOf(r, p.run, latest),
   };
 }
 

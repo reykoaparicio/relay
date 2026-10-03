@@ -39,7 +39,7 @@ const CASES: readonly PageCase[] = [
   { name: 'Onboarding select-project', path: '/onboarding/select-project', scenario: 'first-launch', ready: 'Choose folder…' },
   { name: 'Onboarding add-rule (missing project)', path: '/onboarding/add-rule', scenario: 'first-launch', ready: 'Choose a project first' },
   { name: 'Onboarding choose-template', path: '/onboarding/choose-template', scenario: 'first-launch', ready: /Review & propose a fix · v3/ },
-  { name: 'New run ready', path: `${P}/runs/new`, scenario: 'awaiting-approval', ready: 'All checks passed. Ready to start.' },
+  { name: 'New run ready', path: `${P}/runs/new`, scenario: 'awaiting-approval', ready: 'Checks passed. Enter a goal to start.' },
   { name: 'New run validation-errors', path: `${P}/runs/new`, scenario: 'validation-errors', ready: 'Fix 3 problems to start.' },
   { name: 'New run budget-blocked', path: `${P}/runs/new`, scenario: 'budget-blocked', ready: '$3.10 > $3.00 → blocked' },
   { name: 'Settings providers', path: '/settings/providers', scenario: 'awaiting-approval', ready: /Model catalog, version/ },

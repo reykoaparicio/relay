@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeBridge } from '../../api/fake-bridge';
 import type { FakeScenarioName } from '../../api/fake-bridge';
-import { appError, runEventSchema, stepViewSchema } from '@relay/contracts';
+import { appError, runEventSchema, stepMetaSchema, stepViewSchema } from '@relay/contracts';
 import type { RunEvent, StepView } from '@relay/contracts';
 import { sid } from '../../api/fake-scenarios/world';
-import { bannerActions, defaultStep, incompleteCauseOf, incompleteTitle, inspectorStateName, latestRowOf, stepEventsOf } from './inspector-model';
+import {
+  attemptSeqsOf,
+  instructionVersionOf,
+  stepTitle,
+  unknownDecisionsFor,
+  bannerActions,
+  defaultStep,
+  incompleteCauseOf,
+  incompleteTitle,
+  inspectorStateName,
+  latestRowOf,
+  overrunStep,
+  pauseBlockedStep,
+  signInResumeBlockedReason,
+  stepEventsOf,
+  stepPresentation,
+} from './inspector-model';
 
 /** Every run-inspector mock state (plans/mocks/run-inspector.html) and the `?fake=` scenario that reaches it. */
 const MOCK_STATES: ReadonlyArray<readonly [string, FakeScenarioName]> = [
@@ -134,3 +150,85 @@ describe('incomplete cause (B4)', () => {
   });
 });
 
+
+describe('paused step (audit #14, #19)', () => {
+  it('the step a budget pause holds back reads "Blocked: run budget", never "Ready" / "Not started"', () => {
+    const run = createFakeBridge('budget-paused').world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    const blocked = pauseBlockedStep(run);
+    expect(blocked).toBeDefined();
+    if (blocked === undefined) return;
+    expect(stepPresentation(run, blocked).label).toBe('Blocked: run budget');
+    expect(defaultStep(run)?.id).toBe(blocked.id);
+    const other = run.steps.find((s) => s.id !== blocked.id && s.state === 'pending');
+    if (other !== undefined) expect(stepPresentation(run, other).label).toBe('Not started');
+  });
+
+  it('a cost overrun selects the step whose request overran (the latest ledger.overrun)', () => {
+    const bridge = createFakeBridge('budget-overrun');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    const events = bridge.world.events.get(run.id) ?? [];
+    const overran = overrunStep(run, events);
+    expect(overran?.stepKey).toBe('implement');
+    expect(defaultStep(run, events)?.id).toBe(overran?.id);
+  });
+
+  it('a user pause blocks no step', () => {
+    const run = createFakeBridge('paused-user').world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    expect(pauseBlockedStep(run)).toBeUndefined();
+  });
+});
+
+describe('attemptSeqsOf (audit #8)', () => {
+  const ev = (seq: number, payload: Record<string, unknown>): RunEvent =>
+    runEventSchema.parse({ id: sid('event', 70_000 + seq), runId: sid('run', 1), seq, type: 'attempt.created', at: seq, payload });
+  it('numbers attempts per step row: the payload seq when present, else creation order', () => {
+    const seqs = attemptSeqsOf([
+      ev(1, { attemptId: 'a1', stepRunId: 'r1' }),
+      ev(2, { attemptId: 'a2', stepRunId: 'r1' }),
+      ev(3, { attemptId: 'b1', stepRunId: 'r2', seq: 7 }),
+    ]);
+    expect([seqs.get('a1'), seqs.get('a2'), seqs.get('b1')]).toEqual([1, 2, 7]);
+  });
+});
+
+describe('signInResumeBlockedReason (audit #12)', () => {
+  it('blocks Resume of a queued sign-in pause until the provider has a key', () => {
+    const bridge = createFakeBridge('queued-auth-required');
+    const run = bridge.world.runs[0];
+    if (run === undefined) throw new Error('no run');
+    const providers = bridge.world.providers;
+    expect(signInResumeBlockedReason(run, providers, [])).toMatch(/^connect OpenAI in Settings → Providers first/);
+    const connected = providers.map((p) => (p.providerId === 'openai' ? { ...p, connected: true } : p));
+    expect(signInResumeBlockedReason(run, connected, [])).toBeNull();
+  });
+});
+
+describe('E1 step meta and finished-run decisions', () => {
+  const meta = stepMetaSchema.array().parse([
+    { stepKey: 'review', name: 'Code review', instructionVersion: 'reviewer.v2' },
+    { stepKey: 'approve', name: null, instructionVersion: null },
+  ]);
+
+  it('stepTitle uses the display name, else the key label', () => {
+    expect(stepTitle({ stepKey: 'review' }, meta)).toBe('Code review');
+    expect(stepTitle({ stepKey: 'approve' }, meta)).toBe('Approve plan');
+    expect(stepTitle({ stepKey: 'review' })).toBe('Review input');
+  });
+
+  it('instructionVersionOf reads stepMeta (null when absent)', () => {
+    expect(instructionVersionOf({ stepMeta: meta }, 'review')).toBe('reviewer.v2');
+    expect(instructionVersionOf({ stepMeta: meta }, 'approve')).toBeNull();
+    expect(instructionVersionOf({}, 'review')).toBeNull();
+  });
+
+  it('unknownDecisionsFor: a finished run never offers a retry', () => {
+    for (const status of ['completed', 'incomplete', 'cancelled', 'failed'] as const) {
+      expect(unknownDecisionsFor({ status })).toEqual(['accept_estimated_charge', 'mark_failed_keep_liability']);
+    }
+    expect(unknownDecisionsFor({ status: 'paused' })).toContain('retry_acknowledging_charge');
+    expect(unknownDecisionsFor({ status: 'interrupted' })).toContain('retry_acknowledging_charge');
+  });
+});

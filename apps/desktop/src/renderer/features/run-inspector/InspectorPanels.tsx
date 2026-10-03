@@ -2,11 +2,19 @@
 import { memo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Download } from 'lucide-react';
-import { microusd, stepStateSchema } from '@relay/contracts';
-import type { ContextManifest, LedgerEntryView, RunDetail, RunEvent } from '@relay/contracts';
+import { approvalDecisionSchema, microusd, pauseReasonSchema, runStatusSchema, stepStateSchema } from '@relay/contracts';
+import type { ContextManifest, CostCertainty, LedgerEntryView, RunDetail, RunEvent, RunEventType } from '@relay/contracts';
 import { Button, DataTable, Hash, KeyValueList, Money, Skeleton } from '../../components/ui';
 import type { DataTableColumn } from '../../components/ui';
-import { formatAbsoluteTime, formatTokens, statusPresentation, toIsoString } from '../../lib/format';
+import {
+  APPROVAL_DECISION_LABELS,
+  formatAbsoluteTime,
+  formatClockTime,
+  formatMoney,
+  formatTokens,
+  statusPresentation,
+  toIsoString,
+} from '../../lib/format';
 import { ActionErrorNotice } from './ActionErrorNotice';
 import { stepTitle } from './inspector-model';
 
@@ -17,33 +25,73 @@ import { stepTitle } from './inspector-model';
 export const EVENTS_VIRTUALIZE_THRESHOLD = 300;
 const EVENT_ROW_PX = 32;
 
-/** One-line, redacted summary of an event payload (no content; payloads are already redacted, 02 B5). */
-function eventSummary(e: RunEvent): string {
-  const p = e.payload;
-  const stepKey = typeof p['stepKey'] === 'string' ? stepTitle({ stepKey: p['stepKey'] }) : null;
-  if (e.type === 'run.status_changed') {
-    const to = typeof p['to'] === 'string' ? p['to'] : '';
-    return `Run status: ${to.replaceAll('_', ' ')}${typeof p['pauseReason'] === 'string' ? ` (${p['pauseReason'].replaceAll('_', ' ')})` : ''}`;
-  }
-  if (e.type === 'step.state_changed') {
-    const to = stepStateSchema.safeParse(p['to']);
-    return `${stepKey ?? 'Step'}: ${to.success ? statusPresentation('step', to.data).label : 'changed'}`;
-  }
-  if (e.type === 'approval.decided') {
-    return `Approval: ${typeof p['decision'] === 'string' ? p['decision'].replaceAll('_', ' ') : 'decided'}`;
-  }
-  return stepKey === null ? e.type : `${e.type} · ${stepKey}`;
+function payloadMoney(p: Readonly<Record<string, unknown>>, key: string): string | null {
+  const v = p[key];
+  return typeof v === 'number' && Number.isInteger(v) ? formatMoney(microusd(v)) : null;
 }
 
+/** Plain-language summary per event type (exhaustive: a new contracts type is a compile error here). */
+const EVENT_SUMMARY: { readonly [T in RunEventType]: (p: Readonly<Record<string, unknown>>, step: string | null) => string } = {
+  'run.created': () => 'Run created',
+  'run.status_changed': (p) => {
+    const to = runStatusSchema.safeParse(p['to'] ?? p['status']);
+    const reason = pauseReasonSchema.safeParse(p['pauseReason']);
+    return to.success ? `Run: ${statusPresentation('run', to.data, reason.success ? reason.data : null).label}` : 'Run status changed';
+  },
+  'run.config_revised': () => 'Run configuration revised',
+  'step.state_changed': (p, step) => {
+    const to = stepStateSchema.safeParse(p['to']);
+    return `${step ?? 'Step'}: ${to.success ? statusPresentation('step', to.data).label : 'changed'}`;
+  },
+  'attempt.created': (p, step) =>
+    `${step ?? 'Step'}: request prepared${typeof p['seq'] === 'number' ? ` (attempt #${String(p['seq'])})` : ''}`,
+  'attempt.dispatching': (_p, step) => `${step ?? 'Step'}: request sent to the provider`,
+  'attempt.stream_progress': (_p, step) => `${step ?? 'Step'}: receiving output`,
+  'attempt.settled': (_p, step) => `${step ?? 'Step'}: request finished`,
+  'attempt.unknown': (_p, step) => `${step ?? 'Step'}: request outcome unknown`,
+  'ledger.reserved': (p) => {
+    const n = payloadMoney(p, 'N');
+    return n === null ? 'Budget reserved for the request' : `Budget reserved: ${n}`;
+  },
+  'ledger.settled': () => 'Cost recorded in the ledger',
+  'ledger.blocked': () => 'Budget check stopped the next request',
+  'ledger.overrun': (p) => {
+    const n = payloadMoney(p, 'N');
+    const x = payloadMoney(p, 'X');
+    return n === null || x === null ? 'Cost exceeded the reservation' : `Cost exceeded the reservation: ${x} vs ${n} reserved`;
+  },
+  'approval.requested': () => 'Approval requested',
+  'approval.decided': (p) => {
+    const d = approvalDecisionSchema.safeParse(p['decision']);
+    return d.success ? `Approval: ${APPROVAL_DECISION_LABELS[d.data]}` : 'Approval decided';
+  },
+  'artifact.created': (_p, step) => (step === null ? 'Output saved' : `${step}: output saved`),
+  'artifact.write_failed': (_p, step) => (step === null ? 'An output could not be saved' : `${step}: output could not be saved`),
+  'memory.suggested': () => 'Memory suggestion proposed',
+  'context.assembled': (_p, step) => (step === null ? 'Context assembled' : `${step}: context assembled`),
+  'error.recorded': (p) => (typeof p['userMessage'] === 'string' ? `Problem recorded: ${p['userMessage']}` : 'Problem recorded'),
+  'run.limits_raised': () => 'Run limits raised',
+  'report.created': () => 'Run report created',
+  'run.snapshot_preserved': () => 'Context snapshot preserved',
+};
+
+/** One-line, redacted summary of an event payload (no content; payloads are already redacted, 02 B5). */
+export function eventSummary(e: RunEvent): string {
+  const p = e.payload;
+  const step = typeof p['stepKey'] === 'string' ? stepTitle({ stepKey: p['stepKey'] }) : null;
+  return EVENT_SUMMARY[e.type](p, step);
+}
+
+/** "#28 · 5:24 PM  Approval requested"; the raw event type and full date are in the tooltip. */
 function EventRow({ e }: { readonly e: RunEvent }) {
   return (
-    <>
-      <span className="num subtle">{e.seq}</span>{' '}
-      <time className="num subtle" dateTime={toIsoString(e.at)}>
-        {formatAbsoluteTime(e.at)}
-      </time>{' '}
-      <code>{e.type}</code> <span>{eventSummary(e)}</span>
-    </>
+    <span title={`${e.type} · ${formatAbsoluteTime(e.at)}`}>
+      <span className="num subtle">
+        #{e.seq} ·{' '}
+        <time dateTime={toIsoString(e.at)}>{formatClockTime(e.at)}</time>
+      </span>{' '}
+      <span>{eventSummary(e)}</span>
+    </span>
   );
 }
 
@@ -129,38 +177,69 @@ export const EventsList = memo(EventsListView);
 // ---------------------------------------------------------------------------------------------------------------
 // Ledger (run-scoped)
 
-const LEDGER_COLUMNS: ReadonlyArray<DataTableColumn<LedgerEntryView>> = [
-  {
-    key: 'created',
-    header: 'Created',
-    cell: (e) => (
-      <time className="num whitespace-nowrap" dateTime={toIsoString(e.createdAt)}>
-        {formatAbsoluteTime(e.createdAt)}
-      </time>
-    ),
-  },
-  { key: 'step', header: 'Step', cell: (e) => (e.stepKey === null ? '—' : stepTitle({ stepKey: e.stepKey })) },
-  { key: 'attempt', header: 'Attempt', cell: (e) => (e.attemptId === null ? '—' : <span className="mono">…{e.attemptId.slice(-6)}</span>) },
-  { key: 'type', header: 'Type', cell: (e) => e.type.replaceAll('_', ' ') },
-  { key: 'bucket', header: 'Bucket', cell: (e) => e.bucket },
-  {
-    key: 'delta',
-    header: 'Delta',
-    numeric: true,
-    cell: (e) => (
-      <span className="num whitespace-nowrap">
-        {e.deltaMicrousd > 0 ? '+' : e.deltaMicrousd < 0 ? '−' : ''}
-        <Money value={microusd(Math.abs(e.deltaMicrousd))} />
-      </span>
-    ),
-  },
-  { key: 'certainty', header: 'Certainty', cell: (e) => e.certainty ?? '—' },
-  { key: 'catalog', header: 'Price catalog', cell: (e) => (e.priceCatalogVersion === null ? '—' : <span className="mono">{e.priceCatalogVersion}</span>) },
-];
+/** Certainty as the Budget card words it (FR-09). */
+const CERTAINTY_TEXT: Readonly<Record<CostCertainty, string>> = {
+  reported: 'Reported',
+  calculated: 'Calculated',
+  estimated: 'Estimated',
+  unknown: 'Unknown charge',
+};
+
+function ledgerColumns(attemptSeqs: ReadonlyMap<string, number>): ReadonlyArray<DataTableColumn<LedgerEntryView>> {
+  return [
+    {
+      key: 'created',
+      header: 'Created',
+      nowrap: true,
+      // Entries of one run share a day: the time only, with the full date in the tooltip and `dateTime`.
+      cell: (e) => (
+        <time className="num" dateTime={toIsoString(e.createdAt)} title={formatAbsoluteTime(e.createdAt)}>
+          {formatClockTime(e.createdAt)}
+        </time>
+      ),
+    },
+    { key: 'step', header: 'Step', nowrap: true, cell: (e) => (e.stepKey === null ? '—' : stepTitle({ stepKey: e.stepKey })) },
+    {
+      key: 'attempt',
+      header: 'Attempt',
+      nowrap: true,
+      cell: (e) => {
+        if (e.attemptId === null) return '—';
+        const seq = attemptSeqs.get(e.attemptId);
+        return seq === undefined ? (
+          <span className="mono" title={e.attemptId}>
+            …{e.attemptId.slice(-6)}
+          </span>
+        ) : (
+          <span className="num" title={e.attemptId}>
+            #{seq}
+          </span>
+        );
+      },
+    },
+    { key: 'type', header: 'Type', nowrap: true, cell: (e) => e.type.replaceAll('_', ' ') },
+    { key: 'bucket', header: 'Bucket', cell: (e) => e.bucket },
+    {
+      key: 'delta',
+      header: 'Delta',
+      numeric: true,
+      cell: (e) => (
+        <span className="num whitespace-nowrap">
+          {e.deltaMicrousd > 0 ? '+' : e.deltaMicrousd < 0 ? '−' : ''}
+          <Money value={microusd(Math.abs(e.deltaMicrousd))} />
+        </span>
+      ),
+    },
+    { key: 'certainty', header: 'Certainty', nowrap: true, cell: (e) => (e.certainty === null ? '—' : CERTAINTY_TEXT[e.certainty]) },
+    { key: 'catalog', header: 'Price catalog', nowrap: true, cell: (e) => (e.priceCatalogVersion === null ? '—' : <span className="mono">{e.priceCatalogVersion}</span>) },
+  ];
+}
 
 export interface LedgerPanelProps {
   readonly runLabel: string;
   readonly entries: readonly LedgerEntryView[] | undefined;
+  /** Attempt number per attempt id (`attemptSeqsOf` of the run's events): the Attempt column reads "#2". */
+  readonly attemptSeqs: ReadonlyMap<string, number>;
   readonly error: unknown;
   readonly hasMore: boolean;
   readonly loadingMore: boolean;
@@ -181,7 +260,7 @@ export function LedgerPanel(p: LedgerPanelProps) {
           provider invoice may differ.
         </p>
         <Button icon={Download} pending={p.exporting} onClick={p.onExport}>
-          Export ledger (CSV)
+          Export ledger (CSV)…
         </Button>
       </div>
       {p.exportedTo === null ? null : (
@@ -197,7 +276,7 @@ export function LedgerPanel(p: LedgerPanelProps) {
       ) : (
         <DataTable
           caption={`Ledger entries for ${p.runLabel}, oldest first`}
-          columns={LEDGER_COLUMNS}
+          columns={ledgerColumns(p.attemptSeqs)}
           rows={p.entries}
           getRowKey={(e) => e.id}
           emptyState={<p className="subtle">No ledger entries yet.</p>}

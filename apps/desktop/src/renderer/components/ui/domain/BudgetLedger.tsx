@@ -20,7 +20,9 @@ export interface BudgetLedgerProps {
 /** Tracked usage by certainty (FR-09) plus allowance and remaining. "Tracked by Relay" (§9.1). */
 function BudgetLedgerView({ cost, byStep, caption = 'Run usage' }: BudgetLedgerProps) {
   const stepCaptionId = useId();
-  // One precision per column (sub-cent amounts keep 4 dp, and then the whole column does).
+  const steps = byStep ?? [];
+  // One precision for the whole card, summary and step table alike: sub-cent step amounts put every amount at 4 dp, so
+  // the step rows visibly add up to the summary ("$0.0042 + … = $0.0378", never "… = $0.04").
   const p = moneyColumnPrecision([
     cost.settledReported,
     cost.settledCalculated,
@@ -29,14 +31,9 @@ function BudgetLedgerView({ cost, byStep, caption = 'Run usage' }: BudgetLedgerP
     cost.unknown,
     cost.allowance,
     cost.remaining,
+    ...steps.flatMap((s) => [settledExact(s.cost), s.cost.settledEstimated, s.cost.reserved, s.cost.unknown]),
   ]);
-  const steps = byStep ?? [];
-  const stepP = {
-    settled: moneyColumnPrecision(steps.map((s) => settledExact(s.cost))),
-    estimated: moneyColumnPrecision(steps.map((s) => s.cost.settledEstimated)),
-    reserved: moneyColumnPrecision(steps.map((s) => s.cost.reserved)),
-    unknown: moneyColumnPrecision(steps.map((s) => s.cost.unknown)),
-  };
+  const stepP = { settled: p, estimated: p, reserved: p, unknown: p };
   return (
     <div className="stack">
       <table className="ledger">

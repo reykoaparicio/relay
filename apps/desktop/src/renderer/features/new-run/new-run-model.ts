@@ -1,10 +1,20 @@
 // New-run form model (10 J7): controlled state, client validation bounded by RUN_LIMIT_MAXIMUMS, the mapping of
 // server issue paths to field ids (error summary anchors), and the RunStartInput builder.
 import type { ReactNode } from 'react';
-import { budgetBreakdownSchema, DEFAULT_LIMITS } from '@relay/contracts';
-import type { AppError, BudgetBreakdown, InputOf, Microusd, ProfileWithWarnings, RunPreflight, WorkflowLimits } from '@relay/contracts';
+import { budgetBreakdownSchema, DEFAULT_LIMITS, INPUT_CAPS } from '@relay/contracts';
+import type {
+  AppError,
+  BudgetBreakdown,
+  InputOf,
+  Microusd,
+  PreviewResult,
+  ProfileWithWarnings,
+  RunPreflight,
+  WorkflowLimits,
+} from '@relay/contracts';
 import { isAppErrorException } from '../../api/client';
-import { toViewError, validationIssuesOf } from '../../api/errors';
+import { errorReason, toViewError, validationIssuesOf } from '../../api/errors';
+import { secretLabelText } from '../../lib/format/labels';
 import type { FormProblem } from '../common/ErrorSummary';
 import { checkAllowance, checkWhole, dollarsText, LIMIT_BOUNDS } from '../run-setup/limits';
 import { profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
@@ -22,8 +32,13 @@ export interface ImportedDiff {
 export interface NewRunForm {
   readonly goal: string;
   readonly source: InputSource;
-  /** null = the default selection (every eligible file, up to the cap). */
+  /** null = the default selection (every eligible file not flagged as a suspected secret, up to the cap). */
   readonly files: readonly string[] | null;
+  /**
+   * E2 #11: selected files the user confirmed sending although they look like they hold a secret. Sent as
+   * `input.acknowledgedSuspectedSecrets` (only the ones still selected); unticking a file drops it.
+   */
+  readonly acknowledgedSecrets: readonly string[];
   readonly diff: ImportedDiff | null;
   readonly profileSelection: Readonly<Record<string, string>>;
   /** null = the workflow default. */
@@ -45,6 +60,7 @@ export const INITIAL_FORM: NewRunForm = {
   goal: '',
   source: 'files',
   files: null,
+  acknowledgedSecrets: [],
   diff: null,
   profileSelection: {},
   allowanceText: null,
@@ -58,6 +74,11 @@ export const INITIAL_FORM: NewRunForm = {
 export type FormAction =
   | { readonly type: 'patch'; readonly patch: Partial<NewRunForm> }
   | { readonly type: 'select-profile'; readonly stepKey: string; readonly profileId: string }
+  /**
+   * The file selection (and, when given, the confirmed suspected secrets). Acknowledgements of files that are no longer
+   * selected are dropped, so `acknowledgedSuspectedSecrets` stays a subset of `relPaths`.
+   */
+  | { readonly type: 'set-files'; readonly files: readonly string[]; readonly acknowledged?: readonly string[] }
   /** `defaults`: the non-pinned approved ids ticked while the selection is untouched (the first toggle starts from them). */
   | { readonly type: 'toggle-memory'; readonly id: string; readonly checked: boolean; readonly defaults: readonly string[] };
 
@@ -67,6 +88,8 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
       return { ...s, ...a.patch };
     case 'select-profile':
       return { ...s, profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId } };
+    case 'set-files':
+      return { ...s, files: a.files, acknowledgedSecrets: acknowledgedFor(a.files, a.acknowledged ?? s.acknowledgedSecrets) };
     case 'toggle-memory': {
       const current = s.memoryIds ?? a.defaults;
       return {
@@ -90,6 +113,28 @@ export function memorySelectionError(memoryIds: readonly string[] | null): strin
   return `Choose at most ${String(MAX_MEMORY_RECORD_IDS)} records (${String(memoryIds.length)} are ticked). Untick ${String(over)} more, or include all approved records.`;
 }
 
+/** E2 #11: an included file flagged as a suspected secret (never selected by default). */
+export function isSuspectedSecret(f: PreviewResult['included'][number]): boolean {
+  return f.suspectedSecret === true;
+}
+
+/**
+ * The default file selection: every included file except suspected secrets, up to the file cap. Suspected secrets are
+ * only ever added by an explicit, confirmed tick.
+ */
+export function defaultFiles(preview: PreviewResult | undefined): readonly string[] {
+  return (preview?.included ?? [])
+    .filter((f) => !isSuspectedSecret(f))
+    .slice(0, INPUT_CAPS.maxFiles)
+    .map((f) => f.relPath);
+}
+
+/** The acknowledged suspected secrets that are still selected (contracts: a subset of `relPaths`), in selection order. */
+export function acknowledgedFor(files: readonly string[], acknowledged: readonly string[]): string[] {
+  const acked = new Set(acknowledged);
+  return files.filter((p) => acked.has(p));
+}
+
 /** Field ids: controls use them, and the error summary links to them. */
 export const FIELD = {
   goal: 'new-run-goal',
@@ -103,6 +148,32 @@ export const FIELD = {
   profile: (stepKey: string) => `new-run-profile-${stepKey}`,
 } as const;
 
+/**
+ * The id of the checkbox of the `index`-th included file of the preview. The first one is {@link FIELD.files} (the
+ * picker's anchor), so a problem about the input as a whole and one about the first file reach the same control.
+ */
+export function fileCheckboxId(index: number): string {
+  return index === 0 ? FIELD.files : `${FIELD.files}-${String(index)}`;
+}
+
+/** relPath → checkbox id, for every included file of a preview. */
+export function fileCheckboxIds(preview: PreviewResult | undefined): ReadonlyMap<string, string> {
+  return new Map((preview?.included ?? []).map((f, i) => [f.relPath, fileCheckboxId(i)]));
+}
+
+/** What a per-file problem needs to link to that file's checkbox. */
+export interface FileAnchors {
+  /** The `relPaths` the checked input carried, in order (`input.relPaths.<i>`). */
+  readonly relPaths: readonly string[];
+  /** relPath → its checkbox id ({@link fileCheckboxIds}). */
+  readonly ids: ReadonlyMap<string, string>;
+}
+
+/** The checkbox of a file, else the picker itself (a file the picker does not list). */
+function fileField(relPath: string | undefined, anchors: FileAnchors | undefined): string {
+  return (relPath === undefined ? undefined : anchors?.ids.get(relPath)) ?? FIELD.files;
+}
+
 /** The control that holds the run input for a source: the file picker, or the diff import button. */
 export function inputField(source: InputSource): string {
   return source === 'diff' ? FIELD.diff : FIELD.files;
@@ -112,8 +183,11 @@ export function inputField(source: InputSource): string {
  * Server issue path → field id (`profileOverrides.plan` → the plan profile select). `input` issues target the control
  * rendered for the current source (the file picker is not rendered in diff mode).
  */
-export function fieldForPath(path: string, source: InputSource = 'files'): string | null {
+export function fieldForPath(path: string, source: InputSource = 'files', anchors?: FileAnchors): string | null {
   if (path === 'goal') return FIELD.goal;
+  // `input.relPaths.<i>` (e.g. a suspected secret): the checkbox of that file.
+  const file = /^input\.relPaths\.(\d+)/.exec(path);
+  if (source === 'files' && file?.[1] !== undefined) return fileField(anchors?.relPaths[Number(file[1])], anchors);
   if (path === 'input' || path.startsWith('input.')) return inputField(source);
   const profile = /^profileOverrides\.([a-z][a-z0-9_-]*)/.exec(path);
   if (profile?.[1] !== undefined) return FIELD.profile(profile[1]);
@@ -245,7 +319,7 @@ export function buildStartInput(args: {
     form.source === 'files'
       ? files.length === 0
         ? null
-        : { kind: 'files' as const, relPaths: [...files] }
+        : { kind: 'files' as const, relPaths: [...files], ...acknowledgedInput(files, form.acknowledgedSecrets) }
       : form.diff === null
         ? null
         : { kind: 'diff' as const, diffArtifactId: form.diff.artifactId };
@@ -264,6 +338,12 @@ export function buildStartInput(args: {
   };
 }
 
+/** `acknowledgedSuspectedSecrets` for a files input: absent when none of the selected files is acknowledged. */
+function acknowledgedInput(files: readonly string[], acknowledged: readonly string[]) {
+  const acked = acknowledgedFor(files, acknowledged);
+  return acked.length === 0 ? {} : { acknowledgedSuspectedSecrets: acked };
+}
+
 /** The admission breakdown carried by a BUDGET_BLOCKED error (`details`), if any. */
 export function budgetFromError(e: unknown): BudgetBreakdown | null {
   if (!isAppErrorException(e) || e.appError.code !== 'BUDGET_BLOCKED') return null;
@@ -271,14 +351,86 @@ export function budgetFromError(e: unknown): BudgetBreakdown | null {
   return parsed.success ? parsed.data : null;
 }
 
+/** One file intake refused as a suspected secret (`PERMISSION_DENIED suspected_secret`, `details.denied[]`). */
+export interface DeniedSecret {
+  readonly relPath: string;
+  readonly secretLabel: string | null;
+  readonly secretLine: number | null;
+}
+
+/** The files a `PERMISSION_DENIED suspected_secret` error names (label and line only; never a value), else []. */
+export function deniedSecretsOf(error: AppError | null): DeniedSecret[] {
+  if (error?.code !== 'PERMISSION_DENIED' || errorReason(error) !== 'suspected_secret') return [];
+  const denied = error.details?.['denied'];
+  const fromList = Array.isArray(denied)
+    ? denied.flatMap((d): DeniedSecret[] => {
+        if (typeof d !== 'object' || d === null) return [];
+        const r = d as Record<string, unknown>;
+        if (typeof r['relPath'] !== 'string') return [];
+        return [
+          {
+            relPath: r['relPath'],
+            secretLabel: typeof r['secretLabel'] === 'string' ? r['secretLabel'] : null,
+            secretLine: typeof r['secretLine'] === 'number' ? r['secretLine'] : null,
+          },
+        ];
+      })
+    : [];
+  const single = error.details?.['relPath'];
+  if (fromList.length === 0 && typeof single === 'string') return [{ relPath: single, secretLabel: null, secretLine: null }];
+  return fromList;
+}
+
+/** The file a `PERMISSION_DENIED unreadable` error names (`details.relPath`), else null. */
+export function unreadableFileOf(error: AppError | null): string | null {
+  if (error?.code !== 'PERMISSION_DENIED' || errorReason(error) !== 'unreadable') return null;
+  const relPath = error.details?.['relPath'];
+  return typeof relPath === 'string' ? relPath : null;
+}
+
+/** "src/config/keys.ts looks like it contains a secret (Anthropic API key, line 4). …" — never the value. */
+export function deniedSecretMessage(d: DeniedSecret): string {
+  const where = d.secretLine === null ? '' : `, line ${String(d.secretLine)}`;
+  return `${d.relPath} looks like it contains a secret (${secretLabelText(d.secretLabel)}${where}). Untick it, or confirm sending it.`;
+}
+
+/** Per-file context for {@link problemsFromError}. */
+export interface FileProblemContext {
+  readonly anchors?: FileAnchors | undefined;
+  /** The actions shown next to an unreadable file ("Exclude this file", "Exclude from project…"). */
+  readonly unreadableAction?: ((relPath: string) => ReactNode) | undefined;
+}
+
 /** Problems (summary entries) from an AppError that blocks the run (preflight or start), excluding budget. */
 export function problemsFromError(
   error: AppError,
   issues: ReadonlyArray<{ path: string; message: string; code: string }>,
   source: InputSource = 'files',
+  files: FileProblemContext = {},
 ): FormProblem[] {
   if (issues.length > 0)
-    return issues.map((i) => ({ fieldId: fieldForPath(i.path, source), message: i.message, code: i.code }));
+    return issues.map((i) => ({ fieldId: fieldForPath(i.path, source, files.anchors), message: i.message, code: i.code }));
+  // E2 #11: each refused file links to its checkbox, so it can be unticked or confirmed.
+  const denied = deniedSecretsOf(error);
+  if (denied.length > 0)
+    return denied.map((d) => ({
+      fieldId: source === 'files' ? fileField(d.relPath, files.anchors) : null,
+      message: deniedSecretMessage(d),
+      code: 'suspected_secret',
+    }));
+  // E2 #8: a selected file cannot be read: link to it, and offer to leave it out.
+  const unreadable = unreadableFileOf(error);
+  if (unreadable !== null) {
+    const action = files.unreadableAction?.(unreadable);
+    return [
+      {
+        fieldId: source === 'files' ? fileField(unreadable, files.anchors) : null,
+        message: error.userMessage,
+        code: error.code,
+        ...(action === undefined ? {} : { action }),
+      },
+    ];
+  }
   const stepKey = typeof error.details?.['stepKey'] === 'string' ? error.details['stepKey'] : null;
   const fieldId =
     stepKey !== null
@@ -320,10 +472,14 @@ export interface NewRunStateInput {
   readonly failedKey: string | null;
   /** The action shown next to a missing-credential problem (a link to Settings → Providers). */
   readonly connectProviderAction?: ReactNode;
+  /** Per-file anchors: `input.relPaths.<i>` issues and refused files link to that file's checkbox. */
+  readonly fileAnchors?: FileAnchors;
+  /** The actions shown next to an unreadable selected file. */
+  readonly unreadableAction?: (relPath: string) => ReactNode;
 }
 
 /** Which sentence the page header shows. */
-export type NewRunStatus = 'system_error' | 'budget' | 'problems' | 'ready' | 'checking' | null;
+export type NewRunStatus = 'system_error' | 'budget' | 'problems' | 'needs_goal' | 'ready' | 'checking' | null;
 
 export interface NewRunState {
   readonly budget: BudgetBreakdown | null;
@@ -362,7 +518,7 @@ function preflightProblems(input: NewRunStateInput, budgetShown: boolean): FormP
     const row = stepKey === null ? undefined : rows.find((r) => r.stepKey === stepKey);
     const providerId = stepKey === null ? null : stepProviderId(stepKey, rows, form.profileSelection, profiles);
     return {
-      fieldId: fieldForPath(i.path, form.source),
+      fieldId: fieldForPath(i.path, form.source, input.fileAnchors),
       message: issueMessage(i, providerId, row === undefined ? null : ROLE_LABELS[row.role]),
       code: i.code,
       ...(i.code === MISSING_CREDENTIAL && connectProviderAction !== undefined ? { action: connectProviderAction } : {}),
@@ -371,8 +527,14 @@ function preflightProblems(input: NewRunStateInput, budgetShown: boolean): FormP
 }
 
 /** Summary links must reach a rendered control: a profile issue for a step not in the table has no anchor. */
-function anchorProblems(problems: readonly FormProblem[], form: NewRunForm, rows: readonly ModelStepRow[]): FormProblem[] {
+function anchorProblems(
+  problems: readonly FormProblem[],
+  form: NewRunForm,
+  rows: readonly ModelStepRow[],
+  anchors: FileAnchors | undefined,
+): FormProblem[] {
   const knownFields = new Set<string>([
+    ...(form.source === 'files' ? (anchors?.ids.values() ?? []) : []),
     FIELD.goal,
     form.source === 'files' ? FIELD.files : FIELD.diff,
     FIELD.allowance,
@@ -385,10 +547,13 @@ function anchorProblems(problems: readonly FormProblem[], form: NewRunForm, rows
   return problems.map((p) => (p.fieldId !== null && !knownFields.has(p.fieldId) ? { ...p, fieldId: null } : p));
 }
 
-function statusOf(s: Pick<NewRunState, 'preflightSystemError' | 'budget' | 'problems' | 'allPassed' | 'checking'>): NewRunStatus {
+function statusOf(
+  s: Pick<NewRunState, 'preflightSystemError' | 'budget' | 'problems' | 'allPassed' | 'checking'> & { readonly needsGoal: boolean },
+): NewRunStatus {
   if (s.preflightSystemError !== null) return 'system_error';
   if (s.budget !== null) return 'budget';
   if (s.problems.length > 0) return 'problems';
+  if (s.needsGoal) return 'needs_goal';
   if (s.allPassed) return 'ready';
   return s.checking ? 'checking' : null;
 }
@@ -415,9 +580,14 @@ export function deriveNewRunState(input: NewRunStateInput): NewRunState {
   const server = preflightProblems(input, budget !== null);
   for (const e of [preflightError, startError]) {
     if (e === null || budgetFromError(e) !== null || isSystemError(e)) continue;
-    server.push(...problemsFromError(toViewError(e), validationIssuesOf(e), form.source));
+    server.push(
+      ...problemsFromError(toViewError(e), validationIssuesOf(e), form.source, {
+        anchors: input.fileAnchors,
+        unreadableAction: input.unreadableAction,
+      }),
+    );
   }
-  const serverProblems = anchorProblems(server, form, rows);
+  const serverProblems = anchorProblems(server, form, rows, input.fileAnchors);
   const preflightSystemError =
     preflightError !== null && budgetFromError(preflightError) === null && isSystemError(preflightError) ? preflightError : null;
   const problems = [...check.problems, ...serverProblems].filter(
@@ -440,23 +610,28 @@ export function deriveNewRunState(input: NewRunStateInput): NewRunState {
     budget === null &&
     problems.length === 0;
   const draftClean = !checking && draftKey !== null && preflight.isSuccess && pf !== undefined && pf.issues.length === 0 && pf.budget.allowed;
-  // With no goal yet the check uses a placeholder goal; Start then only reveals what is missing.
-  const allPassed = submitKey === null ? goal === '' && draftClean : checked;
+  // With no goal yet the check uses a placeholder goal: everything else passed, but the run cannot start without one
+  // ("Enter a goal to start", Start disabled), never "All checks passed. Ready to start." on an empty goal.
+  const needsGoal = submitKey === null && goal === '' && draftClean;
+  const allPassed = submitKey !== null && checked;
 
   const blocked = budget !== null;
   const startDisabledReason = blocked
     ? `Blocked by the ${budget.scope === 'project' ? 'monthly' : 'run'} allowance. Choose an option above.`
     : preflightSystemError !== null
       ? 'The run check failed. Retry it in Input summary.'
-      : submitKey !== null && !checked && problems.length === 0
-        ? 'Checking…'
-        : null;
+      : needsGoal
+        ? 'Enter a goal to start.'
+        : submitKey !== null && !checked && problems.length === 0
+          ? 'Checking…'
+          : null;
   const base = { budget, problems, fieldErrors, profileErrors, preflightSystemError, otherStartError, checked, checking, allPassed };
   return {
     ...base,
-    status: statusOf(base),
-    // Disabled while blocked, checking, or with problems; with no input yet a submit shows what is missing.
-    startDisabled: blocked || preflightSystemError !== null || (submitKey !== null && !checked),
+    status: statusOf({ ...base, needsGoal }),
+    // Disabled while blocked, checking, with problems, or with only the goal missing; with other input missing too, a
+    // submit shows everything that is missing.
+    startDisabled: blocked || preflightSystemError !== null || needsGoal || (submitKey !== null && !checked),
     startDisabledReason,
   };
 }

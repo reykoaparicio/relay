@@ -71,7 +71,11 @@ describe('OverviewPage', () => {
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/runs.pause')).toHaveLength(1);
     });
-    expect(screen.queryByRole('region', { name: 'Needs your attention' })).not.toBeInTheDocument();
+    // Once paused, the run waits for the user (Resume): the attention card names the pause and links its step.
+    const attention = await screen.findByRole('region', { name: 'Needs your attention' }, { timeout: 3000 });
+    expect(attention).toHaveTextContent('Paused by you');
+    // The Active runs hint and the Runs nav badge both count it.
+    expect(screen.getAllByText('1 paused run needs you')).toHaveLength(2);
   });
 
   it('empty: offers the sample project and the template; the sample is created with an idempotency key', async () => {
@@ -97,7 +101,9 @@ describe('OverviewPage', () => {
     expect(await screen.findByText(/was interrupted/)).toBeInTheDocument();
     const recovery = await screen.findByRole('region', { name: 'Recovery' });
     expect(within(recovery).getByText('Requests with an unknown outcome')).toBeInTheDocument();
-    expect(within(recovery).getByRole('button', { name: 'Continue from last checkpoint' })).toBeInTheDocument();
+    // Continue from last checkpoint is offered only once every unknown request is decided (engine E1 #8).
+    expect(within(recovery).getByRole('button', { name: 'Decide on unknown charge' })).toBeInTheDocument();
+    expect(within(recovery).queryByRole('button', { name: 'Continue from last checkpoint' })).not.toBeInTheDocument();
     const review = screen.getByRole('link', { name: 'Review recovery options' });
     expect(review.getAttribute('href')).toMatch(/\/runs\/run_\w+\?step=stp_\w+$/);
     expect(screen.getByText('1 interrupted run needs a decision')).toBeInTheDocument();

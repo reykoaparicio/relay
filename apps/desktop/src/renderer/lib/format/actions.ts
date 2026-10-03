@@ -45,8 +45,8 @@ export const RUN_ACTION_LABELS: Readonly<Record<RunAction, string>> = {
   use_preserved_snapshot: 'Use preserved snapshot',
   decide_unknown: 'Decide on unknown charge',
   review_recovery: 'Continue from last checkpoint',
-  export_report: 'Export report',
-  export_patch: 'Export patch',
+  export_report: 'Export report…',
+  export_patch: 'Export patch…',
 };
 
 /**
@@ -97,3 +97,6 @@ export const UNKNOWN_OUTCOME_DECISION_HINTS: Readonly<Record<UnknownOutcomeDecis
   mark_failed_keep_liability: 'The step is marked failed; the possible charge stays recorded as unknown liability.',
   accept_estimated_charge: 'Records the estimated amount as the charge for this request.',
 };
+
+/** Plain wording of a busy database (E2 #2: `DATABASE_UNAVAILABLE database_busy`, next action wait). */
+export const DATABASE_BUSY_MESSAGE = 'The database is in use by another program. Relay will retry.';

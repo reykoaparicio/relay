@@ -292,7 +292,7 @@ test.describe('accessibility', { tag: '@a11y' }, () => {
     const editor = new WorkflowEditor(page);
     await editor.open();
     await expectNoViolations(page, 'workflow-editor', testInfo);
-    await editor.limitField('Maximum attempts').fill('8');
+    await editor.limitField('Max attempts (run)').fill('8');
     await editor.validate();
     await expect(editor.validAlert()).toBeVisible();
     await expectNoViolations(page, 'workflow-editor-validated-draft', testInfo);

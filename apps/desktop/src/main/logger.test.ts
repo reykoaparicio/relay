@@ -71,11 +71,24 @@ describe('createFileLogger daily rotation', () => {
   it('never throws when the log dir cannot be created', async () => {
     const blocked = join(dir, 'file-not-dir');
     await writeFile(blocked, 'x');
-    const logger = createFileLogger(join(blocked, 'logs'), () => NOW);
+    const logger = createFileLogger(join(blocked, 'logs'), () => NOW, { fallbackDir: join(dir, 'fallback'), stderr: () => undefined });
 
     expect(() => {
       logger.info({ event: 'x' });
     }).not.toThrow();
+  });
+
+  it('an unwritable logs dir falls back to the fallback dir (real fs) and reports degraded', async () => {
+    const blocked = join(dir, 'file-not-dir');
+    await writeFile(blocked, 'x');
+    const stderr: string[] = [];
+    const logger = createFileLogger(join(blocked, 'logs'), () => NOW, { fallbackDir: join(dir, 'fallback'), stderr: (t) => stderr.push(t) });
+
+    logger.error({ event: 'disk.trouble' });
+
+    expect(logger.isDegraded()).toBe(true);
+    expect(await readFile(join(dir, 'fallback', `${logDate(NOW)}.jsonl`), 'utf8')).toContain('disk.trouble');
+    expect(stderr.join('')).toContain('cannot write logs');
   });
 });
 
@@ -213,6 +226,38 @@ describe('createFileLogger buffering (MAIN-01)', () => {
     logger.info({ event: 'lost' });
 
     await expect(logger.flush()).resolves.toBeUndefined();
+  });
+
+  it('ENOSPC on logs/: lines go to the fallback dir; if that fails too, to stderr; degraded until logs/ works again', async () => {
+    const m = memFs();
+    let full = true;
+    const failing = (file: string): boolean => full && file.startsWith('/logs/');
+    const enospc = () => Object.assign(new Error('no space'), { code: 'ENOSPC' });
+    const sync = m.fs.appendFileSync.bind(m.fs);
+    const async = m.fs.appendFile.bind(m.fs);
+    let fallbackBroken = false;
+    m.fs.appendFileSync = (file, data) => {
+      if (failing(file) || (fallbackBroken && file.startsWith('/fb/'))) throw enospc();
+      sync(file, data);
+    };
+    m.fs.appendFile = (file, data) => (failing(file) ? Promise.reject(enospc()) : async(file, data));
+    const stderr: string[] = [];
+    const logger = createFileLogger('/logs', () => NOW, { fs: m.fs, fallbackDir: '/fb', stderr: (t) => stderr.push(t) });
+
+    logger.info({ event: 'a' });
+    await logger.flush();
+    logger.error({ event: 'b' });
+    expect(logger.isDegraded()).toBe(true);
+    expect(m.events(join('/fb', `${logDate(NOW)}.jsonl`))).toEqual(['a', 'b']);
+
+    fallbackBroken = true;
+    logger.error({ event: 'c' });
+    expect(stderr.some((l) => l.includes('"event":"c"'))).toBe(true);
+
+    full = false;
+    logger.error({ event: 'd' });
+    expect(logger.isDegraded()).toBe(false);
+    expect(m.events(FILE)).toEqual(['d']);
   });
 });
 

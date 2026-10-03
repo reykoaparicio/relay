@@ -39,15 +39,15 @@ async function withLocked<T>(target: string, fn: () => Promise<T>): Promise<T> {
 }
 
 describe('openProjectRoot fs errors', () => {
-  it('a missing root is NOT_FOUND with details.errno ENOENT', async () => {
+  it('E2 #7: a missing root is PROJECT_ROOT_MISSING with details.errno ENOENT (not a generic NOT_FOUND)', async () => {
     const dir = await tmp.make();
 
     const r = await openRoot(path.join(dir, 'missing'));
 
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.code).toBe('NOT_FOUND');
-    expect(r.error.details).toMatchObject({ entity: 'project_root', errno: 'ENOENT' });
+    expect(r.error.code).toBe('PROJECT_ROOT_MISSING');
+    expect(r.error.details).toMatchObject({ errno: 'ENOENT' });
   });
 
   it.skipIf(isRoot)('a root behind an unreadable parent is PERMISSION_DENIED unsafe_root, like scanProject', async () => {
@@ -65,7 +65,7 @@ describe('openProjectRoot fs errors', () => {
 });
 
 describe.skipIf(isRoot)('project file fs errors', () => {
-  it('readConfined on an unreadable file is NOT_FOUND with details.errno EACCES and no absolute path', async () => {
+  it('E2 #8: readConfined on an unreadable file is PERMISSION_DENIED unreadable naming the relPath, errno EACCES, no absolute path', async () => {
     const dir = await tmp.make();
     await writeTree(dir, { 'locked.txt': 'secret-ish', 'ok.txt': 'fine' });
     const root = await openRoot(dir);
@@ -75,20 +75,25 @@ describe.skipIf(isRoot)('project file fs errors', () => {
 
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.error.code).toBe('NOT_FOUND');
-    expect(r.error.details).toMatchObject({ entity: 'file', relPath: 'locked.txt', errno: 'EACCES' });
+    expect(r.error.code).toBe('PERMISSION_DENIED');
+    expect(r.error.details).toMatchObject({ reason: 'unreadable', relPath: 'locked.txt', errno: 'EACCES' });
+    expect(r.error.userMessage).toContain('locked.txt');
     expect(JSON.stringify(r.error)).not.toContain(dir);
   });
 
-  it('readSelected surfaces the errno of an unreadable selected file', async () => {
+  it('E2 #8: one unreadable selected file → PERMISSION_DENIED unreadable naming it (so the UI can offer "Exclude this file")', async () => {
     const dir = await tmp.make();
-    await writeTree(dir, { 'locked.txt': 'x' });
+    await writeTree(dir, { 'locked.txt': 'x', 'ok.txt': 'y' });
     const root = await openRoot(dir);
     if (!root.ok) throw new Error('root refused');
 
-    const r = await withLocked(path.join(dir, 'locked.txt'), () => readSelected(root.value, ['locked.txt']));
+    const r = await withLocked(path.join(dir, 'locked.txt'), () => readSelected(root.value, ['ok.txt', 'locked.txt']));
 
-    expect(r.ok || r.error.details?.['errno']).toBe('EACCES');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe('PERMISSION_DENIED');
+    expect(r.error.details).toEqual({ reason: 'unreadable', relPath: 'locked.txt', denied: [{ relPath: 'locked.txt', reason: 'unreadable' }] });
+    expect(r.error.userMessage).toContain('locked.txt');
   });
 
   it('an unreadable scan root carries details.errno', async () => {

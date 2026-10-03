@@ -36,6 +36,7 @@ const FIXED_REPORT = {
       decision: 'approved', decidedAt: Date.UTC(2026, 9, 1, 11, 30, 0), note: null, invalidatedReason: 'scope_changed', createdAt: Date.UTC(2026, 9, 1, 11, 10, 0) },
   ],
   revisions: { cycles: 2, maxCycles: 2, planRevisions: 1, incompleteCause: 'revision_limit' },
+  stepMeta: [{ stepKey: 'review', name: 'Find defects', instructionVersion: 'reviewer.v2' }, { stepKey: 'approve', name: null, instructionVersion: null }],
 } as unknown as ReportV1;
 
 const EXPECTED = [
@@ -55,11 +56,11 @@ const EXPECTED = [
   '',
   '## Steps',
   '',
-  '| Step | Revision | Retry | State | Profile | Model | Settled (USD) | Certainty | Unknown (USD) |',
-  '|---|---|---|---|---|---|---|---|---|',
-  '| review | 0 | 0 | succeeded | Economy | anthropic/claude-haiku-4-5 | 0.012345 | calculated | 0.000000 |',
-  '| approve | 1 | 0 | succeeded | — | — | 0.000000 | calculated | 0.000000 |',
-  '| implement | 2 | 1 | failed | Capable \\| big | anthropic/claude-opus-5-5 | 1.000000 | estimated | 0.250000 |',
+  '| Step | Revision | Retry | State | Profile | Model | Instructions | Settled (USD) | Certainty | Unknown (USD) |',
+  '|---|---|---|---|---|---|---|---|---|---|',
+  '| Find defects (review) | 0 | 0 | succeeded | Economy | anthropic/claude-haiku-4-5 | reviewer.v2 | 0.012345 | calculated | 0.000000 |',
+  '| approve | 1 | 0 | succeeded | — | — | — | 0.000000 | calculated | 0.000000 |',
+  '| implement | 2 | 1 | failed | Capable \\| big | anthropic/claude-opus-5-5 | — | 1.000000 | estimated | 0.250000 |',
   '',
   '## Cost (tracked by Relay)',
   '',

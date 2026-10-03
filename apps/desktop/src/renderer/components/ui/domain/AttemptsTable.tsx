@@ -1,9 +1,11 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import type { AttemptView } from '@relay/contracts';
 import { formatDuration } from '../../../lib/format/duration';
 import { ATTEMPT_PURPOSE_LABELS, PROVIDER_LABELS, stepKeyLabel } from '../../../lib/format/labels';
 import { formatTokens, formatTokensExact } from '../../../lib/format/tokens';
 import { DataTable } from '../DataTable';
+import { Disclosure } from '../Disclosure';
+import { KeyValueList } from '../KeyValueList';
 import type { DataTableColumn } from '../DataTable';
 import { Money } from '../Money';
 import { StatusBadge } from '../StatusBadge';
@@ -11,6 +13,11 @@ import { StatusBadge } from '../StatusBadge';
 export interface AttemptsTableProps {
   readonly attempts: readonly AttemptView[];
   readonly caption?: string;
+  /**
+   * Run-level view (attempts of several steps): the Step column names the step too ("Implement · Retry"), using this
+   * display name per step key (E1 `stepMeta`, else the key label). Omitted → the purpose only (one step's attempts).
+   */
+  readonly stepNameFor?: (stepKey: string) => string;
 }
 
 function inputTokens(a: AttemptView): number | null {
@@ -68,56 +75,110 @@ function durationCell(ms: number | null) {
   return <span className="num">{ms === null ? '–' : formatDuration(ms)}</span>;
 }
 
-const COLUMNS: ReadonlyArray<DataTableColumn<AttemptView>> = [
-  { key: 'seq', header: 'Attempt', cell: (a) => <span className="num">#{a.seq}</span> },
-  { key: 'step', header: 'Step', cell: (a) => `${stepKeyLabel(a.stepKey)} · ${ATTEMPT_PURPOSE_LABELS[a.purpose]}` },
-  {
-    key: 'model',
-    header: 'Model',
-    cell: (a) => (
-      <span className="stack" style={{ gap: 0 }}>
-        <span>{PROVIDER_LABELS[a.providerId]}</span>
-        <span className="mono subtle">{a.modelId}</span>
-      </span>
-    ),
-  },
-  { key: 'state', header: 'Dispatch state', cell: (a) => <StatusBadge kind="attempt" value={a.state} /> },
-  { key: 'in', header: 'Tokens in', numeric: true, cell: (a) => <Tokens n={inputTokens(a)} basis={tokenBasis(a)} /> },
-  { key: 'out', header: 'Tokens out', numeric: true, cell: (a) => <Tokens n={a.usage?.outputTokens ?? null} basis={tokenBasis(a)} /> },
-  {
-    key: 'cost',
-    header: 'Cost',
-    numeric: true,
-    cell: (a) => (a.cost === null ? <span className="subtle">none</span> : <Money value={a.cost.microusd} certainty={a.cost.certainty} />),
-  },
-  // §3.3 / R3-20: provider time and app time are shown separately.
-  {
-    key: 'provider-latency',
-    header: 'Provider time',
-    numeric: true,
-    cell: (a) => durationCell(a.providerLatencyMs),
-  },
-  {
-    key: 'app-time',
-    header: 'App time',
-    numeric: true,
-    cell: (a) => durationCell(attemptAppTimeMs(a)),
-  },
-];
+/** Short purpose text for the narrow Step column ("Repair", not "Review input · Schema repair"). */
+const PURPOSE_SHORT: Readonly<Record<AttemptView['purpose'], string>> = {
+  initial: 'Initial',
+  transport_retry: 'Retry',
+  schema_repair: 'Repair',
+  user_retry: 'Your retry',
+  reconcile: 'Reconcile',
+};
 
-function AttemptsTableView({ attempts, caption = 'Attempts for this run' }: AttemptsTableProps) {
+/** Provider time and app time (§3.3 / R3-20, shown separately) behind a per-attempt "Timing" toggle. */
+function Timing({ a }: { readonly a: AttemptView }) {
+  return (
+    <Disclosure summary="Timing" className="attempt-timing">
+      <KeyValueList
+        className="small"
+        items={[
+          { id: 'provider', term: 'Provider time', value: durationCell(a.providerLatencyMs) },
+          { id: 'app', term: 'App time', value: durationCell(attemptAppTimeMs(a)) },
+        ]}
+      />
+    </Disclosure>
+  );
+}
+
+function columnsFor(stepNameFor: ((stepKey: string) => string) | undefined): ReadonlyArray<DataTableColumn<AttemptView>> {
+  return [
+    {
+      key: 'seq',
+      header: 'Attempt',
+      cell: (a) => (
+        <span className="stack" style={{ gap: 2 }}>
+          <span className="num">#{a.seq}</span>
+          <Timing a={a} />
+        </span>
+      ),
+    },
+    {
+      key: 'step',
+      header: 'Step',
+      nowrap: true,
+      cell: (a) => {
+        const name = stepNameFor?.(a.stepKey);
+        return (
+          <span title={`${name ?? stepKeyLabel(a.stepKey)} · ${ATTEMPT_PURPOSE_LABELS[a.purpose]}`}>
+            {name === undefined ? PURPOSE_SHORT[a.purpose] : `${name} · ${PURPOSE_SHORT[a.purpose]}`}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'model',
+      header: 'Model',
+      cell: (a) => (
+        <span className="stack" style={{ gap: 0 }}>
+          <span>{PROVIDER_LABELS[a.providerId]}</span>
+          <span className="mono subtle whitespace-nowrap">{a.modelId}</span>
+        </span>
+      ),
+    },
+    { key: 'state', header: 'Dispatch state', cell: (a) => <StatusBadge kind="attempt" value={a.state} /> },
+    {
+      key: 'tokens',
+      header: 'Tokens in / out',
+      numeric: true,
+      // One column for both counts keeps the table inside the step panel (the cost column is never cut off).
+      cell: (a) => (
+        <span className="stack" style={{ gap: 2, alignItems: 'flex-end' }}>
+          <span>
+            <span className="sr-only">In: </span>
+            <Tokens n={inputTokens(a)} basis={tokenBasis(a)} />
+          </span>
+          <span>
+            <span className="sr-only">Out: </span>
+            <Tokens n={a.usage?.outputTokens ?? null} basis={tokenBasis(a)} />
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: 'cost',
+      header: 'Cost',
+      numeric: true,
+      cell: (a) => (a.cost === null ? <span className="subtle">none</span> : <Money value={a.cost.microusd} certainty={a.cost.certainty} />),
+    },
+  ];
+}
+
+/** The single-step columns (no step name), shared by every instance. */
+const COLUMNS = columnsFor(undefined);
+
+function AttemptsTableView({ attempts, caption = 'Attempts for this run', stepNameFor }: AttemptsTableProps) {
+  const columns = useMemo(() => (stepNameFor === undefined ? COLUMNS : columnsFor(stepNameFor)), [stepNameFor]);
   return (
     <div className="stack">
       <DataTable
         caption={caption}
-        columns={COLUMNS}
+        columns={columns}
         rows={attempts}
         getRowKey={(a) => a.id}
         emptyState={<p className="subtle">No attempts yet. Nothing has been sent to a provider.</p>}
       />
       <p className="subtle">
         Token counts are provider-reported unless marked <span className="tag">est.</span> Each retry is a new attempt;
-        earlier attempts are never overwritten.
+        earlier attempts are never overwritten. Timing shows provider time and app time separately.
       </p>
     </div>
   );

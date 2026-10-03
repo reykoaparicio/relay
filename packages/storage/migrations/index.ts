@@ -1,5 +1,7 @@
 import { sql as init } from './0001_init.js';
 import { sql as indexes } from './0002_indexes.js';
+import { sql as memoryEventsReview } from './0003_memory_events_review.js';
+import { sql as credentialTestSource } from './0004_credential_test_source.js';
 
 /** One embedded, forward-only migration (03 §C2). */
 export interface Migration {
@@ -12,4 +14,6 @@ export interface Migration {
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'init', sql: init },
   { version: 2, name: 'indexes', sql: indexes },
+  { version: 3, name: 'memory_events_review', sql: memoryEventsReview },
+  { version: 4, name: 'credential_test_source', sql: credentialTestSource },
 ];

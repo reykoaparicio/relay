@@ -8,6 +8,7 @@ import type {
   NextAction,
   PreviewResult,
   ProfileWithWarnings,
+  ProviderId,
   ProviderStatus,
   RunPreflight,
   WorkflowSummary,
@@ -53,9 +54,11 @@ export interface GoalInputCardProps {
   readonly preview: { readonly data: PreviewResult | undefined; readonly error: unknown; readonly refetch: () => void };
   readonly importDiff: { readonly isPending: boolean; readonly error: unknown; readonly start: () => void };
   readonly onImportErrorAction: (action: NextAction) => void;
+  /** Display names of the providers that would receive a confirmed suspected secret. */
+  readonly providerNames: readonly string[];
 }
 
-export function GoalInputCard({ form, dispatch, fieldErrors, files, preview, importDiff, onImportErrorAction }: GoalInputCardProps) {
+export function GoalInputCard({ form, dispatch, fieldErrors, files, preview, importDiff, onImportErrorAction, providerNames }: GoalInputCardProps) {
   const titleId = useId();
   return (
     <Card labelledBy={titleId}>
@@ -96,9 +99,12 @@ export function GoalInputCard({ form, dispatch, fieldErrors, files, preview, imp
           error={preview.error}
           onRetry={preview.refetch}
           selected={files}
+          acknowledged={form.acknowledgedSecrets}
+          providerNames={providerNames}
           fieldError={fieldErrors[FIELD.files]}
-          onChange={(next) => {
-            dispatch({ type: 'patch', patch: { files: next } });
+          rowErrors={fieldErrors}
+          onChange={(next, acknowledged) => {
+            dispatch({ type: 'set-files', files: next, acknowledged });
           }}
         />
       ) : (
@@ -400,7 +406,15 @@ export function InputSummaryCard({ preflight: pf, fetching, systemError, hasDraf
   );
 }
 
-export function ProvidersCard({ preflight: pf, systemError }: { readonly preflight: RunPreflight | undefined; readonly systemError: unknown }) {
+export interface ProvidersCardProps {
+  readonly preflight: RunPreflight | undefined;
+  readonly systemError: unknown;
+  readonly inputKind: 'files' | 'diff';
+  readonly roles: ReadonlyMap<ProviderId, readonly string[]>;
+  readonly statuses: readonly ProviderStatus[] | undefined;
+}
+
+export function ProvidersCard({ preflight: pf, systemError, inputKind, roles, statuses }: ProvidersCardProps) {
   const titleId = useId();
   return (
     <Card labelledBy={titleId}>
@@ -410,6 +424,9 @@ export function ProvidersCard({ preflight: pf, systemError }: { readonly preflig
       ) : (
         <ProvidersReceiving
           preflight={pf}
+          inputKind={inputKind}
+          roles={roles}
+          statuses={statuses}
           footnote="Selected context leaves this computer only through these calls, and only to providers this project allows."
         />
       )}

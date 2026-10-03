@@ -77,10 +77,11 @@ function isErrno(e: unknown, ...codes: string[]): boolean {
 }
 
 /**
- * The root cannot be opened: missing → `NOT_FOUND`; not readable (EACCES/EPERM) → `PERMISSION_DENIED unsafe_root`,
+ * The root cannot be opened: missing (moved, renamed, deleted, unmounted) → `PROJECT_ROOT_MISSING` (E2 #7; the user
+ * re-points the project with `projects.relocateRoot`); not readable (EACCES/EPERM) → `PERMISSION_DENIED unsafe_root`,
  * the same answer {@link scanProject} gives for an unreadable root. `details.errno` keeps the cause (code only).
  */
-function rootOpenFailed(e: unknown) {
+export function rootOpenFailed(e: unknown) {
   if (isErrno(e, 'EACCES', 'EPERM')) {
     return err(
       errors.permissionDenied('unsafe_root', {
@@ -89,12 +90,30 @@ function rootOpenFailed(e: unknown) {
       }),
     );
   }
+  if (isErrno(e, 'ENOENT', 'ENOTDIR')) return err(errors.projectRootMissing({ details: errnoDetails(e) }));
   return err(errors.notFound('project_root', {}, { details: errnoDetails(e) }));
 }
 
-/** A project file cannot be opened: `ELOOP` is a symlink escape attempt; anything else is `NOT_FOUND` + errno. */
+/** Errnos of a file that exists but cannot be read (E2 #8). */
+const UNREADABLE_ERRNOS = ['EACCES', 'EPERM', 'EIO', 'ENXIO', 'EAGAIN'] as const;
+
+/** `PERMISSION_DENIED unreadable` naming the file, so the UI can offer "Exclude this file" (E2 #8). */
+export function unreadableFile(rel: RelPath, e?: unknown) {
+  return err(
+    errors.permissionDenied('unreadable', {
+      userMessage: `Relay cannot read ${rel}. Check its permissions, or exclude it from the project.`,
+      details: { relPath: rel, ...errnoDetails(e) },
+    }),
+  );
+}
+
+/**
+ * A project file cannot be opened: `ELOOP` is a symlink escape attempt; a permission / I/O error is `PERMISSION_DENIED
+ * unreadable` naming the file; anything else (it vanished) is `NOT_FOUND` + errno.
+ */
 function fileOpenFailed(e: unknown, rel: RelPath) {
   if (isErrno(e, 'ELOOP')) return err(errors.permissionDenied('outside_root', { details: { relPath: rel } }));
+  if (isErrno(e, ...UNREADABLE_ERRNOS)) return unreadableFile(rel, e);
   return err(errors.notFound('file', {}, { details: { relPath: rel, ...errnoDetails(e) } }));
 }
 
@@ -341,7 +360,7 @@ function excluded(rel: RelPath, exclusion: string) {
  * After `open`, prove the handle is the file that was classified (B1): the real path must still resolve to itself (no
  * symlink swapped into any component since resolution) and `lstat(real)` must be the same inode (dev + ino) as
  * `fstat(fd)`. A swap before the open is caught by the realpath comparison or the inode mismatch; a swap after the
- * open is caught by the inode mismatch. Hard links remain undetectable (documented; not an OS sandbox, §6.5).
+ * open is caught by the inode mismatch. Hard links are refused before this check (`nlink > 1`, E2 #13).
  */
 async function verifyIdentity(root: ProjectRoot, real: string, st: fs.Stats): Promise<boolean> {
   try {
@@ -382,12 +401,16 @@ export async function readConfined(
   try {
     const st = await fh.stat();
     if (!st.isFile()) return excluded(rel, 'not_regular_file');
+    // E2 #13 (audit F5): a hard link is the same inode under a second name, possibly outside the project (and outside
+    // every name rule). Path checks cannot see the other names, so any file with nlink > 1 is refused.
+    if (st.nlink > 1) return excluded(rel, 'hard_link');
     await confinedReadHooks.afterOpen?.(real);
     if (!(await verifyIdentity(root, real, st))) return excluded(rel, 'changed_during_read');
     if (st.size > maxBytes) return excluded(rel, 'too_large');
     const bytes = await readHandle(fh, st.size);
     return ok({ bytes, size: bytes.byteLength, real });
   } catch (e) {
+    if (isErrno(e, ...UNREADABLE_ERRNOS)) return unreadableFile(rel, e);
     return err(errors.notFound('file', {}, { details: { relPath: rel, ...errnoDetails(e) } }));
   } finally {
     await fh.close();

@@ -17,7 +17,7 @@ import { createTemplateRegistry } from '@relay/templates';
 import { createArtifactStore } from '@relay/tools';
 import { createContextAssembler } from '../context.js';
 import { createMemoryService } from '../memory.js';
-import type { ContextAssemblerPort, CredentialResolver, EngineApi, EngineCtx, EngineTestHooks, Logger } from '../ports.js';
+import type { ContextAssemblerPort, CredentialResolver, EngineApi, EngineCtx, EngineTestHooks, Logger, MonotonicClock } from '../ports.js';
 import { undeclaredErrorCode } from '../error-conformance.js';
 import { createEngineContext, createEngineFromContext } from '../runner.js';
 import { createBackupPort, createExportPort, createProjectFs } from '../runtime.js';
@@ -77,6 +77,8 @@ export interface HarnessOptions {
   readonly providers?: (base: ProviderRegistry) => ProviderRegistry;
   /** Extra fake success fixtures keyed by name (scenario steps reference them by `fixture`). */
   readonly extraFixtures?: Readonly<Record<string, unknown>>;
+  /** Monotonic clock for running segments (absent: segments use the manual wall clock, as before). */
+  readonly monotonic?: MonotonicClock;
 }
 
 /** A composed test engine. */
@@ -141,7 +143,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   const ctx = createEngineContext({
     db, providers, projectFs, artifacts, context: o.context?.(baseContext) ?? baseContext, memory, templates,
     credentials: o.credentials ?? OK_CREDENTIALS, maintenance: createMaintenance({ db, artifacts, clock }), clock, ids, logger,
-    emit: (e) => events.push(e), timers, hooks: o.hooks, idleMs: 60_000,
+    emit: (e) => events.push(e), timers, hooks: o.hooks, idleMs: 60_000, monotonic: o.monotonic,
     requestLookup: supportsRequestLookupFor, connectionTestRequest, backup: createBackupPort({ db, userDataDir, clock, logger, homeDir: userDataDir }),
     exports: createExportPort(),
   });

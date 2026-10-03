@@ -96,16 +96,18 @@ describe('approvals.decide (F10, Wave-1 minimal)', () => {
     expect(harness.db.repos.approvals.get(approval.id)?.invalidatedReason).toBe('plan_changed');
   });
 
-  it('a concurrent duplicate with the same key gets CONFLICT(duplicate_in_flight), later replays succeed', async () => {
+  it('a concurrent duplicate with the same key replays the stored result (E1 #7), decided once; later replays succeed', async () => {
     const { harness, approval } = await awaitingApproval();
 
     const [a, b] = await Promise.all([decide(harness, approval), decide(harness, approval)]);
     const later = await decide(harness, approval);
 
-    expect([a.ok, b.ok].sort()).toEqual([false, true]);
-    const failed = a.ok ? b : a;
-    expect(failed.ok ? null : failed.error.details?.['reason']).toBe('duplicate_in_flight');
+    expect([a.ok, b.ok]).toEqual([true, true]);
+    expect(a.ok && b.ok && [a.data.approval.decision, b.data.approval.decision]).toEqual(['approved', 'approved']);
     expect(later.ok).toBe(true);
+    const runId = harness.db.repos.approvals.get(approval.id)?.runId;
+    const decided = runId === undefined ? [] : harness.db.repos.events.list(runId, 0, 1000).filter((e) => e.type === 'approval.decided');
+    expect(decided).toHaveLength(1);
   });
 
   it('reject cancels the run, skips the remaining steps, and generates the report', async () => {
