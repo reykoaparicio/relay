@@ -3,7 +3,7 @@
 // with move_to_unknown N (R4-3); running → interrupted (RUNNER_LOST); cancelling → cancelled with open steps skipped.
 // Succeeded steps are never touched (FR-07). F9b: the reconcile task (after start) looks up `unknown` attempts that
 // have a provider response id on providers that support request lookup.
-import { computeCost, errors, redactDeep, redactString } from '@relay/contracts';
+import { computeCost, errors, isTerminalRunStatus, redactDeep, redactString } from '@relay/contracts';
 import type { ArtifactId, AttemptId, EpochMs, Microusd, RunId } from '@relay/contracts';
 import type { ModelRequest, NormalizedUsage, ReconciliationResult } from '@relay/providers';
 import type { AttemptRow, Repos } from '@relay/storage';
@@ -14,6 +14,7 @@ import { isJsonText, putArtifact } from './checkpoints.js';
 import { canonicalJson, utf8 } from './hash.js';
 import { logSafe } from './log-safe.js';
 import { adapterOf } from './provider-lookup.js';
+import { refreshReport } from './report.js';
 import type { EngineCtx } from './ports.js';
 import { applyPostValidation, deferPause, isDeferrablePause } from './outcome.js';
 import type { ClassifiedOutcome, ResultFlags, Validation } from './retry.js';
@@ -293,6 +294,8 @@ async function settleResolution(ctx: EngineCtx, attempt: AttemptRow, res: Resolu
   const committed = commitReconciled(ctx, fx, { attempt, res, validated, output, puts });
   if (!committed) ctx.logger.warn('reconcile.skipped', { runId: attempt.runId, attemptId: attempt.id, reason: 'attempt_already_moved' });
   await runEffects(ctx, fx);
+  // Round-3 M5: the settlement changed the costs of a FINISHED run: its report is replaced by a fresh one.
+  if (committed && isTerminalRunStatus(ctx.db.repos.runs.get(attempt.runId).status)) await refreshReport(ctx, attempt.runId);
 }
 
 /**

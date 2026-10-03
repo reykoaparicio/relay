@@ -3,6 +3,7 @@ import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { errnoOf } from '@relay/contracts';
 import type { Clock, EpochMs } from '@relay/contracts';
+import { MIGRATIONS } from '../migrations/index.js';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import { readInt } from './mappers.js';
 import { createArtifactRepo } from './repos/artifacts.js';
@@ -307,16 +308,27 @@ export interface RestoreResult {
   readonly previousMovedTo: string | null;
   /** Artifact files restored from the backup because they were missing in `artifacts/`. */
   readonly restoredArtifacts: number;
+  /**
+   * Round-3 L1: artifact files of the backup that could not be copied back (best-effort, before the swap: such an
+   * error never fails a restore whose database is already in place). 0 when all were restored or already present.
+   */
+  readonly artifactsNotRestored: number;
 }
 
-/** True when the SQLite file at `path` opens read-only and passes `PRAGMA quick_check`. */
+/**
+ * True when the SQLite file at `path` opens read-only, passes `PRAGMA quick_check`, and its schema is one this build
+ * can open (round-3 M1: `MAX(version)` of `schema_migrations` ≤ the bundled migrations — a backup written by a newer
+ * Relay would fail with `schema_too_new` again after the restore, so it is skipped like a damaged one).
+ */
 function backupDbIsHealthy(path: string): boolean {
   let driver: ReturnType<typeof openNodeSqlite> | null = null;
   try {
     driver = openNodeSqlite(path, { readOnly: true });
     const rows = driver.prepare('PRAGMA quick_check').all();
     const first = rows[0];
-    return rows.length === 1 && typeof first === 'object' && first !== null && Object.values(first)[0] === 'ok';
+    if (!(rows.length === 1 && typeof first === 'object' && first !== null && Object.values(first)[0] === 'ok')) return false;
+    const version = readInt('schema_migrations', driver.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations').get(), 'v');
+    return version <= MIGRATIONS.length;
   } catch {
     return false;
   } finally {
@@ -324,12 +336,21 @@ function backupDbIsHealthy(path: string): boolean {
   }
 }
 
-async function restoreArtifacts(userDataDir: string, backupDir: string): Promise<number> {
+/** Copies back the backup's artifact files missing in `artifacts/` (never overwriting). Best-effort per file. */
+async function restoreArtifacts(userDataDir: string, backupDir: string): Promise<{ restored: number; failed: number }> {
   const root = join(backupDir, 'artifacts');
-  if (!(await exists(root))) return 0;
+  if (!(await exists(root))) return { restored: 0, failed: 0 };
   let restored = 0;
+  let failed = 0;
   const walk = async (dir: string): Promise<void> => {
-    for (const ent of await readdir(dir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      failed += 1;
+      return;
+    }
+    for (const ent of entries) {
       const abs = join(dir, ent.name);
       if (ent.isDirectory()) {
         await walk(abs);
@@ -339,17 +360,17 @@ async function restoreArtifacts(userDataDir: string, backupDir: string): Promise
       const rel = relative(backupDir, abs).split(sep).join('/');
       const dest = rel.startsWith(ARTIFACTS_PREFIX) ? contained(userDataDir, rel) : null;
       if (dest === null) continue;
-      await mkdir(dirname(dest), { recursive: true });
       try {
+        await mkdir(dirname(dest), { recursive: true });
         await copyFile(abs, dest, fsConstants.COPYFILE_EXCL); // never overwrite an existing artifact
         restored += 1;
       } catch (e) {
-        if (errnoOf(e) !== 'EEXIST') throw e;
+        if (errnoOf(e) !== 'EEXIST') failed += 1;
       }
     }
   };
   await walk(root);
-  return restored;
+  return { restored, failed };
 }
 
 /** Options for {@link restoreLatestBackup}. */
@@ -360,17 +381,93 @@ export interface RestoreOptions {
   readonly backupsDirs?: readonly string[];
 }
 
+/** Round-3 L1: the in-progress restore marker (`<userData>/relay.sqlite.restore-pending.json`). */
+const RESTORE_MARKER = `${DB_FILE}.restore-pending.json`;
+const LIVE_SUFFIXES = ['', '-wal', '-shm'] as const;
+/** `relay.sqlite.before-restore-<stamp>[-n]` (the moved-aside folder), optionally still `.partial`. */
+const ASIDE_DIR_RE = /^relay\.sqlite\.before-restore-\d{8}-\d{6}(?:-\d+)?(?:\.partial)?$/;
+
+interface RestoreMarker {
+  /** The moved-aside folder while it is being filled (`….partial`), and its final name. Both basenames in userData. */
+  readonly asidePartial: string;
+  readonly aside: string;
+}
+
+function readRestoreMarker(text: string): RestoreMarker | null {
+  try {
+    const v = JSON.parse(text) as { asidePartial?: unknown; aside?: unknown };
+    const ok = (n: unknown): n is string => typeof n === 'string' && n === basename(n) && ASIDE_DIR_RE.test(n);
+    return ok(v.asidePartial) && ok(v.aside) ? { asidePartial: v.asidePartial, aside: v.aside } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Moves every remaining live file (`relay.sqlite`, `-wal`, `-shm`) into the aside folder, puts the staged backup copy
+ * in place, names the aside folder, and removes the marker. Each step is idempotent, so it can be re-run after a kill
+ * at any point. The old WAL never stays next to the restored database (it would be replayed into it).
+ */
+async function completeSwap(userDataDir: string, m: RestoreMarker): Promise<void> {
+  const live = join(userDataDir, DB_FILE);
+  const staged = `${live}${PARTIAL_SUFFIX}`;
+  const asidePartial = join(userDataDir, m.asidePartial);
+  const aside = join(userDataDir, m.aside);
+  if (await exists(staged)) {
+    // Not swapped yet: the old files (whatever is left of them) go aside first, the WAL / SHM before the database.
+    const present: string[] = [];
+    for (const suffix of ['-wal', '-shm', '']) if (await exists(`${live}${suffix}`)) present.push(suffix);
+    if (present.length > 0) {
+      await mkdir(asidePartial, { recursive: true });
+      for (const suffix of present) await rename(`${live}${suffix}`, join(asidePartial, `${DB_FILE}${suffix}`));
+    }
+    await rename(staged, live);
+  }
+  if (await exists(asidePartial)) await rename(asidePartial, aside);
+  await rm(join(userDataDir, RESTORE_MARKER), { force: true });
+}
+
+/**
+ * Round-3 L1: finishes a restore that was interrupted (app killed, quit timeout) after its swap began. The marker is
+ * written only once the staged copy of the backup is complete, so the restore is rolled FORWARD: the result is the
+ * restored database, with the previous files kept in the moved-aside folder. Without a marker nothing is changed (a
+ * restore killed before the marker left the live files untouched; a stale staged copy is overwritten by the next
+ * restore). Called at the start of {@link restoreLatestBackup} and by the runtime before it opens the database.
+ * Returns true when it completed an interrupted restore.
+ */
+export async function recoverInterruptedRestore(userDataDir: string): Promise<boolean> {
+  let text: string;
+  try {
+    text = await readFile(join(userDataDir, RESTORE_MARKER), 'utf8');
+  } catch (e) {
+    if (isMissing(e)) return false;
+    throw e;
+  }
+  const marker = readRestoreMarker(text);
+  if (marker === null) {
+    // A marker this module did not write (or a torn write before it was complete): nothing was moved under it.
+    await rm(join(userDataDir, RESTORE_MARKER), { force: true });
+    return false;
+  }
+  await completeSwap(userDataDir, marker);
+  return true;
+}
+
 /**
  * Restores the newest healthy backup into `<userDataDir>/relay.sqlite` (E2 #4). Runner-independent: it never opens
  * the live database, so it works when that file is corrupt, locked by a crashed runner's WAL, or from a newer schema.
  * MUST be called only while no runner is running (main stops / has not started it).
  *
- * Steps: pick the newest complete backup whose `relay.sqlite` passes `quick_check` (damaged ones are skipped) → move
- * the current `relay.sqlite`, `-wal`, `-shm` aside into `relay.sqlite.before-restore-<stamp>/` (never deleted) → copy
- * the backup DB to `relay.sqlite.partial` and rename it into place (atomic) → copy back artifact files that are
- * missing (never overwriting). Returns null when there is no usable backup (nothing is changed).
+ * Steps: finish an interrupted earlier restore ({@link recoverInterruptedRestore}) → pick the newest complete backup
+ * whose `relay.sqlite` passes `quick_check` and whose schema this build can open (damaged / newer ones are skipped,
+ * round-3 M1) → copy the backup DB to `relay.sqlite.partial` → copy back artifact files that are missing (never
+ * overwriting; best-effort and counted, BEFORE the swap, round-3 L1) → write the restore marker → move the current
+ * `relay.sqlite`, `-wal`, `-shm` aside into `relay.sqlite.before-restore-<stamp>/` (never deleted) → rename the staged
+ * copy into place → remove the marker. A kill before the marker leaves the old state; after it, the next launch (or
+ * restore) completes the new state. Returns null when there is no usable backup (nothing is changed).
  */
 export async function restoreLatestBackup(opts: RestoreOptions): Promise<RestoreResult | null> {
+  await recoverInterruptedRestore(opts.userDataDir);
   const dirs = opts.backupsDirs ?? [join(opts.userDataDir, 'backups'), join(opts.userDataDir, AUTO_BACKUPS_DIRNAME)];
   const all = (await Promise.all(dirs.map((d) => listBackups(d)))).flat().sort((a, b) => b.createdAt - a.createdAt || (a.name < b.name ? 1 : -1));
   const candidate = all.find((b) => backupDbIsHealthy(join(b.dir, DB_FILE)));
@@ -378,17 +475,20 @@ export async function restoreLatestBackup(opts: RestoreOptions): Promise<Restore
   const live = join(opts.userDataDir, DB_FILE);
   const staged = `${live}${PARTIAL_SUFFIX}`;
   await copyFile(join(candidate.dir, DB_FILE), staged);
+  const artifacts = await restoreArtifacts(opts.userDataDir, candidate.dir);
   let previousMovedTo: string | null = null;
   const present: string[] = [];
-  for (const suffix of ['', '-wal', '-shm']) if (await exists(`${live}${suffix}`)) present.push(suffix);
-  if (present.length > 0) {
-    const { partial: aside } = await reservePartial(opts.userDataDir, `${DB_FILE}.before-restore-${backupStamp(opts.clock.now())}`, '');
-    const finalAside = aside.slice(0, -PARTIAL_SUFFIX.length);
-    for (const suffix of present) await rename(`${live}${suffix}`, join(aside, `${DB_FILE}${suffix}`));
-    await rename(aside, finalAside);
-    previousMovedTo = finalAside;
+  for (const suffix of LIVE_SUFFIXES) if (await exists(`${live}${suffix}`)) present.push(suffix);
+  if (present.length === 0) {
+    await rename(staged, live);
+  } else {
+    const { partial: asidePartial } = await reservePartial(opts.userDataDir, `${DB_FILE}.before-restore-${backupStamp(opts.clock.now())}`, '');
+    const aside = asidePartial.slice(0, -PARTIAL_SUFFIX.length);
+    const marker: RestoreMarker = { asidePartial: basename(asidePartial), aside: basename(aside) };
+    await writeFile(join(opts.userDataDir, RESTORE_MARKER), `${JSON.stringify(marker)}\n`, 'utf8');
+    await completeSwap(opts.userDataDir, marker);
+    previousMovedTo = aside;
   }
-  await rename(staged, live);
-  const restoredArtifacts = await restoreArtifacts(opts.userDataDir, candidate.dir);
-  return { restoredFrom: candidate.dir, backupCreatedAt: candidate.createdAt, backupKind: candidate.kind, previousMovedTo, restoredArtifacts };
+  return { restoredFrom: candidate.dir, backupCreatedAt: candidate.createdAt, backupKind: candidate.kind, previousMovedTo,
+    restoredArtifacts: artifacts.restored, artifactsNotRestored: artifacts.failed };
 }

@@ -32,10 +32,13 @@ export function unverifiedRootOf(e: unknown): RootVerification | null {
   return parsed.success ? parsed.data : { checkedFiles: 0, matchedFiles: 0, mismatched: [] };
 }
 
-/** "Relay compared 9 files it used before: none match." */
+/**
+ * "Relay compared 9 files it used before: none match." The engine asks for a confirmation unless a clear majority
+ * matches (round-3 M3), so a partial match reads "only 2 match".
+ */
 export function verificationText(v: RootVerification): string {
   if (v.checkedFiles === 0) return 'Relay has no earlier files of this project to compare with this folder.';
-  const matched = v.matchedFiles === 0 ? 'none match' : `${String(v.matchedFiles)} match`;
+  const matched = v.matchedFiles === 0 ? 'none match' : `only ${String(v.matchedFiles)} match`;
   return `Relay compared ${String(v.checkedFiles)} file${v.checkedFiles === 1 ? '' : 's'} it used before with this folder: ${matched}.`;
 }
 

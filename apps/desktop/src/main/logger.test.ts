@@ -1,4 +1,5 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { readFile, readdir, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LOG_FLUSH_INTERVAL_MS, LOG_RETENTION_DAYS, createFileLogger, formatLogLine, logDate, pruneLogs } from './logger.js';
@@ -258,6 +259,44 @@ describe('createFileLogger buffering (MAIN-01)', () => {
     logger.error({ event: 'd' });
     expect(logger.isDegraded()).toBe(false);
     expect(m.events(FILE)).toEqual(['d']);
+  });
+});
+
+describe('createFileLogger: logs/ deleted at runtime (round-3 B4)', () => {
+  /** Empties and removes the `logs/` the logger created inside this test's temp dir (no recursive delete). */
+  async function deleteLogsDir(logs: string): Promise<void> {
+    for (const f of await readdir(logs)) await unlink(join(logs, f));
+    await rmdir(logs);
+  }
+
+  it('re-creates a deleted logs/ on the next sync write instead of staying degraded', async () => {
+    const logs = join(dir, 'logs');
+    const fallback = join(dir, 'fallback');
+    const logger = createFileLogger(logs, () => NOW, { fallbackDir: fallback, stderr: () => undefined });
+    logger.error({ event: 'first' });
+    expect(await readdir(logs)).toEqual([`${logDate(NOW)}.jsonl`]);
+
+    await deleteLogsDir(logs);
+    logger.error({ event: 'second' });
+
+    expect(existsSync(logs)).toBe(true);
+    expect(logger.isDegraded()).toBe(false);
+    expect(await readFile(join(logs, `${logDate(NOW)}.jsonl`), 'utf8')).toContain('"event":"second"');
+    expect(existsSync(fallback)).toBe(false);
+  });
+
+  it('re-creates a deleted logs/ on the next buffered (async) flush too', async () => {
+    const logs = join(dir, 'logs');
+    const logger = createFileLogger(logs, () => NOW, { fallbackDir: join(dir, 'fallback'), stderr: () => undefined });
+    logger.info({ event: 'first' });
+    await logger.flush();
+    await deleteLogsDir(logs);
+
+    logger.info({ event: 'second' });
+    await logger.flush();
+
+    expect(logger.isDegraded()).toBe(false);
+    expect(await readFile(join(logs, `${logDate(NOW)}.jsonl`), 'utf8')).toContain('"event":"second"');
   });
 });
 

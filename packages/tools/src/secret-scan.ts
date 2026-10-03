@@ -56,18 +56,27 @@ export function detectSuspectedSecret(content: string): SuspectedSecret | null {
   return best === null ? null : { label: labelOf(best.match), line: lineAt(text, best.index) };
 }
 
+/** One acknowledgement of a suspected secret: the file and the sha256 of the content the user confirmed (round-3 M4). */
+export interface SecretAcknowledgement {
+  readonly relPath: string;
+  readonly sha256: string;
+}
+
 /**
  * THE suspected-secret predicate (E2 #11) shared by every gate: `runs.preflight` (engine run-start.ts), intake and
- * re-snapshot (`readSelected` with `secretCheck`, read.ts). The hit for `file` unless its relPath is in `acknowledged`,
- * else null. One function so preflight and intake can never disagree about the same file.
+ * re-snapshot (`readSelected` with `secretCheck`, read.ts). The hit for `file` unless an acknowledgement names its
+ * relPath AND the sha256 of its CURRENT bytes (round-3 M4: an acknowledgement is bound to the content the user saw — a
+ * changed file, e.g. a real key pasted over an acknowledged test token, is checked and flagged again), else null. One
+ * function so preflight and intake can never disagree about the same file.
  *
  * Diff-input runs carry no acknowledgement (the `diff` run input has no `acknowledgedSuspectedSecrets`), so callers pass
  * `[]` for them: a suspected secret in any current file the diff references blocks the run (fail closed). The user
  * removes the secret, excludes the file, or selects files instead (where it can be acknowledged).
  */
 export function unacknowledgedSuspectedSecret(
-  file: { readonly relPath: string; readonly content: string },
-  acknowledged: readonly string[],
+  file: { readonly relPath: string; readonly content: string; readonly sha256: string },
+  acknowledged: readonly SecretAcknowledgement[],
 ): SuspectedSecret | null {
-  return acknowledged.includes(file.relPath) ? null : detectSuspectedSecret(file.content);
+  const acked = acknowledged.some((a) => a.relPath === file.relPath && a.sha256 === file.sha256);
+  return acked ? null : detectSuspectedSecret(file.content);
 }

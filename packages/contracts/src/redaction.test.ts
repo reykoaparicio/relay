@@ -71,8 +71,9 @@ describe('redactString', () => {
 
   it('keeps every sk- pattern anchored with the lookbehind', () => {
     const skPatterns = SECRET_PATTERNS.filter((p) => p.source.includes('sk-'));
-    // Specific prefixes may also follow a `\n`/`\t`/`\r` or `%XX` escape (audit F3); the generic rule may not.
-    const escBoundary = String.raw`(?:(?<![A-Za-z0-9])|(?<=\\[nrt]|%[0-9A-Fa-f]{2}))`;
+    // Specific prefixes may also follow a `\n`/`\t`/`\r` or `%XX` escape (audit F3), or `\b`/`\f`/`\uXXXX`
+    // (round-3 B6); the generic rule may not.
+    const escBoundary = String.raw`(?:(?<![A-Za-z0-9])|(?<=\\[nrtbf]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2}))`;
     const generic = skPatterns.filter((p) => p.source.startsWith('(?<![A-Za-z0-9])sk-['));
 
     expect(skPatterns).toHaveLength(5);
@@ -181,6 +182,13 @@ describe('redactString: keys after \\n / \\t / \\r escapes and %XX URL encodings
     ['URL-encoded JSON, lowercase hex', `p=%7b%22k%22%3a%22${OPENAI_PROJECT}%22%7d`, OPENAI_PROJECT],
     ['URL-encoded space before a GitHub token', `q=token%20${GH_SERVER}`, GH_SERVER],
     ['URL-encoded colon before a Gemini key', `q=k%3A${GEMINI}`, GEMINI],
+    // Round-3 B6: the other JSON escapes whose last char is a letter or digit: \uXXXX, \b, \f.
+    ['JSON \\u003c before an Anthropic key', String.raw`x\u003c` + ANTHROPIC + String.raw`\u003e`, ANTHROPIC],
+    ['JSON \\u0022 before a GitHub token', String.raw`\u0022` + GH_PAT, GH_PAT],
+    ['JSON \\u000A (uppercase hex) before a Gemini key', String.raw`k\u000A` + GEMINI, GEMINI],
+    ['JSON \\b before an Anthropic key', String.raw`a\b` + ANTHROPIC, ANTHROPIC],
+    ['JSON \\f before a GitHub token', String.raw`key=\f` + GH_PAT, GH_PAT],
+    ['JSON.stringify of a form feed before an OpenAI project key', JSON.stringify({ t: `x\f${OPENAI_PROJ_LONG}` }), OPENAI_PROJ_LONG],
   ])('redacts and detects: %s', (_name, text, key) => {
     const out = redactString(text);
 
@@ -207,8 +215,12 @@ describe('redactString: keys after \\n / \\t / \\r escapes and %XX URL encodings
     ['GitHub prefix inside a word', `x${GH_PAT}`],
     // A backslash before some other letter, or a partial %X escape, is not an escape boundary.
     ['backslash-x before a key', `\\x${OPENAI_PROJECT}`],
-    ['backslash-b before a key', `\\b${GH_PAT}`],
     ['single hex digit after %', `%2${ANTHROPIC}`],
+    // Round-3 B6: only a COMPLETE \uXXXX escape is a boundary; the generic sk- rule still needs a non-alphanumeric.
+    ['partial \\u escape before a key', String.raw`\u00` + GH_PAT],
+    ['non-hex \\u escape before a key', String.raw`\u00zz` + GH_PAT],
+    ['generic sk- after \\u003c', String.raw`x\u003c` + GENERIC],
+    ['generic sk- after \\b', String.raw`x\b` + GENERIC],
     ['non-hex %XX', `%2G${GEMINI}`],
   ])('does not redact: %s', (_name, text) => {
     expect(redactString(text)).toBe(text);

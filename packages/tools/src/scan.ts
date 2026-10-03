@@ -6,6 +6,7 @@ import { INPUT_CAPS, assertNever, err, errnoDetails, errnoOf, errors, ok } from 
 import type { ClassifyContext, Sniff } from './exclusions.js';
 import { SNIFF_BYTES, classifyByContent, classifyByName, compileUserPatterns, sniffBytes } from './exclusions.js';
 import { createIncrementalGitignore, loadGitignore } from './gitignore.js';
+import { sha256Hex } from './hash.js';
 import type { ProjectRoot } from './paths.js';
 import { isSecretRootPath, normalizeRelPath, realRelPath, resolveInside } from './paths.js';
 import type { SuspectedSecret } from './secret-scan.js';
@@ -18,7 +19,10 @@ export interface InputCaps {
   readonly maxFiles: number;
 }
 
-/** One included file in a scan preview. `sha256` is filled lazily by `hashFiles`, never during preview. */
+/**
+ * One included file in a scan preview. `sha256` is filled lazily by `hashFiles` — except for a suspected secret, whose
+ * bytes the preview already read: it carries their hash (round-3 M4: what a confirmation to send it is bound to).
+ */
 export interface FileEntry {
   readonly relPath: RelPath;
   readonly size: number;
@@ -241,7 +245,9 @@ function addUnreadable(state: ScanState, relPath: string): void {
   if (rel !== null) state.unreadable.push(rel);
 }
 
-type FileVerdict = { readonly reason: ExclusionReason } | { readonly reason: null; readonly suspectedSecret: SuspectedSecret | null };
+type FileVerdict =
+  | { readonly reason: ExclusionReason }
+  | { readonly reason: null; readonly suspectedSecret: SuspectedSecret | null; readonly sha256?: Sha256 };
 
 /**
  * The content verdict of a probed file: binary sniff → too_large → caps; then UTF-8 validity (read only if admitted);
@@ -256,7 +262,10 @@ async function fileReason(item: Extract<Inspected, { kind: 'file' }>, state: Sca
   const bytes = needBytes ? (item.probe.bytes ?? (await readWhole(item.abs, item.probe.size))) : null;
   const utf8 = item.probe.utf8 ?? (bytes !== null && isUtf8(bytes));
   if (!utf8) return { reason: 'binary' };
-  return { reason: null, suspectedSecret: detectSecrets && bytes !== null ? detectSuspectedSecret(bytes.toString('utf8')) : null };
+  const suspectedSecret = detectSecrets && bytes !== null ? detectSuspectedSecret(bytes.toString('utf8')) : null;
+  // Round-3 M4: a flagged file carries the hash of the bytes just checked, so a confirmation to send it can be bound
+  // to exactly this content (intake honours it only while the file still has this hash). Only flagged files pay.
+  return suspectedSecret === null || bytes === null ? { reason: null, suspectedSecret } : { reason: null, suspectedSecret, sha256: sha256Hex(bytes) };
 }
 
 async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyContext, caps: InputCaps, detectSecrets: boolean): Promise<void> {
@@ -286,7 +295,8 @@ async function applyInspected(item: Inspected, state: ScanState, ctx: ClassifyCo
         return;
       }
       const flagged = verdict.suspectedSecret;
-      state.included.push({ relPath: item.relPath, size: item.probe.size, ...(flagged === null ? {} : { suspectedSecret: flagged }) });
+      state.included.push({ relPath: item.relPath, size: item.probe.size,
+        ...(flagged === null ? {} : { suspectedSecret: flagged, ...(verdict.sha256 === undefined ? {} : { sha256: verdict.sha256 }) }) });
       state.includedBytes += item.probe.size;
       return;
     }

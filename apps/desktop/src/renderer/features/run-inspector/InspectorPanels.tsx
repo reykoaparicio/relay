@@ -71,7 +71,7 @@ const EVENT_SUMMARY: { readonly [T in RunEventType]: (p: Readonly<Record<string,
   'context.assembled': (_p, step) => (step === null ? 'Context assembled' : `${step}: context assembled`),
   'error.recorded': (p) => (typeof p['userMessage'] === 'string' ? `Problem recorded: ${p['userMessage']}` : 'Problem recorded'),
   'run.limits_raised': () => 'Run limits raised',
-  'report.created': () => 'Run report created',
+  'report.created': (p) => (p['refreshed'] === true ? 'Run report updated with the settled cost' : 'Run report created'),
   'run.snapshot_preserved': () => 'Context snapshot preserved',
 };
 

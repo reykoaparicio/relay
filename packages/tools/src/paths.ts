@@ -374,6 +374,16 @@ async function verifyIdentity(root: ProjectRoot, real: string, st: fs.Stats): Pr
   }
 }
 
+/** Options of {@link readConfined}. */
+export interface ConfinedReadOptions {
+  /**
+   * Read a file even when it has other names (`nlink > 1`). ONLY for content that is parsed locally and never sent or
+   * stored (round-3 M2: a `.gitignore` is parsed into rules; refusing a hard-linked one would silently drop its rules
+   * and include the files it ignores — fail open). Every other read keeps the E2 #13 refusal.
+   */
+  readonly allowHardLink?: boolean;
+}
+
 /**
  * Reads a confined file (05 E1, B1): resolve ONCE → classify the real path (`check`) → `open(real, O_RDONLY |
  * O_NOFOLLOW | O_NONBLOCK)` → `fstat` (regular file, size ≤ `maxBytes`) → identity check (see {@link verifyIdentity})
@@ -385,6 +395,7 @@ export async function readConfined(
   rel: RelPath,
   maxBytes: number,
   check?: RealPathCheck,
+  opts: ConfinedReadOptions = {},
 ): Promise<Result<ConfinedRead>> {
   const resolved = await resolveInside(root, rel);
   if (!resolved.ok) return resolved;
@@ -403,7 +414,7 @@ export async function readConfined(
     if (!st.isFile()) return excluded(rel, 'not_regular_file');
     // E2 #13 (audit F5): a hard link is the same inode under a second name, possibly outside the project (and outside
     // every name rule). Path checks cannot see the other names, so any file with nlink > 1 is refused.
-    if (st.nlink > 1) return excluded(rel, 'hard_link');
+    if (st.nlink > 1 && opts.allowHardLink !== true) return excluded(rel, 'hard_link');
     await confinedReadHooks.afterOpen?.(real);
     if (!(await verifyIdentity(root, real, st))) return excluded(rel, 'changed_during_read');
     if (st.size > maxBytes) return excluded(rel, 'too_large');

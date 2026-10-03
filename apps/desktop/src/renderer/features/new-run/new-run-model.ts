@@ -37,8 +37,8 @@ export interface NewRunForm {
   readonly files: readonly string[] | null;
   /**
    * E2 #11: selected files the user confirmed sending although they look like they hold a secret. Sent as
-   * `input.acknowledgedSuspectedSecrets` (only the ones still selected and still valid, {@link validAcknowledged});
-   * unticking a file drops it.
+   * `input.acknowledgedSuspectedSecrets` `{ relPath, sha256 }` (only the ones still selected and still valid,
+   * {@link validAcknowledged} / {@link ackInputs}); unticking a file drops it.
    */
   readonly acknowledgedSecrets: readonly SecretAck[];
   readonly diff: ImportedDiff | null;
@@ -195,6 +195,26 @@ export function validAcknowledged(
       return k.sha256 === null || now === undefined || now === null || now === k.sha256;
     })
     .map((k) => k.relPath);
+}
+
+/** One `input.acknowledgedSuspectedSecrets` entry: a confirmed file and the sha256 of the content confirmed (round-3 M4). */
+export interface AckInput {
+  readonly relPath: string;
+  readonly sha256: string;
+}
+
+/**
+ * The acknowledgements to send (round-3 M4): each still-valid confirmation (`valid`, from {@link validAcknowledged})
+ * with the sha256 of the content the user confirmed — the preview hash recorded with the confirmation, else the current
+ * preview's. The engine honours it only while the file still has that hash, so a file changed after the confirm is
+ * flagged again. A confirmation with no hash at all is not sent (the file stays flagged and the user is asked again).
+ */
+export function ackInputs(acks: readonly SecretAck[], valid: readonly string[], preview: PreviewResult | undefined): AckInput[] {
+  return acks.flatMap((k) => {
+    if (!valid.includes(k.relPath)) return [];
+    const sha256 = k.sha256 ?? previewSha(preview, k.relPath) ?? null;
+    return sha256 === null ? [] : [{ relPath: k.relPath, sha256 }];
+  });
 }
 
 /**
@@ -393,11 +413,14 @@ export function buildStartInput(args: {
   readonly rows: readonly ModelStepRow[];
   readonly check: ClientCheck;
   readonly goal: string;
-  /** The confirmed suspected secrets to send ({@link validAcknowledged}); default: every stored confirmation. */
-  readonly acknowledged?: readonly string[];
+  /**
+   * The confirmed suspected secrets to send, with their content hash ({@link ackInputs}); default: every stored
+   * confirmation that carries a hash.
+   */
+  readonly acknowledged?: readonly AckInput[];
 }): StartInput | null {
   const { form, workflow, files, rows, check } = args;
-  const acknowledged = args.acknowledged ?? form.acknowledgedSecrets.map((k) => k.relPath);
+  const acknowledged = args.acknowledged ?? ackInputs(form.acknowledgedSecrets, form.acknowledgedSecrets.map((k) => k.relPath), undefined);
   if (workflow === null || args.goal === '' || args.goal.length > 2000) return null;
   if (Object.keys(check.fieldErrors).some((k) => k !== FIELD.goal && k !== FIELD.files && k !== FIELD.diff))
     return null;
@@ -424,9 +447,15 @@ export function buildStartInput(args: {
   };
 }
 
-/** `acknowledgedSuspectedSecrets` for a files input: absent when none of the selected files is acknowledged. */
-function acknowledgedInput(files: readonly string[], acknowledged: readonly string[]) {
-  const acked = acknowledgedFor(files, acknowledged);
+/**
+ * `acknowledgedSuspectedSecrets` for a files input (`{ relPath, sha256 }` entries of the selected files, in selection
+ * order): absent when none of the selected files is acknowledged.
+ */
+export function acknowledgedInput(files: readonly string[], acknowledged: readonly AckInput[]) {
+  const acked = acknowledgedFor(files, acknowledged.map((a) => a.relPath)).flatMap((p) => {
+    const a = acknowledged.find((x) => x.relPath === p);
+    return a === undefined ? [] : [{ relPath: a.relPath, sha256: a.sha256 }];
+  });
   return acked.length === 0 ? {} : { acknowledgedSuspectedSecrets: acked };
 }
 

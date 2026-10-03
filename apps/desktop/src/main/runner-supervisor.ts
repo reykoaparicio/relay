@@ -144,6 +144,11 @@ export type MaintenanceOutcome =
 
 /** How long a maintenance runner may take (copying a large backup). */
 export const MAINTENANCE_TIMEOUT_MS = 120_000;
+/**
+ * Round-3 L1: how long `shutdown()` (app quit) waits for a maintenance runner (a restore) to finish before killing it.
+ * A restore killed mid-way is recovered at the next restore / launch (storage `restoreLatestBackup` is crash-safe).
+ */
+export const MAINTENANCE_QUIT_WAIT_MS = 15_000;
 
 /** The supervisor (08 H6). */
 export interface RunnerSupervisor extends RunnerRequester {
@@ -166,6 +171,8 @@ export interface RunnerSupervisor extends RunnerRequester {
    * runner's `maintenance.result`. Does not restart the runner (call {@link restart} afterwards).
    */
   runMaintenance(task: RunnerMaintenanceTask): Promise<MaintenanceOutcome>;
+  /** A maintenance runner (e.g. a restore) is alive (round-3 L1: main asks before quitting). */
+  maintenanceRunning(): boolean;
 }
 
 /** Statuses during which a run may have a provider request in flight. */
@@ -255,6 +262,11 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
   let restarting: Promise<RestartOutcome> | null = null;
   /** A maintenance runner in progress (restart() waits for nothing: it is refused meanwhile). */
   let maintaining: Promise<MaintenanceOutcome> | null = null;
+  /**
+   * Round-3 L1: the maintenance child itself, at supervisor scope, until it has exited (or was killed): shutdown()
+   * waits for it (capped by {@link MAINTENANCE_QUIT_WAIT_MS}) and then kills it, so a quit never abandons a restore.
+   */
+  let maintenanceChild: { readonly child: UtilityChildLike; readonly exited: Promise<void> } | null = null;
   let seq = 0;
   const pending = new Map<string, Pending>();
   let readyWaiters: ((ready: boolean) => void)[] = [];
@@ -564,6 +576,31 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
     });
   };
 
+  /**
+   * Round-3 L1 (app quit): waits for a live maintenance child (a restore) to exit, at most
+   * {@link MAINTENANCE_QUIT_WAIT_MS}, then kills it. Never leaves it running after the app is gone.
+   */
+  const stopMaintenance = async (): Promise<void> => {
+    const m = maintenanceChild;
+    if (m === null) return;
+    log.info({ event: 'runner.maintenance_wait_on_quit', pid: m.child.pid, outcome: 'ok' });
+    let timer: unknown = null;
+    const gone = await Promise.race([
+      m.exited.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = t.setTimeout(() => {
+          resolve(false);
+        }, MAINTENANCE_QUIT_WAIT_MS);
+      }),
+    ]);
+    if (timer !== null) t.clearTimeout(timer);
+    if (!gone) {
+      log.warn({ event: 'runner.kill', reason: 'maintenance_quit', pid: m.child.pid, outcome: 'error' });
+      m.child.kill();
+    }
+    if (maintenanceChild === m) maintenanceChild = null;
+  };
+
   return {
     start() {
       // After shutdown() the supervisor is finished for good (app quit): never fork a runner that nobody will stop.
@@ -628,6 +665,11 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       });
       // The child exits on its own after posting the result; wait for that exit before anything forks again.
       const exited = new Promise<void>((resolve) => c.on('exit', () => { resolve(); }));
+      const mine = { child: c, exited };
+      maintenanceChild = mine;
+      void exited.then(() => {
+        if (maintenanceChild === mine) maintenanceChild = null;
+      });
       maintaining = p.then(async (o) => {
         let timer: unknown = null;
         const gone = await Promise.race([
@@ -702,6 +744,8 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       clearRestartTimer(); // a pending backoff never forks after shutdown
       if (session !== null) clearSessionTimers(session);
       settleReadyWaiters(false);
+      // A maintenance runner only exists while no serving runner does; awaited only then (no extra tick otherwise).
+      if (maintenanceChild !== null) await stopMaintenance();
       const s = session;
       if (s === null) return;
       const exited = new Promise<void>((resolve) => exitWaiters.push(resolve));
@@ -712,6 +756,8 @@ export function createRunnerSupervisor(deps: SupervisorDeps): RunnerSupervisor {
       await exited;
       t.clearTimeout(killTimer);
     },
+
+    maintenanceRunning: () => maintenanceChild !== null,
 
     state() {
       const pid = session?.child.pid;

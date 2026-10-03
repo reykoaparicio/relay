@@ -44,8 +44,12 @@ export async function writeNewFile(dest: string, data: string, fs: SafeWriteFs =
   const dir = dirname(dest);
   const name = basename(dest);
   const tmp = join(dir, `.${name}.${randomBytes(6).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, { encoding: 'utf8', mode, flag: 'wx' });
+  let created = false;
   try {
+    // Round-3 B5: inside the try, so a write that fails part-way (ENOSPC) never leaves the temp file behind
+    // (writeOwned removes its own partial file; a name collision — EEXIST — is someone else's file and never removed).
+    await writeOwned(tmp, data, fs, mode);
+    created = true;
     for (let n = 1; n <= MAX_NAME_SUFFIX; n += 1) {
       const candidate = join(dir, suffixedName(name, n));
       try {
@@ -60,15 +64,32 @@ export async function writeNewFile(dest: string, data: string, fs: SafeWriteFs =
     }
     throw new Error('no free file name');
   } finally {
-    await fs.unlink(tmp).catch(() => undefined);
+    if (created) await fs.unlink(tmp).catch(() => undefined);
   }
 }
 
+/**
+ * `O_EXCL` write of `path`. On any failure other than EEXIST the file is ours (`wx` created it), so whatever part of it
+ * reached the disk is removed before rethrowing (round-3 B5). EEXIST means someone else's file: never touched.
+ */
+async function writeOwned(path: string, data: string, fs: SafeWriteFs, mode: number): Promise<void> {
+  try {
+    await fs.writeFile(path, data, { encoding: 'utf8', mode, flag: 'wx' });
+  } catch (e) {
+    if (errnoOf(e) !== 'EEXIST') await fs.unlink(path).catch(() => undefined);
+    throw e;
+  }
+}
+
+/**
+ * Fallback for filesystems without hard links: an `O_EXCL` write of the final name. A write that fails part-way removes
+ * the partial file it created ({@link writeOwned}), so no partial file is ever left under the final name.
+ */
 async function writeExclusive(dir: string, name: string, from: number, data: string, fs: SafeWriteFs, mode: number): Promise<string> {
   for (let n = from; n <= MAX_NAME_SUFFIX; n += 1) {
     const candidate = join(dir, suffixedName(name, n));
     try {
-      await fs.writeFile(candidate, data, { encoding: 'utf8', mode, flag: 'wx' });
+      await writeOwned(candidate, data, fs, mode);
       return candidate;
     } catch (e) {
       if (errnoOf(e) !== 'EEXIST') throw e;
@@ -80,7 +101,7 @@ async function writeExclusive(dir: string, name: string, from: number, data: str
 /** Atomically replaces a small state file main owns (temp file + rename in the same directory). */
 export async function replaceFileAtomic(dest: string, data: string, fs: SafeWriteFs = realFs): Promise<void> {
   const tmp = join(dirname(dest), `.${basename(dest)}.${randomBytes(6).toString('hex')}.tmp`);
-  await fs.writeFile(tmp, data, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await writeOwned(tmp, data, fs, 0o600); // a failed temp write removes its own partial file (round-3 B5)
   try {
     await fs.rename(tmp, dest);
   } catch (e) {

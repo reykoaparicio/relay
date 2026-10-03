@@ -312,10 +312,11 @@ export async function preflightRun(ctx: EngineCtx, input: StartInput): Promise<R
 /**
  * Files intake would refuse with PERMISSION_DENIED `suspected_secret`: the SAME predicate (tools
  * `unacknowledgedSuspectedSecret`, injected as `projectFs.suspectedSecret`) over the same `readSelected` content and the same acknowledgement list
- * ({@link acknowledgedSuspectedSecrets}) intake uses, so preflight and intake always agree. A diff-input run cannot
+ * ({@link acknowledgedSuspectedSecrets}) intake uses, so preflight and intake always agree: an acknowledgement whose
+ * sha256 no longer matches the file's current bytes is flagged again (round-3 M4). A diff-input run cannot
  * acknowledge (fail closed). Never echoes the content.
  */
-function suspectedSecretIssues(ctx: EngineCtx, input: StartInput, files: readonly { relPath: string; content: string }[]): ValidationIssue[] {
+function suspectedSecretIssues(ctx: EngineCtx, input: StartInput, files: readonly { relPath: string; content: string; sha256: string }[]): ValidationIssue[] {
   const acknowledged = acknowledgedSuspectedSecrets(input.input);
   const selected: readonly string[] = input.input.kind === 'files' ? input.input.relPaths : [];
   return files.flatMap((f) => {

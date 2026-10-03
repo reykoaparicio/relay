@@ -47,6 +47,8 @@ export interface WebContentsLike {
   openDevTools(): void;
   send(channel: string, payload: unknown): void;
   reload(): void;
+  /** Kills the renderer process (Electron): the only way out of a renderer that is stuck in a loop. */
+  forcefullyCrashRenderer(): void;
   on(event: 'did-finish-load' | 'unresponsive' | 'responsive', listener: () => void): unknown;
   on(event: 'render-process-gone', listener: (e: unknown, details: RenderProcessGoneDetails) => void): unknown;
 }
@@ -75,13 +77,20 @@ export const AUTO_RELOAD_WINDOW_MS = 5 * 60_000;
 /**
  * Wires `render-process-gone` / `unresponsive` / `responsive` on `win`: a crash is logged and reloaded once
  * automatically; another crash within {@link AUTO_RELOAD_WINDOW_MS} shows Reload / Quit. A hung renderer is never
- * reloaded behind the user's back (it may recover): it gets Wait / Reload / Quit, dismissed if it recovers.
+ * reloaded behind the user's back (it may recover): it gets Wait / Reload / Quit, dismissed if it recovers. Reload
+ * there crashes the hung renderer (`forcefullyCrashRenderer`) and reloads it once it is gone (round-3 M6).
  */
 export function attachRendererRecovery(win: Pick<WindowLike, 'isDestroyed' | 'webContents'>, d: RendererRecoveryDeps): void {
   const windowMs = d.autoReloadWindowMs ?? AUTO_RELOAD_WINDOW_MS;
   const wc = win.webContents;
   let lastAutoReloadAt: number | null = null;
   let open: { kind: 'crashed' | 'unresponsive'; abort: AbortController } | null = null;
+  /**
+   * Round-3 M6: set when the user chose Reload on a HUNG renderer. A plain `reload()` is queued behind the busy
+   * renderer and never runs, so the renderer is crashed instead; its `render-process-gone` then reloads the window
+   * (without the auto-reload budget or the crash dialog: this crash was asked for).
+   */
+  let forcedReload = false;
 
   const prompt = async (kind: 'crashed' | 'unresponsive'): Promise<void> => {
     if (open !== null) {
@@ -101,11 +110,25 @@ export function attachRendererRecovery(win: Pick<WindowLike, 'isDestroyed' | 'we
     if (abort.signal.aborted && kind === 'unresponsive') choice = 'wait';
     d.logger.info({ event: 'window.recovery_choice', kind, choice, outcome: 'ok' });
     if (win.isDestroyed()) return;
-    if (choice === 'reload') wc.reload();
+    if (choice === 'reload' && kind === 'unresponsive') {
+      forcedReload = true;
+      try {
+        wc.forcefullyCrashRenderer();
+      } catch {
+        forcedReload = false;
+        wc.reload();
+      }
+    } else if (choice === 'reload') wc.reload();
     else if (choice === 'quit') d.quit();
   };
 
   wc.on('render-process-gone', (_e, details) => {
+    if (forcedReload) {
+      forcedReload = false;
+      d.logger.info({ event: 'window.forced_reload', reason: details.reason, outcome: 'ok' });
+      if (!win.isDestroyed()) wc.reload();
+      return;
+    }
     d.logger.error({ event: 'window.renderer_gone', reason: details.reason, exitCode: details.exitCode, outcome: 'error' });
     if (details.reason === 'clean-exit' || win.isDestroyed()) return;
     const n = d.now();

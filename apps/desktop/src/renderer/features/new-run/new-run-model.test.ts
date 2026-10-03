@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { errors, previewResultSchema, runStartInputSchema } from '@relay/contracts';
 import {
   ackEntries,
+  ackInputs,
   acknowledgedFor,
   buildStartInput,
   checkForm,
@@ -124,6 +125,16 @@ describe('suspected secrets and file anchors (E2 #8, #11)', () => {
     expect(validAcknowledged([ack], ['anthropic'], undefined)).toEqual(['src/config/keys.ts']);
   });
 
+  it('ackInputs: valid confirmations with the hash confirmed, else the current preview hash; none without a hash', () => {
+    const A = 'a'.repeat(64);
+    const B = 'b'.repeat(64);
+    const p = previewResultSchema.parse({ ...preview, included: preview.included.map((f) => ({ ...f, sha256: B })) });
+    expect(ackInputs([{ ...KEYS_ACK, sha256: A }], ['src/config/keys.ts'], p)).toEqual([{ relPath: 'src/config/keys.ts', sha256: A }]);
+    expect(ackInputs([{ ...KEYS_ACK, sha256: null }], ['src/config/keys.ts'], p)).toEqual([{ relPath: 'src/config/keys.ts', sha256: B }]);
+    expect(ackInputs([{ ...KEYS_ACK, sha256: null }], ['src/config/keys.ts'], undefined)).toEqual([]);
+    expect(ackInputs([{ ...KEYS_ACK, sha256: A }], [], p)).toEqual([]);
+  });
+
   it('ackEntries records the named providers and the preview hash of a new confirmation, and keeps valid ones', () => {
     const A = 'a'.repeat(64);
     const p = previewResultSchema.parse({ ...preview, included: preview.included.map((f) => ({ ...f, sha256: A })) });
@@ -139,13 +150,17 @@ describe('suspected secrets and file anchors (E2 #8, #11)', () => {
     const d = limitDefaults(undefined);
     const build = (form: NewRunForm, files: readonly string[]) =>
       buildStartInput({ form, projectId: 'prj_1', workflow: { id: 'wfl_1', version: 3 }, files, rows: [], check: checkForm(form, limitTexts(form, d), d, files.length), goal: 'Goal' });
-    const acked = { ...INITIAL_FORM, acknowledgedSecrets: [KEYS_ACK] };
+    const A = 'a'.repeat(64);
+    const acked = { ...INITIAL_FORM, acknowledgedSecrets: [{ ...KEYS_ACK, sha256: A }] };
+    // Round-3 M4: each entry carries the sha256 of the content confirmed.
     expect(build(acked, ['src/a.ts', 'src/config/keys.ts'])?.input).toEqual({
       kind: 'files',
       relPaths: ['src/a.ts', 'src/config/keys.ts'],
-      acknowledgedSuspectedSecrets: ['src/config/keys.ts'],
+      acknowledgedSuspectedSecrets: [{ relPath: 'src/config/keys.ts', sha256: A }],
     });
     expect(build(acked, ['src/a.ts'])?.input).toEqual({ kind: 'files', relPaths: ['src/a.ts'] });
+    // A confirmation without any hash cannot be sent (the engine would flag the file again; the user is asked again).
+    expect(build({ ...INITIAL_FORM, acknowledgedSecrets: [{ ...KEYS_ACK, sha256: null }] }, ['src/config/keys.ts'])?.input).toEqual({ kind: 'files', relPaths: ['src/config/keys.ts'] });
     expect(acknowledgedFor(['x', 'y'], ['y', 'z'])).toEqual(['y']);
   });
 

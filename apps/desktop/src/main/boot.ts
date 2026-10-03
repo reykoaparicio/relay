@@ -41,6 +41,13 @@ export interface BootServices {
   activeRunId(): string | null;
   /** Native confirmation "A run is in progress…"; true = quit anyway. Called only while a run is active. */
   confirmQuitDuringRun(): boolean;
+  /** A backup restore (maintenance runner) is in progress (round-3 L1). Optional: absent = never. */
+  maintenanceRunning?(): boolean;
+  /**
+   * Native confirmation "A backup is being restored…" (same style as {@link confirmQuitDuringRun}); true = quit
+   * anyway. Called only while a restore runs.
+   */
+  confirmQuitDuringRestore?(): boolean;
   /** Writes the clean-quit marker (never rejects). */
   recordCleanQuit(runActive: boolean): Promise<void>;
   flushLogs(): Promise<void>;
@@ -93,6 +100,11 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
 
   let services: BootServices | null = null;
   let quitting = false;
+  /**
+   * Round-3 B3: the layout + launch-marker write (`ensureLayout` → `recordLaunch`, `{ clean: false }`). An early quit
+   * waits for it before writing the clean-quit marker, so the launch write can never land after (and overwrite) it.
+   */
+  let layoutDone: Promise<void> = Promise.resolve();
   app.on('second-instance', () => services?.focusMainWindow());
   app.on('window-all-closed', () => {
     app.quit();
@@ -104,6 +116,13 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
       return; // nothing started yet: let the quit proceed
     }
     const s = services;
+    // Round-3 L1: a restore in progress is asked about like a run (quitting mid-copy is recoverable, but slower).
+    if (s.maintenanceRunning?.() === true && s.confirmQuitDuringRestore?.() === false) {
+      e.preventDefault();
+      s.logger.info({ event: 'app.quit_cancelled', reason: 'restore_in_progress', outcome: 'ok' });
+      s.focusMainWindow();
+      return;
+    }
     const runId = s.activeRunId();
     if (runId !== null && !s.confirmQuitDuringRun()) {
       e.preventDefault(); // the user chose to keep Relay open
@@ -119,6 +138,7 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
       } catch (err) {
         s.logger.error({ event: 'runner.shutdown_failed', outcome: 'error', err: err instanceof Error ? err.message : String(err) });
       }
+      await layoutDone; // never rejects (round-3 B3)
       await s.recordCleanQuit(runId !== null).catch(() => undefined);
       s.logger.info({ event: 'app.quit', runActive: runId !== null, outcome: 'ok' });
       await s.flushLogs().catch(() => undefined);
@@ -133,7 +153,12 @@ export async function boot(deps: BootDeps): Promise<BootServices | null> {
   const s = deps.createServices(cfg);
   services = s;
   s.applySessionPolicy();
-  await s.ensureLayout();
+  const layout = s.ensureLayout();
+  layoutDone = layout.then(
+    () => undefined,
+    () => undefined,
+  );
+  await layout;
   if (quitRequested()) {
     s.logger.info({ event: 'app.boot_aborted', reason: 'quitting', outcome: 'ok' });
     return s;

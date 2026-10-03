@@ -1,7 +1,7 @@
 // Public API of @relay/storage (03). The engine imports only types from here; runtime.ts composes the values.
 export { MIGRATIONS } from '../migrations/index.js';
 export type { Migration } from '../migrations/index.js';
-export { AUTO_BACKUPS_DIRNAME, AUTO_BACKUP_INTERVAL_MS, AUTO_BACKUP_KEEP, autoBackup, createBackup, listBackups, pruneAutoBackups, restoreLatestBackup } from './backup.js';
+export { AUTO_BACKUPS_DIRNAME, AUTO_BACKUP_INTERVAL_MS, AUTO_BACKUP_KEEP, autoBackup, createBackup, listBackups, pruneAutoBackups, recoverInterruptedRestore, restoreLatestBackup } from './backup.js';
 export type {
   AutoBackupOptions,
   BackupEntry,

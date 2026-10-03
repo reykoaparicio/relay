@@ -128,7 +128,6 @@ async function quit(child: ChildProcess): Promise<string> {
  * `productName` was set). The smoke launch must never create or touch either.
  */
 const REAL_PROFILES = ['Relay', '@relay/desktop'].map((n) => path.join(userInfo().homedir, 'Library', 'Application Support', n));
-const REAL_USER_DATA = REAL_PROFILES[0] ?? '';
 async function anyRealProfile(): Promise<string | null> {
   for (const p of REAL_PROFILES) if (await exists(p)) return p;
   return null;
@@ -150,7 +149,8 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
   // build ignores them, and the smoke facts need no provider calls.
   const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, CFFIXED_USER_HOME: home, TMPDIR: parent };
   const child = spawn(path.join(app, 'Contents/MacOS/Relay'), [], { env, detached: true, stdio: 'ignore' });
-  const leaked = async (): Promise<boolean> => (await anyRealProfile()) !== null;
+  /** The real profile the app created (the Relay or the @relay/desktop folder), or null. */
+  const leaked = (): Promise<string | null> => anyRealProfile();
   const onExit = (): void => { killGroup(child, 'SIGKILL'); };
   process.once('exit', onExit);
   const onSignal = (): void => { killGroup(child, 'SIGKILL'); process.exit(130); };
@@ -159,10 +159,14 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
   try {
     const dbFile = path.join(userData, 'relay.sqlite');
     // Watch the real profile while waiting: if isolation fails, stop the app at once.
-    const appeared = await waitFor(DB_WAIT_MS, async () => ((await leaked()) ? 'leaked' : (await exists(dbFile)) ? 'ok' : null));
-    if (appeared === 'leaked') {
+    const appeared = await waitFor(DB_WAIT_MS, async (): Promise<{ leaked: string } | 'ok' | null> => {
+      const profile = await leaked();
+      return profile !== null ? { leaked: profile } : (await exists(dbFile)) ? 'ok' : null;
+    });
+    if (appeared !== null && appeared !== 'ok') {
       killGroup(child, 'SIGKILL');
-      return [{ name: 'smoke launch', ok: false, detail: `isolation failed: the app created ${REAL_USER_DATA} (left in place for you to inspect)` }];
+      // Name the folder that actually appeared (Relay or @relay/desktop), not always the first candidate.
+      return [{ name: 'smoke launch', ok: false, detail: `isolation failed: the app created ${appeared.leaked} (left in place for you to inspect)` }];
     }
     if (appeared === null) return [{ name: 'smoke launch', ok: false, detail: `relay.sqlite not created within ${String(DB_WAIT_MS)} ms in the temp home` }];
     const facts = await waitFor(SEED_WAIT_MS, () => {
@@ -178,8 +182,9 @@ async function smokeLaunch(app: string): Promise<CheckResult[]> {
     }
     if (final === null) return [{ name: 'smoke launch', ok: false, detail: 'relay.sqlite unreadable' }];
     const latest = Math.max(...MIGRATIONS.map((m) => m.version));
-    const isolation: CheckResult = (await leaked())
-      ? { name: 'profile isolation', ok: false, detail: `the app created ${REAL_USER_DATA}` }
+    const leakedAfter = await leaked();
+    const isolation: CheckResult = leakedAfter !== null
+      ? { name: 'profile isolation', ok: false, detail: `the app created ${leakedAfter}` }
       : { name: 'profile isolation', ok: true, detail: 'userData inside the temp home; real profile untouched' };
     return [{ name: 'smoke launch', ok: true, detail: 'relay.sqlite created' }, isolation, ...checkSeedFacts(final, latest)];
   } finally {

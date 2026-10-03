@@ -134,33 +134,75 @@ function revisionsOf(run: RunRow, snapshot: RunSnapshot, all: readonly StepRow[]
   };
 }
 
-/** F17: generates (once) the report artifact of a terminal run. */
-export async function generateReport(ctx: EngineCtx, runId: RunId): Promise<Result<ArtifactId>> {
-  const r = ctx.db.repos;
-  const existing = r.artifacts.listForRun(runId, ['report'])[0];
-  if (existing !== undefined) return ok(existing.id);
-  const run = r.runs.get(runId);
-  if (!isTerminalRunStatus(run.status)) return err(errors.conflict({ reason: 'run_not_terminal' }));
-  const report = reportV1Schema.safeParse(buildReport(ctx, r, { ...run, status: run.status }));
+/** Builds, validates and stores a report of the terminal `runId` (outside any tx). Returns the stored artifact's id + location. */
+async function writeReport(ctx: EngineCtx, r: Repos, run: RunRow & { status: TerminalRunStatus }) {
+  const report = reportV1Schema.safeParse(buildReport(ctx, r, run));
   const correlationId = ctx.ids.next('correlation');
   if (!report.success) {
-    ctx.logger.error('report.invalid', { runId, correlationId });
+    ctx.logger.error('report.invalid', { runId: run.id, correlationId });
     return err(errors.internal(correlationId));
   }
   const id = ctx.ids.next('artifact');
-  const put = await ctx.artifacts.put({ scopeDir: `artifacts/${runId}`, artifactId: id, bytes: utf8(canonicalJson(report.data)), mediaType: 'application/json' });
+  const put = await ctx.artifacts.put({ scopeDir: `artifacts/${run.id}`, artifactId: id, bytes: utf8(canonicalJson(report.data)), mediaType: 'application/json' });
   if (!put.ok) return put;
+  return ok({ id, put: put.value });
+}
+
+/** F17: generates (once) the report artifact of a terminal run. */
+export async function generateReport(ctx: EngineCtx, runId: RunId): Promise<Result<ArtifactId>> {
+  const r = ctx.db.repos;
+  const existing = r.artifacts.listForRun(runId, ['report']).at(-1);
+  if (existing !== undefined) return ok(existing.id);
+  const run = r.runs.get(runId);
+  if (!isTerminalRunStatus(run.status)) return err(errors.conflict({ reason: 'run_not_terminal' }));
+  const written = await writeReport(ctx, r, { ...run, status: run.status });
+  if (!written.ok) return written;
+  const { id, put } = written.value;
   const fx: PostCommitEffect[] = [];
   const row = ctx.db.tx('immediate', (tx) => {
-    const raced = tx.artifacts.listForRun(runId, ['report'])[0]; // another caller (terminal effect / start sweep) won: keep one report
+    const raced = tx.artifacts.listForRun(runId, ['report']).at(-1); // another caller (terminal effect / start sweep) won: keep one report
     if (raced !== undefined) return raced;
-    const art = tx.artifacts.insertIfAbsent({ id, runId, projectId: run.projectId, kind: 'report', relPath: put.value.relPath,
-      sha256: put.value.sha256, sizeBytes: put.value.sizeBytes, mediaType: 'application/json', schemaId: 'report.v1', createdAt: ctx.clock.now() });
+    const art = tx.artifacts.insertIfAbsent({ id, runId, projectId: run.projectId, kind: 'report', relPath: put.relPath,
+      sha256: put.sha256, sizeBytes: put.sizeBytes, mediaType: 'application/json', schemaId: 'report.v1', createdAt: ctx.clock.now() });
     appendRunEvent(tx, fx, runId, 'report.created', { artifactId: art.id });
     return art;
   });
   await runEffects(ctx, fx);
   return ok(row.id);
+}
+
+/**
+ * Round-3 M5: a settlement on a FINISHED run (a late `runs.decideUnknown`, or background reconciliation of one of its
+ * unknown attempts) changes the costs its report states. The report is immutable, so a NEW report artifact is stored
+ * (the run detail and export read the newest one) and `report.created` is appended, so the UI refreshes. A run that
+ * is not terminal (or has no report yet: the terminal effect / start sweep writes the first one) is left alone.
+ * Never throws; a failure is logged and the previous report stays.
+ */
+export async function refreshReport(ctx: EngineCtx, runId: RunId): Promise<Result<ArtifactId | null>> {
+  try {
+    const r = ctx.db.repos;
+    const run = r.runs.get(runId);
+    if (!isTerminalRunStatus(run.status)) return ok(null);
+    if (r.artifacts.listForRun(runId, ['report']).length === 0) return await generateReport(ctx, runId);
+    const written = await writeReport(ctx, r, { ...run, status: run.status });
+    if (!written.ok) {
+      ctx.logger.warn('report.refresh_failed', { runId, code: written.error.code });
+      return written;
+    }
+    const { id, put } = written.value;
+    const fx: PostCommitEffect[] = [];
+    ctx.db.tx('immediate', (tx) => {
+      const art = tx.artifacts.insertIfAbsent({ id, runId, projectId: run.projectId, kind: 'report', relPath: put.relPath,
+        sha256: put.sha256, sizeBytes: put.sizeBytes, mediaType: 'application/json', schemaId: 'report.v1', createdAt: ctx.clock.now() });
+      appendRunEvent(tx, fx, runId, 'report.created', { artifactId: art.id, refreshed: true });
+    });
+    await runEffects(ctx, fx);
+    return ok(id);
+  } catch (e) {
+    const correlationId = ctx.ids.next('correlation');
+    ctx.logger.error('report.refresh_threw', { runId, correlationId, err: e instanceof Error ? e.name : 'unknown' });
+    return err(errors.internal(correlationId));
+  }
 }
 
 /**

@@ -62,7 +62,8 @@ export function makeGitignoreMatcher(rules: GitignoreRules): (relPath: string, i
 }
 
 /**
- * Reads `<dirRel>/.gitignore` through the confined reader; missing or unreadable → null. `dirRel` may be an on-disk
+ * Reads `<dirRel>/.gitignore` through the confined reader (a hard-linked one included, round-3 M2); missing or
+ * unreadable → null. `dirRel` may be an on-disk
  * (possibly NFD) spelling, so it is only schema-checked, not re-normalized. A `.gitignore` that resolves to a secret
  * is never read.
  */
@@ -70,9 +71,10 @@ export async function loadGitignore(root: ProjectRoot, dirRel: string): Promise<
   const rel = relPathBrand.safeParse(dirRel === '' ? '.gitignore' : `${dirRel}/.gitignore`);
   if (!rel.success) return null;
   const noSecrets = { maxFileBytes: INPUT_CAPS.maxFileBytes };
-  const read = await readConfined(root, rel.data, INPUT_CAPS.maxFileBytes, (real) =>
-    classifyByName(real, false, noSecrets) === 'secret' ? 'secret' : null,
-  );
+  // Round-3 M2: the rules are parsed here and never sent, so a hard-linked `.gitignore` is read (refusing it would drop
+  // its rules and include what it ignores: fail open). It is still refused as an input file (read.ts).
+  const notSecret = (real: string) => (classifyByName(real, false, noSecrets) === 'secret' ? 'secret' : null);
+  const read = await readConfined(root, rel.data, INPUT_CAPS.maxFileBytes, notSecret, { allowHardLink: true });
   if (!read.ok) return null;
   return parseGitignore(new TextDecoder().decode(read.value.bytes));
 }

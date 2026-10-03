@@ -7,7 +7,7 @@ export type { Classification, ClassifyContext, EntryStat, Sniff } from './exclus
 export { classify, classifyByContent, classifyByName, compileUserPatterns, sniffBytes } from './exclusions.js';
 export type { ExportArtifactsInput, ExportFailure } from './export.js';
 export { assertExportDestination, exportArtifacts, isSafeFileName, writeExportFile } from './export.js';
-export type { SuspectedSecret, SuspectedSecretLabel } from './secret-scan.js';
+export type { SecretAcknowledgement, SuspectedSecret, SuspectedSecretLabel } from './secret-scan.js';
 export { SECRET_SCAN_MAX_CHARS, detectSuspectedSecret, unacknowledgedSuspectedSecret } from './secret-scan.js';
 export { sha256Hex } from './hash.js';
 export type { NormalizeOptions, OpenRootOptions, PathRelation, ProjectRoot, RelPath } from './paths.js';

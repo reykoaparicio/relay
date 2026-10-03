@@ -5,7 +5,7 @@
 import { ok } from '@relay/contracts';
 import type { AppError, ArtifactId, EpochMs, ProjectId, Result, RunId, Sha256, StepRunId } from '@relay/contracts';
 import type { Repos, RunInputFile, RunRow } from '@relay/storage';
-import type { InputFileRef, SelectedFile } from '@relay/tools';
+import type { InputFileRef, SecretAcknowledgement, SelectedFile } from '@relay/tools';
 import { computeIntakeContextHash } from '../manifest.js';
 import type { EngineCtx } from '../ports.js';
 import { appendRunEvent } from '../run-machine.js';
@@ -18,21 +18,29 @@ import { blockRun, commitIfReady, setupBlocked } from './local.js';
 export type Snapshotted = { readonly file: SelectedFile; readonly ref: InputFileRef };
 
 /**
- * The run input's explicit acknowledgement of suspected-secret files (E2 #11; `RunInput.acknowledgedSuspectedSecrets`).
- * Used by BOTH preflight and intake (with the shared tools `unacknowledgedSuspectedSecret` predicate) so they agree.
- * Read defensively so an input without the field means "none acknowledged". Only a `files` input can acknowledge: a
- * `diff` input never can, so a suspected secret in a file its diff references always blocks the run (fail closed).
+ * The run input's explicit acknowledgement of suspected-secret files (E2 #11; `RunInput.acknowledgedSuspectedSecrets`),
+ * each bound to the sha256 of the content the user confirmed (round-3 M4). Used by BOTH preflight and intake / the
+ * resnapshot (with the shared tools `unacknowledgedSuspectedSecret` predicate) so they agree. Read defensively so an
+ * input without the field means "none acknowledged"; an entry without a hash (a legacy bare relPath) never matches.
+ * Only a `files` input can acknowledge: a `diff` input never can, so a suspected secret in a file its diff references
+ * always blocks the run (fail closed).
  */
-export function acknowledgedSuspectedSecrets(input: RunRow['input']): string[] {
+export function acknowledgedSuspectedSecrets(input: RunRow['input']): SecretAcknowledgement[] {
   if (input.kind !== 'files') return [];
   const v: unknown = (input as { readonly acknowledgedSuspectedSecrets?: unknown }).acknowledgedSuspectedSecrets;
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((x: unknown) => {
+    if (typeof x !== 'object' || x === null) return [];
+    const { relPath, sha256 } = x as { readonly relPath?: unknown; readonly sha256?: unknown };
+    return typeof relPath === 'string' && typeof sha256 === 'string' ? [{ relPath, sha256 }] : [];
+  });
 }
 
 /**
  * Reads `relPaths` from the project root ONCE and snapshots their bytes as `input_file` artifacts (reusing this run's
  * existing snapshot per sha). Used by intake and by `resnapshot_and_replan` (06 F10). A file whose content looks like a
- * credential is refused (PERMISSION_DENIED `suspected_secret`, E2 #11) unless the run input acknowledges it. A missing
+ * credential is refused (PERMISSION_DENIED `suspected_secret`, E2 #11) unless the run input acknowledges it with the
+ * hash of its CURRENT content (round-3 M4: a file changed since the confirmation is checked and refused again). A missing
  * project folder is PROJECT_ROOT_MISSING (E2 #7); an unreadable file PERMISSION_DENIED `unreadable` naming it (E2 #8).
  */
 export async function snapshotSelectedFiles(ctx: EngineCtx, runId: RunId, relPaths: readonly string[]): Promise<Snapshotted[] | { error: AppError }> {

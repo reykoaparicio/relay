@@ -5478,9 +5478,22 @@ Channel `relay/v1/runs.preflight` · query · route `runner`
               "maxItems": 200,
               "type": "array",
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "type": "object",
+                "properties": {
+                  "relPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "relPath",
+                  "sha256"
+                ]
               }
             }
           },
@@ -5825,9 +5838,22 @@ Channel `relay/v1/runs.start` · command · route `runner`
               "maxItems": 200,
               "type": "array",
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "type": "object",
+                "properties": {
+                  "relPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "relPath",
+                  "sha256"
+                ]
               }
             }
           },
@@ -6499,9 +6525,22 @@ Channel `relay/v1/runs.get` · query · route `runner`
               "maxItems": 200,
               "type": "array",
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "type": "object",
+                "properties": {
+                  "relPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "relPath",
+                  "sha256"
+                ]
               }
             }
           },
@@ -10341,9 +10380,22 @@ Channel `relay/v1/runs.decideUnknown` · command · route `runner`
               "maxItems": 200,
               "type": "array",
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "type": "object",
+                "properties": {
+                  "relPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "relPath",
+                  "sha256"
+                ]
               }
             }
           },
@@ -11703,9 +11755,22 @@ Channel `relay/v1/runs.retryStep` · command · route `runner`
               "maxItems": 200,
               "type": "array",
               "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512
+                "type": "object",
+                "properties": {
+                  "relPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "relPath",
+                  "sha256"
+                ]
               }
             }
           },

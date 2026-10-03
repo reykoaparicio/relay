@@ -37,6 +37,7 @@ import { logSafe } from './log-safe.js';
 import { toModelProfile } from './profiles.js';
 import { adapterOf } from './provider-lookup.js';
 import { resumeIfUnknownsResolved } from './recovery.js';
+import { refreshReport } from './report.js';
 import { nextPurpose } from './retry.js';
 import type { PostCommitEffect } from './run-machine.js';
 import { allowedRunActions, appendRunEvent, applyRunEvent, runEffects } from './run-machine.js';
@@ -142,13 +143,19 @@ function revisionReason(run: RunRow): ConfigRevisionReason {
 
 // ---------------------------------------------------------------- next-admission estimate (increaseAllowance, projects.update)
 
+/** {@link estimateNextReservation}: the next step's estimate could not be built. */
+export const ESTIMATE_UNAVAILABLE = 'unavailable';
+/** N of the next reservation, null = nothing to admit, or {@link ESTIMATE_UNAVAILABLE}. */
+export type NextReservation = Microusd | null | typeof ESTIMATE_UNAVAILABLE;
+
 /**
- * N of the next eligible model step, built exactly like dispatch (context → request → adapter estimate), or null
- * when no model step is left or the estimate cannot be built (the loop's authoritative checks then decide).
+ * N of the next eligible model step, built exactly like dispatch (context → request → adapter estimate); null when no
+ * model step is open yet (nothing to admit: e.g. a run blocked before intake); {@link ESTIMATE_UNAVAILABLE} when the
+ * estimate cannot be built (round-3 B1: a budget pause is then KEPT — nothing proves the budget admits the step).
  * F2 (security): nothing is sent toward a provider the project no longer allows or that has no credential ref — the
- * key is never resolved and the adapter never asked; null lets the dispatch-time checks pause the run instead.
+ * key is never resolved and the adapter never asked.
  */
-export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Promise<Microusd | null> {
+export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Promise<NextReservation> {
   const r = ctx.db.repos;
   const run = r.runs.get(runId);
   const step = openModelSteps(r, run).find((s) => s.state === 'ready' || s.state === 'pending');
@@ -156,16 +163,16 @@ export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Pro
   try {
     const stepSnap = effectiveStepSnapshot(r, run, step.stepKey);
     const providerId = stepSnap.profile.providerId;
-    if (!r.projects.get(run.projectId).providerPolicy.allowedProviderIds.includes(providerId) || r.credentials.get(providerId) === undefined) return null;
+    if (!r.projects.get(run.projectId).providerPolicy.allowedProviderIds.includes(providerId) || r.credentials.get(providerId) === undefined) return ESTIMATE_UNAVAILABLE;
     const prior = r.attempts.listForStep(step.id);
     const purpose = nextPurpose(step, prior);
     const assembled = await ctx.context.assemble({ run, step, snapshot: stepSnap.profile, stepSpec: stepSnap,
       preservedSnapshot: hasSnapshotPreserved(r, runId), purpose, priorAttempts: prior });
-    if (!assembled.ok) return null;
+    if (!assembled.ok) return ESTIMATE_UNAVAILABLE;
     const request = buildModelRequest(ctx.templates, stepSnap, assembled.value, { attemptId: 'estimate', runId, stepKey: step.stepKey, purpose },
       r.projects.get(run.projectId).providerPolicy.providerOptions);
     const adapter = adapterOf(ctx, stepSnap.profile.providerId);
-    if (!adapter.ok) return null; // no adapter: the dispatch-time check pauses the run (fail closed there)
+    if (!adapter.ok) return ESTIMATE_UNAVAILABLE; // no adapter: the dispatch-time check pauses the run (fail closed there)
     const credential = await ctx.credentials.resolve({ providerId: stepSnap.profile.providerId, purpose: 'dispatch', attemptId: null });
     const estimate = await adapter.value.estimate(request, stepSnap.profile.prices, {
       ...(credential.ok ? { apiKey: credential.value } : {}), priceCatalogVersion: stepSnap.profile.priceCatalogVersion,
@@ -173,7 +180,7 @@ export async function estimateNextReservation(ctx: EngineCtx, runId: RunId): Pro
     return estimate.upperAllowanceMicrousd;
   } catch (e) {
     ctx.logger.warn('estimate.next_failed', { runId, err: logSafe(e) });
-    return null;
+    return ESTIMATE_UNAVAILABLE;
   }
 }
 
@@ -407,21 +414,34 @@ function costNow(r: Repos, runId: RunId): CostSummary {
  * Re-check of a `paused(budget_run | budget_project)` run inside the caller's tx (E1 #1): RESUME_RESOLVED when the
  * next admission passes; otherwise, when the OTHER scope is now the one that fails, the run moves to that scope's
  * pause (BUDGET_BLOCKED, the breakdown as its detail) so the offered action is the one that can unblock it. Returns
- * the failing breakdown (null when resumed).
+ * whether it resumed and the failing breakdown (null when resumed or unknown).
+ *
+ * Round-3 B1: when the next reservation cannot be estimated ({@link ESTIMATE_UNAVAILABLE}: no credential, provider
+ * not allowed, no adapter, …) nothing proves the budget now admits it, so the pause is KEPT. In particular a project
+ * allowance edit re-checks a `budget_run` pause only through a real admission of N: it resumes only when both scopes
+ * pass (the project limit was the cause) and moves it only when the project scope fails.
+ * Round-3 B2: a scope move keeps the `stepKey` / `estimatedInputTokens` of the old pause detail, so the profile
+ * options keep their `step_estimate` basis.
  */
-function recheckBudgetPause(r: Repos, fx: PostCommitEffect[], run: RunRow, N: Microusd | null, now: EpochMs): BudgetBreakdown | null {
+function recheckBudgetPause(r: Repos, fx: PostCommitEffect[], run: RunRow, N: NextReservation, now: EpochMs): { resumed: boolean; breakdown: BudgetBreakdown | null } {
+  if (N === ESTIMATE_UNAVAILABLE) return { resumed: false, breakdown: null };
   const next = nextAdmission(r, run, N, now);
   if (next.ok || next.breakdown === null) {
     applyRunEvent(r, run, { type: 'RESUME_RESOLVED' }, now, fx);
-    return null;
+    return { resumed: true, breakdown: null };
   }
   const scope = next.breakdown.scope === 'project' ? 'project' : 'run';
   const wanted: PauseReason = scope === 'project' ? 'budget_project' : 'budget_run';
   if (isPausedFor(run, ['budget_run', 'budget_project']) && run.pauseReason !== wanted) {
+    const old = run.statusDetail?.details ?? {};
+    const carried = {
+      ...(typeof old['stepKey'] === 'string' ? { stepKey: old['stepKey'] } : {}),
+      ...(typeof old['estimatedInputTokens'] === 'number' ? { estimatedInputTokens: old['estimatedInputTokens'] } : {}),
+    };
     appendRunEvent(r, fx, run.id, 'ledger.blocked', { ...next.breakdown, stepRunId: null });
-    applyRunEvent(r, run, { type: 'BUDGET_BLOCKED', scope, error: errors.budgetBlocked(next.breakdown) }, now, fx);
+    applyRunEvent(r, run, { type: 'BUDGET_BLOCKED', scope, error: errors.budgetBlocked(next.breakdown, { details: carried }) }, now, fx);
   }
-  return next.breakdown;
+  return { resumed: false, breakdown: next.breakdown };
 }
 
 /**
@@ -440,6 +460,8 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
   if (early !== null) return early;
   const before = ctx.db.repos.runs.get(input.runId);
   const N = isPausedFor(before, ['budget_run', 'budget_overrun']) ? await estimateNextReservation(ctx, before.id) : null;
+  // An overrun is acknowledged by its own action; an unavailable estimate there admits nothing (as before).
+  const overrunN = N === ESTIMATE_UNAVAILABLE ? null : N;
   const res = await inTx(ctx, (r, fx, now) => {
     // E1 #7: a concurrent same-key request committed while this one estimated: replay its result, never re-apply.
     const again = replayOf(r);
@@ -455,10 +477,10 @@ export async function increaseAllowance(ctx: EngineCtx, input: IncreaseAllowance
     r.runs.setLimits(run.id, { ...run.limits, budgetMicrousd: input.newAllowanceMicrousd });
     appendRunEvent(r, fx, run.id, 'run.limits_raised', { budgetMicrousd: { from: L, to: input.newAllowanceMicrousd } });
     let budget: BudgetBreakdown | null = null;
-    if (isPausedFor(run, ['budget_run'])) budget = recheckBudgetPause(r, fx, r.runs.get(run.id), N, now);
+    if (isPausedFor(run, ['budget_run'])) budget = recheckBudgetPause(r, fx, r.runs.get(run.id), N, now).breakdown;
     else if (isPausedFor(run, ['budget_overrun'])) {
       // An overrun is never moved to another pause here: acknowledge_overrun stays offered (dispatch then decides).
-      const next = nextAdmission(r, run, N, now);
+      const next = nextAdmission(r, run, overrunN, now);
       if (next.ok) applyRunEvent(r, r.runs.get(run.id), { type: 'RESUME_RESOLVED' }, now, fx);
       else budget = next.breakdown;
     }
@@ -483,7 +505,7 @@ export async function reevaluateProjectBudget(ctx: EngineCtx, projectId: RunRow[
     const res = await inTx(ctx, (r, fx, now) => {
       const cur = r.runs.get(run.id);
       if (!isPausedFor(cur, ['budget_project', 'budget_run'])) return ok(false);
-      return ok(recheckBudgetPause(r, fx, cur, N, now) === null);
+      return ok(recheckBudgetPause(r, fx, cur, N, now).resumed);
     });
     if (res.ok && res.value) resumed.push(run.id);
   }
@@ -502,6 +524,16 @@ interface DecideUnknownInput {
 }
 
 /**
+ * Round-3 L2: the date a user-decided settlement of an unknown charge is booked at — when the request was sent
+ * (`dispatchedAt`, else when the attempt was created). The liability it resolves was booked then, so the resolve and
+ * the settle land in the same month: a decision taken weeks later never moves an old charge into the current month's
+ * project spend (§9.3 month window).
+ */
+function chargeDateOf(a: AttemptRow): EpochMs {
+  return a.dispatchedAt ?? a.createdAt;
+}
+
+/**
  * E1 #4: on a terminal run only the liability is settled — the ledger and the attempt, never the step or the run. A
  * retry makes no sense there, so `retry_acknowledging_charge` is refused; `accept_estimated_charge` turns the unknown
  * liability into an `estimated` settled cost (it stops counting against later months); `mark_failed_keep_liability`
@@ -512,7 +544,7 @@ function applyTerminalUnknownDecision(r: Repos, fx: PostCommitEffect[], run: Run
   if (input.decision === 'accept_estimated_charge') {
     const liability = r.ledger.attemptBalances(a.id).unknown;
     r.ledger.append(resolveUnknownEntries({ liability, settled: liability, certainty: 'estimated', attemptId: a.id, runId: run.id,
-      projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now }));
+      projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: chargeDateOf(a) }));
     r.attempts.transition(a.id, ['unknown'], 'failed', { error: errors.requestOutcomeUnknown(a.id, { details: { chargeAccepted: true } }), finishedAt: now });
   } else {
     r.attempts.transition(a.id, ['unknown'], 'abandoned', { error: errors.requestOutcomeUnknown(a.id, { details: { decision: input.decision } }), finishedAt: now });
@@ -544,7 +576,7 @@ function applyUnknownDecision(r: Repos, fx: PostCommitEffect[], run: RunRow, inp
     case 'accept_estimated_charge': {
       const liability = r.ledger.attemptBalances(a.id).unknown;
       r.ledger.append(resolveUnknownEntries({ liability, settled: liability, certainty: 'estimated', attemptId: a.id, runId: run.id,
-        projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: now }));
+        projectId: run.projectId, priceCatalogVersion: a.priceCatalogVersion, createdAt: chargeDateOf(a) }));
       r.attempts.transition(a.id, ['unknown'], 'failed', { error: errors.requestOutcomeUnknown(a.id, { details: { chargeAccepted: true } }), finishedAt: now });
       if (step.state === 'unknown') applyStepEvent(r, fx, step, 'USER_ABANDON', { error: errors.requestOutcomeUnknown(a.id) });
       break;
@@ -575,6 +607,8 @@ export async function decideUnknown(ctx: EngineCtx, input: DecideUnknownInput): 
   });
   if (!res.ok) return res;
   ctx.wake.signal();
+  // Round-3 M5: settling a liability of a FINISHED run changes what its report states: store a fresh report.
+  if (isTerminalRunStatus(ctx.db.repos.runs.get(input.runId).status)) await refreshReport(ctx, input.runId);
   return ok(runDetail(ctx, input.runId));
 }
 

@@ -424,12 +424,14 @@ function failIfUnreadable(w: FakeWorld, input: RunInputIn): void {
 
 /**
  * Files of the input that look like they hold a secret and are not acknowledged (E2 #11): the selected files, or the
- * files an imported diff touches (a diff input cannot acknowledge one: the engine fails closed).
+ * files an imported diff touches (a diff input cannot acknowledge one: the engine fails closed). Like the engine
+ * (round-3 M4), an acknowledgement holds only while its sha256 is the file's current (preview) hash.
  */
 function unacknowledgedSecrets(w: FakeWorld, input: RunInputIn) {
   const files = input.kind === 'files' ? input.relPaths : (w.diffFiles.get(input.diffArtifactId) ?? []);
-  const acked = new Set(input.kind === 'files' ? (input.acknowledgedSuspectedSecrets ?? []) : []);
-  return w.preview.included.filter((f) => f.suspectedSecret === true && files.includes(f.relPath) && !acked.has(f.relPath));
+  const acks = input.kind === 'files' ? (input.acknowledgedSuspectedSecrets ?? []) : [];
+  const acked = (f: { relPath: string; sha256: string | null }) => acks.some((a) => a.relPath === f.relPath && a.sha256 === f.sha256);
+  return w.preview.included.filter((f) => f.suspectedSecret === true && files.includes(f.relPath) && !acked(f));
 }
 
 /**
@@ -618,7 +620,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     w.projects = w.projects.map((p) => (p.id === next.id ? next : p));
     return next;
   },
-  // Engine `relocateRoot`: archived → CONFLICT; an unverified folder (no earlier file matches) needs `confirm`.
+  // Engine `relocateRoot`: archived → CONFLICT; an unverified folder (no clear majority of earlier files matches) needs `confirm`.
   'projects.relocate': (w, input, ctx) => {
     const project = w.projects.find((p) => p.id === input.projectId) ?? fail(errors.notFound('project'));
     if (project.archivedAt !== null) fail(errors.conflict({ entity: 'project', reason: 'archived' }));

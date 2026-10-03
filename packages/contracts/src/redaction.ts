@@ -9,11 +9,13 @@ import { assertNever } from './assert.js';
 const NB = '(?<![A-Za-z0-9])';
 /**
  * Left boundary for the distinctive-prefix rules (sk-ant-, sk-proj-, sk-svcacct-, gh*_/github_pat_, AIza): {@link NB},
- * or right after a literal `\n` / `\t` / `\r` escape (JSON text, e.g. `"Key rejected:\nsk-ant-…"`) or a `%XX` URL
- * escape (`%22sk-ant-…`), whose last char is a letter or digit (audit F3). The generic `sk-` rule keeps plain
- * {@link NB}: after `%2D` or `\n` in random text it would over-match. Fixed-length lookbehinds: still linear.
+ * or right after a JSON escape whose last char is a letter or digit — `\n` / `\t` / `\r` (e.g. `"Key
+ * rejected:\nsk-ant-…"`, audit F3), `\b` / `\f`, or a complete `\uXXXX` (round-3 B6: `x\u003csk-ant-…`, which
+ * `JSON.stringify` writes for control characters) — or a `%XX` URL escape (`%22sk-ant-…`). The generic `sk-` rule
+ * keeps plain {@link NB}: after `%2D` or `\n` in random text it would over-match. Each alternative is a fixed-length
+ * lookbehind (2, 6 or 3 chars) checked once per start position: still linear.
  */
-const NB_ESC = `(?:${NB}|(?<=\\\\[nrt]|%[0-9A-Fa-f]{2}))`;
+const NB_ESC = `(?:${NB}|(?<=\\\\[nrtbf]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2}))`;
 /** An optional quote around a JSON key or value, possibly backslash-escaped (`"`, `'`, `\"`). */
 const Q = `(?:\\\\?["'])?`;
 /** Characters of a credential-shaped token (base64/base64url, JWT, and API key alphabets). */

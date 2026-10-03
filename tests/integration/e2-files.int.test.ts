@@ -2,6 +2,7 @@
 // re-pointed with verification (#7); one unreadable file is PERMISSION_DENIED `unreadable` naming it (#8); export
 // reports per part and retries only the failed one (#10); content-suspected secrets are flagged in the preview and
 // refused at intake (#11); hard links are excluded (#13).
+import { createHash } from 'node:crypto';
 import { chmod, link, readdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -155,7 +156,8 @@ describe('E2 suspected secrets: preflight and intake agree (#11)', () => {
       const x = await createHarness({ start: false });
       h = x;
       await writeFile(join(x.projectRoot, 'src', 'deploy.ts'), c.content);
-      const input = { kind: 'files' as const, relPaths: ['src/errors.ts', 'src/deploy.ts'], ...(c.ack ? { acknowledgedSuspectedSecrets: ['src/deploy.ts'] } : {}) };
+      const ack = { relPath: 'src/deploy.ts', sha256: createHash('sha256').update(c.content, 'utf8').digest('hex') };
+      const input = { kind: 'files' as const, relPaths: ['src/errors.ts', 'src/deploy.ts'], ...(c.ack ? { acknowledgedSuspectedSecrets: [ack] } : {}) };
       const base = { projectId: x.projectId, workflowId: x.workflowId, workflowVersion: 1, goal: 'Fix the defects in the handlers.', input };
 
       const pre = await x.call('relay/v1/runs.preflight', base);

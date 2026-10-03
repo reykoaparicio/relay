@@ -37,6 +37,7 @@ import type {
   ReadOptions,
   ScanOptions,
   ScanResult,
+  SecretAcknowledgement,
   SelectedFile,
   SuspectedSecret,
 } from '@relay/tools';
@@ -185,9 +186,10 @@ export interface ProjectFsPort {
   checkDiffPaths(root: ProjectRoot, diff: ImportedDiff, opts?: DiffCheckOptions): Promise<Result<void>>;
   /**
    * E2 #11 tools `unacknowledgedSuspectedSecret`: the ONE suspected-secret predicate. `runs.preflight` calls it on the
-   * files it read; intake applies it inside `readSelected({ secretCheck })`. Same function → they never disagree.
+   * files it read; intake applies it inside `readSelected({ secretCheck })`. Same function → they never disagree. An
+   * acknowledgement holds only while `sha256` (of the bytes read now) matches the one acknowledged (round-3 M4).
    */
-  suspectedSecret(file: { readonly relPath: string; readonly content: string }, acknowledged: readonly string[]): SuspectedSecret | null;
+  suspectedSecret(file: { readonly relPath: string; readonly content: string; readonly sha256: string }, acknowledged: readonly SecretAcknowledgement[]): SuspectedSecret | null;
 }
 
 /** 05 E7 export writes (FR-10), injected by runtime.ts. */

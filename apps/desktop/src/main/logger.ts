@@ -178,6 +178,25 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
     }
   };
 
+  /**
+   * Round-3 B4: logs/ removed while Relay runs (ENOENT on append) is re-created once — `ensured` is reset and the
+   * append retried — instead of degrading to the fallback for the rest of the session.
+   */
+  const recreatedDir = (e: unknown): boolean => {
+    if ((e as { code?: unknown } | null)?.code !== 'ENOENT') return false;
+    ensured = false;
+    return ensureDir();
+  };
+
+  const appendSyncOnce = (file: string, data: string): void => {
+    try {
+      fs.appendFileSync(join(dir, file), data);
+    } catch (e) {
+      if (!recreatedDir(e)) throw e;
+      fs.appendFileSync(join(dir, file), data);
+    }
+  };
+
   const writeSync = (batch: [string, string][]): void => {
     if (batch.length === 0) return;
     const primary = ensureDir();
@@ -187,7 +206,7 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
         continue;
       }
       try {
-        fs.appendFileSync(join(dir, file), data);
+        appendSyncOnce(file, data);
         setDegraded(false);
       } catch {
         writeFallback(file, data);
@@ -206,7 +225,12 @@ export function createFileLogger(dir: string, now: () => number = Date.now, opts
     const run = async (): Promise<void> => {
       for (const [file, data] of group(batch)) {
         try {
-          await fs.appendFile(join(dir, file), data);
+          try {
+            await fs.appendFile(join(dir, file), data);
+          } catch (e) {
+            if (!recreatedDir(e)) throw e;
+            await fs.appendFile(join(dir, file), data);
+          }
           setDegraded(false);
         } catch {
           writeFallback(file, data);

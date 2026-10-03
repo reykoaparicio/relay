@@ -22,13 +22,18 @@ import { useWorkflow } from '../../hooks/useWorkflow';
 import { useNextAction } from '../common/useNextAction';
 import { FilePicker } from '../new-run/FilePicker';
 import {
+  ackEntries,
+  ackInputs,
   acknowledgedFor,
+  acknowledgedInput,
   budgetFromError,
   defaultFiles,
   deniedSecretMessage,
   deniedSecretsOf,
   fileCheckboxIds,
+  validAcknowledged,
 } from '../new-run/new-run-model';
+import type { SecretAck } from '../new-run/new-run-model';
 import { appErrorOf } from '../../api/errors';
 import { PROVIDER_LABELS } from '../../lib/format';
 import { paths } from '../shell/paths';
@@ -63,9 +68,11 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
   // Every included file except suspected secrets (E2 #11) until the user narrows the selection (New run's FilePicker:
   // see and narrow the input); a suspected secret is added only by a confirmed tick.
   const [chosenFiles, setChosenFiles] = useState<readonly string[] | null>(null);
-  const [acknowledged, setAcknowledged] = useState<readonly string[]>([]);
+  // Each confirmation records the preview hash of the content confirmed (round-3 M4): a file changed since is asked again.
+  const [acknowledged, setAcknowledged] = useState<readonly SecretAck[]>([]);
   const relPaths = [...(chosenFiles ?? defaultFiles(preview.data))];
-  const acked = acknowledgedFor(relPaths, acknowledged);
+  const validAcks = validAcknowledged(acknowledged, [], preview.data);
+  const acked = acknowledgedFor(relPaths, validAcks);
   const checkboxIds = fileCheckboxIds(preview.data);
   const rows =
     workflow.data === undefined || profiles.data === undefined ? [] : modelSteps(workflow.data.spec, profiles.data);
@@ -83,7 +90,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
           input: {
             kind: 'files' as const,
             relPaths,
-            ...(acked.length === 0 ? {} : { acknowledgedSuspectedSecrets: acked }),
+            ...acknowledgedInput(relPaths, ackInputs(acknowledged, acked, preview.data)),
           },
           limitOverrides: {
             ...('value' in allowance ? { budgetMicrousd: allowance.value } : {}),
@@ -270,7 +277,7 @@ export function ReviewStep({ state, dispatch, go }: StepProps) {
         providerNames={providerNames}
         onChange={(next, ack) => {
           setChosenFiles(next);
-          setAcknowledged(ack);
+          setAcknowledged(ackEntries(ack, acknowledged, validAcks, [], preview.data));
         }}
         fieldError={showErrors && preview.data !== undefined && relPaths.length === 0 ? 'Select at least one file.' : undefined}
       />

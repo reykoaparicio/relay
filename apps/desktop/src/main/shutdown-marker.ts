@@ -47,17 +47,25 @@ export function createShutdownMarker(d: ShutdownMarkerDeps): ShutdownMarker {
   const readText = d.readText ?? ((p: string) => fsp.readFile(p, 'utf8').catch(() => null));
   const writeText = d.writeText ?? ((p: string, t: string) => replaceFileAtomic(p, t));
   let prev: LastShutdown | null = null;
+  /**
+   * Round-3 B3: the marker operations run one after another in CALL order (the launch's read + write is one step), so
+   * a launch write that is still in flight can never land after — and overwrite — a clean quit.
+   */
+  let chain: Promise<void> = Promise.resolve();
+  const serial = (step: () => Promise<void>): Promise<void> => {
+    chain = chain.then(step).catch(() => undefined);
+    return chain;
+  };
   const write = async (m: LastShutdown): Promise<void> => {
     await writeText(file, `${JSON.stringify(m)}\n`).catch(() => undefined);
   };
   return {
     previous: () => prev,
-    async recordLaunch() {
-      prev = parseShutdownMarker(await readText(file).catch(() => null));
-      await write({ clean: false, at: epochMs(d.now()), runActive: false });
-    },
-    async recordCleanQuit(runActive) {
-      await write({ clean: true, at: epochMs(d.now()), runActive });
-    },
+    recordLaunch: () =>
+      serial(async () => {
+        prev = parseShutdownMarker(await readText(file).catch(() => null));
+        await write({ clean: false, at: epochMs(d.now()), runActive: false });
+      }),
+    recordCleanQuit: (runActive) => serial(() => write({ clean: true, at: epochMs(d.now()), runActive })),
   };
 }

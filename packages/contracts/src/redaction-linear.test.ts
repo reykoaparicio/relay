@@ -84,10 +84,17 @@ describe('redaction runs in linear time on adversarial input', () => {
 
 const OLD_NB = '(?<![A-Za-z0-9])';
 /**
- * Deliberate change (audit F3): the distinctive-prefix rules also match right after a literal `\n`/`\t`/`\r` or a
- * `%XX` escape. The oracle carries that boundary so the agreement tests below still pin everything else.
+ * Deliberate changes, the ONLY allowed differences from the previous implementation. The oracle carries the same left
+ * boundary, so the agreement tests below still pin everything else (the value rules, the generic `sk-` rule, the
+ * keep/secret groups, the tails):
+ * - audit F3: the distinctive-prefix rules (sk-ant-, sk-proj-, sk-svcacct-, gh*_/github_pat_, AIza) also match right
+ *   after a literal `\n`/`\t`/`\r` or a `%XX` escape;
+ * - round-3 B6: … and right after the other JSON escapes whose last char is a letter or digit: `\b`, `\f` and a
+ *   complete `\uXXXX`. A key there (`x\u003csk-ant-…`, `"a\bghp_…"`) used to be missed, so the new code redacts /
+ *   detects strictly MORE: e.g. `\bsk-ant-admin01-…` (fast-check's counterexample against the old boundary). The
+ *   generic `sk-` rule is unchanged (plain lookbehind), so `\bsk-<16+ chars>` is still not a generic match.
  */
-const OLD_NB_ESC = `(?:${OLD_NB}|(?<=\\\\[nrt]|%[0-9A-Fa-f]{2}))`;
+const OLD_NB_ESC = `(?:${OLD_NB}|(?<=\\\\[nrtbf]|\\\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2}))`;
 const OLD_Q = `(?:\\\\?["'])?`;
 const OLD_CRED = 'A-Za-z0-9_\\-+/=.~';
 const OLD_CREDENTIAL_VALUE = `(?!\\[REDACTED)(?=[${OLD_CRED}]*\\d)(?=[${OLD_CRED}]*[A-Za-z])[${OLD_CRED}]{16,}(?![${OLD_CRED}(])`;

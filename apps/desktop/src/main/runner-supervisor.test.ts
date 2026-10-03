@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errors, ok } from '@relay/contracts';
 import type { PushEvent, Result } from '@relay/contracts';
 import type { LogFields, MainLogger } from './logger.js';
-import { RESTART_BACKOFF_MS, createRunnerSupervisor, minimalEnv } from './runner-supervisor.js';
+import { MAINTENANCE_QUIT_WAIT_MS, RESTART_BACKOFF_MS, createRunnerSupervisor, minimalEnv } from './runner-supervisor.js';
 import type { SupervisorDeps } from './runner-supervisor.js';
 
 vi.mock('electron', () => ({}));
@@ -651,6 +651,48 @@ describe('runner supervisor: manual recovery, lastFatal, activeRunId, maintenanc
 
     await expect(p).resolves.toMatchObject({ ok: true, result: { ok: true, restored: true } });
     expect(sup.state().state).toBe('unavailable'); // the caller restarts
+  });
+
+  it('round-3 L1: shutdown() during a restore waits for the maintenance child to finish (no kill); maintenanceRunning() reports it', async () => {
+    const { sup, children } = await fatalBoot();
+    expect(sup.maintenanceRunning()).toBe(false);
+    const m = sup.runMaintenance('restore_latest_backup');
+    const maint = children[1];
+    if (maint === undefined) throw new Error('no maintenance child');
+    expect(sup.maintenanceRunning()).toBe(true);
+    let shutDown = false;
+    const s = sup.shutdown({ graceMs: 5_000 }).then(() => {
+      shutDown = true;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shutDown).toBe(false); // the quit waits for the restore
+    expect(maint.killed).toBe(false);
+
+    maint.port.deliver({ kind: 'maintenance.result', task: 'restore_latest_backup',
+      result: { ok: true, restored: true, restoredFromDisplayPath: '~/b', backupCreatedAt: 5, previousMovedToDisplayPath: null } });
+    maint.emit('exit', 0);
+    await s;
+    await expect(m).resolves.toMatchObject({ ok: true });
+    expect(maint.killed).toBe(false);
+    expect(sup.maintenanceRunning()).toBe(false);
+  });
+
+  it('round-3 L1: shutdown() kills a restore that outlives the quit cap', async () => {
+    const { sup, children, lines } = await fatalBoot();
+    void sup.runMaintenance('restore_latest_backup');
+    const maint = children[1];
+    if (maint === undefined) throw new Error('no maintenance child');
+    let shutDown = false;
+    void sup.shutdown({ graceMs: 5_000 }).then(() => {
+      shutDown = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(MAINTENANCE_QUIT_WAIT_MS + 1);
+
+    expect(maint.killed).toBe(true);
+    expect(shutDown).toBe(true);
+    expect(lines).toContainEqual(expect.objectContaining({ event: 'runner.kill', reason: 'maintenance_quit' }));
+    expect(sup.maintenanceRunning()).toBe(false);
   });
 
   it('runMaintenance passes the task in the env and reports an exit without a result', async () => {

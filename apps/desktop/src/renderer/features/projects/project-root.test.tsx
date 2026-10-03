@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../../api/fake-bridge';
 import { sid } from '../../api/fake-scenarios/world';
 import { renderApp } from '../testing/render-app';
+import { verificationText } from './ProjectRootMissing';
 
 async function missingPanel() {
   const title = await screen.findByText('Project folder not found');
@@ -47,6 +48,12 @@ describe('missing project folder (E2 #7)', () => {
     await waitFor(() => {
       expect(screen.queryByText('Project folder not found')).not.toBeInTheDocument();
     });
+  });
+
+  it('verificationText: none / a partial match (the engine confirms unless a clear majority matches) / nothing to compare', () => {
+    expect(verificationText({ checkedFiles: 9, matchedFiles: 0, mismatched: [] })).toBe('Relay compared 9 files it used before with this folder: none match.');
+    expect(verificationText({ checkedFiles: 9, matchedFiles: 1, mismatched: [] })).toBe('Relay compared 9 files it used before with this folder: only 1 match.');
+    expect(verificationText({ checkedFiles: 0, matchedFiles: 0, mismatched: [] })).toBe('Relay has no earlier files of this project to compare with this folder.');
   });
 
   it('a cancelled folder dialog changes nothing', async () => {

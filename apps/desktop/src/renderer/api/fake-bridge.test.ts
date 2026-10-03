@@ -415,9 +415,13 @@ describe('fake bridge', () => {
       expect(pf.ok && pf.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([expect.objectContaining({ path: 'input.relPaths.1' })]);
       const start = await bridge.invoke('relay/v1/runs.start', { ...base, idempotencyKey: '01JABCDEFGHJKMNPQRSTVWXYZ0', input: { kind: 'files', relPaths } });
       expect(!start.ok && start.error.details).toMatchObject({ reason: 'suspected_secret', denied: [{ relPath: 'src/config/keys.ts', secretLabel: 'anthropic_key', secretLine: 4 }] });
-      const acked = { kind: 'files' as const, relPaths, acknowledgedSuspectedSecrets: ['src/config/keys.ts'] };
+      const acked = { kind: 'files' as const, relPaths, acknowledgedSuspectedSecrets: [{ relPath: 'src/config/keys.ts', sha256: flagged?.sha256 ?? '' }] };
       const pf2 = await bridge.invoke('relay/v1/runs.preflight', { ...base, input: acked });
       expect(pf2.ok && pf2.data.issues.some((i) => i.code === 'suspected_secret')).toBe(false);
+      // Round-3 M4: an acknowledgement of other content (a different hash) is flagged again.
+      const stale = { ...acked, acknowledgedSuspectedSecrets: [{ relPath: 'src/config/keys.ts', sha256: 'f'.repeat(64) }] };
+      const pf3 = await bridge.invoke('relay/v1/runs.preflight', { ...base, input: stale });
+      expect(pf3.ok && pf3.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([expect.objectContaining({ path: 'input.relPaths.1' })]);
     });
 
     it('unreadable-file: preview lists unreadable entries; preflight denies a selected unreadable file', async () => {

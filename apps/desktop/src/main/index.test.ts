@@ -180,6 +180,54 @@ describe('boot @m1', () => {
     expect(calls).toContain('quit');
   });
 
+  it('round-3 B3: an early quit waits for the launch marker (ensureLayout) before writing the clean-quit marker', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    let finishLayout: () => void = () => undefined;
+    services.ensureLayout = () => {
+      calls.push('layout');
+      return new Promise<void>((r) => (finishLayout = () => {
+        calls.push('layout.done'); // recordLaunch wrote { clean: false }
+        r();
+      }));
+    };
+    const booting = boot({ ...BASE, app, env: {}, createServices: () => services });
+    await flush();
+
+    app.fire('before-quit');
+    finishShutdown();
+    await flush();
+    // The launch marker is still being written: the clean-quit marker must not race it (it would be overwritten).
+    expect(calls).not.toContain('cleanQuit:false');
+    finishLayout();
+    await booting;
+    await flush();
+
+    expect(calls.indexOf('layout.done')).toBeGreaterThan(-1);
+    expect(calls.indexOf('cleanQuit:false')).toBeGreaterThan(calls.indexOf('layout.done'));
+    expect(calls).toContain('quit');
+  });
+
+  it('round-3 B3: a failing ensureLayout never blocks the quit', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    let failLayout: () => void = () => undefined;
+    services.ensureLayout = () => new Promise<void>((_r, reject) => (failLayout = () => { reject(new Error('disk full')); }));
+    const booting = boot({ ...BASE, app, env: {}, createServices: () => services });
+    await flush();
+
+    app.fire('before-quit');
+    finishShutdown();
+    failLayout();
+    await expect(booting).rejects.toThrow('disk full');
+    await flush();
+
+    expect(calls).toContain('cleanQuit:false');
+    expect(calls).toContain('quit');
+  });
+
   it('F6: a quit before whenReady resolves never creates services', async () => {
     const calls: string[] = [];
     const app = fakeApp(calls);
@@ -282,6 +330,32 @@ describe('boot @m1', () => {
     expect(calls.slice(calls.indexOf('confirm'))).toEqual(['confirm', 'supervisor.shutdown', 'cleanQuit:true', 'flush', 'quit']);
   });
 
+  it('round-3 L1: before-quit during a restore asks first; "keep open" cancels the quit; "quit anyway" shuts down', async () => {
+    const calls: string[] = [];
+    const app = fakeApp(calls);
+    const { services, finishShutdown } = fakeServices(calls);
+    let answer = false;
+    services.maintenanceRunning = () => true;
+    services.confirmQuitDuringRestore = () => {
+      calls.push('confirmRestore');
+      return answer;
+    };
+    await boot({ ...BASE, app, env: {}, createServices: () => services });
+
+    const kept = app.fire('before-quit');
+    expect(kept.prevented).toBe(true);
+    expect(calls).not.toContain('supervisor.shutdown');
+    expect(calls).toContain('focus');
+
+    answer = true;
+    app.fire('before-quit');
+    finishShutdown();
+    await flush();
+    expect(calls.filter((c) => c === 'confirmRestore')).toHaveLength(2);
+    expect(calls).toContain('supervisor.shutdown');
+    expect(calls).toContain('quit');
+  });
+
   it('before-quit with no run in flight never prompts and records a clean quit', async () => {
     const calls: string[] = [];
     const app = fakeApp(calls);
@@ -350,7 +424,7 @@ describe('userData writability probe', () => {
 describe('renderer recovery', () => {
   function fakeWin() {
     const handlers = new Map<string, (...a: unknown[]) => void>();
-    const log = { reloads: 0, destroyed: false };
+    const log = { reloads: 0, destroyed: false, crashes: 0 };
     const win = {
       isDestroyed: () => log.destroyed,
       webContents: {
@@ -358,6 +432,9 @@ describe('renderer recovery', () => {
         send: () => undefined,
         reload: () => {
           log.reloads += 1;
+        },
+        forcefullyCrashRenderer: () => {
+          log.crashes += 1;
         },
         on: (event: string, l: (...a: unknown[]) => void) => {
           handlers.set(event, l);
@@ -440,6 +517,30 @@ describe('renderer recovery', () => {
     expect(log.reloads).toBe(0);
   });
 
+  it('round-3 M6: Reload on a hung renderer force-crashes it, then reloads on render-process-gone without the crash dialog or the auto-reload budget', async () => {
+    const { win, log, emit } = fakeWin();
+    let now = 0;
+    const ask = vi.fn<(kind: 'crashed' | 'unresponsive', signal: AbortSignal) => Promise<RecoveryChoice>>(() => Promise.resolve('reload'));
+    const quit = vi.fn();
+    attachRendererRecovery(win, { logger: nullLogger, now: () => now, ask, quit });
+
+    emit('unresponsive');
+    await flush();
+    // A frozen renderer never runs a plain reload(): it is crashed instead, and reloaded once it is gone.
+    expect(log.crashes).toBe(1);
+    expect(log.reloads).toBe(0);
+    emit('render-process-gone', {}, { reason: 'killed', exitCode: 9 });
+    expect(log.reloads).toBe(1);
+    expect(ask).toHaveBeenCalledTimes(1); // no "stopped working again" dialog for the crash we caused
+
+    // The forced crash did not spend the automatic-reload budget: a real crash soon after is still reloaded silently.
+    now += 1_000;
+    emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 });
+    expect(log.reloads).toBe(2);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(quit).not.toHaveBeenCalled();
+  });
+
   it('never reloads a destroyed window', () => {
     const { win, log, emit } = fakeWin();
     log.destroyed = true;
@@ -484,6 +585,7 @@ describe('main window', () => {
         },
         send: () => undefined,
         reload: () => undefined,
+        forcefullyCrashRenderer: () => undefined,
         on: () => undefined,
       };
     };

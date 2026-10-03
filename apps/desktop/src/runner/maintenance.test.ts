@@ -14,7 +14,7 @@ describe('runner maintenance mode', () => {
   it('restore_latest_backup: maps the storage result to display paths', async () => {
     const restore = vi.fn(() => Promise.resolve({
       restoredFrom: '/Users/a/Library/Relay/backups/2026-10-01', backupCreatedAt: 42, backupKind: 'auto' as const,
-      previousMovedTo: '/Users/a/Library/Relay/relay.sqlite.before-restore-1', restoredArtifacts: 0,
+      previousMovedTo: '/Users/a/Library/Relay/relay.sqlite.before-restore-1', restoredArtifacts: 0, artifactsNotRestored: 0,
     }));
 
     const r = await runMaintenanceTask('restore_latest_backup', { userDataDir: '/Users/a/Library/Relay', homeDir: '/Users/a', restore, clock: { now: () => epochMs(1) } });

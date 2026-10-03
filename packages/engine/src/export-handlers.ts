@@ -71,7 +71,7 @@ async function readJson(ctx: EngineCtx, id: ArtifactId, entity: string): Promise
 /** The run's report (generated once if the terminal run lacks one, F17); NOT_FOUND for a run that has not ended. */
 async function runReport(ctx: EngineCtx, runId: RunId): Promise<Result<ReportV1>> {
   const r = ctx.db.repos;
-  let id = r.artifacts.listForRun(runId, ['report'])[0]?.id;
+  let id = r.artifacts.listForRun(runId, ['report']).at(-1)?.id; // the newest (a late settlement refreshes it)
   if (id === undefined) {
     if (!isTerminalRunStatus(r.runs.get(runId).status)) return err(errors.notFound('report', {}, { details: { reason: 'run_not_terminal' } }));
     const made = await generateReport(ctx, runId);

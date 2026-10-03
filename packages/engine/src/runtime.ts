@@ -9,7 +9,7 @@ import { createIdGen, err, errors, ok, systemClock, toDisplayPath } from '@relay
 import type { Clock, ModelCapabilities, PushEvent } from '@relay/contracts';
 import { connectionTestRequest, createProviderRegistry, loadCatalogEntries, supportsRequestLookupFor } from '@relay/providers';
 import type { FakeCallLog, FakeScenario, ProviderRegistry } from '@relay/providers';
-import { createBackup, createMaintenance, openDb } from '@relay/storage';
+import { createBackup, createMaintenance, openDb, recoverInterruptedRestore } from '@relay/storage';
 import type { Db } from '@relay/storage';
 import { createTemplateRegistry } from '@relay/templates';
 import type { TemplateRegistry } from '@relay/templates';
@@ -135,6 +135,8 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const timers = o.timers ?? globalTimers;
   mkdirSync(o.userDataDir, { recursive: true });
   const dbPath = join(o.userDataDir, 'relay.sqlite');
+  // Round-3 L1: a backup restore killed mid-swap (quit, crash) is completed before the database is opened.
+  if (await recoverInterruptedRestore(o.userDataDir)) logger.warn('restore.recovered_interrupted', {});
   const db = await openDb({ path: dbPath, clock, ids, backupsDir: join(o.userDataDir, 'backups'), ...(o.isPidAlive === undefined ? {} : { isPidAlive: o.isPidAlive }) });
   try {
     const templates = o.templates ?? createTemplateRegistry();

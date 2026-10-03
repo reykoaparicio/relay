@@ -7,6 +7,13 @@ import { PROFILES } from '../api/fake-scenarios/world';
 import { renderApp } from '../features/testing/render-app';
 import { budgetBreakdown } from '../components/ui/test-fixtures';
 
+/** Round-3 M4: the acknowledgement the form sends for the flagged fake file — its path and the previewed content hash. */
+function keysAck(bridge: ReturnType<typeof createFakeBridge>): { relPath: string; sha256: string } {
+  const f = bridge.world.preview.included.find((x) => x.relPath === 'src/config/keys.ts');
+  if (f === undefined || f.sha256 === null) throw new Error('the fake preview gives no hash for src/config/keys.ts');
+  return { relPath: f.relPath, sha256: f.sha256 };
+}
+
 const NEW_RUN = `/p/${FAKE_PROJECT_ID}/runs/new`;
 const SLOW = { timeout: 3000 };
 
@@ -551,7 +558,7 @@ describe('NewRunPage (J7)', () => {
       expect(screen.getByRole('checkbox', { name: KEYS })).toBeChecked();
       await waitFor(() => {
         expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toMatchObject({
-          input: { acknowledgedSuspectedSecrets: [KEYS] },
+          input: { acknowledgedSuspectedSecrets: [keysAck(bridge)] },
         });
       }, SLOW);
       await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
@@ -559,9 +566,9 @@ describe('NewRunPage (J7)', () => {
       await waitFor(() => {
         expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
       });
-      const input = bridge.callsTo('relay/v1/runs.start')[0]?.input as { input: { relPaths: string[]; acknowledgedSuspectedSecrets?: string[] } };
+      const input = bridge.callsTo('relay/v1/runs.start')[0]?.input as { input: { relPaths: string[]; acknowledgedSuspectedSecrets?: unknown[] } };
       expect(input.input.relPaths).toContain(KEYS);
-      expect(input.input.acknowledgedSuspectedSecrets).toEqual([KEYS]);
+      expect(input.input.acknowledgedSuspectedSecrets).toEqual([keysAck(bridge)]); // round-3 M4: bound to the previewed content
     });
 
     it('unticking a confirmed file drops its acknowledgement', async () => {
@@ -626,8 +633,8 @@ describe('NewRunPage (J7)', () => {
       await waitFor(() => {
         expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
       });
-      const input = bridge.callsTo('relay/v1/runs.start')[0]?.input as { input: { acknowledgedSuspectedSecrets?: string[] } };
-      expect(input.input.acknowledgedSuspectedSecrets).toEqual([KEYS]);
+      const input = bridge.callsTo('relay/v1/runs.start')[0]?.input as { input: { acknowledgedSuspectedSecrets?: unknown[] } };
+      expect(input.input.acknowledgedSuspectedSecrets).toEqual([keysAck(bridge)]); // round-3 M4: bound to the previewed content
     });
 
     it('a diff touching a flagged file: advice that can be followed (no "confirm" for a diff), linked to the import', async () => {

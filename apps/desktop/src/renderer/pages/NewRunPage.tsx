@@ -25,6 +25,7 @@ import {
 import { UnreadableFileActions } from '../features/new-run/UnreadableFileActions';
 import {
   ackEntries,
+  ackInputs,
   budgetFromError,
   buildStartInput,
   checkForm,
@@ -101,6 +102,8 @@ export function NewRunPage() {
   const receiving = [...roles.keys()];
   // E2 #11: a confirmation holds only while it named every receiving provider and the file is unchanged.
   const acknowledged = validAcknowledged(form.acknowledgedSecrets, receiving, preview.data);
+  // Round-3 M4: each is sent with the hash of the content confirmed; the engine flags a file changed since.
+  const ackInput = ackInputs(form.acknowledgedSecrets, acknowledged, preview.data);
   const wfVersion = wfSummary?.latestValidatedVersion ?? null;
   const wfRef =
     wfSummary === undefined || wfVersion === null ? null : { id: wfSummary.id, version: wfVersion };
@@ -116,7 +119,7 @@ export function NewRunPage() {
     rows,
     check,
     goal: goal === '' ? 'Draft goal' : goal,
-    acknowledged,
+    acknowledged: ackInput,
   });
   const draftKey = draft === null ? null : canonicalJson(draft);
   const settled = useDebouncedValue(draftKey ?? '', PREFLIGHT_DEBOUNCE_MS);
@@ -176,7 +179,7 @@ export function NewRunPage() {
   useNavPerf('new-run', project.data !== undefined && workflow.data !== undefined);
 
   // ----- problems (validation-errors), budget (budget-blocked) and readiness: one pure derivation -----
-  const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal, acknowledged });
+  const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal, acknowledged: ackInput });
   const submitKey = submittable === null ? null : canonicalJson(submittable);
   const state = deriveNewRunState({
     form,

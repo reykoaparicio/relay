@@ -1,5 +1,6 @@
 // E2 file-tool fixes: hard links refused (#13, audit F5), suspected secrets by content (#11, audit F1) in the scan
 // preview and at intake (readSelected secretCheck), and the content detector itself.
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,6 +19,7 @@ afterEach(async () => {
 const ANT = ['sk', 'ant', 'api03', 'Ab3dEfGh1JkLmN0pQrStUvWxYz0123456789abcd'].join('-');
 const GH = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
 const AWS = ['AKIA', 'ABCDEFGHIJ234567'].join('');
+const sha = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
 
 async function openRoot(dir: string) {
   const r = await openProjectRoot(dir, { userDataDir: path.join(dir, '..', 'relay-ud-never') });
@@ -47,6 +49,27 @@ describe('#13 hard links (audit F5)', () => {
     expect(JSON.stringify(selected)).not.toContain('OUTSIDE');
   });
 
+  it('round-3 M2: a hard-linked .gitignore still applies its rules (never "no rules": fail closed), in the scan and in direct reads', async () => {
+    const shared = await tmp.make('relay-shared-');
+    const dir = await tmp.make();
+    await writeTree(shared, { 'shared.gitignore': 'private-notes.md\nsub/hidden.txt\n' });
+    await writeTree(dir, { 'a.ts': 'export const a = 1;\n', 'private-notes.md': 'do not send\n', 'sub/hidden.txt': 'nor this\n' });
+    await fs.promises.link(path.join(shared, 'shared.gitignore'), path.join(dir, '.gitignore'));
+    const root = await openRoot(dir);
+
+    const scan = await scanProject(root);
+    const read = await readSelected(root, ['private-notes.md'], { respectGitignore: true });
+    const nested = await readSelected(root, ['sub/hidden.txt'], { respectGitignore: true });
+
+    expect(scan.ok && scan.value.included.map((f) => f.relPath)).toEqual(['a.ts']);
+    expect(scan.ok && scan.value.excluded).toEqual(expect.arrayContaining([{ relPath: 'private-notes.md', reason: 'gitignored', isDirectory: false }]));
+    expect(read.ok).toBe(false);
+    expect(nested.ok).toBe(false);
+    expect(JSON.stringify([read, nested])).not.toContain('do not send');
+    // The .gitignore itself is still never sent: reading it as an input file is refused as a hard link.
+    expect((await readSelected(root, ['.gitignore'])).ok).toBe(false);
+  });
+
   it('two hard-linked names inside the project are both refused (the inode is shared; nlink > 1)', async () => {
     const dir = await tmp.make();
     await writeTree(dir, { 'a.txt': 'same\n' });
@@ -59,13 +82,17 @@ describe('#13 hard links (audit F5)', () => {
 });
 
 describe('#11 suspected secrets by content (audit F1)', () => {
-  it('unacknowledgedSuspectedSecret (the shared preflight/intake predicate) = detectSuspectedSecret unless acknowledged', () => {
-    const hit = { relPath: 'src/k.ts', content: `const k = '${GH}';` };
+  it('unacknowledgedSuspectedSecret (the shared preflight/intake predicate) = detectSuspectedSecret unless acknowledged WITH the current content hash', () => {
+    const content = `const k = '${GH}';`;
+    const hit = { relPath: 'src/k.ts', content, sha256: sha(content) };
 
     expect(unacknowledgedSuspectedSecret(hit, [])).toEqual(detectSuspectedSecret(hit.content));
-    expect(unacknowledgedSuspectedSecret(hit, ['src/other.ts'])).not.toBeNull();
-    expect(unacknowledgedSuspectedSecret(hit, ['src/k.ts'])).toBeNull();
-    expect(unacknowledgedSuspectedSecret({ relPath: 'a.ts', content: "const api_key = 'abcdefghijklmnopqrstuvwx';" }, [])).toBeNull();
+    expect(unacknowledgedSuspectedSecret(hit, [{ relPath: 'src/other.ts', sha256: sha(content) }])).not.toBeNull();
+    expect(unacknowledgedSuspectedSecret(hit, [{ relPath: 'src/k.ts', sha256: sha(content) }])).toBeNull();
+    // Round-3 M4: the same path with a different (older) content hash is flagged again.
+    expect(unacknowledgedSuspectedSecret(hit, [{ relPath: 'src/k.ts', sha256: sha('const k = "fixture";') }])).toEqual(detectSuspectedSecret(content));
+    const clean = "const api_key = 'abcdefghijklmnopqrstuvwx';";
+    expect(unacknowledgedSuspectedSecret({ relPath: 'a.ts', content: clean, sha256: sha(clean) }, [])).toBeNull();
   });
 
   it('detectSuspectedSecret reports a label and a line, never the value; prose and placeholders are not hits', () => {
@@ -98,6 +125,10 @@ describe('#11 suspected secrets by content (audit F1)', () => {
       ['src/config.ts', { label: 'github_token', line: 1 }],
     ]);
     expect(off.ok && off.value.included.every((f) => f.suspectedSecret === undefined)).toBe(true);
+    // Round-3 M4: a flagged file carries the hash of its bytes (the confirmation binds to it); others do not pay for one.
+    expect(on.ok && on.value.included.map((f) => [f.relPath, f.sha256 ?? null])).toEqual([
+      ['src/a.ts', null], ['src/big.ts', sha(big)], ['src/config.ts', sha(`export const key = '${GH}';\n`)],
+    ]);
   });
 
   it('intake (secretCheck) refuses an unacknowledged suspected secret with PERMISSION_DENIED suspected_secret, and reads it once acknowledged', async () => {
@@ -106,7 +137,8 @@ describe('#11 suspected secrets by content (audit F1)', () => {
     const root = await openRoot(dir);
 
     const refused = await readSelected(root, ['src/a.ts', 'src/config.ts'], { secretCheck: { acknowledged: [] } });
-    const acknowledged = await readSelected(root, ['src/a.ts', 'src/config.ts'], { secretCheck: { acknowledged: ['src/config.ts'] } });
+    const acknowledged = await readSelected(root, ['src/a.ts', 'src/config.ts'], { secretCheck: { acknowledged: [{ relPath: 'src/config.ts', sha256: sha(`export const key = '${GH}';\n`) }] } });
+    const staleAck = await readSelected(root, ['src/config.ts'], { secretCheck: { acknowledged: [{ relPath: 'src/config.ts', sha256: sha('export const key = 1;\n') }] } });
     const unchecked = await readSelected(root, ['src/config.ts']);
 
     expect(refused.ok).toBe(false);
@@ -116,6 +148,7 @@ describe('#11 suspected secrets by content (audit F1)', () => {
       denied: [{ relPath: 'src/config.ts', reason: 'suspected_secret', secretLabel: 'github_token', secretLine: 1 }] });
     expect(JSON.stringify(refused.error)).not.toContain(GH);
     expect(acknowledged.ok && acknowledged.value.files.map((f) => f.relPath)).toEqual(['src/a.ts', 'src/config.ts']);
+    expect(staleAck.ok || staleAck.error.details?.['reason']).toBe('suspected_secret'); // round-3 M4: hash mismatch
     expect(unchecked.ok).toBe(true);
   });
 

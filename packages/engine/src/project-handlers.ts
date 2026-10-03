@@ -120,10 +120,19 @@ const RELOCATE_VERIFY_FILES = 200;
 const RELOCATE_MISMATCH_LIST = 20;
 
 /**
+ * Round-3 M3: a re-pointed folder counts as the same project only when a clear majority of the known files match —
+ * at least half of the checked files AND at least min(3, checked) of them. One shared boilerplate file is not enough.
+ */
+function isVerifiedRoot(v: { readonly checkedFiles: number; readonly matchedFiles: number }): boolean {
+  return v.checkedFiles > 0 && v.matchedFiles * 2 >= v.checkedFiles && v.matchedFiles >= Math.min(3, v.checkedFiles);
+}
+
+/**
  * `projects.relocateRoot` (E2 #7): re-points a moved / renamed project. The new folder goes through the same root
  * checks as a new project (`openRoot`), must not be another active project's folder, and is verified by comparing the
- * live hashes of up to 200 previously used files (their newest `run_input_files` hash). With no match — or no known
- * file at all — it is CONFLICT `root_unverified` (with `details.verification`) unless `confirm` is set.
+ * live hashes of up to 200 previously used files (their newest `run_input_files` hash). Unless a clear majority matches
+ * ({@link isVerifiedRoot}) — or with no known file at all — it is CONFLICT `root_unverified` (with
+ * `details.verification`) unless `confirm` is set. The verification is returned either way.
  */
 export async function relocateRoot(ctx: EngineCtx, input: ParsedInputOf<'relay/v1/projects.relocateRoot'>): Promise<Result<RootRelocation>> {
   const r = ctx.db.repos;
@@ -140,11 +149,13 @@ export async function relocateRoot(ctx: EngineCtx, input: ParsedInputOf<'relay/v
   const liveBy = new Map((live?.value ?? []).map((h) => [h.relPath as string, h.sha256]));
   const mismatched = known.filter((f) => liveBy.get(f.relPath) !== f.sha256).map((f) => f.relPath);
   const verification = { checkedFiles: known.length, matchedFiles: known.length - mismatched.length, mismatched: mismatched.slice(0, RELOCATE_MISMATCH_LIST) };
-  if (verification.matchedFiles === 0 && input.confirm !== true) {
+  if (!isVerifiedRoot(verification) && input.confirm !== true) {
     return err(errors.conflict({ entity: 'project', reason: 'root_unverified', verification }, {
       userMessage: known.length === 0
         ? 'Relay has no earlier files to compare with this folder. Confirm that it is the same project.'
-        : 'None of the files Relay used before match this folder. Confirm that it is the same project.',
+        : verification.matchedFiles === 0
+          ? 'None of the files Relay used before match this folder. Confirm that it is the same project.'
+          : `Only ${String(verification.matchedFiles)} of the ${String(known.length)} files Relay used before match this folder. Confirm that it is the same project.`,
     }));
   }
   const moved = ctx.db.txResult('immediate', (tx) => tx.projects.setRoot(project.id, { rootRealpath: root.value.realpath, rootDisplayPath: input.rootDisplayPath }));

@@ -38,20 +38,31 @@ export const workflowLimitsSchema = runLimitsSchema.partial();
 export type WorkflowLimits = z.infer<typeof workflowLimitsSchema>;
 
 /**
+ * One acknowledgement of a suspected secret (E2 #11, round-3 M4): the selected file the user confirmed sending although
+ * its content looks like it holds a secret, bound to the content the user saw — the sha256 of the file's bytes (the
+ * `projects.previewFiles` / `previewRoot` `sha256` of a flagged file). Preflight, intake and a resnapshot honour it only
+ * while the file's CURRENT content still has that hash; a changed file is flagged (`suspected_secret`) again.
+ */
+export const suspectedSecretAckSchema = z.object({ relPath: relPathSchema, sha256: sha256Schema });
+/** Suspected-secret acknowledgement. */
+export type SuspectedSecretAck = z.infer<typeof suspectedSecretAckSchema>;
+
+/**
  * The `files` run input. `acknowledgedSuspectedSecrets`: selected files the user confirmed sending although their
  * content looks like it holds a secret (intake refuses such a file with PERMISSION_DENIED `suspected_secret` unless it
- * is listed here); every entry must be one of `relPaths`. Kept on the stored input, so intake sees it on re-parse.
+ * is listed here WITH its current content hash); every entry must be one of `relPaths`. Kept on the stored input, so
+ * intake and a resnapshot see it on re-parse.
  */
 const filesRunInputSchema = z
   .object({
     kind: z.literal('files'),
     relPaths: z.array(relPathSchema).min(1).max(INPUT_CAPS.maxFiles),
-    acknowledgedSuspectedSecrets: z.array(relPathSchema).max(INPUT_CAPS.maxFiles).optional(),
+    acknowledgedSuspectedSecrets: z.array(suspectedSecretAckSchema).max(INPUT_CAPS.maxFiles).optional(),
   })
   .superRefine((v, ctx) => {
     const selected = new Set(v.relPaths);
-    (v.acknowledgedSuspectedSecrets ?? []).forEach((p, i) => {
-      if (!selected.has(p)) ctx.addIssue({ code: 'custom', path: ['acknowledgedSuspectedSecrets', i], message: 'Not one of the selected files.' });
+    (v.acknowledgedSuspectedSecrets ?? []).forEach((a, i) => {
+      if (!selected.has(a.relPath)) ctx.addIssue({ code: 'custom', path: ['acknowledgedSuspectedSecrets', i, 'relPath'], message: 'Not one of the selected files.' });
     });
   });
 
@@ -62,6 +73,24 @@ export const runInputSchema = z.discriminatedUnion('kind', [
 ]);
 /** Run input. */
 export type RunInput = z.infer<typeof runInputSchema>;
+
+/**
+ * Drops acknowledgements stored by an earlier build (round-3 M4), which were bare relPaths with no content hash. They
+ * can never be matched against the file's current content, so they are treated as "not acknowledged": an old run
+ * that re-reads its files (intake retry, resnapshot) flags such a file again (fail closed) instead of failing to load.
+ */
+function dropLegacyAcks(v: unknown): unknown {
+  if (typeof v !== 'object' || v === null || (v as { kind?: unknown }).kind !== 'files') return v;
+  const acks = (v as { acknowledgedSuspectedSecrets?: unknown }).acknowledgedSuspectedSecrets;
+  if (!Array.isArray(acks) || !acks.some((a) => typeof a === 'string')) return v;
+  const kept = acks.filter((a) => typeof a !== 'string');
+  const rest: Record<string, unknown> = { ...(v as Record<string, unknown>) };
+  delete rest['acknowledgedSuspectedSecrets'];
+  return kept.length === 0 ? rest : { ...rest, acknowledgedSuspectedSecrets: kept };
+}
+
+/** A run input as stored in `runs.input_json` (storage re-parse): {@link runInputSchema}, legacy string acks dropped. */
+export const storedRunInputSchema = z.preprocess(dropLegacyAcks, runInputSchema);
 
 /**
  * `runs.start` input (§12.5). `memoryRecordIds` = approved records the user ticked; pinned user rules are always

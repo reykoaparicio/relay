@@ -1,6 +1,7 @@
 // E1 regression tests: F2 (no estimate egress to a provider the project no longer allows), the monotonic deadline
 // (Mac sleep / clock set back), a key rejected during a run marks the provider failing, instruction versioning, the
 // optional step name, choose-profile estimates, run-level attempts + manifest, and suspected-secret preflight issues.
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { epochMs } from '@relay/contracts';
 import type { ProviderId, RunId, StepKey } from '@relay/contracts';
@@ -378,12 +379,15 @@ describe('suspected secrets (E2 coordination)', () => {
     const base = { projectId: x.projectId, workflowId: wf, workflowVersion: 1, goal: 'g' };
 
     const plain = await x.engine.handle('relay/v1/runs.preflight', { ...base, input: { kind: 'files', relPaths: ['src/handlers/user.ts', 'src/config.ts'] } });
-    const acked = await x.engine.handle('relay/v1/runs.preflight', { ...base, input: { kind: 'files', relPaths: ['src/handlers/user.ts', 'src/config.ts'], acknowledgedSuspectedSecrets: ['src/config.ts'] } });
-    const outside = await x.engine.handle('relay/v1/runs.start', { ...base, idempotencyKey: 'e1-secret-start-001', input: { kind: 'files', relPaths: ['src/handlers/user.ts'], acknowledgedSuspectedSecrets: ['src/config.ts'] } });
+    const ack = { relPath: 'src/config.ts', sha256: createHash('sha256').update(SECRET, 'utf8').digest('hex') };
+    const acked = await x.engine.handle('relay/v1/runs.preflight', { ...base, input: { kind: 'files', relPaths: ['src/handlers/user.ts', 'src/config.ts'], acknowledgedSuspectedSecrets: [ack] } });
+    const stale = await x.engine.handle('relay/v1/runs.preflight', { ...base, input: { kind: 'files', relPaths: ['src/handlers/user.ts', 'src/config.ts'], acknowledgedSuspectedSecrets: [{ ...ack, sha256: 'a'.repeat(64) }] } });
+    const outside = await x.engine.handle('relay/v1/runs.start', { ...base, idempotencyKey: 'e1-secret-start-001', input: { kind: 'files', relPaths: ['src/handlers/user.ts'], acknowledgedSuspectedSecrets: [ack] } });
 
     expect(plain.ok && plain.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([expect.objectContaining({ path: 'input.relPaths.1' })]);
     expect(plain.ok && JSON.stringify(plain.data.issues)).not.toContain('sk-ant');
     expect(acked.ok && acked.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([]);
+    expect(stale.ok && stale.data.issues.filter((i) => i.code === 'suspected_secret')).toEqual([expect.objectContaining({ path: 'input.relPaths.1' })]);
     expect(outside.ok ? null : outside.error.code).toBe('VALIDATION_FAILED');
   });
 });

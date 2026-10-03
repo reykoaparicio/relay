@@ -7,7 +7,7 @@ import { sha256Hex } from './hash.js';
 import type { ProjectRoot } from './paths.js';
 import { isSecretRootPath, normalizeRelPath, readConfined } from './paths.js';
 import type { InputCaps } from './scan.js';
-import type { SuspectedSecretLabel } from './secret-scan.js';
+import type { SecretAcknowledgement, SuspectedSecretLabel } from './secret-scan.js';
 import { unacknowledgedSuspectedSecret } from './secret-scan.js';
 
 /** Options for {@link readSelected}. */
@@ -16,10 +16,11 @@ export interface ReadOptions {
   readonly exclusions?: readonly string[];
   readonly respectGitignore?: boolean;
   /**
-   * E2 #11 (intake): refuse files whose content looks like a credential (`suspected_secret`) unless their relPath is in
-   * `acknowledged` (the run input's `acknowledgedSuspectedSecrets`). Omitted = no content check.
+   * E2 #11 (intake): refuse files whose content looks like a credential (`suspected_secret`) unless `acknowledged` (the
+   * run input's `acknowledgedSuspectedSecrets`) names their relPath with the sha256 of the bytes read now (round-3 M4).
+   * Omitted = no content check.
    */
-  readonly secretCheck?: { readonly acknowledged: readonly string[] };
+  readonly secretCheck?: { readonly acknowledged: readonly SecretAcknowledgement[] };
 }
 
 /** One file read at intake. `sha256` is computed over exactly `bytes` (feeds `run_input_files` and the context hash). */
@@ -95,11 +96,12 @@ async function readOne(root: ProjectRoot, rel: RelPath, ctx: ClassifyContext, se
   if (sniffed !== null) return denied(rel, sniffed);
   const content = decodeUtf8(bytes);
   if (content === null) return denied(rel, 'binary'); // invalid UTF-8 is treated as binary (05 E4)
+  const sha256 = sha256Hex(bytes);
   if (secretCheck !== undefined) {
-    const hit = unacknowledgedSuspectedSecret({ relPath: rel, content }, secretCheck.acknowledged);
+    const hit = unacknowledgedSuspectedSecret({ relPath: rel, content, sha256 }, secretCheck.acknowledged);
     if (hit !== null) return { kind: 'denied', denial: { relPath: rel, reason: 'suspected_secret', secretLabel: hit.label, secretLine: hit.line } };
   }
-  return { kind: 'file', file: { relPath: rel, content, bytes, sha256: sha256Hex(bytes), size: bytes.byteLength } };
+  return { kind: 'file', file: { relPath: rel, content, bytes, sha256, size: bytes.byteLength } };
 }
 
 function normalizeAll(relPaths: readonly string[]): Result<RelPath[]> {

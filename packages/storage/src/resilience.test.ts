@@ -1,14 +1,14 @@
 // E2 database / backup resilience: boot-time busy retry, distinct fatal open errors, WAL-inclusive size, atomic and
 // rolling backups, and the runner-independent restore.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DATABASE_UNAVAILABLE_MESSAGES, createIdGen, epochMs, fatalInfoOf, isRelayError, systemClock } from '@relay/contracts';
 import type { Clock } from '@relay/contracts';
-import { AUTO_BACKUP_KEEP, autoBackup, createBackup, listBackups, pruneAutoBackups, restoreLatestBackup } from './backup.js';
+import { AUTO_BACKUP_KEEP, autoBackup, createBackup, listBackups, pruneAutoBackups, recoverInterruptedRestore, restoreLatestBackup } from './backup.js';
 import { openNodeSqlite } from './driver-node-sqlite.js';
 import { mapOpenError } from './errors.js';
 import { MigrationChecksumError, MigrationVersionError } from './errors.js';
@@ -237,6 +237,162 @@ describe('storage resilience (E2)', () => {
       const reopened = await openDb({ ...opts, clock });
       expect(reopened.repos.settings.get('marker')).toBe('from-backup');
       reopened.close();
+    });
+
+    it('round-3 M1: a backup whose schema is newer than this build is skipped (it would fail schema_too_new again)', async () => {
+      const clock = manual();
+      const db = await openDb({ ...opts, clock });
+      db.tx('immediate', (r) => {
+        r.settings.set('marker', 'compatible');
+      });
+      const older = await createBackup({ db, userDataDir: dir, clock });
+      clock.advance(3_600_000);
+      const newer = await db.autoBackup({ force: true });
+      if (newer === null) throw new Error('no automatic backup');
+      db.close();
+      // The newer backup was taken by a newer Relay (schema 5).
+      const raw = openNodeSqlite(join(newer.dir, 'relay.sqlite'));
+      raw.exec("INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (99, 'future', 'x', 1)");
+      raw.close();
+      clock.advance(1_000);
+
+      const res = await restoreLatestBackup({ userDataDir: dir, clock });
+
+      expect(res?.restoredFrom).toBe(older.dir);
+      const reopened = await openDb({ ...opts, clock });
+      expect(reopened.repos.settings.get('marker')).toBe('compatible');
+      reopened.close();
+    });
+
+    it('round-3 M1: only newer-schema backups → null, nothing changed', async () => {
+      const clock = manual();
+      const db = await openDb({ ...opts, clock });
+      const only = await createBackup({ db, userDataDir: dir, clock });
+      db.close();
+      const raw = openNodeSqlite(join(only.dir, 'relay.sqlite'));
+      raw.exec("INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (99, 'future', 'x', 1)");
+      raw.close();
+      const before = readFileSync(opts.path);
+
+      expect(await restoreLatestBackup({ userDataDir: dir, clock })).toBeNull();
+      expect(readFileSync(opts.path).equals(before)).toBe(true);
+    });
+
+    it('round-3 L1: an artifact that cannot be copied back never fails a restore whose database is swapped (copied before the swap, counted)', async () => {
+      const clock = manual();
+      const db = await openDb({ ...opts, clock });
+      db.tx('immediate', (r) => {
+        r.settings.set('marker', 'from-backup');
+      });
+      const b = await createBackup({ db, userDataDir: dir, clock });
+      db.close();
+      mkdirSync(join(b.dir, 'artifacts', 'runs', 'x'), { recursive: true });
+      writeFileSync(join(b.dir, 'artifacts', 'runs', 'x', 'a.md'), 'artifact');
+      writeFileSync(join(b.dir, 'artifacts', 'ok.md'), 'fine');
+      // Live `artifacts/runs` is a FILE: copying `runs/x/a.md` back fails (any fs error would do: ENOSPC, EACCES…).
+      mkdirSync(join(dir, 'artifacts'), { recursive: true });
+      writeFileSync(join(dir, 'artifacts', 'runs'), 'x');
+
+      const res = await restoreLatestBackup({ userDataDir: dir, clock });
+
+      expect(res).toMatchObject({ restoredFrom: b.dir, restoredArtifacts: 1, artifactsNotRestored: 1 });
+      expect(readFileSync(join(dir, 'artifacts', 'ok.md'), 'utf8')).toBe('fine');
+      const reopened = await openDb({ ...opts, clock });
+      expect(reopened.repos.settings.get('marker')).toBe('from-backup');
+      reopened.close();
+      expect(existsSync(join(dir, 'relay.sqlite.restore-pending.json'))).toBe(false);
+    });
+
+    describe('round-3 L1: a restore killed at any step is recoverable (old state before the marker, new state after)', () => {
+      /** A live DB ('old', with a -wal/-shm) and a backup of other content ('from-backup'); returns the backup dir. */
+      async function prepare(clock: ReturnType<typeof manual>): Promise<string> {
+        const db = await openDb({ ...opts, clock });
+        db.tx('immediate', (r) => {
+          r.settings.set('marker', 'from-backup');
+        });
+        const b = await createBackup({ db, userDataDir: dir, clock });
+        db.tx('immediate', (r) => {
+          r.settings.set('marker', 'old');
+        });
+        db.close();
+        writeFileSync(`${opts.path}-wal`, ''); // an (empty) old WAL / SHM next to the live DB
+        writeFileSync(`${opts.path}-shm`, '');
+        return b.dir;
+      }
+      const marker = join('relay.sqlite.restore-pending.json');
+      const ASIDE = 'relay.sqlite.before-restore-20261001-120000';
+      const live = (suffix = '') => `${opts.path}${suffix}`;
+
+      async function settingAfterRecovery(clock: ReturnType<typeof manual>): Promise<unknown> {
+        const db = await openDb({ ...opts, clock });
+        try {
+          return db.repos.settings.get('marker');
+        } finally {
+          db.close();
+        }
+      }
+
+      /** Replays the restore steps up to `step`, then "kills" it (stops). */
+      async function killedAt(step: number, clock: ReturnType<typeof manual>): Promise<void> {
+        const backup = await prepare(clock);
+        copyFileSync(join(backup, 'relay.sqlite'), live('.partial')); // 0: staged copy complete
+        if (step === 0) return;
+        mkdirSync(join(dir, `${ASIDE}.partial`));
+        writeFileSync(join(dir, marker), `${JSON.stringify({ asidePartial: `${ASIDE}.partial`, aside: ASIDE })}\n`); // 1: marker
+        if (step === 1) return;
+        renameSync(live('-wal'), join(dir, `${ASIDE}.partial`, 'relay.sqlite-wal')); // 2: WAL moved
+        if (step === 2) return;
+        renameSync(live('-shm'), join(dir, `${ASIDE}.partial`, 'relay.sqlite-shm'));
+        renameSync(live(), join(dir, `${ASIDE}.partial`, 'relay.sqlite')); // 3: everything moved
+        if (step === 3) return;
+        renameSync(live('.partial'), live()); // 4: swapped
+        if (step === 4) return;
+        renameSync(join(dir, `${ASIDE}.partial`), join(dir, ASIDE)); // 5: aside named; the marker is still there
+      }
+
+      it('killed before the marker: the live database is untouched (old state); the stale staged copy is ignored', async () => {
+        const clock = manual();
+        await killedAt(0, clock);
+
+        expect(await recoverInterruptedRestore(dir)).toBe(false);
+        expect(await settingAfterRecovery(clock)).toBe('old');
+      });
+
+      it.each([1, 2, 3, 4, 5])('killed after step %i: the next launch completes it (new state; the old files kept aside)', async (step) => {
+        const clock = manual();
+        await killedAt(step, clock);
+
+        expect(await recoverInterruptedRestore(dir)).toBe(true);
+
+        expect(existsSync(join(dir, marker))).toBe(false);
+        expect(existsSync(live('.partial'))).toBe(false);
+        expect(existsSync(live('-wal')) && readFileSync(live('-wal')).length > 0).toBe(false); // the old WAL never stays
+        expect(readdirSync(join(dir, ASIDE)).sort()).toEqual(['relay.sqlite', 'relay.sqlite-shm', 'relay.sqlite-wal']);
+        expect(await settingAfterRecovery(clock)).toBe('from-backup');
+        expect(await recoverInterruptedRestore(dir)).toBe(false); // idempotent
+      });
+
+      it('restoreLatestBackup itself first completes an interrupted restore', async () => {
+        const clock = manual();
+        await killedAt(3, clock);
+        clock.advance(5_000);
+
+        const res = await restoreLatestBackup({ userDataDir: dir, clock });
+
+        expect(res).not.toBeNull();
+        expect(readdirSync(join(dir, ASIDE)).sort()).toEqual(['relay.sqlite', 'relay.sqlite-shm', 'relay.sqlite-wal']);
+        expect(await settingAfterRecovery(clock)).toBe('from-backup');
+      });
+
+      it('a garbage marker is dropped without moving anything', async () => {
+        const clock = manual();
+        await prepare(clock);
+        writeFileSync(join(dir, marker), '{"asidePartial":"../../etc","aside":"x"}');
+
+        expect(await recoverInterruptedRestore(dir)).toBe(false);
+        expect(existsSync(join(dir, marker))).toBe(false);
+        expect(await settingAfterRecovery(clock)).toBe('old');
+      });
     });
 
     it('#4: restoreLatestBackup with no usable backup changes nothing', async () => {

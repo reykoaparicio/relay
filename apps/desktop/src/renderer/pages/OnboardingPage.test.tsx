@@ -6,6 +6,13 @@ import { createFakeBridge } from '../api/fake-bridge';
 import type { FakeScenarioName } from '../api/fake-bridge';
 import { renderApp } from '../features/testing/render-app';
 
+/** Round-3 M4: the acknowledgement the form sends for the flagged fake file — its path and the previewed content hash. */
+function keysAck(bridge: ReturnType<typeof createFakeBridge>): { relPath: string; sha256: string } {
+  const f = bridge.world.preview.included.find((x) => x.relPath === 'src/config/keys.ts');
+  if (f === undefined || f.sha256 === null) throw new Error('the fake preview gives no hash for src/config/keys.ts');
+  return { relPath: f.relPath, sha256: f.sha256 };
+}
+
 const KEY = 'sk-ant-api03-SECRETSECRETSECRET-9x7Q';
 
 async function heading(name: string | RegExp) {
@@ -365,7 +372,7 @@ describe('OnboardingPage (J6)', () => {
     expect(screen.getByRole('checkbox', { name: 'src/config/keys.ts' })).toBeChecked();
     await waitFor(() => {
       expect(bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input).toMatchObject({
-        input: { acknowledgedSuspectedSecrets: ['src/config/keys.ts'] },
+        input: { acknowledgedSuspectedSecrets: [keysAck(bridge)] },
       });
     }, SLOW);
     await user.click(await startEnabled());
@@ -373,7 +380,7 @@ describe('OnboardingPage (J6)', () => {
       expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
     });
     expect(bridge.callsTo('relay/v1/runs.start')[0]?.input).toMatchObject({
-      input: { acknowledgedSuspectedSecrets: ['src/config/keys.ts'] },
+      input: { acknowledgedSuspectedSecrets: [keysAck(bridge)] },
     });
   });
 

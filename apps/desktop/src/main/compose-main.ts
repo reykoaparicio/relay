@@ -269,6 +269,16 @@ export function createProductionServices(cfg: BootConfig): BootServices {
       });
       return choice === 0;
     },
+    maintenanceRunning: () => sup.maintenanceRunning(),
+    confirmQuitDuringRestore: () => {
+      if (relaunchRequested || cfg.e2e) return true; // relaunch: confirmed in the renderer; E2E: never block on a modal
+      const choice = messageBoxSync({
+        type: 'warning', buttons: ['Quit Anyway', 'Keep Relay Open'], defaultId: 1, cancelId: 1,
+        message: 'A backup is being restored.',
+        detail: 'Relay waits a few seconds for the restore to finish before quitting. If it has to stop it, your current data is kept and you can restore again the next time Relay opens.',
+      });
+      return choice === 0;
+    },
     recordCleanQuit: (runActive) => marker.recordCleanQuit(runActive),
     flushLogs: () => {
       logger.flushSync(); // before-quit: everything queued reaches disk before app.quit()
