@@ -234,7 +234,8 @@ export function ChooseTemplateStep({ state, dispatch, go }: StepProps) {
   const selectedId = state.workflow?.id ?? offered[0]?.id ?? null;
   const selected = offered.find((w) => w.id === selectedId);
   const version = useWorkflow(selected?.id, selected?.latestValidatedVersion);
-  const onWorkflowsAction = useRetryAction(() => void workflows.refetch());
+  const refetchWorkflows = () => void workflows.refetch();
+  const onWorkflowsAction = useRetryAction(refetchWorkflows);
 
   return (
     <StepFrame
@@ -258,7 +259,7 @@ export function ChooseTemplateStep({ state, dispatch, go }: StepProps) {
       }}
     >
       {workflows.error === null ? null : (
-        <ErrorView error={toViewError(workflows.error)} onAction={onWorkflowsAction} />
+        <ErrorView error={toViewError(workflows.error)} onAction={onWorkflowsAction} onRetry={refetchWorkflows} />
       )}
       {workflows.data === undefined && workflows.error === null ? (
         <div aria-busy="true">

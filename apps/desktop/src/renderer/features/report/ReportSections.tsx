@@ -4,11 +4,11 @@ import { useId, useState } from 'react';
 import type { ReactNode } from 'react';
 import { addMicrousd } from '@relay/contracts';
 import type { ExportWhat, FindingsV1, ReportV1, RunDetail } from '@relay/contracts';
-import { Button, Dialog, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
+import { Button, Dialog, DialogClose, DialogFooter, Hash, InlineAlert, KeyValueList, Money, RadioGroup, Skeleton, StatusBadge } from '../../components/ui';
 import { APPROVAL_DECISION_LABELS, formatAbsoluteTime, PROVIDER_LABELS, statusPresentation, toIsoString } from '../../lib/format';
 import { errorTitle, toViewError } from '../../api/errors';
 import { FindingsView } from '../outputs/OutputViews';
-import { EXPORT_PART_LABELS, retryWhatOf } from './export-results';
+import { anyExportFailed, EXPORT_NOT_FOUND_TEXT, EXPORT_PART_LABELS, exportErrorParts, exportErrorRetryable, retryWhatOf } from './export-results';
 import type { ExportPartResult } from './export-results';
 import { incompleteCauseOf, incompleteTitle, stepTitle } from '../run-inspector/inspector-model';
 import type { IncompleteCause } from '../run-inspector/inspector-model';
@@ -405,12 +405,19 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
   const [what, setWhat] = useState<ExportWhat>(hasPatch ? initial : 'report');
   const failed = error !== null && error !== undefined;
   const e = failed ? toViewError(error) : null;
-  const retryWhat = parts === null ? null : retryWhatOf(parts);
-  const partial = parts !== null && retryWhat !== null;
-  const failedCount = parts?.filter((p) => p.state === 'failed').length ?? 0;
-  const title = partial ? 'Export partly saved' : failed ? 'Export failed' : 'Export the run';
+  // Per-part rows: of a partial export, else of a whole export that failed (`details.failed`).
+  const rows = parts ?? exportErrorParts(e);
+  const retryWhat = rows === null ? null : retryWhatOf(rows);
+  const partial = rows !== null && anyExportFailed(rows);
+  const anyWritten = rows?.some((p) => p.state === 'written') ?? false;
+  const failedCount = rows?.filter((p) => p.state === 'failed').length ?? 0;
+  const retryCount = rows?.filter((p) => p.state === 'failed' && p.retryable).length ?? 0;
+  // A failure a retry cannot fix (NOT_FOUND: the artifact is gone) offers no retry, only Close.
+  const errorRetryable = e !== null && exportErrorRetryable(e);
+  const canRetry = partial ? retryWhat !== null : failed ? errorRetryable : true;
+  const title = partial && anyWritten ? 'Export partly saved' : failed || partial ? 'Export failed' : 'Export the run';
   const primaryLabel = partial
-    ? failedCount > 1
+    ? retryCount > 1
       ? 'Retry failed files'
       : 'Retry failed file'
     : failed
@@ -425,31 +432,41 @@ export function ExportDialog({ open, onOpenChange, hasPatch, initial, pending, e
       title={title}
       description={failed || partial ? undefined : 'Relay asks where to save; it never exports into the project folder.'}
       footer={
-        <DialogFooter
-          primaryLabel={primaryLabel}
-          secondaryLabel={failed || partial ? 'Close' : 'Cancel'}
-          pending={pending}
-          onPrimary={() => {
-            onExport(partial ? retryWhat : what);
-          }}
-        />
+        canRetry ? (
+          <DialogFooter
+            primaryLabel={primaryLabel}
+            secondaryLabel={failed || partial ? 'Close' : 'Cancel'}
+            pending={pending}
+            onPrimary={() => {
+              onExport(partial ? (retryWhat ?? what) : what);
+            }}
+          />
+        ) : (
+          <DialogClose label="Close" />
+        )
       }
     >
-      {partial ? (
+      {partial && anyWritten ? (
         <InlineAlert tone="warning" live="polite" title={failedCount > 1 ? 'Some files were not saved' : 'One file was not saved'}>
-          <p>Run is intact; retry only the files that failed.</p>
+          <p>
+            {retryCount === 0
+              ? 'Run is intact. The files that failed cannot be exported again.'
+              : retryCount === failedCount
+                ? 'Run is intact; retry only the files that failed.'
+                : 'Run is intact; retry only the files that can still be written.'}
+          </p>
         </InlineAlert>
       ) : null}
-      {failed && e !== null ? (
-        <InlineAlert tone="danger" live="assertive" title={errorTitle(e)}>
-          <p>Run is intact; retry export only.</p>
+      {failed && e !== null && !(partial && anyWritten) ? (
+        <InlineAlert tone="danger" live="assertive" title={e.code === 'NOT_FOUND' && rows === null ? EXPORT_NOT_FOUND_TEXT : errorTitle(e, 'command')}>
+          <p>{errorRetryable ? 'Run is intact; retry export only.' : 'Run is intact. Trying again would fail the same way.'}</p>
           <p className="subtle">
             Error code <code>{e.code}</code>. No run data, ledger entries, or artifacts were changed.
           </p>
         </InlineAlert>
       ) : null}
       {partial ? (
-        <ExportPartRows parts={parts} />
+        <ExportPartRows parts={rows} />
       ) : (
         <RadioGroup<ExportWhat>
           legend="What to export"

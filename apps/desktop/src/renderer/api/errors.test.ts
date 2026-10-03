@@ -16,14 +16,14 @@ describe('api/errors (R2)', () => {
 
   it('runner fatals in plain words: curated database messages, a crash loop sentence, else the recorded message', () => {
     expect(runnerFatalText(fatal('db_corrupt'))).toBe(DATABASE_UNAVAILABLE_MESSAGES.db_corrupt);
-    expect(runnerFatalText(fatal('schema_too_new'))).toBe(DATABASE_UNAVAILABLE_MESSAGES.schema_too_new);
+    expect(runnerFatalText(fatal('schema_too_new'))).toBe('This data was created by a newer Relay. Install the newer version to open it.');
     expect(runnerFatalText(fatal('restart_limit', 'RUNNER_UNAVAILABLE'))).toMatch(/stopped several times in a row/);
     expect(runnerFatalText(fatal(null, 'INTERNAL'))).toBe('Recorded message.');
   });
 
-  it('a restore is offered only for a damaged or newer database', () => {
-    expect(['db_corrupt', 'integrity_check_failed', 'schema_too_new'].map((r) => fatalOffersRestore(fatal(r)))).toEqual([true, true, true]);
-    expect(['disk_full', 'db_readonly', 'database_busy', 'restart_limit'].map((r) => fatalOffersRestore(fatal(r)))).toEqual([false, false, false, false]);
+  it('a restore is offered only for a damaged database (never for data from a newer Relay)', () => {
+    expect(['db_corrupt', 'integrity_check_failed'].map((r) => fatalOffersRestore(fatal(r)))).toEqual([true, true]);
+    expect(['schema_too_new', 'disk_full', 'db_readonly', 'database_busy', 'restart_limit'].map((r) => fatalOffersRestore(fatal(r)))).toEqual([false, false, false, false, false]);
     expect(fatalOffersRestore(null)).toBe(false);
     expect(fatalOffersRestore(fatal(null))).toBe(false);
   });
@@ -34,7 +34,8 @@ describe('api/errors (R2)', () => {
     const rate = new AppErrorException(errors.rateLimited(null));
     expect(isDatabaseBusy(busy)).toBe(true);
     expect(isDatabaseBusy(other)).toBe(false);
-    expect(errorTitle(busy.appError)).toBe('The database is in use by another program. Relay will retry.');
+    expect(errorTitle(busy.appError)).toBe('The database is in use by another program. Try again in a moment.');
+    expect(errorTitle(busy.appError, 'command')).toBe('The database is in use by another program, so nothing was changed. Try again in a moment.');
     expect(shouldRetryQuery(5, busy)).toBe(true);
     expect(shouldRetryQuery(6, busy)).toBe(false);
     expect(shouldRetryQuery(2, rate)).toBe(false);

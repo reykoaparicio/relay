@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { errors, previewResultSchema, runStartInputSchema } from '@relay/contracts';
 import {
+  ackEntries,
   acknowledgedFor,
   buildStartInput,
   checkForm,
@@ -17,8 +18,10 @@ import {
   MAX_MEMORY_RECORD_IDS,
   problemsFromError,
   unreadableFileOf,
+  validAcknowledged,
 } from './new-run-model';
-import type { NewRunForm } from './new-run-model';
+import type { NewRunForm, SecretAck } from './new-run-model';
+import { issueMessage } from '../run-setup/preflight-issues';
 
 function startInput(form: NewRunForm) {
   const d = limitDefaults(undefined);
@@ -83,18 +86,60 @@ describe('suspected secrets and file anchors (E2 #8, #11)', () => {
     expect(defaultFiles(undefined)).toEqual([]);
   });
 
+  const KEYS_ACK: SecretAck = { relPath: 'src/config/keys.ts', providers: ['anthropic'], sha256: null };
+
   it('set-files keeps acknowledgements a subset of the selection (unticking drops one)', () => {
-    let f = formReducer(INITIAL_FORM, { type: 'set-files', files: ['src/a.ts', 'src/config/keys.ts'], acknowledged: ['src/config/keys.ts'] });
-    expect(f.acknowledgedSecrets).toEqual(['src/config/keys.ts']);
+    let f = formReducer(INITIAL_FORM, { type: 'set-files', files: ['src/a.ts', 'src/config/keys.ts'], acknowledged: [KEYS_ACK] });
+    expect(f.acknowledgedSecrets).toEqual([KEYS_ACK]);
     f = formReducer(f, { type: 'set-files', files: ['src/a.ts'] });
     expect(f.acknowledgedSecrets).toEqual([]);
+  });
+
+  it('select-profile drops a confirmation that did not name a provider the run now sends to (asked again)', () => {
+    const f = formReducer(INITIAL_FORM, { type: 'set-files', files: ['src/config/keys.ts'], acknowledged: [KEYS_ACK] });
+    // Still only Anthropic: kept.
+    expect(formReducer(f, { type: 'select-profile', stepKey: 'review', profileId: 'p', receivingProviders: ['anthropic'] }).acknowledgedSecrets).toEqual([KEYS_ACK]);
+    // OpenAI joins: the confirmation named Anthropic only, so it is dropped.
+    expect(
+      formReducer(f, { type: 'select-profile', stepKey: 'plan', profileId: 'p', receivingProviders: ['anthropic', 'openai'] }).acknowledgedSecrets,
+    ).toEqual([]);
+    // Fewer providers than confirmed: kept.
+    const both = formReducer(INITIAL_FORM, { type: 'set-files', files: ['src/config/keys.ts'], acknowledged: [{ ...KEYS_ACK, providers: ['anthropic', 'openai'] }] });
+    expect(formReducer(both, { type: 'select-profile', stepKey: 'plan', profileId: 'p', receivingProviders: ['openai'] }).acknowledgedSecrets).toHaveLength(1);
+  });
+
+  it('validAcknowledged: a confirmation holds only for the providers it named and the file content it saw', () => {
+    const hashed = (sha: string | null) =>
+      previewResultSchema.parse({ ...preview, included: preview.included.map((f) => (f.relPath === 'src/config/keys.ts' ? { ...f, sha256: sha } : f)) });
+    const A = 'a'.repeat(64);
+    const B = 'b'.repeat(64);
+    const ack: SecretAck = { ...KEYS_ACK, sha256: A };
+    expect(validAcknowledged([ack], ['anthropic'], hashed(A))).toEqual(['src/config/keys.ts']);
+    expect(validAcknowledged([ack], ['anthropic', 'openai'], hashed(A))).toEqual([]);
+    // The file changed since the confirm: ask again.
+    expect(validAcknowledged([ack], ['anthropic'], hashed(B))).toEqual([]);
+    // No hash on either side, or the preview not loaded: the provider scope alone decides.
+    expect(validAcknowledged([ack], ['anthropic'], hashed(null))).toEqual(['src/config/keys.ts']);
+    expect(validAcknowledged([KEYS_ACK], ['anthropic'], hashed(B))).toEqual(['src/config/keys.ts']);
+    expect(validAcknowledged([ack], ['anthropic'], undefined)).toEqual(['src/config/keys.ts']);
+  });
+
+  it('ackEntries records the named providers and the preview hash of a new confirmation, and keeps valid ones', () => {
+    const A = 'a'.repeat(64);
+    const p = previewResultSchema.parse({ ...preview, included: preview.included.map((f) => ({ ...f, sha256: A })) });
+    expect(ackEntries(['src/config/keys.ts'], [], [], ['anthropic', 'openai'], p)).toEqual([
+      { relPath: 'src/config/keys.ts', providers: ['anthropic', 'openai'], sha256: A },
+    ]);
+    // A stored, still-valid confirmation is kept as it was; an invalid one is replaced by the new confirm.
+    expect(ackEntries(['src/config/keys.ts'], [KEYS_ACK], ['src/config/keys.ts'], ['openai'], p)).toEqual([KEYS_ACK]);
+    expect(ackEntries(['src/config/keys.ts'], [KEYS_ACK], [], ['anthropic', 'openai'], p)[0]?.providers).toEqual(['anthropic', 'openai']);
   });
 
   it('runs.start input carries acknowledgedSuspectedSecrets only for selected, confirmed files', () => {
     const d = limitDefaults(undefined);
     const build = (form: NewRunForm, files: readonly string[]) =>
       buildStartInput({ form, projectId: 'prj_1', workflow: { id: 'wfl_1', version: 3 }, files, rows: [], check: checkForm(form, limitTexts(form, d), d, files.length), goal: 'Goal' });
-    const acked = { ...INITIAL_FORM, acknowledgedSecrets: ['src/config/keys.ts'] };
+    const acked = { ...INITIAL_FORM, acknowledgedSecrets: [KEYS_ACK] };
     expect(build(acked, ['src/a.ts', 'src/config/keys.ts'])?.input).toEqual({
       kind: 'files',
       relPaths: ['src/a.ts', 'src/config/keys.ts'],
@@ -126,6 +171,28 @@ describe('suspected secrets and file anchors (E2 #8, #11)', () => {
         code: 'suspected_secret',
       },
     ]);
+  });
+
+  it('a suspected_secret denial of a diff input words what can be done (a diff cannot confirm one)', () => {
+    const e = errors.permissionDenied('suspected_secret', {
+      details: { relPath: 'src/config/keys.ts', denied: [{ relPath: 'src/config/keys.ts', reason: 'suspected_secret', secretLabel: 'anthropic_key', secretLine: 4 }] },
+    });
+    expect(problemsFromError(e, [], 'diff')).toEqual([
+      {
+        fieldId: FIELD.diff,
+        message:
+          'The imported diff touches src/config/keys.ts, which looks like it contains a secret. Remove the secret from that file, or use Selected files and confirm it there.',
+        code: 'suspected_secret',
+      },
+    ]);
+  });
+
+  it('a preflight suspected_secret issue at `input` (a diff) gets the diff wording; a file issue keeps the engine message', () => {
+    const message = '"src/config/keys.ts" looks like it contains a secret. Remove it or confirm sending it.';
+    expect(issueMessage({ path: 'input', code: 'suspected_secret', message }, null, null)).toBe(
+      'The imported diff touches src/config/keys.ts, which looks like it contains a secret. Remove the secret from that file, or use Selected files and confirm it there.',
+    );
+    expect(issueMessage({ path: 'input.relPaths.1', code: 'suspected_secret', message }, null, null)).toBe(message);
   });
 
   it('an unreadable file links to its checkbox and carries the page\'s actions', () => {

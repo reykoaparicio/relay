@@ -1,7 +1,7 @@
 // Error mapping (10 J2): AppError → ErrorView props, and `nextAction` → a route or a page handler.
 import { DATABASE_UNAVAILABLE_MESSAGES, errors } from '@relay/contracts';
 import type { AppError, DatabaseUnavailableReason, ErrorCode, NextAction, RunnerFatal } from '@relay/contracts';
-import { DATABASE_BUSY_MESSAGE } from '../lib/format/actions';
+import { DATABASE_BUSY_COMMAND_MESSAGE, DATABASE_BUSY_MESSAGE } from '../lib/format/actions';
 import { paths } from '../features/shell/paths';
 import { isAppErrorException } from './client';
 
@@ -77,8 +77,8 @@ const ERROR_TITLES: Partial<Readonly<Record<ErrorCode, string>>> = {
 };
 
 /** Short title for an error banner, by code. Falls back to the error's own user message. */
-export function errorTitle(error: AppError): string {
-  if (isDatabaseBusy(error)) return DATABASE_BUSY_TEXT;
+export function errorTitle(error: AppError, kind: 'load' | 'command' = 'load'): string {
+  if (isDatabaseBusy(error)) return kind === 'command' ? DATABASE_BUSY_COMMAND_MESSAGE : DATABASE_BUSY_TEXT;
   return ERROR_TITLES[error.code] ?? error.userMessage;
 }
 
@@ -121,8 +121,15 @@ export function isProjectRootMissing(e: unknown): boolean {
   return appErrorOf(e)?.code === 'PROJECT_ROOT_MISSING';
 }
 
-/** Fatal reasons a backup restore can fix (the database file itself is damaged or from a newer Relay). */
-export const RESTORABLE_FATAL_REASONS: readonly string[] = ['db_corrupt', 'integrity_check_failed', 'schema_too_new'];
+/**
+ * Fatal reasons a backup restore can fix (the database file itself is damaged). Not `schema_too_new`: the data is
+ * healthy but from a newer Relay, and restoring an older backup would silently drop everything since — the fix is to
+ * install the newer version ({@link SCHEMA_TOO_NEW_TEXT}).
+ */
+export const RESTORABLE_FATAL_REASONS: readonly string[] = ['db_corrupt', 'integrity_check_failed'];
+
+/** `schema_too_new` in words: what to do instead of a restore. */
+export const SCHEMA_TOO_NEW_TEXT = 'This data was created by a newer Relay. Install the newer version to open it.';
 
 /** True when restoring the latest backup is a sensible recovery for this runner fatal. */
 export function fatalOffersRestore(fatal: RunnerFatal | null | undefined): boolean {
@@ -135,6 +142,7 @@ export function fatalOffersRestore(fatal: RunnerFatal | null | undefined): boole
  */
 export function runnerFatalText(fatal: RunnerFatal): string {
   const reason = fatal.reason;
+  if (reason === 'schema_too_new') return SCHEMA_TOO_NEW_TEXT;
   if (reason !== null && reason in DATABASE_UNAVAILABLE_MESSAGES) {
     return DATABASE_UNAVAILABLE_MESSAGES[reason as DatabaseUnavailableReason];
   }

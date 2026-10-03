@@ -1,9 +1,12 @@
 // R2 item 1/2: runner recovery (shell banner + Settings → Diagnostics) and a busy database.
 import { describe, expect, it } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { errors } from '@relay/contracts';
+import { MemoryRouter } from 'react-router';
+import { DATABASE_UNAVAILABLE_MESSAGES, errors } from '@relay/contracts';
+import { AppErrorException } from '../../api/client';
 import { createFakeBridge, FAKE_PROJECT_ID } from '../../api/fake-bridge';
+import { MutationError } from '../common/MutationError';
 import { renderApp } from '../testing/render-app';
 
 async function banner() {
@@ -20,6 +23,20 @@ describe('runner recovery (E2 #3/#4)', () => {
     expect(screen.getAllByRole('button', { name: 'Restore latest backup' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: 'Quit and relaunch' }).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Open diagnostics' })).toBeInTheDocument();
+  });
+
+  it('Settings → Diagnostics while the runner is down: runner-reported rows say "Unknown", and the banner has no "Open diagnostics"', async () => {
+    renderApp('/settings/diagnostics', { scenario: 'runner-unavailable' });
+    const section = await screen.findByRole('region', { name: 'Diagnostics' });
+    await banner();
+    const value = async (term: string) => (await within(section).findByText(term)).nextElementSibling?.textContent;
+    expect(await value('Price catalog')).toBe('Unknown while the runner is down');
+    expect(await value('Prompt templates')).toBe('Unknown while the runner is down');
+    expect(within(section).queryByText(/none loaded/)).not.toBeInTheDocument();
+    expect(within(section).queryByText('0 loaded')).not.toBeInTheDocument();
+    // Already on the diagnostics page: no button that leads back to it.
+    expect(screen.queryByRole('button', { name: 'Open diagnostics' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Restart runner' }).length).toBeGreaterThan(0);
   });
 
   it('restart fails again with a database fatal: the reason is shown in words', async () => {
@@ -48,6 +65,35 @@ describe('runner recovery (E2 #3/#4)', () => {
     await waitFor(() => {
       expect(screen.queryByText('The background runner is unavailable')).not.toBeInTheDocument();
     });
+  });
+
+  it('a restore that leaves the runner down is a failure with the reason, never a success', async () => {
+    const user = userEvent.setup();
+    const bridge = createFakeBridge('runner-unavailable');
+    bridge.world.restoreLeavesFatal = { code: 'DATABASE_UNAVAILABLE', reason: 'disk_full', message: DATABASE_UNAVAILABLE_MESSAGES.disk_full };
+    renderApp('/settings/diagnostics', { bridge });
+    const section = await screen.findByRole('region', { name: 'Diagnostics' });
+    await user.click(await within(section).findByRole('button', { name: 'Restore latest backup' }));
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Restore backup' }));
+    expect(
+      await within(section).findByText(`Backup restored, but the runner still could not start: ${DATABASE_UNAVAILABLE_MESSAGES.disk_full}`, {}, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Backup restored')).not.toBeInTheDocument();
+    expect(screen.getByText('Backup restored, but the runner still could not start')).toBeInTheDocument();
+    expect(screen.getByText('The background runner is unavailable')).toBeInTheDocument();
+  });
+
+  it('data from a newer Relay: no restore is offered; it says to install the newer version', async () => {
+    const bridge = createFakeBridge('runner-unavailable');
+    bridge.world.diagnostics = {
+      ...bridge.world.diagnostics,
+      runner: { ...bridge.world.diagnostics.runner, lastFatal: { code: 'DATABASE_UNAVAILABLE', reason: 'schema_too_new', message: 'x', at: 1 } as never },
+    };
+    renderApp('/settings/diagnostics', { bridge });
+    const section = await screen.findByRole('region', { name: 'Diagnostics' });
+    expect(await within(section).findByText('This data was created by a newer Relay. Install the newer version to open it.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restore latest backup' })).not.toBeInTheDocument();
+    expect(within(section).getByRole('button', { name: 'Restart runner' })).toBeInTheDocument();
   });
 
   it('no usable backup: says so and changes nothing', async () => {
@@ -128,11 +174,52 @@ describe('busy database (E2 #2)', () => {
     bridge.world.busyFailures = 0;
     bridge.failNext('relay/v1/runs.list', { ...errors.databaseUnavailable('database_busy'), nextAction: 'wait' });
     renderApp(`/p/${FAKE_PROJECT_ID}/runs`, { bridge });
-    expect(await screen.findByText('The database is in use by another program. Relay will retry.')).toBeInTheDocument();
+    expect(await screen.findByText('The database is in use by another program. Try again in a moment.')).toBeInTheDocument();
     expect(screen.queryByText('DATABASE_UNAVAILABLE')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Try again now' }));
     await waitFor(() => {
-      expect(screen.queryByText('The database is in use by another program. Relay will retry.')).not.toBeInTheDocument();
+      expect(screen.queryByText('The database is in use by another program. Try again in a moment.')).not.toBeInTheDocument();
+    });
+  });
+
+  it('a busy database on a command never renders a "Try again now" that nothing handles, and says nothing changed', () => {
+    const busy = new AppErrorException({ ...errors.databaseUnavailable('database_busy'), nextAction: 'wait' });
+    const { unmount } = render(
+      <MemoryRouter>
+        <MutationError error={busy} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('The database is in use by another program, so nothing was changed. Try again in a moment.')).toBeInTheDocument();
+    expect(screen.queryByText(/Relay will retry/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again now' })).not.toBeInTheDocument();
+    unmount();
+    // A page that handles `wait` (re-submits) gets the button, wired to its handler.
+    let waited = 0;
+    render(
+      <MemoryRouter>
+        <MutationError error={busy} handlers={{ wait: () => { waited += 1; } }} />
+      </MemoryRouter>,
+    );
+    screen.getByRole('button', { name: 'Try again now' }).click();
+    expect(waited).toBe(1);
+  });
+
+  it('New run: a busy preflight is a system error with "Retry the check", not a dead button', async () => {
+    const user = userEvent.setup();
+    const bridge = createFakeBridge('awaiting-approval');
+    bridge.failNext('relay/v1/runs.preflight', { ...errors.databaseUnavailable('database_busy'), nextAction: 'wait' });
+    renderApp(`/p/${FAKE_PROJECT_ID}/runs/new`, { bridge });
+    const summary = await screen.findByRole('region', { name: 'Input summary' });
+    expect(await within(summary).findByText('The database is in use by another program. Try again in a moment.', {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.getByText('Start unavailable: the run check failed.')).toBeInTheDocument();
+    expect(within(summary).queryByRole('button', { name: 'Try again now' })).not.toBeInTheDocument();
+    const before = bridge.callsTo('relay/v1/runs.preflight').length;
+    await user.click(within(summary).getByRole('button', { name: 'Retry the check' }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/runs.preflight').length).toBe(before + 1);
+    });
+    await waitFor(() => {
+      expect(within(summary).queryByText(/in use by another program/)).not.toBeInTheDocument();
     });
   });
 });

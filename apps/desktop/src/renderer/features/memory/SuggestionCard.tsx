@@ -132,7 +132,7 @@ export function SuggestionCard({ projectId, suggestion, titleOf, mutations, onCo
         </h3>
         <span className="badge warning">Suggested, not used by runs</span>
       </div>
-      {detail.error === null ? null : <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} />}
+      {detail.error === null ? null : <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} onRetry={() => void detail.refetch()} />}
       {editing && record !== undefined ? (
         <MemoryEditForm
           record={record}

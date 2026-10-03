@@ -61,6 +61,31 @@ describe('OverviewPage', () => {
     expect(within(controls).getByText(/tracked by Relay/)).toBeInTheDocument();
   });
 
+  it('active and paused cards name steps by the workflow step name (stepMeta), not the key label', async () => {
+    const named = (scenario: 'active-run' | 'output-invalid') => {
+      const bridge = createFakeBridge(scenario);
+      bridge.world.runs = bridge.world.runs.map((r) => ({
+        ...r,
+        stepMeta: (r.stepMeta ?? []).map((m) => ({ ...m, name: `Custom ${m.stepKey}` })),
+      }));
+      return bridge;
+    };
+    renderApp(OVERVIEW, { bridge: named('active-run') });
+    const card = await screen.findByRole('region', { name: 'Active run' });
+    expect(within(card).getByText(/Step 2 of 6/).querySelector('b')).toHaveTextContent(/^Custom /);
+  });
+
+  it('paused card: "Blocked at" uses the workflow step name', async () => {
+    const bridge = createFakeBridge('output-invalid');
+    bridge.world.runs = bridge.world.runs.map((r) => ({
+      ...r,
+      stepMeta: (r.stepMeta ?? []).map((m) => ({ ...m, name: `Custom ${m.stepKey}` })),
+    }));
+    renderApp(OVERVIEW, { bridge });
+    const attention = await screen.findByRole('region', { name: 'Needs your attention' }, { timeout: 3000 });
+    expect(attention).toHaveTextContent('Blocked at Custom implement.');
+  });
+
   it('active-run: shows the running step and pauses through runs.pause', async () => {
     const { bridge } = renderApp(OVERVIEW, { scenario: 'active-run' });
     const card = await screen.findByRole('region', { name: 'Active run' });

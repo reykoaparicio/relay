@@ -46,13 +46,24 @@ export function MutationError({ error, handlers = {}, names, projectId, conflict
     );
   }
   const view = toViewError(error);
-  const title = errorTitle(view);
+  const title = errorTitle(view, 'command');
   // `reload` without a handler would do nothing: drop it rather than render a dead button.
   const shown =
     handlers.reload === undefined
       ? { ...view, nextAction: view.nextAction === 'reload' ? ('none' as const) : view.nextAction, alternatives: view.alternatives.filter((a) => a !== 'reload') }
       : view;
-  return <ErrorView error={shown} live="assertive" {...(title === view.userMessage ? {} : { title })} onAction={onAction} />;
+  // A busy database offers "Try again now" only when the page handles `wait` (re-submitting is the page's call).
+  const retry = handlers.wait;
+  return (
+    <ErrorView
+      error={shown}
+      live="assertive"
+      command
+      {...(title === view.userMessage ? {} : { title })}
+      {...(retry === undefined ? {} : { onRetry: retry })}
+      onAction={onAction}
+    />
+  );
 }
 
 export interface ConflictNoticeProps {

@@ -8,7 +8,7 @@ import {
   UNKNOWN_OUTCOME_DECISION_LABELS,
 } from '../../../lib/format/actions';
 import type { UnknownOutcomeDecision } from '../../../lib/format/actions';
-import { stepKeyLabel } from '../../../lib/format/labels';
+import { stepName } from '../../../lib/format/labels';
 import { formatMoney } from '../../../lib/format/money';
 import { statusPresentation } from '../../../lib/format/status-presentation';
 import { Button } from '../Button';
@@ -94,7 +94,7 @@ export function RecoveryPanel({
       </div>
       <p>
         Last completed step:{' '}
-        <strong>{lastDone ? stepKeyLabel(lastDone.stepKey) : 'none yet'}</strong>
+        <strong>{lastDone ? stepName(lastDone.stepKey, run.stepMeta) : 'none yet'}</strong>
       </p>
       {run.unresolvedAttempts.length > 0 ? (
         <div className="stack">
@@ -106,7 +106,7 @@ export function RecoveryPanel({
                 <li key={a.id} className="list-item static">
                   <span className="row">
                     <span className="title" id={titleId}>
-                      {stepKeyLabel(a.stepKey)} · attempt {a.seq}
+                      {stepName(a.stepKey, run.stepMeta)} · attempt {a.seq}
                     </span>
                     <StatusBadge kind="attempt" value={a.state} />
                   </span>

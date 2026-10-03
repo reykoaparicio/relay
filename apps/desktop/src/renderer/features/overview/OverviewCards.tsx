@@ -22,13 +22,14 @@ import {
   StatusBadge,
   StatTile,
 } from '../../components/ui';
-import { formatMonth, statusPresentation, stepKeyLabel } from '../../lib/format';
+import { formatMonth, statusPresentation } from '../../lib/format';
 import { call } from '../../api/client';
 import { toViewError } from '../../api/errors';
 import { qk } from '../../api/keys';
 import { useIdempotentMutation } from '../../hooks/useIdempotentMutation';
 import { RUNS_MAX_PAGE } from '../../hooks/useRuns';
 import { useAppInfo } from '../../hooks/useAppInfo';
+import { useStatusChangedAt } from '../../hooks/useStatusChangedAt';
 import { defaultStep, INTERRUPTION_LEAD, interruptedStep, interruptionCauseOf, stepTitle } from '../run-inspector/inspector-model';
 import { useRunActions } from '../run-inspector/useRunActions';
 import { runLabel, RunCost } from '../runs/run-display';
@@ -119,6 +120,7 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
   const lastDone = [...run.steps].reverse().find((s) => s.state === 'succeeded');
   // E2: an interrupted run's cause follows how the previous session ended (clean quit vs the runner stopped).
   const lastShutdown = useAppInfo().data?.lastShutdown;
+  const interruptionTime = useStatusChangedAt(run.id, 'interrupted', run.status === 'interrupted');
   const interruptedAt = interruptedStep(run);
   const liability = addMicrousd(...run.unresolvedAttempts.flatMap((a) => (a.cost === null ? [] : [a.cost.microusd])));
   const unknownStep = run.unresolvedAttempts[0]?.stepRunId ?? interruptedAt?.id;
@@ -142,7 +144,7 @@ export function InterruptedBanner({ projectId, run }: { readonly projectId: stri
       }
     >
       <p>
-        {run.status === 'interrupted' ? INTERRUPTION_LEAD[interruptionCauseOf(lastShutdown)] : 'Relay lost track of the request while '}
+        {run.status === 'interrupted' ? INTERRUPTION_LEAD[interruptionCauseOf(lastShutdown, interruptionTime)] : 'Relay lost track of the request while '}
         <b>{interruptedAt === undefined ? 'a step' : stepTitle(interruptedAt, run.stepMeta)}</b> was running. The last completed step is{' '}
         <b>{lastDone === undefined ? 'none yet' : stepTitle(lastDone, run.stepMeta)}</b>. Completed outputs are intact and
         will not be re-run automatically.
@@ -262,7 +264,7 @@ export function ActiveRunCard({ projectId, run }: { readonly projectId: string; 
         <AttentionTitle run={run} />
         {current === undefined ? null : (
           <p className="muted">
-            Step {index + 1} of {run.steps.length} · <b>{stepKeyLabel(current.stepKey)}</b>
+            Step {index + 1} of {run.steps.length} · <b>{stepTitle(current, run.stepMeta)}</b>
             {current.providerId === null ? null : (
               <>
                 {' '}· {current.profileName} profile
@@ -330,7 +332,7 @@ export function PausedAttentionCard({
           {presentation.detail === undefined ? null : `${presentation.detail}.`}
           {step === undefined ? null : (
             <>
-              {' '}Blocked at <b>{stepKeyLabel(step.stepKey)}</b>.
+              {' '}Blocked at <b>{stepTitle(step, run.stepMeta)}</b>.
             </>
           )}
         </p>

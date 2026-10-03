@@ -94,10 +94,8 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
     // providers.test BUDGET_BLOCKED: the setup allowance for connection tests is in Settings → Data.
     increase_allowance: () => void navigate(paths.settings('data')),
   });
-  const onLoadAction = useNextAction({
-    reload: () => void providers.refetch(),
-    wait: () => void providers.refetch(),
-  });
+  const refetchProviders = () => void providers.refetch();
+  const onLoadAction = useNextAction({ reload: refetchProviders, wait: refetchProviders });
 
   const anyConnected = connectedIds.length > 0 || state.connected.length > 0;
   const otherProvider = SETUP_PROVIDERS.find((id) => id !== chosen && !connectedIds.includes(id));
@@ -110,7 +108,7 @@ export function ConnectProviderStep({ state, dispatch, go }: StepProps) {
             <Skeleton lines={4} />
           </div>
         ) : (
-          <ErrorView error={toViewError(providers.error)} onAction={onLoadAction} />
+          <ErrorView error={toViewError(providers.error)} onAction={onLoadAction} onRetry={refetchProviders} />
         )}
       </StepFrame>
     );

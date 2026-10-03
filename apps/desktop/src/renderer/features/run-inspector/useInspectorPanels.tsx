@@ -109,7 +109,7 @@ export function useInspectorPanels({
       label: 'Budget',
       content: (
         <div className="stack">
-          <BudgetLedger cost={run.cost} byStep={ledger.summary.data?.byStep ?? NO_STEP_COSTS} caption={`${runLabel(run.id)} tracked usage`} />
+          <BudgetLedger cost={run.cost} byStep={ledger.summary.data?.byStep ?? NO_STEP_COSTS} caption={`${runLabel(run.id)} tracked usage`} stepMeta={run.stepMeta} />
           <div className="actions">
             <Button
               size="sm"

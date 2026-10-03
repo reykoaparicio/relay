@@ -24,8 +24,10 @@ import { useProjects } from '../../hooks/useProjects';
 import { useProviders } from '../../hooks/useProviders';
 import { useRun } from '../../hooks/useRun';
 import { useSettings } from '../../hooks/useSettings';
+import { useStatusChangedAt } from '../../hooks/useStatusChangedAt';
 import { useWorkflows } from '../../hooks/useWorkflow';
 import { useRunnerState } from '../../state/PushSyncProvider';
+import { signInBlockedSince } from '../run-inspector/inspector-model';
 import { RunnerFatalText, RunnerRecovery } from '../runner/RunnerRecovery';
 import { href, paths } from './paths';
 
@@ -60,10 +62,17 @@ export function providerStatusText(
 
 function ProviderStatusLine({ authPausedRunId }: { readonly authPausedRunId: string | undefined }) {
   const providers = useProviders();
-  // A run paused for sign-in names its provider in the run detail (statusDetail.details.providerId).
+  // A run paused for sign-in names its provider in the run detail (statusDetail.details.providerId). The provider is
+  // unhealthy only while Resume cannot help yet — the inspector's rule: a successful reconnect/test since the pause
+  // makes it healthy again, even though the run stays paused until the user resumes it.
   const authRun = useRun(authPausedRunId);
-  const named = authRun.data?.statusDetail?.details?.['providerId'];
-  const signInNeeded = new Set(typeof named === 'string' ? [named] : []);
+  const run = authRun.data;
+  const pausedAt = useStatusChangedAt(run?.id, 'paused', run?.status === 'paused');
+  const named = run?.statusDetail?.details?.['providerId'];
+  // While the pause time is loading, a started run's provider stays unhealthy (a test from before the pause must not count).
+  const blocked =
+    run !== undefined && (run.startedAt !== null && pausedAt === undefined ? true : signInBlockedSince(run, providers.data, pausedAt ?? null) !== null);
+  const signInNeeded = new Set(typeof named === 'string' && blocked ? [named] : []);
   if (providers.data === undefined) return null;
   const { text, ok } = providerStatusText(providers.data, signInNeeded);
   const Icon = ok ? CircleCheck : TriangleAlert;
@@ -78,6 +87,8 @@ function ProviderStatusLine({ authPausedRunId }: { readonly authPausedRunId: str
 function RunnerBanner() {
   const state = useRunnerState();
   const navigate = useNavigate();
+  // On Settings → Diagnostics itself, "Open diagnostics" would lead nowhere.
+  const onDiagnostics = useLocation().pathname === paths.settings('diagnostics');
   const queryClient = useQueryClient();
   // Why it stopped (main keeps the last fatal): read only while the runner is unavailable.
   const diagnostics = useDiagnostics({ enabled: state === 'unavailable' });
@@ -104,15 +115,17 @@ function RunnerBanner() {
           fatal={fatal}
           compact
           extra={
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                void navigate(paths.settings('diagnostics'));
-              }}
-            >
-              Open diagnostics
-            </Button>
+            onDiagnostics ? undefined : (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  void navigate(paths.settings('diagnostics'));
+                }}
+              >
+                Open diagnostics
+              </Button>
+            )
           }
         />
       </InlineAlert>

@@ -58,10 +58,11 @@ export function WorkflowEditorPage() {
   const version = editableVersion(summary);
   const viewQ = useWorkflow(workflowId, version);
   const profiles = useProfiles();
-  const retry = useRetryAction(() => {
+  const refetch = () => {
     void workflows.refetch();
     void viewQ.refetch();
-  });
+  };
+  const retry = useRetryAction(refetch);
   const missing = workflows.data !== undefined && summary === undefined;
   useNavPerf('workflow-editor', viewQ.data !== undefined || viewQ.error !== null || workflows.error !== null || missing);
 
@@ -71,7 +72,7 @@ export function WorkflowEditorPage() {
       <>
         <PageHeader title="Workflow editor" breadcrumbs={[{ label: 'Workflows' }]} />
         {loadError !== null ? (
-          <ErrorView error={toViewError(loadError)} onAction={retry} />
+          <ErrorView error={toViewError(loadError)} onAction={retry} onRetry={refetch} />
         ) : missing ? (
           <InlineAlert tone="warning" title="This workflow does not exist">
             <p>

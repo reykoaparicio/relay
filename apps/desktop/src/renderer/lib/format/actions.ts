@@ -98,5 +98,11 @@ export const UNKNOWN_OUTCOME_DECISION_HINTS: Readonly<Record<UnknownOutcomeDecis
   accept_estimated_charge: 'Records the estimated amount as the charge for this request.',
 };
 
-/** Plain wording of a busy database (E2 #2: `DATABASE_UNAVAILABLE database_busy`, next action wait). */
-export const DATABASE_BUSY_MESSAGE = 'The database is in use by another program. Relay will retry.';
+/**
+ * Plain wording of a busy database (E2 #2: `DATABASE_UNAVAILABLE database_busy`, next action wait) for a load. Nothing
+ * retries a failed load on its own once the query gave up, so it never promises that Relay will.
+ */
+export const DATABASE_BUSY_MESSAGE = 'The database is in use by another program. Try again in a moment.';
+
+/** The same for a failed command: the change was not made. */
+export const DATABASE_BUSY_COMMAND_MESSAGE = 'The database is in use by another program, so nothing was changed. Try again in a moment.';

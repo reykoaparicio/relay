@@ -20,10 +20,11 @@ export function ProfilesStep({ state, dispatch, go }: StepProps) {
   const profiles = useProfiles();
   const providers = useProviders();
   const [showErrors, setShowErrors] = useState(false);
-  const onLoadAction = useRetryAction(() => {
+  const refetch = () => {
     void workflow.refetch();
     void profiles.refetch();
-  });
+  };
+  const onLoadAction = useRetryAction(refetch);
   if (state.workflow === null)
     return (
       <MissingPrerequisite
@@ -64,6 +65,7 @@ export function ProfilesStep({ state, dispatch, go }: StepProps) {
         <ErrorView
           error={toViewError(loadError)}
           onAction={onLoadAction}
+          onRetry={refetch}
         />
       )}
       {spec === undefined || profiles.data === undefined ? (

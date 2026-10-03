@@ -31,7 +31,11 @@ const ROWS: readonly ModelStepRow[] = [
   { stepKey: 'review', role: 'reviewer', specProfile: 'Balanced', defaultProfileId: PROFILES.balanced.id, maxOutputTokens: undefined },
 ];
 
-function panel(budget: BudgetBreakdown, handlers: { onSelectProfile?: (k: string, id: string) => void; onSaved?: () => void } = {}) {
+function panel(
+  budget: BudgetBreakdown,
+  handlers: { onSelectProfile?: (k: string, id: string) => void; onSaved?: () => void } = {},
+  selection: Readonly<Record<string, string>> = {},
+) {
   return (
     <MemoryRouter>
       <BudgetBlockedPanel
@@ -39,7 +43,7 @@ function panel(budget: BudgetBreakdown, handlers: { onSelectProfile?: (k: string
         project={PROJECT}
         rows={ROWS}
         profiles={PROFILE_LIST}
-        selection={{}}
+        selection={selection}
         onSetAllowance={() => undefined}
         onSelectProfile={handlers.onSelectProfile ?? (() => undefined)}
         onProjectAllowanceSaved={handlers.onSaved ?? (() => undefined)}
@@ -63,6 +67,21 @@ describe('BudgetBlockedPanel (B11)', () => {
     expect(select).toHaveValue(PROFILES.balanced.id);
     await userEvent.selectOptions(select, PROFILES.economy.id);
     expect(onSelectProfile).toHaveBeenCalledWith('review', PROFILES.economy.id);
+  });
+
+  it('lists only profiles whose provider the project allows, with the reservation of the current one', () => {
+    // The project allows Anthropic only: the OpenAI profile is not offered once it is not the current choice.
+    renderWithProviders(panel(BASE, {}, { review: PROFILES.economy.id }));
+    const select = screen.getByRole('combobox', { name: /Profile for Review input/ });
+    const labels = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(labels).toEqual(['Economy · Anthropic · reserves $1.50 now']);
+  });
+
+  it('a current profile whose provider is not allowed stays listed, marked', () => {
+    renderWithProviders(panel(BASE));
+    const select = screen.getByRole('combobox', { name: /Profile for Review input/ });
+    const labels = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(labels).toEqual(['Economy · Anthropic', 'Balanced · OpenAI · not allowed by this project']);
   });
 
   it('project scope: saves the monthly allowance inline with projects.update, then re-checks', async () => {

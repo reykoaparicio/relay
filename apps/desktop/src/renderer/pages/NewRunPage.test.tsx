@@ -459,6 +459,57 @@ describe('NewRunPage (J7)', () => {
     expect(screen.getByRole('textbox', { name: /Run allowance \(USD\)/ })).toHaveValue('4.50');
   });
 
+  it('a restored draft drops files that are gone or excluded since, and says how many', async () => {
+    const user = userEvent.setup();
+    const { bridge, router } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Keep me');
+    // An explicit selection: Clear, then tick two files.
+    const [first, second] = bridge.world.preview.included;
+    if (first === undefined || second === undefined) throw new Error('preview too small');
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await user.click(screen.getByRole('checkbox', { name: first.relPath }));
+    await user.click(screen.getByRole('checkbox', { name: second.relPath }));
+    await act(async () => {
+      await router.navigate('/settings/projects');
+    });
+    // Meanwhile one of them is deleted.
+    bridge.world.preview = { ...bridge.world.preview, included: bridge.world.preview.included.filter((f) => f.relPath !== second.relPath) };
+    await act(async () => {
+      await router.navigate(NEW_RUN);
+    });
+    await ready();
+    expect(await screen.findByText('1 file from your draft is no longer available', {}, SLOW)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: first.relPath })).toBeChecked();
+    await waitFor(() => {
+      const last = bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input as { input: { relPaths: string[] } } | undefined;
+      expect(last?.input.relPaths).toEqual([first.relPath]);
+    }, SLOW);
+  });
+
+  it('project folder missing at Start: a successful relocate clears the panel and the form comes back', async () => {
+    const user = userEvent.setup();
+    const { bridge } = renderApp(NEW_RUN, { scenario: 'awaiting-approval' });
+    await ready();
+    await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Do it');
+    await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+    // The folder disappears between preflight and Start.
+    bridge.world.rootMissing.add(FAKE_PROJECT_ID);
+    bridge.failNext('relay/v1/runs.start', errors.projectRootMissing());
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await screen.findByText('Project folder not found');
+    await user.click(screen.getByRole('button', { name: /Locate folder/ }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/projects.relocate')).toHaveLength(1);
+    });
+    expect(bridge.world.rootMissing.has(FAKE_PROJECT_ID)).toBe(false);
+    await waitFor(() => {
+      expect(screen.queryByText('Project folder not found')).not.toBeInTheDocument();
+    }, SLOW);
+    expect(screen.getByRole('form', { name: 'New run' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: /Goal/ })).toHaveValue('Do it');
+  });
+
   describe('suspected-secret (E2 #11)', () => {
     const KEYS = 'src/config/keys.ts';
 
@@ -525,6 +576,78 @@ describe('NewRunPage (J7)', () => {
         expect(last?.input['relPaths']).not.toContain(KEYS);
         expect(last?.input).not.toHaveProperty('acknowledgedSuspectedSecrets');
       }, SLOW);
+    });
+
+    it('the confirm names only the providers the chosen profiles use (engine providersReceivingContext)', async () => {
+      const user = userEvent.setup();
+      const { bridge } = renderApp(NEW_RUN, { scenario: 'suspected-secret' });
+      const table = await screen.findByRole('table', { name: 'Role to model profile snapshot' });
+      for (const s of within(table).getAllByRole('combobox')) await user.selectOptions(s, 'Economy · Anthropic');
+      await waitFor(() => {
+        const last = bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input as { profileOverrides?: Record<string, string> } | undefined;
+        expect(Object.keys(last?.profileOverrides ?? {}).sort()).toEqual(['implement', 'plan', 'verify']);
+      }, SLOW);
+      await waitFor(() => {
+        expect(screen.getByRole('region', { name: 'Providers that will receive this context' })).not.toHaveTextContent(/OpenAI/);
+      }, SLOW);
+      await user.click(screen.getByRole('checkbox', { name: KEYS }));
+      expect(await screen.findByRole('dialog', { name: 'Send this file to Anthropic?' })).toBeInTheDocument();
+    });
+
+    it('a confirmation given while every step used Anthropic is asked again once a step moves to OpenAI', async () => {
+      const user = userEvent.setup();
+      const { bridge } = renderApp(NEW_RUN, { scenario: 'suspected-secret' });
+      const table = await screen.findByRole('table', { name: 'Role to model profile snapshot' });
+      await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review the config');
+      for (const s of within(table).getAllByRole('combobox')) await user.selectOptions(s, 'Economy · Anthropic');
+      await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+      await user.click(screen.getByRole('checkbox', { name: KEYS }));
+      await user.click(within(await screen.findByRole('dialog', { name: 'Send this file to Anthropic?' })).getByRole('button', { name: 'Send this file' }));
+      await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+      expect(screen.getByText('You confirmed sending it.')).toBeInTheDocument();
+
+      // The plan step moves to OpenAI: OpenAI would now receive the file, which the confirmation never named.
+      await user.selectOptions(within(table).getAllByRole('combobox')[1]!, 'Balanced · OpenAI');
+      expect(screen.queryByText('You confirmed sending it.')).not.toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: KEYS })).toBeChecked();
+      expect(screen.getByRole('button', { name: 'Confirm sending…' })).toBeInTheDocument();
+      await waitFor(() => {
+        const last = bridge.callsTo('relay/v1/runs.preflight').at(-1)?.input as { input: Record<string, unknown> } | undefined;
+        expect(last?.input).not.toHaveProperty('acknowledgedSuspectedSecrets');
+      }, SLOW);
+      await screen.findByRole('alert', { name: /1 problem prevents starting this run/ }, SLOW);
+      expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+
+      // Confirming again names both providers and lets the run start with the acknowledgement.
+      await user.click(screen.getByRole('button', { name: 'Confirm sending…' }));
+      await user.click(within(await screen.findByRole('dialog', { name: 'Send this file to Anthropic and OpenAI?' })).getByRole('button', { name: 'Send this file' }));
+      await screen.findByText('All checks passed. Ready to start.', {}, SLOW);
+      await user.click(screen.getByRole('button', { name: 'Start run' }));
+      await waitFor(() => {
+        expect(bridge.callsTo('relay/v1/runs.start')).toHaveLength(1);
+      });
+      const input = bridge.callsTo('relay/v1/runs.start')[0]?.input as { input: { acknowledgedSuspectedSecrets?: string[] } };
+      expect(input.input.acknowledgedSuspectedSecrets).toEqual([KEYS]);
+    });
+
+    it('a diff touching a flagged file: advice that can be followed (no "confirm" for a diff), linked to the import', async () => {
+      const user = userEvent.setup();
+      const { bridge } = renderApp(NEW_RUN, { scenario: 'suspected-secret' });
+      await ready();
+      await user.type(screen.getByRole('textbox', { name: /Goal/ }), 'Review this change');
+      bridge.world.importDiffFiles = ['src/app.ts', KEYS];
+      await user.click(screen.getByRole('radio', { name: /Import a \.diff\/\.patch file/ }));
+      await user.click(screen.getByRole('button', { name: 'Import a .diff/.patch file…' }));
+      const message = `The imported diff touches ${KEYS}, which looks like it contains a secret. Remove the secret from that file, or use Selected files and confirm it there.`;
+      const summary = await screen.findByRole('alert', { name: /1 problem prevents starting this run/ }, SLOW);
+      const link = within(summary).getByRole('link', { name: message });
+      expect(within(summary).queryByText(/confirm sending it/)).not.toBeInTheDocument();
+      await user.click(link);
+      expect(screen.getByRole('button', { name: 'Import a different file…' })).toHaveFocus();
+      expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled();
+      // The engine's issue sits at `input` (the diff lists no relPaths).
+      const pf = bridge.callsTo('relay/v1/runs.preflight').at(-1);
+      expect(pf?.input).toMatchObject({ input: { kind: 'diff' } });
     });
 
     it('a preflight suspected_secret issue links to the file checkbox', async () => {

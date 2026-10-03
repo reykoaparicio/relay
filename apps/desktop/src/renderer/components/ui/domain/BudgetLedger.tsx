@@ -1,8 +1,8 @@
 import { memo, useId } from 'react';
-import type { CostSummary } from '@relay/contracts';
+import type { CostSummary, RunDetail } from '@relay/contracts';
 import { Money } from '../Money';
 import { TableScroll } from '../TableScroll';
-import { stepKeyLabel } from '../../../lib/format/labels';
+import { stepName } from '../../../lib/format/labels';
 import { moneyColumnPrecision } from '../../../lib/format/money';
 import { settledExact } from './budget-math';
 
@@ -15,10 +15,12 @@ export interface BudgetLedgerProps {
   readonly cost: CostSummary;
   readonly byStep?: readonly StepCost[];
   readonly caption?: string;
+  /** The run's step names (`RunDetail.stepMeta`): the step rows use the workflow's names. */
+  readonly stepMeta?: RunDetail['stepMeta'];
 }
 
 /** Tracked usage by certainty (FR-09) plus allowance and remaining. "Tracked by Relay" (§9.1). */
-function BudgetLedgerView({ cost, byStep, caption = 'Run usage' }: BudgetLedgerProps) {
+function BudgetLedgerView({ cost, byStep, caption = 'Run usage', stepMeta }: BudgetLedgerProps) {
   const stepCaptionId = useId();
   const steps = byStep ?? [];
   // One precision for the whole card, summary and step table alike: sub-cent step amounts put every amount at 4 dp, so
@@ -97,7 +99,7 @@ function BudgetLedgerView({ cost, byStep, caption = 'Run usage' }: BudgetLedgerP
             <tbody>
               {steps.map((s) => (
                 <tr key={s.stepKey}>
-                  <th scope="row">{stepKeyLabel(s.stepKey)}</th>
+                  <th scope="row">{stepName(s.stepKey, stepMeta)}</th>
                   <td className="num"><Money value={settledExact(s.cost)} precision={stepP.settled} /></td>
                   {/* The column header carries the certainty; "≈ $0.00 est." per cell wrapped in a narrow card. */}
                   <td className="num"><Money value={s.cost.settledEstimated} precision={stepP.estimated} /></td>

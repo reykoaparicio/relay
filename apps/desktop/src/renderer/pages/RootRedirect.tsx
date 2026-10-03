@@ -17,6 +17,10 @@ export function RootRedirect() {
           void settings.refetch();
           void projects.refetch();
         }}
+        onRetry={() => {
+          void settings.refetch();
+          void projects.refetch();
+        }}
       />
     );
   }

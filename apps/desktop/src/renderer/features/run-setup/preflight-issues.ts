@@ -47,11 +47,30 @@ function providerLabel(id: ProviderId | null): string {
   return id === null ? 'this provider' : PROVIDER_LABELS[id];
 }
 
+/** The issue code of a file that looks like it contains a secret (E2 #11). */
+export const SUSPECTED_SECRET = 'suspected_secret';
+
+/**
+ * A suspected secret in a file an imported diff touches. A diff input cannot acknowledge one (the engine fails
+ * closed), so "confirm sending it" cannot be followed here: the fix is to remove the secret, or switch to Selected
+ * files and confirm the file there.
+ */
+export function diffSecretMessage(relPath: string | null): string {
+  return `The imported diff touches ${relPath ?? 'a file'}, which looks like it contains a secret. Remove the secret from that file, or use Selected files and confirm it there.`;
+}
+
+/** The file an engine `suspected_secret` issue names (`"src/x.ts" looks like it contains a secret. …`), else null. */
+function secretFileOfMessage(message: string): string | null {
+  return /^"([^"]+)" looks like it contains a secret/.exec(message)?.[1] ?? null;
+}
+
 /**
  * The problem text of an issue. A missing credential names the provider and the fix (the engine's message is generic
- * because a ValidationIssue carries no provider); every other issue keeps the engine's message.
+ * because a ValidationIssue carries no provider); a suspected secret at `input` (a diff input, which cannot confirm
+ * one) gets advice that can be followed; every other issue keeps the engine's message.
  */
 export function issueMessage(i: ValidationIssue, providerId: ProviderId | null, stepTitle: string | null): string {
+  if (i.code === SUSPECTED_SECRET && i.path === 'input') return diffSecretMessage(secretFileOfMessage(i.message));
   if (i.code !== MISSING_CREDENTIAL) return i.message;
   const who = stepTitle === null ? '' : `${stepTitle}: `;
   return `${who}no API key is connected for ${providerLabel(providerId)}. Connect it, or choose a profile whose provider is connected.`;

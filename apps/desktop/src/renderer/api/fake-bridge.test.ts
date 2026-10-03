@@ -239,6 +239,27 @@ describe('fake bridge', () => {
       expect(fixed.issues).toEqual([]);
     });
 
+    it('providersReceivingContext follows the chosen profiles, like the engine (run-start.ts)', async () => {
+      const bridge = createFakeBridge('awaiting-approval');
+      expect((await preflight(bridge)).inputSummary.providersReceivingContext).toEqual(['anthropic', 'openai']);
+      // Every step on an Anthropic profile: only Anthropic receives the context.
+      const capable = 'prf_00000000000000000000000003';
+      const allAnthropic = await preflight(bridge, { profileOverrides: { plan: capable, verify: capable } });
+      expect(allAnthropic.inputSummary.providersReceivingContext).toEqual(['anthropic']);
+    });
+
+    it('a diff input touching a suspected secret: a preflight issue at `input`, and runs.start is refused (engine fails closed)', async () => {
+      const bridge = createFakeBridge('suspected-secret');
+      bridge.world.importDiffFiles = ['src/app.ts', 'src/config/keys.ts'];
+      const imported = await bridge.invoke('relay/v1/artifacts.importDiff', { projectId: FAKE_PROJECT_ID });
+      if (!imported.ok || imported.data === null) throw new Error('import failed');
+      const input = { kind: 'diff' as const, diffArtifactId: imported.data.artifactId };
+      const pf = await preflight(bridge, { input });
+      expect(pf.issues).toContainEqual({ path: 'input', code: 'suspected_secret', message: '"src/config/keys.ts" looks like it contains a secret. Remove it or confirm sending it.' });
+      const start = await bridge.invoke('relay/v1/runs.start', { ...base, input, idempotencyKey: '01J9ZZZZZZZZZZZZZZZZZZZZZM' });
+      expect(start.ok ? null : start.error).toMatchObject({ code: 'PERMISSION_DENIED', details: { reason: 'suspected_secret' } });
+    });
+
     it('lists provider_not_allowed as an issue (not a PERMISSION_DENIED error); runs.start stays strict', async () => {
       const bridge = createFakeBridge('awaiting-approval');
       const project = bridge.world.projects[0];

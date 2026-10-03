@@ -20,6 +20,8 @@ export type MissingRootProject = Pick<Project, 'id' | 'name' | 'rootDisplayPath'
 
 export interface ProjectRootMissingProps {
   readonly project: MissingRootProject;
+  /** Called after a successful relocate, e.g. so a page clears the error that showed this panel. */
+  readonly onRelocated?: () => void;
 }
 
 /** The verification of a CONFLICT `root_unverified`, else null. */
@@ -55,7 +57,7 @@ function useRefreshProject(projectId: string) {
 }
 
 /** "Project folder not found" with "Locate folder…" and "Remove project". */
-export function ProjectRootMissing({ project }: ProjectRootMissingProps) {
+export function ProjectRootMissing({ project, onRelocated }: ProjectRootMissingProps) {
   const toast = useToast();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -74,6 +76,7 @@ export function ProjectRootMissing({ project }: ProjectRootMissingProps) {
     onSuccess: (res) => {
       setPending(null);
       refresh();
+      onRelocated?.();
       const v = res.verification;
       toast.show({
         key: `project:relocated:${project.id}`,

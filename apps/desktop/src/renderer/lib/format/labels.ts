@@ -1,4 +1,4 @@
-import type { ApprovalDecision, AttemptPurpose, ExclusionReason, MemoryType, ProviderId } from '@relay/contracts';
+import type { ApprovalDecision, AttemptPurpose, ExclusionReason, MemoryType, ProviderId, RunDetail } from '@relay/contracts';
 
 /** Display names. Exhaustive Records over contracts enums (compile error when an enum grows). */
 export const PROVIDER_LABELS: Readonly<Record<ProviderId, string>> = {
@@ -110,6 +110,15 @@ export function stepKeyLabel(stepKey: string): string {
   if (known !== undefined) return known;
   const words = stepKey.replaceAll(/[_-]+/g, ' ').trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * A run's name for a step: the workflow's display name (`RunDetail.stepMeta[].name`, E1) when the run carries one,
+ * else {@link stepKeyLabel}. The shared step-name source for every view of a run.
+ */
+export function stepName(stepKey: string, stepMeta?: RunDetail['stepMeta']): string {
+  const name = stepMeta?.find((m) => m.stepKey === stepKey)?.name;
+  return name === undefined || name === null || name.trim() === '' ? stepKeyLabel(stepKey) : name;
 }
 
 /** "Run 9T4P": the short, human label of a run id (its last four characters). */

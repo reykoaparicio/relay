@@ -28,6 +28,7 @@ import type {
   MemoryRecordDetail,
   OperationKey,
   PauseReason,
+  ProviderId,
   PushEvent,
   RunDetail,
   RunEvent,
@@ -349,19 +350,34 @@ const READINESS_MESSAGES = {
  * 06 F14 preflight readiness per model step of the spec, on its effective profile (spec name ⊕ `profileOverrides`):
  * unknown profile, provider not permitted by the project, no connected credential. Paths `profileOverrides.<step>`.
  */
-function readinessIssues(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>): ValidationIssue[] {
-  const project = w.projects.find((p) => p.id === input.projectId);
+/** Each model step of the input's workflow version with the profile it resolves to (an override, else by name). */
+function stepProfiles(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>) {
   const version = w.workflowVersions.find((v) => v.workflowId === input.workflowId && v.version === input.workflowVersion);
-  if (project === undefined || version === undefined) return [];
-  const issues: ValidationIssue[] = [];
-  for (const step of version.spec.steps) {
-    if (step.kind !== 'model') continue;
-    const path = `profileOverrides.${step.id}`;
+  return (version?.spec.steps ?? []).flatMap((step) => {
+    if (step.kind !== 'model') return [];
     const overrideId = input.profileOverrides?.[step.id];
     const profile =
       overrideId === undefined
         ? w.profiles.find((p) => p.profile.name.toLowerCase() === step.profile.toLowerCase())
         : w.profiles.find((p) => p.profile.id === overrideId);
+    return [{ step, profile }];
+  });
+}
+
+/**
+ * Engine `preflight` (run-start.ts): the providers of the snapshot with the overrides applied, deduplicated in step
+ * order — the providers a confirmed suspected secret would be sent to.
+ */
+function providersReceivingContext(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>): ProviderId[] {
+  return [...new Set(stepProfiles(w, input).flatMap(({ profile }) => (profile === undefined ? [] : [profile.profile.providerId])))];
+}
+
+function readinessIssues(w: FakeWorld, input: InputOf<'relay/v1/runs.preflight'>): ValidationIssue[] {
+  const project = w.projects.find((p) => p.id === input.projectId);
+  if (project === undefined) return [];
+  const issues: ValidationIssue[] = [];
+  for (const { step, profile } of stepProfiles(w, input)) {
+    const path = `profileOverrides.${step.id}`;
     if (profile === undefined) {
       issues.push({ path, code: 'unknown_profile', message: `No profile named "${step.profile.slice(0, 40)}".` });
       continue;
@@ -382,13 +398,7 @@ function firstMissingCredential(w: FakeWorld, input: InputOf<'relay/v1/runs.pref
   const issue = readinessIssues(w, input).find((i) => i.code === 'missing_credential');
   if (issue === undefined) return null;
   const stepKey = issue.path.slice('profileOverrides.'.length);
-  const version = w.workflowVersions.find((v) => v.workflowId === input.workflowId && v.version === input.workflowVersion);
-  const step = version?.spec.steps.find((s) => s.id === stepKey);
-  const overrideId = input.profileOverrides?.[stepKey];
-  const profile =
-    overrideId === undefined
-      ? w.profiles.find((p) => step?.kind === 'model' && p.profile.name.toLowerCase() === step.profile.toLowerCase())
-      : w.profiles.find((p) => p.profile.id === overrideId);
+  const profile = stepProfiles(w, input).find((x) => x.step.id === stepKey)?.profile;
   return { stepKey, providerId: profile?.profile.providerId ?? 'anthropic' };
 }
 
@@ -412,21 +422,30 @@ function failIfUnreadable(w: FakeWorld, input: RunInputIn): void {
   );
 }
 
-/** Selected files that look like they hold a secret and are not acknowledged (E2 #11). */
+/**
+ * Files of the input that look like they hold a secret and are not acknowledged (E2 #11): the selected files, or the
+ * files an imported diff touches (a diff input cannot acknowledge one: the engine fails closed).
+ */
 function unacknowledgedSecrets(w: FakeWorld, input: RunInputIn) {
-  if (input.kind !== 'files') return [];
-  const acked = new Set(input.acknowledgedSuspectedSecrets ?? []);
-  return w.preview.included.filter((f) => f.suspectedSecret === true && input.relPaths.includes(f.relPath) && !acked.has(f.relPath));
+  const files = input.kind === 'files' ? input.relPaths : (w.diffFiles.get(input.diffArtifactId) ?? []);
+  const acked = new Set(input.kind === 'files' ? (input.acknowledgedSuspectedSecrets ?? []) : []);
+  return w.preview.included.filter((f) => f.suspectedSecret === true && files.includes(f.relPath) && !acked.has(f.relPath));
 }
 
-/** Engine `suspectedSecretIssues`: one preflight issue per unacknowledged suspected file (never the value). */
+/**
+ * Engine `suspectedSecretIssues`: one preflight issue per unacknowledged suspected file (never the value), at the
+ * file's `input.relPaths.<i>`, or at `input` when the input does not list it (a diff).
+ */
 function suspectedSecretIssues(w: FakeWorld, input: RunInputIn): ValidationIssue[] {
-  if (input.kind !== 'files') return [];
-  return unacknowledgedSecrets(w, input).map((f) => ({
-    path: `input.relPaths.${String(input.relPaths.indexOf(f.relPath))}`,
-    code: 'suspected_secret',
-    message: `"${f.relPath}" looks like it contains a secret. Remove it or confirm sending it.`,
-  }));
+  const selected: readonly string[] = input.kind === 'files' ? input.relPaths : [];
+  return unacknowledgedSecrets(w, input).map((f) => {
+    const index = selected.indexOf(f.relPath);
+    return {
+      path: index >= 0 ? `input.relPaths.${String(index)}` : 'input',
+      code: 'suspected_secret',
+      message: `"${f.relPath}" looks like it contains a secret. Remove it or confirm sending it.`,
+    };
+  });
 }
 
 /** Intake's PERMISSION_DENIED `suspected_secret` with `details.denied` (label and line, never the value). */
@@ -461,7 +480,20 @@ function setRunnerReady(w: FakeWorld, ctx: HandlerContext): void {
 const HANDLERS: { [K in OperationKey]: Handler<K> } = {
   // ---------- app ----------
   'app.getInfo': (w) => w.info,
-  'app.getDiagnostics': (w) => ({ ...w.diagnostics, runner: { ...w.diagnostics.runner, state: w.runnerState } }),
+  // Main answers the runner half itself while the runner is down (composite `degradedDiagnostics`): zeros, which the
+  // page shows as unknown. The database size is the file on disk.
+  'app.getDiagnostics': (w) => ({
+    ...w.diagnostics,
+    ...(w.runnerState === 'unavailable'
+      ? {
+          db: { ...w.diagnostics.db, schemaVersion: 0, migrationsPending: 0 },
+          unresolvedAttempts: 0,
+          catalog: { version: null, models: 0 },
+          prompts: { loaded: 0 },
+        }
+      : {}),
+    runner: { ...w.diagnostics.runner, state: w.runnerState },
+  }),
   'app.createBackup': (w, _i, ctx) => ({
     backupDisplayPath: `${w.info.userDataDisplayPath}/backups/relay-${String(ctx.now())}.sqlite`,
     createdAt: ctx.now(),
@@ -487,14 +519,22 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     if (!w.backupAvailable) {
       return { restored: false, restoredFromDisplayPath: null, backupCreatedAt: null, previousMovedToDisplayPath: null, runnerState: 'unavailable' as const };
     }
-    setRunnerReady(w, ctx);
     const backupAt = ctx.now() - 26 * 60 * 60_000;
+    const leftFatal = w.restoreLeavesFatal;
+    if (leftFatal === null) setRunnerReady(w, ctx);
+    else {
+      // The backup is in place, but the restarted runner fails again for another reason.
+      w.diagnostics = {
+        ...w.diagnostics,
+        runner: { ...w.diagnostics.runner, state: 'unavailable', pid: null, lastFatal: { ...leftFatal, at: ctx.now() } as NonNullable<typeof w.diagnostics.runner.lastFatal> },
+      };
+    }
     return {
       restored: true,
       restoredFromDisplayPath: `${w.info.userDataDisplayPath}/backups/relay-${String(backupAt)}.sqlite`,
       backupCreatedAt: backupAt,
       previousMovedToDisplayPath: `${w.info.userDataDisplayPath}/damaged-${String(ctx.now())}`,
-      runnerState: 'ready' as const,
+      runnerState: leftFatal === null ? ('ready' as const) : ('unavailable' as const),
     };
   },
   'app.getSettings': (w) => w.settings,
@@ -777,7 +817,7 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
           // Engine semantics: absent = every approved record (§4.5 default context); [] = pinned only; a list = pinned + those.
           .filter((m) => m.status === 'approved' && (input.memoryRecordIds === undefined || m.pinned || input.memoryRecordIds.includes(m.id)))
           .map((m) => ({ id: m.id, revision: m.currentRevision, type: m.type, title: m.title, pinned: m.pinned })),
-        providersReceivingContext: ['anthropic', 'openai'],
+        providersReceivingContext: providersReceivingContext(w, input),
       },
       firstReservation: { N: budget.N, basis: 'local_estimate' as const },
       budget,
@@ -1166,14 +1206,12 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
 
   // ---------- artifacts ----------
   'artifacts.get': (w, input) => w.artifacts.get(input.artifactId) ?? fail(errors.notFound('artifact')),
-  'artifacts.importDiff': (w, _i, ctx) =>
-    w.dialogCancels.has('artifacts.importDiff')
-      ? null
-      : {
-          artifactId: ctx.newId('artifact'),
-          files: ['src/routes/users.ts', 'src/validation/schemas.ts'],
-          parseWarnings: [...w.importDiffWarnings],
-        },
+  'artifacts.importDiff': (w, _i, ctx) => {
+    if (w.dialogCancels.has('artifacts.importDiff')) return null;
+    const artifactId = ctx.newId('artifact');
+    w.diffFiles.set(artifactId, [...w.importDiffFiles]);
+    return { artifactId, files: [...w.importDiffFiles], parseWarnings: [...w.importDiffWarnings] };
+  },
   'artifacts.export': (w, input) => {
     findRun(w, input.runId);
     if (w.exportFails) fail(errors.artifactWriteFailed());
@@ -1181,15 +1219,26 @@ const HANDLERS: { [K in OperationKey]: Handler<K> } = {
     // E2 #10: per-part results. A part in `exportFailParts` fails once (ARTIFACT_WRITE_FAILED); a retry writes it.
     const parts = input.what === 'both' ? (['report', 'patch'] as const) : ([input.what] as const);
     const fileName = { report: 'report.md', patch: 'patch.diff' } as const;
-    const failed = parts
-      .filter((part) => w.exportFailParts.includes(part))
-      .map((part) => ({ what: part, code: 'ARTIFACT_WRITE_FAILED' as const, userMessage: `Relay could not write ${fileName[part]}. The folder may be read-only or full.` }));
+    // A part whose artifact is gone fails with NOT_FOUND every time (engine `exportArtifacts`: missing artifact row).
+    const missing = parts
+      .filter((part) => w.exportMissingParts.includes(part))
+      .map((part) => ({ what: part, code: 'NOT_FOUND' as const, userMessage: `The ${part} artifact was not found.` }));
+    const failed = [
+      ...missing,
+      ...parts
+        .filter((part) => !w.exportMissingParts.includes(part) && w.exportFailParts.includes(part))
+        .map((part) => ({ what: part, code: 'ARTIFACT_WRITE_FAILED' as const, userMessage: `Relay could not write ${fileName[part]}. The folder may be read-only or full.` })),
+    ];
     w.exportFailParts = w.exportFailParts.filter((part) => !parts.includes(part));
     const written = parts.filter((part) => !failed.some((f) => f.what === part)).map((part) => ({ what: part, displayPath: `~/Downloads/${fileName[part]}` }));
     // Engine `exportArtifacts`: only when NOTHING was written is it an error (the first failure, with `details.failed`).
     const firstFailure = failed[0];
     if (written.length === 0 && firstFailure !== undefined) {
-      fail(errors.artifactWriteFailed({ userMessage: firstFailure.userMessage, details: { failed } }));
+      fail(
+        firstFailure.code === 'NOT_FOUND'
+          ? { ...errors.notFound('artifact'), details: { failed } }
+          : errors.artifactWriteFailed({ userMessage: firstFailure.userMessage, details: { failed } }),
+      );
     }
     return { exported: true, displayPaths: written.map((x) => x.displayPath), written, failed };
   },
@@ -1337,8 +1386,9 @@ export function createFakeBridge(scenario: FakeScenarioName | FakeWorld = DEFAUL
     invoke,
     subscribe(listener) {
       listeners.add(listener);
-      // Main pushes the current runner state to a new window when it is not `ready`.
-      if (world.runnerState !== 'ready') {
+      // Main pushes the current runner state to a new window when it is not `ready` (unless the test models that push
+      // arriving before the window subscribed: the preload does not buffer pushes, so it is lost).
+      if (world.runnerState !== 'ready' && !world.dropInitialRunnerPush) {
         const state = world.runnerState;
         queueMicrotask(() => {
           if (listeners.has(listener)) listener({ type: 'runner.state', state });

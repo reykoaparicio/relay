@@ -125,6 +125,11 @@ export function OverviewPage() {
             for (const q of heads) void q.refetch();
             void recent.refetch();
           }}
+          onRetry={() => {
+            void project.refetch();
+            for (const q of heads) void q.refetch();
+            void recent.refetch();
+          }}
         />
       </>
     );

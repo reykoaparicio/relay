@@ -105,7 +105,7 @@ export function RunsPage() {
 
   let list;
   if (runs.error !== null) {
-    list = <ErrorView error={toViewError(runs.error)} onAction={() => void runs.refetch()} />;
+    list = <ErrorView error={toViewError(runs.error)} onAction={() => void runs.refetch()} onRetry={() => void runs.refetch()} />;
   } else if (rows === undefined) {
     list = (
       <div aria-busy="true">

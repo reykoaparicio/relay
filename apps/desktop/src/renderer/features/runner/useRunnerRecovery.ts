@@ -40,6 +40,16 @@ export function useRestoreLatestBackup() {
     // so the outcome is also a toast.
     onSuccess: (res) => {
       if (!res.restored) return;
+      if (res.runnerState !== 'ready') {
+        // The backup is in place, but the runner is still down: never a success toast.
+        toast.show({
+          key: 'runner:restored',
+          title: 'Backup restored, but the runner still could not start',
+          body: 'See the runner banner or Settings → Diagnostics for the reason. Nothing was deleted.',
+          tone: 'danger',
+        });
+        return;
+      }
       toast.show({
         key: 'runner:restored',
         title: 'Backup restored',

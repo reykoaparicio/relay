@@ -1,4 +1,4 @@
-export { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
+export { formatMoney, formatMoneyPair, formatSumPart, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
 export type { FormatMoneyOptions, MoneyPrecision } from './money';
 export { formatTokens, formatTokensExact } from './tokens';
 export { formatHash } from './hash';
@@ -18,4 +18,4 @@ export {
   UNKNOWN_OUTCOME_DECISION_HINTS,
 } from './actions';
 export type { UnknownOutcomeDecision } from './actions';
-export { APPROVAL_DECISION_LABELS, PROVIDER_LABELS, MEMORY_TYPE_LABELS, ATTEMPT_PURPOSE_LABELS, EXCLUSION_REASON_LABELS, STEP_TITLES, runLabel, stepKeyLabel } from './labels';
+export { APPROVAL_DECISION_LABELS, PROVIDER_LABELS, MEMORY_TYPE_LABELS, ATTEMPT_PURPOSE_LABELS, EXCLUSION_REASON_LABELS, STEP_TITLES, runLabel, stepKeyLabel, stepName } from './labels';

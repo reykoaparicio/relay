@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { usd } from '@relay/contracts';
 import type { Microusd } from '@relay/contracts';
-import { formatMoney, formatMoneyPair, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
+import { formatMoney, formatMoneyPair, formatSumPart, formatUsdAtPrecision, moneyColumnPrecision, sumConsistentPrecision } from './money';
 
 const m = (n: number) => n as Microusd;
 
@@ -106,5 +106,19 @@ describe('sumConsistentPrecision', () => {
     const digits = sumConsistentPrecision([55_000, 445_000], 500_000);
     expect(digits).toBe(3);
     expect([55_000, 445_000, 500_000].map((v) => formatUsdAtPrecision(m(v), digits))).toEqual(['$0.055', '$0.445', '$0.500']);
+  });
+
+  it('a tiny overrun never reads as $0.00 over, nor as actual equal to reserved (500,000 reserved, 500,030 actual)', () => {
+    const digits = sumConsistentPrecision([500_000, 30], 500_030);
+    expect(digits).toBe(5);
+    expect([500_000, 30, 500_030].map((v) => formatSumPart(v, digits))).toEqual(['$0.50000', '$0.00003', '$0.50003']);
+    // 1 µUSD over needs the 6 dp cap.
+    const one = sumConsistentPrecision([500_000, 1], 500_001);
+    expect(one).toBe(6);
+    expect(formatSumPart(1, one)).toBe('$0.000001');
+    // Below what 6 dp can show (a fractional µUSD): an inequality, never "$0.000000".
+    expect(formatSumPart(0.4, 6)).toBe('< $0.000001');
+    expect(formatSumPart(-0.4, 6)).toBe('> -$0.000001');
+    expect(formatSumPart(0, 2)).toBe('$0.00');
   });
 });

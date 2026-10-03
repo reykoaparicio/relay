@@ -802,6 +802,18 @@ describe('RunInspectorPage E1 run-level fields', () => {
     expect((await screen.findAllByText('Selected by you', {}, { timeout: 3000 })).length).toBeGreaterThan(0);
   });
 
+  it('Context tab: a latest manifest that fails to load is a neutral note with a retry, not an assertive action error', async () => {
+    const bridge = createFakeBridge('completed');
+    const run = focusRun(bridge);
+    bridge.failNext('relay/v1/artifacts.get', errors.internal(undefined));
+    renderApp(`${P}/runs/${run.id}?step=${stepOf(run, 'approve').id}&tab=context`, { bridge });
+    const note = await screen.findByText(/^This manifest could not be loaded/, {}, { timeout: 3000 });
+    expect(note.closest('[role="alert"]')).toBeNull();
+    expect(screen.queryByText(/The run is unchanged/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect((await screen.findAllByText('Selected by you', {}, { timeout: 3000 })).length).toBeGreaterThan(0);
+  });
+
   it('Context tab: a purged or missing latest manifest is explained, not an error', async () => {
     const bridge = createFakeBridge('completed');
     const run = focusRun(bridge);

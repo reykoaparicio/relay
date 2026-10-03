@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router';
-import type { BudgetBreakdown, Microusd, ProfileWithWarnings, Project } from '@relay/contracts';
+import type { BudgetBreakdown, Microusd, ProfileWithWarnings, Project, ProviderId } from '@relay/contracts';
 import { BudgetBreakdownTable, Button, ButtonLink, Field, MoneyInput, parseDollarInput, Select } from '../../components/ui';
 import { call } from '../../api/client';
 import { MutationError } from '../common/MutationError';
@@ -68,29 +68,46 @@ function MonthlyAllowanceEdit({ project, suggested, onSaved }: { readonly projec
   );
 }
 
-/** Inline profile switch for the first model step (its reservation is the N of the check). */
+/**
+ * Inline profile switch for the first model step (its reservation is the N of the check). Only profiles whose provider
+ * the project allows are offered (any other would be refused); the current choice shows the reservation it needs now.
+ */
 function ProfileSwitch({
   rows,
   profiles,
   selection,
+  allowedProviderIds,
+  reservation,
   onSelect,
 }: {
   readonly rows: readonly ModelStepRow[];
   readonly profiles: readonly ProfileWithWarnings[];
   readonly selection: Readonly<Record<string, string>>;
+  readonly allowedProviderIds: readonly ProviderId[];
+  /** The first reservation (N) of the current choice. */
+  readonly reservation: Microusd;
   readonly onSelect: (stepKey: string, profileId: string) => void;
 }) {
   const id = useId();
   const row = rows[0];
   if (row === undefined) return null;
   const value = selection[row.stepKey] ?? row.defaultProfileId ?? '';
+  // The current choice stays listed (the select must show it), marked when its provider is not allowed.
+  const options = profiles.flatMap((p) => {
+    const allowed = allowedProviderIds.includes(p.profile.providerId);
+    const current = p.profile.id === value;
+    if (!allowed && !current) return [];
+    const base = `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]}`;
+    const note = !allowed ? ' · not allowed by this project' : current ? ` · reserves ${formatMoney(reservation)} now` : '';
+    return [{ value: p.profile.id, label: `${base}${note}` }];
+  });
   return (
     <Field label={`Profile for ${stepKeyLabel(row.stepKey)}`} id={id} hint="Changes this run only. The check runs again.">
       {(control) => (
         <Select
           {...control}
           value={value}
-          options={profiles.map((p) => ({ value: p.profile.id, label: `${p.profile.name} · ${PROVIDER_LABELS[p.profile.providerId]}` }))}
+          options={options}
           onValueChange={(v) => {
             onSelect(row.stepKey, v);
           }}
@@ -171,7 +188,14 @@ export function BudgetBlockedPanel({
         <div className="stack rounded-md border border-border p-4">
           <strong>Use a cheaper profile</strong>
           <p className="small muted">A smaller model lowers the first reservation (N).</p>
-          <ProfileSwitch rows={rows} profiles={profiles} selection={selection} onSelect={onSelectProfile} />
+          <ProfileSwitch
+            rows={rows}
+            profiles={profiles}
+            selection={selection}
+            allowedProviderIds={project.providerPolicy.allowedProviderIds}
+            reservation={budget.N}
+            onSelect={onSelectProfile}
+          />
         </div>
         <div className="stack rounded-md border border-border p-4">
           <strong>Don&apos;t start</strong>

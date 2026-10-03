@@ -25,10 +25,15 @@ const ANNOUNCED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
 /** Event types that change `runs.get` / ledger data. Stream progress only updates the live token count. */
 const NON_INVALIDATING: ReadonlySet<RunEventType> = new Set<RunEventType>(['attempt.stream_progress']);
 
-/** Event types that move money: they also refresh the project's month cost ("Usage tracked by Relay"). */
+/**
+ * Event types that move money: they also refresh the project's month cost ("Usage tracked by Relay"). A settle is
+ * reported as `attempt.settled` (the engine emits no `ledger.settled`); an unknown outcome moves the reservation to
+ * unknown liability.
+ */
 const LEDGER_EVENTS: ReadonlySet<RunEventType> = new Set<RunEventType>([
   'ledger.reserved',
-  'ledger.settled',
+  'attempt.settled',
+  'attempt.unknown',
   'ledger.blocked',
   'ledger.overrun',
 ]);

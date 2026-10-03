@@ -39,6 +39,12 @@ describe('AttemptsTable', () => {
     expect(screen.getByText('App time').nextElementSibling).toHaveTextContent(/^2s$/);
   });
 
+  it('each attempt\'s Timing toggle names its attempt (not a list of identical "Timing")', () => {
+    render(<AttemptsTable attempts={[attempt(1), attempt(2)]} />);
+    const summaries = [...document.querySelectorAll('summary')].filter((s) => s.textContent.startsWith('Timing'));
+    expect(summaries.map((s) => s.textContent)).toEqual(['Timing for attempt #1', 'Timing for attempt #2']);
+  });
+
   it('keeps the table narrow: the purpose is short text and the model id never wraps', () => {
     render(<AttemptsTable attempts={[attempt(1)]} />);
     const headers = screen.getAllByRole('columnheader').map((h) => h.textContent);

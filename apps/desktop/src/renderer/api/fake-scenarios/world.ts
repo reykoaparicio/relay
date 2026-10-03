@@ -114,16 +114,27 @@ export interface FakeWorld {
   dialogCancels: Set<string>;
   /** Parse warnings `artifacts.importDiff` reports for the imported file. */
   importDiffWarnings: string[];
+  /** The files the next `artifacts.importDiff` touches. */
+  importDiffFiles: string[];
+  /** Imported diff artifact id → the files it touches (diff inputs are checked for suspected secrets by them). */
+  diffFiles: Map<string, readonly string[]>;
   /** Providers whose `providers.test` fails with AUTH_REQUIRED. */
   authFailing: Set<string>;
   /** `memory.purgeProjectHistory`: how many files fail to purge (reported as `failed`, retried by the next sweep). */
   purgeFailures: number;
   /** `runner.state` the fake main reports (pushed on subscribe when not `ready`); `unavailable` fails runner-routed ops. */
   runnerState: RunnerState;
+  /** The initial `runner.state` push reaches no window (sent before the renderer subscribed; never buffered). */
+  dropInitialRunnerPush: boolean;
   /** `app.restartRunner` brings the runner back (else it fails again with the same fatal reason). */
   restartFixes: boolean;
   /** `app.restoreLatestBackup` finds a healthy backup. */
   backupAvailable: boolean;
+  /**
+   * After a restore, the runner still cannot start with this fatal (e.g. the disk is full): the restore answers
+   * `restored: true` with `runnerState: 'unavailable'`. Null = the restored database opens.
+   */
+  restoreLeavesFatal: { readonly code: 'DATABASE_UNAVAILABLE' | 'RUNNER_UNAVAILABLE'; readonly reason: string | null; readonly message: string } | null;
   /** The next N runner-routed queries fail with the retryable DATABASE_UNAVAILABLE `database_busy` (next action wait). */
   busyFailures: number;
   /** Projects whose folder is gone: file ops answer PROJECT_ROOT_MISSING until `projects.relocate`. */
@@ -136,6 +147,8 @@ export interface FakeWorld {
   unreadableOnRead: Set<string>;
   /** Parts `artifacts.export` fails to write once each (a partial export); a retry of the part succeeds. */
   exportFailParts: ExportPart[];
+  /** Parts whose artifact is no longer stored: every export of them fails with NOT_FOUND (a retry never helps). */
+  exportMissingParts: ExportPart[];
   /** idempotencyKey → first result (02 §B0: a replay returns the first result). */
   idempotency: Map<string, unknown>;
   /** Next id number for created entities. */
@@ -1228,17 +1241,22 @@ export function buildWorld(o: WorldOptions): FakeWorld {
     exportFails: false,
     dialogCancels: new Set(),
     importDiffWarnings: [],
+    importDiffFiles: ['src/routes/users.ts', 'src/validation/schemas.ts'],
+    diffFiles: new Map(),
     authFailing: authFailed,
     purgeFailures: 0,
     runnerState: o.runnerFatal === undefined ? 'ready' : 'unavailable',
     restartFixes: o.runnerFatal?.code === 'RUNNER_UNAVAILABLE',
     backupAvailable: true,
+    dropInitialRunnerPush: false,
+    restoreLeavesFatal: null,
     busyFailures: 0,
     rootMissing: new Set(),
     relocateUnverified: false,
     selections: new Map(),
     unreadableOnRead: new Set(),
     exportFailParts: [],
+    exportMissingParts: [],
     idempotency: new Map(),
     nextId: 5_000,
     now: () => now,

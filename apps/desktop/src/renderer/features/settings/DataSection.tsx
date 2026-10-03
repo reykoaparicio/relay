@@ -76,13 +76,14 @@ function useExportToast() {
 /** Settings → Storage & data (10 J10, §12.3, §18.3–18.4). */
 export function DataSection() {
   const { project, explicit, projects, settings, choose } = useSettingsProject();
-  const retry = useRetryAction(() => {
+  const refetch = () => {
     void projects.refetch();
     void settings.refetch();
-  });
+  };
+  const retry = useRetryAction(refetch);
   return (
     <section className="stack" aria-label="Storage & data">
-      {projects.error === null ? null : <ErrorView error={toViewError(projects.error)} onAction={retry} />}
+      {projects.error === null ? null : <ErrorView error={toViewError(projects.error)} onAction={retry} onRetry={refetch} />}
       {projects.data === undefined || project === undefined ? null : (
         <SettingsProjectPicker projects={projects.data} value={project.id} onChange={choose} />
       )}
@@ -94,7 +95,7 @@ export function DataSection() {
             <Skeleton lines={4} />
           </div>
         ) : (
-          <ErrorView error={toViewError(settings.error)} onAction={retry} />
+          <ErrorView error={toViewError(settings.error)} onAction={retry} onRetry={refetch} />
         )
       ) : (
         <RetentionCard

@@ -65,9 +65,10 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 /** Settings → Projects (10 J10): rename, exclusions with a live preview, provider policy, allowance, OpenAI store. */
 export function ProjectsSection() {
   const { project, projects, choose } = useSettingsProject();
-  const retry = useRetryAction(() => void projects.refetch());
+  const refetch = () => void projects.refetch();
+  const retry = useRetryAction(refetch);
   const titleId = useId();
-  if (projects.error !== null) return <ErrorView error={toViewError(projects.error)} onAction={retry} />;
+  if (projects.error !== null) return <ErrorView error={toViewError(projects.error)} onAction={retry} onRetry={refetch} />;
   if (projects.data === undefined) {
     return (
       <div className="card" aria-busy="true">

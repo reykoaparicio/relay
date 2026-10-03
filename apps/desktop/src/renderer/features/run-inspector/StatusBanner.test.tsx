@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import type { RunDetail } from '@relay/contracts';
+import type { RunDetail, RunEvent } from '@relay/contracts';
 import { appError, attempt, runDetail } from '../../components/ui/test-fixtures';
 import { renderWithProviders } from '../../components/ui/test-utils';
 import { hashMapDetail } from './inspector-model';
@@ -106,6 +106,21 @@ describe('StatusBanner: one cause-and-action banner (audit #3, #14, #15)', () =>
     expect(within(banner).queryByText('Paused: cost exceeded reservation')).not.toBeInTheDocument();
   });
 
+  it('overrun by 30 µUSD on $0.50: the amounts gain decimals instead of reading "$0.50 … $0.50 reserved" and "$0.00" over', () => {
+    const run = runDetail({ status: 'paused', pauseReason: 'budget_overrun', unresolvedAttempts: [], availableActions: ['acknowledge_overrun', 'stop'] });
+    const events = [{ seq: 1, at: 1, type: 'ledger.overrun', payload: { attemptId: 'att_1', stepRunId: null, N: 500_000, X: 500_030 } }] as unknown as RunEvent[];
+    renderWithProviders(
+      <MemoryRouter>
+        <StatusBanner run={run} projectId="prj_1" events={events} onAction={() => undefined} onRecoveryAction={() => undefined} pending={null} busy={false} />
+      </MemoryRouter>,
+    );
+    const banner = screen.getByTestId('status-banner');
+    expect(banner).toHaveTextContent('The last call cost $0.50003, more than the $0.50000 reserved');
+    const value = (term: string) => within(banner).getByText(term).nextElementSibling?.textContent;
+    expect(value('Reserved')).toBe('$0.50000');
+    expect(value('Over the reservation')).toBe('$0.00003');
+  });
+
   it('output-invalid: a plain summary leads, the field list and error code are collapsed under the actions', async () => {
     const bridge = createFakeBridge('output-invalid');
     const run = bridge.world.runs[0];
@@ -120,6 +135,38 @@ describe('StatusBanner: one cause-and-action banner (audit #3, #14, #15)', () =>
     // The actions come before the collapsed detail.
     const retry = within(banner).getByRole('button', { name: 'Retry step' });
     expect(retry.compareDocumentPosition(details as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('StatusBanner step names (stepMeta)', () => {
+  const META = [{ stepKey: 'plan', name: 'Draft the change plan', instructionVersion: null }];
+  it('auth_required before start: "Needed by" uses the workflow step name', () => {
+    renderBanner(
+      runDetail({
+        status: 'paused',
+        pauseReason: 'auth_required',
+        startedAt: null,
+        stepMeta: META,
+        unresolvedAttempts: [],
+        availableActions: ['resume', 'stop'],
+        statusDetail: appError({ code: 'AUTH_REQUIRED', userMessage: 'No key.', nextAction: 'reconnect_provider', alternatives: [], details: { providerId: 'openai', stepKey: 'plan' } }),
+      }),
+    );
+    expect(screen.getByText('Needed by: Draft the change plan')).toBeInTheDocument();
+  });
+
+  it('setup_blocked: "Step" uses the workflow step name', () => {
+    renderBanner(
+      runDetail({
+        status: 'paused',
+        pauseReason: 'setup_blocked',
+        stepMeta: META,
+        unresolvedAttempts: [],
+        availableActions: ['stop'],
+        statusDetail: appError({ code: 'VALIDATION_FAILED', userMessage: 'Setup failed.', nextAction: 'choose_profile', alternatives: [], details: { stepKey: 'plan' } }),
+      }),
+    );
+    expect(screen.getByText('Step: Draft the change plan')).toBeInTheDocument();
   });
 });
 

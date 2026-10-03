@@ -56,9 +56,24 @@ export interface GoalInputCardProps {
   readonly onImportErrorAction: (action: NextAction) => void;
   /** Display names of the providers that would receive a confirmed suspected secret. */
   readonly providerNames: readonly string[];
+  /** The selected suspected secrets whose confirmation still holds (`validAcknowledged`). */
+  readonly acknowledged: readonly string[];
+  /** The file picker's new selection and confirmed suspected secrets. */
+  readonly onFilesChange: (next: readonly string[], acknowledged: readonly string[]) => void;
 }
 
-export function GoalInputCard({ form, dispatch, fieldErrors, files, preview, importDiff, onImportErrorAction, providerNames }: GoalInputCardProps) {
+export function GoalInputCard({
+  form,
+  dispatch,
+  fieldErrors,
+  files,
+  preview,
+  importDiff,
+  onImportErrorAction,
+  providerNames,
+  acknowledged,
+  onFilesChange,
+}: GoalInputCardProps) {
   const titleId = useId();
   return (
     <Card labelledBy={titleId}>
@@ -99,13 +114,11 @@ export function GoalInputCard({ form, dispatch, fieldErrors, files, preview, imp
           error={preview.error}
           onRetry={preview.refetch}
           selected={files}
-          acknowledged={form.acknowledgedSecrets}
+          acknowledged={acknowledged}
           providerNames={providerNames}
           fieldError={fieldErrors[FIELD.files]}
           rowErrors={fieldErrors}
-          onChange={(next, acknowledged) => {
-            dispatch({ type: 'set-files', files: next, acknowledged });
-          }}
+          onChange={onFilesChange}
         />
       ) : (
         <DiffImport form={form} fieldError={fieldErrors[FIELD.diff]} importDiff={importDiff} onImportErrorAction={onImportErrorAction} />
@@ -172,10 +185,10 @@ export interface WorkflowCardProps {
   readonly providers: readonly ProviderStatus[] | undefined;
   readonly selection: Readonly<Record<string, string>>;
   readonly profileErrors: FieldErrors;
-  readonly dispatch: Dispatch;
+  readonly onSelectProfile: (stepKey: string, profileId: string) => void;
 }
 
-export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, providers, selection, profileErrors, dispatch }: WorkflowCardProps) {
+export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, providers, selection, profileErrors, onSelectProfile }: WorkflowCardProps) {
   const titleId = useId();
   return (
     <Card labelledBy={titleId}>
@@ -209,9 +222,7 @@ export function WorkflowCard({ projectId, summary, contentHash, rows, profiles, 
         selected={selection}
         errors={profileErrors}
         selectId={FIELD.profile}
-        onSelect={(stepKey, profileId) => {
-          dispatch({ type: 'select-profile', stepKey, profileId });
-        }}
+        onSelect={onSelectProfile}
       />
     </Card>
   );

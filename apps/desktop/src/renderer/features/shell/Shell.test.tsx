@@ -81,3 +81,39 @@ describe('Shell runner banner (08 H6 → J4)', () => {
     });
   });
 });
+
+describe('Shell provider status line', () => {
+  it('a provider is healthy again after a successful connection test, while the run stays paused for sign-in', async () => {
+    const bridge = createFakeBridge('auth-failed');
+    renderApp(`/p/${FAKE_PROJECT_ID}/runs`, { bridge });
+    expect(await screen.findByText('1 of 2 providers connected', {}, { timeout: 3000 })).toBeInTheDocument();
+    // The user reconnects OpenAI (a new key passes its test); the run is still paused until they resume it.
+    bridge.world.authFailing.delete('openai');
+    await act(async () => {
+      const res = await bridge.invoke('relay/v1/providers.test', { providerId: 'openai' });
+      expect(res.ok).toBe(true);
+    });
+    expect(bridge.world.runs.some((r) => r.status === 'paused' && r.pauseReason === 'auth_required')).toBe(true);
+    expect(await screen.findByText('2 providers connected', {}, { timeout: 3000 })).toBeInTheDocument();
+  });
+
+  it('a test that passed before the pause does not count: the provider stays unhealthy', async () => {
+    const bridge = createFakeBridge('auth-failed');
+    // OpenAI's last test passed long before the run paused for its sign-in.
+    bridge.world.providers = bridge.world.providers.map((p) =>
+      p.providerId === 'openai' && p.lastTest !== null ? { ...p, lastTest: { ...p.lastTest, ok: true, at: 1 as typeof p.lastTest.at } } : p,
+    );
+    renderApp(`/p/${FAKE_PROJECT_ID}/runs`, { bridge });
+    expect(await screen.findByText('1 of 2 providers connected', {}, { timeout: 3000 })).toBeInTheDocument();
+  });
+});
+
+describe('Shell runner banner without the initial push', () => {
+  it('a runner.state push sent before the window subscribed is not needed: the shell asks main on mount', async () => {
+    const bridge = createFakeBridge('runner-unavailable');
+    bridge.world.dropInitialRunnerPush = true;
+    renderApp('/settings/about', { bridge });
+    expect(await screen.findByText('The background runner is unavailable', {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(bridge.callsTo('relay/v1/app.getDiagnostics').length).toBeGreaterThan(0);
+  });
+});

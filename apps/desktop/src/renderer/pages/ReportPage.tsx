@@ -31,7 +31,7 @@ import {
   SummarySection,
   TerminalLead,
 } from '../features/report/ReportSections';
-import { exportPartResults, retryWhatOf } from '../features/report/export-results';
+import { anyExportFailed, exportPartResults } from '../features/report/export-results';
 import type { ExportPartResult } from '../features/report/export-results';
 import { useArtifactExport } from '../features/run-inspector/useRunExports';
 import { runLabel } from '../features/runs/run-display';
@@ -103,7 +103,8 @@ export function ReportPage() {
           return;
         }
         const rows = exportPartResults(res, exportParts ?? []);
-        if (rows !== null && retryWhatOf(rows) !== null) {
+        // Any failed part keeps the dialog open: a retryable one offers "Retry", a permanent one is final.
+        if (rows !== null && anyExportFailed(rows)) {
           setExportParts(rows);
           return;
         }
@@ -156,6 +157,10 @@ export function ReportPage() {
         <ErrorView
           error={toViewError(loadError)}
           onAction={() => {
+            void runQ.refetch();
+            void reportQ.refetch();
+          }}
+          onRetry={() => {
             void runQ.refetch();
             void reportQ.refetch();
           }}
@@ -250,6 +255,9 @@ export function ReportPage() {
           <ErrorView
             error={toViewError(patchQ.error)}
             onAction={() => {
+              void patchQ.refetch();
+            }}
+            onRetry={() => {
               void patchQ.refetch();
             }}
           />

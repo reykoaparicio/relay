@@ -147,6 +147,60 @@ describe('ReportPage', () => {
     });
   });
 
+  it('export-partial with a part that is no longer stored (NOT_FOUND): final wording, no retry for it', async () => {
+    const { bridge } = open('export-partial');
+    await ready();
+    bridge.world.exportFailParts = [];
+    bridge.world.exportMissingParts = ['patch'];
+    await userEvent.click(headerExport());
+    const first = await screen.findByRole('dialog', { name: 'Export the run' });
+    await userEvent.click(within(first).getByRole('radio', { name: /Both/ }));
+    await userEvent.click(within(first).getByRole('button', { name: 'Export 2 files' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export partly saved' });
+    const rows = within(dialog).getAllByTestId('export-part');
+    expect(rows[0]).toHaveTextContent('Report (Markdown): Written to ~/Downloads/report.md');
+    expect(rows[1]).toHaveTextContent('Patch (.patch): Failed. This file is no longer stored, so it cannot be exported.');
+    expect(within(dialog).getByText('Run is intact. The files that failed cannot be exported again.')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Export saved')).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(1);
+  });
+
+  it('a mix: the write failure is retried, the missing part is not', async () => {
+    const { bridge } = open('export-partial');
+    await ready();
+    bridge.world.exportFailParts = ['report'];
+    bridge.world.exportMissingParts = ['patch'];
+    await userEvent.click(headerExport());
+    const first = await screen.findByRole('dialog', { name: 'Export the run' });
+    await userEvent.click(within(first).getByRole('radio', { name: /Both/ }));
+    await userEvent.click(within(first).getByRole('button', { name: 'Export 2 files' }));
+    // Nothing was written: the whole export fails, with per-part details.
+    const dialog = await screen.findByRole('dialog', { name: /Export (failed|partly saved)/ });
+    await userEvent.click(within(dialog).getByRole('button', { name: /Retry/ }));
+    await waitFor(() => {
+      expect(bridge.callsTo('relay/v1/artifacts.export')).toHaveLength(2);
+    });
+    expect(bridge.callsTo('relay/v1/artifacts.export')[1]?.input).toMatchObject({ what: 'report' });
+  });
+
+  it('a whole export failing with NOT_FOUND offers no retry', async () => {
+    const { bridge } = open('export-partial');
+    await ready();
+    bridge.world.exportFailParts = [];
+    bridge.world.exportMissingParts = ['report'];
+    await userEvent.click(headerExport());
+    await userEvent.click(await screen.findByRole('button', { name: 'Export' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Export failed' });
+    expect(within(dialog).getByTestId('export-part')).toHaveTextContent('Report (Markdown): Failed. This file is no longer stored, so it cannot be exported.');
+    expect(within(dialog).getByText('Run is intact. Trying again would fail the same way.')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument();
+  });
+
   it('export success names where the files were saved; a cancelled save dialog closes quietly', async () => {
     const { bridge } = open('completed');
     await ready();

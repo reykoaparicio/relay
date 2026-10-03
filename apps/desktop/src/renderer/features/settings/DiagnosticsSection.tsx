@@ -30,6 +30,9 @@ export function lastShutdownText(last: { readonly clean: boolean; readonly at: n
   return `Did not quit normally (crash, force quit or power loss) · session started ${when}${last.runActive ? ' · a run was in progress' : ''}`;
 }
 
+/** A runner-reported value while the runner is down (main answers only its own half). */
+const RUNNER_DOWN_UNKNOWN = 'Unknown while the runner is down';
+
 /** Settings → Diagnostics (§18.3): runner heartbeat, schema version, unresolved calls, provider mode, version/build. */
 export function DiagnosticsSection() {
   const titleId = useId();
@@ -49,6 +52,10 @@ export function DiagnosticsSection() {
           void diagnostics.refetch();
           void info.refetch();
         }}
+        onRetry={() => {
+          void diagnostics.refetch();
+          void info.refetch();
+        }}
       />
     );
   } else if (d === undefined || i === undefined) {
@@ -60,6 +67,7 @@ export function DiagnosticsSection() {
   } else {
     const runner = RUNNER[d.runner.state];
     const RunnerIcon = runner.icon;
+    const runnerDown = d.runner.state === 'unavailable';
     const items: KeyValueItem[] = [
       {
         id: 'runner',
@@ -111,8 +119,8 @@ export function DiagnosticsSection() {
         id: 'schema',
         term: 'Database schema',
         value:
-          d.runner.state === 'unavailable' && d.db.schemaVersion === 0
-            ? `Unknown while the runner is down · ${formatBytes(d.db.sizeBytes)}`
+          runnerDown && d.db.schemaVersion === 0
+            ? `${RUNNER_DOWN_UNKNOWN} · ${formatBytes(d.db.sizeBytes)}`
             : `Version ${String(d.db.schemaVersion)} · ${d.db.migrationsPending === 0 ? 'current' : `${String(d.db.migrationsPending)} migration(s) pending`} · ${formatBytes(d.db.sizeBytes)}`,
         mono: true,
       },
@@ -120,7 +128,9 @@ export function DiagnosticsSection() {
         id: 'unresolved',
         term: 'Unresolved calls',
         value:
-          d.unresolvedAttempts === 0
+          runnerDown && d.unresolvedAttempts === 0
+            ? RUNNER_DOWN_UNKNOWN
+            : d.unresolvedAttempts === 0
             ? 'None'
             : `${String(d.unresolvedAttempts)} with an unknown outcome · decide them from the run inspector`,
       },
@@ -142,10 +152,18 @@ export function DiagnosticsSection() {
       {
         id: 'catalog',
         term: 'Price catalog',
-        value: `${d.catalog.version ?? 'none loaded'} · ${String(d.catalog.models)} models`,
+        // The runner reports these: while it is down, "none loaded · 0 models" would be a false statement.
+        value:
+          runnerDown && d.catalog.version === null && d.catalog.models === 0
+            ? RUNNER_DOWN_UNKNOWN
+            : `${d.catalog.version ?? 'none loaded'} · ${String(d.catalog.models)} models`,
         mono: true,
       },
-      { id: 'prompts', term: 'Prompt templates', value: `${String(d.prompts.loaded)} loaded` },
+      {
+        id: 'prompts',
+        term: 'Prompt templates',
+        value: runnerDown && d.prompts.loaded === 0 ? RUNNER_DOWN_UNKNOWN : `${String(d.prompts.loaded)} loaded`,
+      },
       {
         id: 'logging',
         term: 'Log file',
@@ -307,7 +325,7 @@ export function AboutSection() {
         info.error === null ? (
           <Skeleton lines={2} />
         ) : (
-          <ErrorView error={toViewError(info.error)} onAction={() => void info.refetch()} />
+          <ErrorView error={toViewError(info.error)} onAction={() => void info.refetch()} onRetry={() => void info.refetch()} />
         )
       ) : (
         <p>

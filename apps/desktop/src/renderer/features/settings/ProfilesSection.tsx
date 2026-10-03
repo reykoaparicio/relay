@@ -27,10 +27,11 @@ export function ProfilesSection() {
   const queryClient = useQueryClient();
   const profiles = useProfiles();
   const catalog = useCatalog();
-  const retry = useRetryAction(() => {
+  const refetch = () => {
     void profiles.refetch();
     void catalog.refetch();
-  });
+  };
+  const retry = useRetryAction(refetch);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [saved, setSaved] = useState<ProfileWithWarnings | null>(null);
@@ -95,7 +96,7 @@ export function ProfilesSection() {
 
   const body =
     profiles.error !== null ? (
-      <ErrorView error={toViewError(profiles.error)} onAction={retry} />
+      <ErrorView error={toViewError(profiles.error)} onAction={retry} onRetry={refetch} />
     ) : profiles.data === undefined ? (
       <div aria-busy="true">
         <Skeleton lines={4} />

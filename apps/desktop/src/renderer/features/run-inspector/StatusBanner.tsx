@@ -21,11 +21,11 @@ import type { RecoveryDecisionDetail } from '../../components/ui';
 import {
   DESTRUCTIVE_RUN_ACTIONS,
   formatDuration,
-  formatUsdAtPrecision,
+  formatSumPart,
   PROVIDER_LABELS,
   RUN_ACTION_LABELS,
   statusPresentation,
-  stepKeyLabel,
+  stepName,
   sumConsistentPrecision,
 } from '../../lib/format';
 import { useAppInfo } from '../../hooks/useAppInfo';
@@ -41,6 +41,7 @@ import {
   incompleteTitle,
   INTERRUPTION_LEAD,
   interruptedStep,
+  interruptedAtOf,
   interruptionCauseOf,
   issuesOf,
   lastOverrun,
@@ -283,9 +284,9 @@ function overrunAmounts(o: OverrunFact): { readonly reserved: string; readonly a
   const over = o.actual - o.reserved;
   const digits = sumConsistentPrecision([o.reserved, over], o.actual);
   return {
-    reserved: formatUsdAtPrecision(microusd(o.reserved), digits),
-    actual: formatUsdAtPrecision(microusd(o.actual), digits),
-    over: formatUsdAtPrecision(microusd(over), digits),
+    reserved: formatSumPart(o.reserved, digits),
+    actual: formatSumPart(o.actual, digits),
+    over: formatSumPart(over, digits),
   };
 }
 
@@ -445,7 +446,7 @@ function pausedModelRefused({ step, detail }: PausedContext): BannerContent {
   };
 }
 
-function pausedSetupBlocked({ detail, notStarted, stepKeyDetail, code }: PausedContext): BannerContent {
+function pausedSetupBlocked({ run, detail, notStarted, stepKeyDetail, code }: PausedContext): BannerContent {
   return {
     title: notStarted
       ? 'A setup check failed before the run started'
@@ -454,7 +455,7 @@ function pausedSetupBlocked({ detail, notStarted, stepKeyDetail, code }: PausedC
       <>
         <p>{detail?.userMessage ?? 'Relay could not start the next step with the current setup.'}</p>
         {notStarted ? <p>Nothing was sent to a provider and nothing was reserved.</p> : null}
-        {stepKeyDetail === null ? null : <p className="subtle">Step: {stepKeyLabel(stepKeyDetail)}</p>}
+        {stepKeyDetail === null ? null : <p className="subtle">Step: {stepName(stepKeyDetail, run.stepMeta)}</p>}
         {stringDetail(detail, 'modelId') === null ? null : (
           <p className="subtle">
             Model <span className="mono">{stringDetail(detail, 'modelId')}</span>
@@ -497,7 +498,7 @@ function pausedUnknownOutcome({ run }: PausedContext): BannerContent {
   };
 }
 
-function pausedAuthRequired({ detail, notStarted, stepKeyDetail }: PausedContext): BannerContent {
+function pausedAuthRequired({ run, detail, notStarted, stepKeyDetail }: PausedContext): BannerContent {
   if (notStarted) {
     // Queued → paused(auth_required): no credential ref for a provider the run needs (06 F13 runChecks).
     return {
@@ -508,7 +509,7 @@ function pausedAuthRequired({ detail, notStarted, stepKeyDetail }: PausedContext
             The run has not started: nothing was sent to a provider and nothing was reserved. Connect the
             provider in Settings, then resume.
           </p>
-          {stepKeyDetail === null ? null : <p className="subtle">Needed by: {stepKeyLabel(stepKeyDetail)}</p>}
+          {stepKeyDetail === null ? null : <p className="subtle">Needed by: {stepName(stepKeyDetail, run.stepMeta)}</p>}
           <p className="subtle">Relay does not show or log the key.</p>
         </>
       ),
@@ -673,7 +674,7 @@ function statusContent(
         : pausedContent(run.pauseReason, run, events, step);
     case 'interrupted': {
       // E2: the cause follows how the previous session ended (a clean quit, or the runner stopped responding).
-      const cause = interruptionCauseOf(lastShutdown);
+      const cause = interruptionCauseOf(lastShutdown, interruptedAtOf(events));
       const stuck = interruptedStep(run);
       return {
         title: 'Relay stopped while this run was in progress',

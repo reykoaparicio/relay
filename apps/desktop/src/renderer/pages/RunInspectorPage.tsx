@@ -375,6 +375,9 @@ export function RunInspectorPage() {
           onAction={() => {
             void runQ.refetch();
           }}
+          onRetry={() => {
+            void runQ.refetch();
+          }}
         />
       </>
     );

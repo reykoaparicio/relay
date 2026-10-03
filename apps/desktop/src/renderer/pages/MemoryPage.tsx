@@ -85,9 +85,10 @@ export function MemoryPage() {
   const [command, setCommand] = useState<DetailCommand | null>(null);
   const detailHeading = useRef<HTMLHeadingElement>(null);
   const conflictHeading = useRef<HTMLHeadingElement>(null);
-  const retry = useRetryAction(() => {
+  const refetch = () => {
     void current.refetch();
-  });
+  };
+  const retry = useRetryAction(refetch);
 
   useNavPerf('memory', current.data !== undefined || current.error !== null);
 
@@ -162,7 +163,7 @@ export function MemoryPage() {
 
   const listBody = (t: MemoryTab) => {
     const q = lists[t];
-    if (q.error !== null) return <ErrorView error={toViewError(q.error)} onAction={retry} />;
+    if (q.error !== null) return <ErrorView error={toViewError(q.error)} onAction={retry} onRetry={refetch} />;
     if (q.data === undefined) {
       return (
         <div aria-busy="true">
@@ -225,7 +226,7 @@ export function MemoryPage() {
           }}
         />
         {selected === undefined ? null : detail.error !== null ? (
-          <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} />
+          <ErrorView error={toViewError(detail.error)} onAction={() => void detail.refetch()} onRetry={() => void detail.refetch()} />
         ) : record === undefined ? (
           <div className="card" aria-busy="true">
             <Skeleton lines={8} />

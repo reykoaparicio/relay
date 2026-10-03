@@ -9,17 +9,18 @@ import type {
   Microusd,
   PreviewResult,
   ProfileWithWarnings,
+  ProviderId,
   RunPreflight,
   WorkflowLimits,
 } from '@relay/contracts';
 import { isAppErrorException } from '../../api/client';
-import { errorReason, toViewError, validationIssuesOf } from '../../api/errors';
+import { errorReason, isDatabaseBusy, toViewError, validationIssuesOf } from '../../api/errors';
 import { secretLabelText } from '../../lib/format/labels';
 import type { FormProblem } from '../common/ErrorSummary';
 import { checkAllowance, checkWhole, dollarsText, LIMIT_BOUNDS } from '../run-setup/limits';
 import { profileOverridesFor, ROLE_LABELS } from '../run-setup/model-steps';
 import type { ModelStepRow } from '../run-setup/model-steps';
-import { issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
+import { diffSecretMessage, issueMessage, MISSING_CREDENTIAL, problemIssues, stepKeyOfPath, stepProviderId } from '../run-setup/preflight-issues';
 
 export type InputSource = 'files' | 'diff';
 
@@ -36,9 +37,10 @@ export interface NewRunForm {
   readonly files: readonly string[] | null;
   /**
    * E2 #11: selected files the user confirmed sending although they look like they hold a secret. Sent as
-   * `input.acknowledgedSuspectedSecrets` (only the ones still selected); unticking a file drops it.
+   * `input.acknowledgedSuspectedSecrets` (only the ones still selected and still valid, {@link validAcknowledged});
+   * unticking a file drops it.
    */
-  readonly acknowledgedSecrets: readonly string[];
+  readonly acknowledgedSecrets: readonly SecretAck[];
   readonly diff: ImportedDiff | null;
   readonly profileSelection: Readonly<Record<string, string>>;
   /** null = the workflow default. */
@@ -54,6 +56,19 @@ export interface NewRunForm {
   readonly memoryIds: readonly string[] | null;
   /** Set by the first submit: goal/input errors show from then on. */
   readonly submitted: boolean;
+}
+
+/**
+ * One confirmation to send a suspected secret (E2 #11). It is scoped to what the user was told: the providers named in
+ * the confirm, and the file content previewed then. A run that would also send it to another provider, or a changed
+ * file, asks again.
+ */
+export interface SecretAck {
+  readonly relPath: string;
+  /** The providers the confirm named. */
+  readonly providers: readonly ProviderId[];
+  /** The file's `projects.previewFiles` sha256 when confirmed; null when the preview did not give one. */
+  readonly sha256: string | null;
 }
 
 export const INITIAL_FORM: NewRunForm = {
@@ -73,12 +88,21 @@ export const INITIAL_FORM: NewRunForm = {
 
 export type FormAction =
   | { readonly type: 'patch'; readonly patch: Partial<NewRunForm> }
-  | { readonly type: 'select-profile'; readonly stepKey: string; readonly profileId: string }
+  /**
+   * `receivingProviders`: the providers that receive the run's context after this change. A confirmed suspected secret
+   * whose confirmation did not name all of them is dropped (the user is asked again).
+   */
+  | {
+      readonly type: 'select-profile';
+      readonly stepKey: string;
+      readonly profileId: string;
+      readonly receivingProviders?: readonly ProviderId[];
+    }
   /**
    * The file selection (and, when given, the confirmed suspected secrets). Acknowledgements of files that are no longer
    * selected are dropped, so `acknowledgedSuspectedSecrets` stays a subset of `relPaths`.
    */
-  | { readonly type: 'set-files'; readonly files: readonly string[]; readonly acknowledged?: readonly string[] }
+  | { readonly type: 'set-files'; readonly files: readonly string[]; readonly acknowledged?: readonly SecretAck[] }
   /** `defaults`: the non-pinned approved ids ticked while the selection is untouched (the first toggle starts from them). */
   | { readonly type: 'toggle-memory'; readonly id: string; readonly checked: boolean; readonly defaults: readonly string[] };
 
@@ -86,10 +110,19 @@ export function formReducer(s: NewRunForm, a: FormAction): NewRunForm {
   switch (a.type) {
     case 'patch':
       return { ...s, ...a.patch };
-    case 'select-profile':
-      return { ...s, profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId } };
-    case 'set-files':
-      return { ...s, files: a.files, acknowledgedSecrets: acknowledgedFor(a.files, a.acknowledged ?? s.acknowledgedSecrets) };
+    case 'select-profile': {
+      const receiving = a.receivingProviders;
+      return {
+        ...s,
+        profileSelection: { ...s.profileSelection, [a.stepKey]: a.profileId },
+        acknowledgedSecrets:
+          receiving === undefined ? s.acknowledgedSecrets : s.acknowledgedSecrets.filter((k) => coversProviders(k, receiving)),
+      };
+    }
+    case 'set-files': {
+      const selected = new Set(a.files);
+      return { ...s, files: a.files, acknowledgedSecrets: (a.acknowledged ?? s.acknowledgedSecrets).filter((k) => selected.has(k.relPath)) };
+    }
     case 'toggle-memory': {
       const current = s.memoryIds ?? a.defaults;
       return {
@@ -133,6 +166,56 @@ export function defaultFiles(preview: PreviewResult | undefined): readonly strin
 export function acknowledgedFor(files: readonly string[], acknowledged: readonly string[]): string[] {
   const acked = new Set(acknowledged);
   return files.filter((p) => acked.has(p));
+}
+
+/** The confirmation named every provider that would now receive the file. */
+function coversProviders(ack: SecretAck, receiving: readonly ProviderId[]): boolean {
+  return receiving.every((p) => ack.providers.includes(p));
+}
+
+/** The preview's sha256 of a file: undefined while the preview does not list it, null when it gives none. */
+function previewSha(preview: PreviewResult | undefined, relPath: string): string | null | undefined {
+  return preview?.included.find((f) => f.relPath === relPath)?.sha256;
+}
+
+/**
+ * The confirmed suspected secrets that still hold (E2 #11): the confirmation named every provider that would receive
+ * the file now, and the file has not changed since (when both the confirmation and the current preview carry a hash).
+ * Anything else is asked again: the file stays ticked, unconfirmed, and preflight flags it.
+ */
+export function validAcknowledged(
+  acks: readonly SecretAck[],
+  receiving: readonly ProviderId[],
+  preview: PreviewResult | undefined,
+): string[] {
+  return acks
+    .filter((k) => {
+      if (!coversProviders(k, receiving)) return false;
+      const now = previewSha(preview, k.relPath);
+      return k.sha256 === null || now === undefined || now === null || now === k.sha256;
+    })
+    .map((k) => k.relPath);
+}
+
+/**
+ * The confirmations after the file picker reports its confirmed paths: a still-valid earlier confirmation is kept as
+ * is; a new one records the providers the confirm named and the file's current preview hash.
+ */
+export function ackEntries(
+  paths: readonly string[],
+  previous: readonly SecretAck[],
+  valid: readonly string[],
+  named: readonly ProviderId[],
+  preview: PreviewResult | undefined,
+): SecretAck[] {
+  return paths.map(
+    (relPath) =>
+      (valid.includes(relPath) ? previous.find((k) => k.relPath === relPath) : undefined) ?? {
+        relPath,
+        providers: [...named],
+        sha256: previewSha(preview, relPath) ?? null,
+      },
+  );
 }
 
 /** Field ids: controls use them, and the error summary links to them. */
@@ -310,8 +393,11 @@ export function buildStartInput(args: {
   readonly rows: readonly ModelStepRow[];
   readonly check: ClientCheck;
   readonly goal: string;
+  /** The confirmed suspected secrets to send ({@link validAcknowledged}); default: every stored confirmation. */
+  readonly acknowledged?: readonly string[];
 }): StartInput | null {
   const { form, workflow, files, rows, check } = args;
+  const acknowledged = args.acknowledged ?? form.acknowledgedSecrets.map((k) => k.relPath);
   if (workflow === null || args.goal === '' || args.goal.length > 2000) return null;
   if (Object.keys(check.fieldErrors).some((k) => k !== FIELD.goal && k !== FIELD.files && k !== FIELD.diff))
     return null;
@@ -319,7 +405,7 @@ export function buildStartInput(args: {
     form.source === 'files'
       ? files.length === 0
         ? null
-        : { kind: 'files' as const, relPaths: [...files], ...acknowledgedInput(files, form.acknowledgedSecrets) }
+        : { kind: 'files' as const, relPaths: [...files], ...acknowledgedInput(files, acknowledged) }
       : form.diff === null
         ? null
         : { kind: 'diff' as const, diffArtifactId: form.diff.artifactId };
@@ -414,8 +500,9 @@ export function problemsFromError(
   const denied = deniedSecretsOf(error);
   if (denied.length > 0)
     return denied.map((d) => ({
-      fieldId: source === 'files' ? fileField(d.relPath, files.anchors) : null,
-      message: deniedSecretMessage(d),
+      fieldId: source === 'files' ? fileField(d.relPath, files.anchors) : FIELD.diff,
+      // A diff input cannot confirm a suspected secret: say what can be done instead.
+      message: source === 'files' ? deniedSecretMessage(d) : diffSecretMessage(d.relPath),
       code: 'suspected_secret',
     }));
   // E2 #8: a selected file cannot be read: link to it, and offer to leave it out.
@@ -502,10 +589,13 @@ export interface NewRunState {
   readonly startDisabledReason: string | null;
 }
 
-/** System errors (runner down, internal, conflict) are not form problems: they render as an ErrorView. */
+/**
+ * System errors (runner down, internal, conflict, a busy database) are not form problems: they render as an ErrorView
+ * with "Retry the check".
+ */
 function isSystemError(e: unknown): boolean {
   const code = toViewError(e).code;
-  return code === 'INTERNAL' || code === 'CONFLICT' || code === 'RUNNER_UNAVAILABLE';
+  return code === 'INTERNAL' || code === 'CONFLICT' || code === 'RUNNER_UNAVAILABLE' || isDatabaseBusy(e);
 }
 
 function preflightProblems(input: NewRunStateInput, budgetShown: boolean): FormProblem[] {

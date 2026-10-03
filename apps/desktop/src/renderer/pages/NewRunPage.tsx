@@ -3,6 +3,7 @@ import type { SyntheticEvent } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router';
 import { assertNever } from '@relay/contracts';
+import type { PreviewResult } from '@relay/contracts';
 import { ButtonLink, ErrorView, InlineAlert, PageHeader, Skeleton, useLiveRegion } from '../components/ui';
 import { call } from '../api/client';
 import { isProjectRootMissing, toViewError } from '../api/errors';
@@ -23,6 +24,7 @@ import {
 } from '../features/new-run/NewRunCards';
 import { UnreadableFileActions } from '../features/new-run/UnreadableFileActions';
 import {
+  ackEntries,
   budgetFromError,
   buildStartInput,
   checkForm,
@@ -34,6 +36,7 @@ import {
   INITIAL_FORM,
   limitDefaults,
   limitTexts,
+  validAcknowledged,
 } from '../features/new-run/new-run-model';
 import type { NewRunState } from '../features/new-run/new-run-model';
 import { modelSteps } from '../features/run-setup/model-steps';
@@ -66,6 +69,8 @@ export function NewRunPage() {
   const queryClient = useQueryClient();
   // A draft of this project's form comes back after a trip elsewhere (e.g. Settings to raise the monthly allowance).
   const [form, dispatch] = useReducer(formReducer, projectId, (id: string) => loadNewRunDraft(id) ?? INITIAL_FORM);
+  // Whether this form came back from a draft: files it names that are gone now are reported once below.
+  const [fromDraft] = useState(() => loadNewRunDraft(projectId) !== undefined);
   useEffect(() => {
     saveNewRunDraft(projectId, form);
   }, [projectId, form]);
@@ -87,9 +92,15 @@ export function NewRunPage() {
     () => (spec === undefined || profiles.data === undefined ? [] : modelSteps(spec, profiles.data)),
     [spec, profiles.data],
   );
-  // Untouched: every included file except suspected secrets (E2 #11), up to the cap.
-  const files = form.files ?? defaultFiles(preview.data);
+  // Untouched: every included file except suspected secrets (E2 #11), up to the cap. An explicit selection (e.g. from a
+  // draft) keeps only files the current preview still includes: a file deleted, moved or excluded since is never sent.
+  const { files, unavailable } = useMemo(() => selectedFiles(form.files, preview.data), [form.files, preview.data]);
   const check = checkForm(form, texts, defaults, files.length);
+  // Who receives the run's context with the current profile choice (engine: the snapshot's providers with overrides).
+  const roles = rolesByProvider(rows, form.profileSelection, profiles.data);
+  const receiving = [...roles.keys()];
+  // E2 #11: a confirmation holds only while it named every receiving provider and the file is unchanged.
+  const acknowledged = validAcknowledged(form.acknowledgedSecrets, receiving, preview.data);
   const wfVersion = wfSummary?.latestValidatedVersion ?? null;
   const wfRef =
     wfSummary === undefined || wfVersion === null ? null : { id: wfSummary.id, version: wfVersion };
@@ -105,6 +116,7 @@ export function NewRunPage() {
     rows,
     check,
     goal: goal === '' ? 'Draft goal' : goal,
+    acknowledged,
   });
   const draftKey = draft === null ? null : canonicalJson(draft);
   const settled = useDebouncedValue(draftKey ?? '', PREFLIGHT_DEBOUNCE_MS);
@@ -113,9 +125,17 @@ export function NewRunPage() {
   // `input.relPaths.<i>` preflight issues index the checked input's files: read them from the key it ran for.
   const settledFiles = useMemo(() => relPathsOfKey(settled), [settled]);
   const checkboxIds = useMemo(() => fileCheckboxIds(preview.data), [preview.data]);
-  // Who would receive a confirmed suspected secret: the checked run's providers, else the workflow's step providers.
-  const roles = rolesByProvider(rows, form.profileSelection, profiles.data);
-  const providerNames = (pf?.inputSummary.providersReceivingContext ?? [...roles.keys()]).map((id) => PROVIDER_LABELS[id]);
+  // Who would receive a confirmed suspected secret: the checked run's providers and the current choice's (a check that
+  // has not caught up with a profile change never names fewer providers than the run would use).
+  const namedProviders = [...new Set([...(pf?.inputSummary.providersReceivingContext ?? []), ...receiving])];
+  const providerNames = namedProviders.map((id) => PROVIDER_LABELS[id]);
+  const onFilesChange = (next: readonly string[], ackPaths: readonly string[]) => {
+    dispatch({
+      type: 'set-files',
+      files: next,
+      acknowledged: ackEntries(ackPaths, form.acknowledgedSecrets, acknowledged, namedProviders, preview.data),
+    });
+  };
 
   const importDiff = useMutation({
     mutationFn: () => call('relay/v1/artifacts.importDiff', { projectId }),
@@ -146,10 +166,17 @@ export function NewRunPage() {
     },
   });
 
+  // A profile change can add a provider: confirmations that did not name it are dropped (asked again).
+  const selectProfile = (stepKey: string, profileId: string) => {
+    start.newIntent();
+    const next = { ...form.profileSelection, [stepKey]: profileId };
+    dispatch({ type: 'select-profile', stepKey, profileId, receivingProviders: [...rolesByProvider(rows, next, profiles.data).keys()] });
+  };
+
   useNavPerf('new-run', project.data !== undefined && workflow.data !== undefined);
 
   // ----- problems (validation-errors), budget (budget-blocked) and readiness: one pure derivation -----
-  const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal });
+  const submittable = buildStartInput({ form, projectId, workflow: wfRef, files, rows, check, goal, acknowledged });
   const submitKey = submittable === null ? null : canonicalJson(submittable);
   const state = deriveNewRunState({
     form,
@@ -201,12 +228,13 @@ export function NewRunPage() {
     const first = problems.find((p) => p.fieldId !== null);
     focusField(first?.fieldId ?? FIELD.goal);
   };
-  const onLoadAction = useRetryAction(() => {
+  const refetchLoad = () => {
     void project.refetch();
     void workflows.refetch();
     void workflow.refetch();
     void profiles.refetch();
-  });
+  };
+  const onLoadAction = useRetryAction(refetchLoad);
   const onImportErrorAction = useNextAction({}, { projectId });
   const onErrorAction = useNextAction(
     {
@@ -253,7 +281,7 @@ export function NewRunPage() {
     return (
       <>
         {header}
-        <ErrorView error={toViewError(loadError)} onAction={onLoadAction} />
+        <ErrorView error={toViewError(loadError)} onAction={onLoadAction} onRetry={refetchLoad} />
       </>
     );
   }
@@ -277,7 +305,13 @@ export function NewRunPage() {
     return (
       <>
         {header}
-        <ProjectRootMissing project={project.data} />
+        {/* A start that failed on the missing folder is cleared once the folder is found, so the form comes back. */}
+        <ProjectRootMissing
+          project={project.data}
+          onRelocated={() => {
+            start.reset();
+          }}
+        />
       </>
     );
   }
@@ -297,6 +331,11 @@ export function NewRunPage() {
       {header}
       <form className="stack" onSubmit={onSubmit} noValidate aria-label="New run">
         <ErrorSummary problems={problems} focusOnMount={form.submitted} />
+        {fromDraft && unavailable > 0 ? (
+          <InlineAlert tone="info" live="polite" title={`${String(unavailable)} file${unavailable === 1 ? '' : 's'} from your draft ${unavailable === 1 ? 'is' : 'are'} no longer available`}>
+            <p>{unavailable === 1 ? 'It was' : 'They were'} deleted, moved, or excluded since, and {unavailable === 1 ? 'is' : 'are'} left out of this run.</p>
+          </InlineAlert>
+        ) : null}
         {budget === null ? null : (
           <BudgetBlockedPanel
             budget={budget}
@@ -304,10 +343,7 @@ export function NewRunPage() {
             rows={rows}
             profiles={profiles.data}
             selection={form.profileSelection}
-            onSelectProfile={(stepKey, profileId) => {
-              start.newIntent();
-              dispatch({ type: 'select-profile', stepKey, profileId });
-            }}
+            onSelectProfile={selectProfile}
             onProjectAllowanceSaved={() => {
               start.newIntent();
               void queryClient.invalidateQueries({ queryKey: qk.project(projectId) });
@@ -330,6 +366,8 @@ export function NewRunPage() {
               importDiff={{ isPending: importDiff.isPending, error: importDiff.error, start: () => { importDiff.mutate(); } }}
               onImportErrorAction={onImportErrorAction}
               providerNames={providerNames}
+              acknowledged={acknowledged}
+              onFilesChange={onFilesChange}
             />
             <WorkflowCard
               projectId={projectId}
@@ -340,7 +378,7 @@ export function NewRunPage() {
               providers={providers.data}
               selection={form.profileSelection}
               profileErrors={state.profileErrors}
-              dispatch={dispatch}
+              onSelectProfile={selectProfile}
             />
             <LimitsCard texts={texts} fieldErrors={fieldErrors} dispatch={dispatch} />
             <MemoryCard
@@ -384,6 +422,21 @@ export function NewRunPage() {
       </form>
     </>
   );
+}
+
+/**
+ * The files the run would send: the default selection while untouched, else the explicit selection minus files the
+ * current preview no longer includes (`unavailable` counts those). Until the preview loads, the selection as is.
+ */
+function selectedFiles(
+  selection: readonly string[] | null,
+  preview: PreviewResult | undefined,
+): { readonly files: readonly string[]; readonly unavailable: number } {
+  if (selection === null) return { files: defaultFiles(preview), unavailable: 0 };
+  if (preview === undefined) return { files: selection, unavailable: 0 };
+  const included = new Set<string>(preview.included.map((f) => f.relPath));
+  const files = selection.filter((p) => included.has(p));
+  return { files, unavailable: selection.length - files.length };
 }
 
 /** The `input.relPaths` of a preflight key (`canonicalJson` of the checked input), else []. */

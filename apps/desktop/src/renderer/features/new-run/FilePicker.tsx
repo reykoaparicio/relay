@@ -55,7 +55,7 @@ export function FilePicker({
   /** The suspected secret waiting for the "Send this file?" confirm. */
   const [confirming, setConfirming] = useState<Included | null>(null);
   if (error !== null && error !== undefined)
-    return <ErrorView error={toViewError(error)} onAction={onAction} />;
+    return <ErrorView error={toViewError(error)} onAction={onAction} onRetry={onRetry} />;
   if (preview === undefined) {
     return (
       <div aria-busy="true" id={FIELD.files} tabIndex={-1}>

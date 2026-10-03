@@ -189,6 +189,35 @@ describe('useRunEvents (gapless contract, 02 §B5)', () => {
     }
   });
 
+  it('attempt.settled alone refreshes the project month cost (the usage tile); a non-money event does not', async () => {
+    const { bridge, run, hook, queryClient } = setup();
+    await waitFor(() => {
+      expect(hook.result.current.loaded).toBe(true);
+    });
+    const spy = vi.spyOn(queryClient, 'invalidateQueries');
+    vi.useFakeTimers();
+    try {
+      const last = hook.result.current.lastSeq;
+      act(() => {
+        bridge.emit({ type: 'run.event', event: event(bridge, run.id, last + 1, 'artifact.created', { stepKey: 'review' }) });
+      });
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      const costKeys = () => spy.mock.calls.map((c) => c[0]?.queryKey).filter((k) => Array.isArray(k) && k[0] === 'project-cost');
+      expect(costKeys()).toHaveLength(0);
+      act(() => {
+        bridge.emit({ type: 'run.event', event: event(bridge, run.id, last + 2, 'attempt.settled', { stepKey: 'review' }) });
+      });
+      act(() => {
+        vi.advanceTimersByTime(250);
+      });
+      expect(costKeys()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('B1: a failed initial load stays loaded:false, retries with backoff, and never announces history', async () => {
     const timers = manualTimers();
     const { bridge, run, hook, announce } = setup({

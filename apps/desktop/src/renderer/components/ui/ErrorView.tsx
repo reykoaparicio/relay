@@ -1,5 +1,5 @@
 import type { AppError, NextAction } from '@relay/contracts';
-import { DATABASE_BUSY_MESSAGE, NEXT_ACTION_LABELS } from '../../lib/format/actions';
+import { DATABASE_BUSY_COMMAND_MESSAGE, DATABASE_BUSY_MESSAGE, NEXT_ACTION_LABELS } from '../../lib/format/actions';
 import { Button } from './Button';
 import { InlineAlert } from './InlineAlert';
 import type { InlineAlertLive } from './InlineAlert';
@@ -12,6 +12,13 @@ export interface ErrorViewProps {
   readonly pendingAction?: NextAction | null;
   /** `'assertive'` when the error answers the user's own submit (a failed command); default `'off'` (load errors). */
   readonly live?: InlineAlertLive;
+  /**
+   * Repeats what failed (a load's refetch). A busy database (E2 #2) offers "Try again now" only when this is given: a
+   * button nothing handles would be dead.
+   */
+  readonly onRetry?: () => void;
+  /** The error answers a command (the busy wording says nothing was changed). Default: `live === 'assertive'`. */
+  readonly command?: boolean;
 }
 
 /** E2 #2: another program holds the database lock — a wait, not a crash (no error code, no danger tone). */
@@ -20,7 +27,7 @@ function isBusy(error: AppError): boolean {
 }
 
 /** Renders an AppError: plain message, stable code, and one button per next action (09 I3 `.banner.danger`). */
-export function ErrorView({ error, onAction, title, pendingAction = null, live = 'off' }: ErrorViewProps) {
+export function ErrorView({ error, onAction, title, pendingAction = null, live = 'off', onRetry, command = live === 'assertive' }: ErrorViewProps) {
   const actions = [error.nextAction, ...error.alternatives].filter(
     (a, i, all): a is NextAction => a !== 'none' && all.indexOf(a) === i,
   );
@@ -29,11 +36,13 @@ export function ErrorView({ error, onAction, title, pendingAction = null, live =
       <InlineAlert
         tone="info"
         live={live}
-        title={DATABASE_BUSY_MESSAGE}
+        title={command ? DATABASE_BUSY_COMMAND_MESSAGE : DATABASE_BUSY_MESSAGE}
         actions={
-          <Button pending={pendingAction === 'wait'} onClick={() => { onAction('wait'); }}>
-            Try again now
-          </Button>
+          onRetry === undefined ? undefined : (
+            <Button pending={pendingAction === 'wait'} onClick={onRetry}>
+              Try again now
+            </Button>
+          )
         }
       >
         <p>Close other copies of Relay or programs that open its data folder if this keeps happening.</p>

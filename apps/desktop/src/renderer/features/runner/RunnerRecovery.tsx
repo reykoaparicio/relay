@@ -4,7 +4,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { DatabaseBackup, Power, RotateCw } from 'lucide-react';
-import type { RunnerFatal } from '@relay/contracts';
+import type { RunnerFatal, RunnerState } from '@relay/contracts';
 import { Button, ConfirmDialog, InlineAlert } from '../../components/ui';
 import { appErrorOf, errorReason, fatalOffersRestore, runnerFatalText, toViewError } from '../../api/errors';
 import { formatDate } from '../../lib/format';
@@ -33,6 +33,12 @@ function restartFailureText(e: unknown): string {
     });
   }
   return toViewError(e).userMessage;
+}
+
+/** Why the runner is still down after a restore: its recorded fatal in words, else its state. */
+function stillDownReason(fatal: RunnerFatal | null | undefined, state: RunnerState): string {
+  if (fatal !== null && fatal !== undefined) return runnerFatalText(fatal);
+  return state === 'unavailable' ? 'it is unavailable.' : `it is still ${state === 'restarting' ? 'restarting' : 'starting'}.`;
 }
 
 /** The recovery buttons plus the outcome of the last restart / restore / relaunch. */
@@ -109,7 +115,17 @@ export function RunnerRecovery({ fatal, compact = false, extra }: RunnerRecovery
           <p>{toViewError(restore.error).userMessage}</p>
         </InlineAlert>
       ) : null}
-      {restored === undefined ? null : restored.restored ? (
+      {restored === undefined ? null : restored.restored && restored.runnerState !== 'ready' ? (
+        // The backup is in place but the runner is still down: a failure with the reason, never a success.
+        <InlineAlert tone="danger" live="assertive" title={`Backup restored, but the runner still could not start: ${stillDownReason(fatal, restored.runnerState)}`}>
+          <p>
+            Relay restored the backup
+            {restored.backupCreatedAt === null ? '' : ` from ${formatDate(restored.backupCreatedAt)}`}
+            {restored.previousMovedToDisplayPath === null ? '.' : <>; the previous data was moved to <span className="mono">{restored.previousMovedToDisplayPath}</span>.</>}{' '}
+            Nothing was deleted. Try Restart runner, or Quit and relaunch.
+          </p>
+        </InlineAlert>
+      ) : restored.restored ? (
         <InlineAlert tone="success" live="polite" title="Backup restored">
           <p>
             Relay restored the backup
@@ -123,7 +139,6 @@ export function RunnerRecovery({ fatal, compact = false, extra }: RunnerRecovery
               deleted.
             </p>
           )}
-          {restored.runnerState === 'ready' ? null : <p>The runner is still starting.</p>}
         </InlineAlert>
       ) : (
         <InlineAlert tone="warning" live="polite" title="No usable backup">

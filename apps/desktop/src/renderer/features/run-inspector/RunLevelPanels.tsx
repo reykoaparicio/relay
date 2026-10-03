@@ -7,7 +7,7 @@ import type { AttemptView, ContextManifest, RunDetail, StepDetail, StepView } fr
 import { AttemptsTable, Button, ContextManifestView, Skeleton } from '../../components/ui';
 import { isAppErrorException } from '../../api/client';
 import { useArtifact } from '../../hooks/useArtifact';
-import { ActionErrorNotice } from './ActionErrorNotice';
+import { LoadErrorNotice } from './ActionErrorNotice';
 import { stepTitle } from './inspector-model';
 
 type AttemptsScope = 'step' | 'run';
@@ -124,7 +124,7 @@ type ManifestLoad =
   | { readonly kind: 'ready'; readonly manifest: ContextManifest }
   | { readonly kind: 'gone' }
   | { readonly kind: 'unreadable' }
-  | { readonly kind: 'error'; readonly error: unknown };
+  | { readonly kind: 'error'; readonly error: unknown; readonly retry: () => void };
 
 /** `artifacts.get` of the latest manifest, schema-checked (`contextManifestSchema`) before anything is rendered. */
 function useLatestManifest(artifactId: string): ManifestLoad {
@@ -132,7 +132,13 @@ function useLatestManifest(artifactId: string): ManifestLoad {
   if (q.error !== null) {
     return isAppErrorException(q.error) && q.error.appError.code === 'NOT_FOUND'
       ? { kind: 'gone' }
-      : { kind: 'error', error: q.error };
+      : {
+          kind: 'error',
+          error: q.error,
+          retry: () => {
+            void q.refetch();
+          },
+        };
   }
   if (q.data === undefined) return { kind: 'loading' };
   if (q.data.meta.purged) return { kind: 'gone' };
@@ -168,7 +174,7 @@ function LatestManifest({
       ) : load.kind === 'unreadable' ? (
         <p className="subtle">This manifest could not be read, so it is not shown.</p>
       ) : (
-        <ActionErrorNotice error={load.error} />
+        <LoadErrorNotice error={load.error} what="This manifest" onRetry={load.retry} />
       )}
     </div>
   );

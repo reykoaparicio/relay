@@ -96,14 +96,31 @@ function unitsAt(m: number, digits: number): bigint {
 
 /**
  * One precision (2–6 dp) for amounts read as a sum, `parts[0] + parts[1] + … = total`, at which the displayed parts
- * visibly add up to the displayed total ("$0.06 + $0.44 = $0.50", never "$0.06 + $0.45 = $0.50"). 2 dp unless
- * rounding would break the sum; µUSD at 6 dp is exact, so the sum always holds there.
+ * visibly add up to the displayed total ("$0.06 + $0.44 = $0.50", never "$0.06 + $0.45 = $0.50"), no non-zero part
+ * reads as zero, and a total that differs from a part does not look equal to it (an overrun of 30 µUSD on $0.50 never
+ * reads "$0.50 > $0.50" with "$0.00" over). 2 dp unless one of those would break; µUSD at 6 dp is exact, so all of them
+ * hold there.
  */
 export function sumConsistentPrecision(parts: readonly number[], total: number): number {
   const base = moneyColumnPrecision([...parts, total] as Microusd[]);
   for (let digits = base; digits < MAX_PRECISION; digits++) {
-    const sum = parts.reduce((acc, p) => acc + unitsAt(p, digits), 0n);
-    if (sum === unitsAt(total, digits)) return digits;
+    const units = parts.map((p) => unitsAt(p, digits));
+    const totalUnits = unitsAt(total, digits);
+    const sumHolds = units.reduce((acc, u) => acc + u, 0n) === totalUnits;
+    const noHiddenPart = parts.every((p, i) => p === 0 || units[i] !== 0n);
+    const totalDistinct = parts.every((p, i) => p === total || units[i] !== totalUnits);
+    if (sumHolds && noHiddenPart && totalDistinct) return digits;
   }
   return MAX_PRECISION;
+}
+
+/**
+ * `m` at `digits` dp for a sum display ({@link sumConsistentPrecision}); a non-zero amount below what the 6 dp cap can
+ * show reads "< $0.000001" (or "> -$0.000001"), never "$0.000000".
+ */
+export function formatSumPart(m: number, digits: number): string {
+  // Integer µUSD: rounding to a whole micro-dollar (half away from zero) is what 6 dp shows.
+  const whole = Math.sign(m) * Math.round(Math.abs(m));
+  if (m !== 0 && whole === 0) return m < 0 ? '> -$0.000001' : '< $0.000001';
+  return formatUsdAtPrecision(whole as Microusd, digits);
 }

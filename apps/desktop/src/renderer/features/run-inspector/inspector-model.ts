@@ -10,10 +10,11 @@ import type {
   RunAction,
   RunDetail,
   RunEvent,
+  RunStatus,
   StepView,
   ValidationIssue,
 } from '@relay/contracts';
-import { statusPresentation, stepKeyLabel } from '../../lib/format';
+import { statusPresentation, stepName } from '../../lib/format';
 import type { StatusPresentation, UnknownOutcomeDecision } from '../../lib/format';
 
 /** Tabs of the selected step panel (`?tab=`). `budget` / `summary` exist as tabs only below 1280 px. */
@@ -31,11 +32,10 @@ export function parseInspectorTab(value: string | null): InspectorPanel {
 
 /**
  * A step's title: its display name from the workflow spec (`RunDetail.stepMeta[].name`, E1) when the run carries one,
- * else the shared label source ({@link stepKeyLabel}), so every view names a step the same way.
+ * else the shared label source ({@link stepName}), so every view names a step the same way.
  */
 export function stepTitle(step: { readonly stepKey: string }, stepMeta?: RunDetail['stepMeta']): string {
-  const name = stepMeta?.find((m) => m.stepKey === step.stepKey)?.name;
-  return name === undefined || name === null || name.trim() === '' ? stepKeyLabel(step.stepKey) : name;
+  return stepName(step.stepKey, stepMeta);
 }
 
 /** The instruction version a model step ran with (`RunDetail.stepMeta`, e.g. "reviewer.v2"); null when not known. */
@@ -59,9 +59,31 @@ export function interruptedStep(run: Pick<RunDetail, 'steps' | 'unresolvedAttemp
  */
 export type InterruptionCause = 'quit' | 'runner_stopped' | 'unknown';
 
-export function interruptionCauseOf(lastShutdown: LastShutdown | null | undefined): InterruptionCause {
+export function interruptionCauseOf(
+  lastShutdown: LastShutdown | null | undefined,
+  interruptedAt: number | null | undefined,
+): InterruptionCause {
   if (lastShutdown === null || lastShutdown === undefined) return 'unknown';
+  // `lastShutdown` describes only the previous session. AppInfo carries no launch time, so the run's interruption is
+  // tied to that session by time: the run became interrupted (recovery after that session) after the session's
+  // record. A run interrupted earlier (an older session), or with no interruption event to compare, gets the neutral
+  // wording rather than a cause that may belong to another session.
+  if (interruptedAt === null || interruptedAt === undefined || interruptedAt <= lastShutdown.at) return 'unknown';
   return lastShutdown.clean ? 'quit' : 'runner_stopped';
+}
+
+/** When the run last changed to `status` (its `run.status_changed` event), if the events show it. */
+export function statusChangedAtOf(events: readonly RunEvent[], status: RunStatus): number | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e?.type === 'run.status_changed' && (e.payload['to'] ?? e.payload['status']) === status) return e.at;
+  }
+  return null;
+}
+
+/** When the run last changed to `interrupted`, if the events show it. */
+export function interruptedAtOf(events: readonly RunEvent[]): number | null {
+  return statusChangedAtOf(events, 'interrupted');
 }
 
 /** The lead of the cause sentence, to be followed by the step name and " was running". */
@@ -287,14 +309,6 @@ export function attemptSeqsOf(events: readonly RunEvent[]): ReadonlyMap<string, 
   return out;
 }
 
-/** When the run last changed to `paused` (its `run.status_changed` event), if the events show it. */
-function pausedAt(events: readonly RunEvent[]): number | null {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if (e?.type === 'run.status_changed' && (e.payload['to'] ?? e.payload['status']) === 'paused') return e.at;
-  }
-  return null;
-}
 
 /**
  * Why Resume cannot help yet for a run paused `auth_required`: its provider has no key, or the key that was rejected
@@ -306,6 +320,19 @@ export function signInResumeBlockedReason(
   providers: readonly ProviderStatus[] | undefined,
   events: readonly RunEvent[],
 ): string | null {
+  return signInBlockedSince(run, providers, statusChangedAtOf(events, 'paused'));
+}
+
+/**
+ * {@link signInResumeBlockedReason} with the pause time given directly (`pausedAt`: when the run became paused; null
+ * when not known, then any successful test counts). Shared by the inspector and the shell's provider status line, so
+ * both agree on when a provider is healthy again.
+ */
+export function signInBlockedSince(
+  run: RunDetail,
+  providers: readonly ProviderStatus[] | undefined,
+  pausedAt: number | null,
+): string | null {
   if (run.status !== 'paused' || run.pauseReason !== 'auth_required' || providers === undefined) return null;
   const providerId = stringDetail(run.statusDetail, 'providerId');
   if (providerId === null) return null;
@@ -314,7 +341,7 @@ export function signInResumeBlockedReason(
   if (p === undefined || !p.connected) return `connect ${name} in Settings → Providers first.`;
   // Queued run paused for a missing key: a connected key is all it needed.
   if (run.startedAt === null) return null;
-  const since = pausedAt(events) ?? 0;
+  const since = pausedAt ?? 0;
   if (p.lastTest !== null && p.lastTest.ok && p.lastTest.at >= since) return null;
   return `reconnect ${name} first: its stored key was rejected. Resume becomes available after a successful connection test.`;
 }

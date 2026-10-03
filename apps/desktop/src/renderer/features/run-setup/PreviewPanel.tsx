@@ -22,7 +22,7 @@ export interface PreviewPanelProps {
 export function PreviewPanel({ data, error, onRetry, label }: PreviewPanelProps) {
   const onAction = useRetryAction(onRetry);
   if (error !== null && error !== undefined)
-    return <ErrorView error={toViewError(error)} onAction={onAction} />;
+    return <ErrorView error={toViewError(error)} onAction={onAction} onRetry={onRetry} />;
   if (data === undefined) {
     return (
       <div aria-busy="true">

@@ -62,7 +62,7 @@ export function MemoryPicker({
     </div>
   );
   if (error !== null && error !== undefined) {
-    return wrap(<ErrorView error={toViewError(error)} onAction={onAction} />);
+    return wrap(<ErrorView error={toViewError(error)} onAction={onAction} onRetry={onRetry} />);
   }
   if (records === undefined) {
     return wrap(

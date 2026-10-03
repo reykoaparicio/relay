@@ -84,10 +84,21 @@ const PURPOSE_SHORT: Readonly<Record<AttemptView['purpose'], string>> = {
   reconcile: 'Reconcile',
 };
 
-/** Provider time and app time (§3.3 / R3-20, shown separately) behind a per-attempt "Timing" toggle. */
+/**
+ * Provider time and app time (§3.3 / R3-20, shown separately) behind a per-attempt "Timing" toggle. Its accessible name
+ * says which attempt ("Timing for attempt #2"): a list of identical "Timing" toggles gives no context.
+ */
 function Timing({ a }: { readonly a: AttemptView }) {
   return (
-    <Disclosure summary="Timing" className="attempt-timing">
+    <Disclosure
+      summary={
+        <>
+          <span>Timing</span>
+          <span className="sr-only"> for attempt #{a.seq}</span>
+        </>
+      }
+      className="attempt-timing"
+    >
       <KeyValueList
         className="small"
         items={[

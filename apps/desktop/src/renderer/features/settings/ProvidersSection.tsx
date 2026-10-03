@@ -29,9 +29,12 @@ export function ProvidersSection() {
   const diagnostics = useDiagnostics();
   const catalog = useCatalog();
   const profiles = useProfiles();
-  const providersAction = useNextAction({ reload: () => void providers.refetch(), wait: () => void providers.refetch() });
-  const catalogAction = useNextAction({ reload: () => void catalog.refetch(), wait: () => void catalog.refetch() });
-  const profilesAction = useNextAction({ reload: () => void profiles.refetch(), wait: () => void profiles.refetch() });
+  const refetchProviders = () => void providers.refetch();
+  const refetchCatalog = () => void catalog.refetch();
+  const refetchProfiles = () => void profiles.refetch();
+  const providersAction = useNextAction({ reload: refetchProviders, wait: refetchProviders });
+  const catalogAction = useNextAction({ reload: refetchCatalog, wait: refetchCatalog });
+  const profilesAction = useNextAction({ reload: refetchProfiles, wait: refetchProfiles });
   const now = useNow(NOW_IDLE_INTERVAL_MS, providers.dataUpdatedAt);
   const listed = (providers.data ?? []).filter((p) => p.providerId !== 'fake');
   const secure = diagnostics.data?.secureStorage.available ?? true;
@@ -107,7 +110,7 @@ export function ProvidersSection() {
           label is shown.
         </p>
         {providers.error === null ? null : (
-          <ErrorView error={toViewError(providers.error)} onAction={providersAction} />
+          <ErrorView error={toViewError(providers.error)} onAction={providersAction} onRetry={refetchProviders} />
         )}
         {providers.data === undefined && providers.error === null ? (
           <div aria-busy="true">
@@ -128,10 +131,10 @@ export function ProvidersSection() {
           model.
         </p>
         {catalog.error === null ? null : (
-          <ErrorView error={toViewError(catalog.error)} onAction={catalogAction} />
+          <ErrorView error={toViewError(catalog.error)} onAction={catalogAction} onRetry={refetchCatalog} />
         )}
         {profiles.error === null ? null : (
-          <ErrorView error={toViewError(profiles.error)} onAction={profilesAction} />
+          <ErrorView error={toViewError(profiles.error)} onAction={profilesAction} onRetry={refetchProfiles} />
         )}
         {catalog.data === undefined ? (
           catalog.error === null ? (
