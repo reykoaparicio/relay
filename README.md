@@ -8,7 +8,7 @@ The full product and engineering specification is [`Relay_Product_and_Engineerin
 
 This is a pitch prototype, not a product. The P0 scope (spec §3.1) is:
 
-- one desktop OS (macOS on Apple silicon);
+- one the desktop OS (macOS on Apple silicon);
 - two API providers (Anthropic and OpenAI), with Gemini as an optional third adapter;
 - one fixed workflow template, with a model chosen per role;
 - local approved memory, a usage ledger, iteration limits, approvals, checkpoints, and an exportable patch and report.
