@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Relay · AI on your code, with the brakes on</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #10201a; --muted: #5b6b64; --paper: #f7f8f5; --line: #dfe5e0;
+    --green: #2f7a55; --green-soft: #e3f3ea; --amber: #b7791f; --dark: #0f1a15;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: radial-gradient(1200px 700px at 50% 40%, #1b2a23 0%, #0b120e 70%); }
+  body { font-family: 'Inter Tight', -apple-system, 'Helvetica Neue', Arial, sans-serif; color: var(--ink); overflow: hidden; }
+  .stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  .slide {
+    position: absolute; width: 1280px; height: 720px; border-radius: 22px; overflow: hidden;
+    padding: 72px 88px; display: flex; flex-direction: column;
+    background: linear-gradient(160deg, #ffffff 0%, var(--paper) 60%, #eef3ef 100%);
+    box-shadow: 0 40px 100px -30px rgba(0,0,0,.75);
+    opacity: 0; pointer-events: none; transform: scale(.985); transition: opacity .55s ease, transform .55s ease;
+    transform-origin: center;
+  }
+  .slide.active { opacity: 1; pointer-events: auto; transform: scale(1); }
+  .slide.dark { background: linear-gradient(160deg, #13221b 0%, var(--dark) 100%); color: #eef5f0; }
+  .slide.brand { background: linear-gradient(135deg, #2f7a55 0%, #4f9a6f 55%, #8cc79f 100%); color: #fff; }
+  .num { position: absolute; top: 28px; right: 36px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; letter-spacing: .18em; opacity: .55; }
+  .eyebrow { font-size: 13px; font-weight: 600; letter-spacing: .24em; text-transform: uppercase; color: var(--green); margin-bottom: 22px; }
+  .dark .eyebrow { color: #8cc79f; } .brand .eyebrow { color: rgba(255,255,255,.85); }
+  h1 { font-size: 92px; font-weight: 700; line-height: 1.02; letter-spacing: -.035em; margin: 0; }
+  h2 { font-size: 64px; font-weight: 600; line-height: 1.06; letter-spacing: -.03em; margin: 0 0 26px; }
+  .lead { font-size: 26px; line-height: 1.5; color: var(--muted); max-width: 62ch; margin: 0; }
+  .dark .lead { color: #a9bbb1; } .brand .lead { color: rgba(255,255,255,.92); }
+  .accent { color: var(--green); } .dark .accent { color: #8cc79f; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; margin-top: auto; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: auto; }
+  .grid5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-top: auto; }
+  .card { padding: 26px 26px 24px; border-radius: 16px; background: #fff; border: 1px solid var(--line); }
+  .dark .card { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.09); }
+  .card .k { font-size: 44px; font-weight: 700; letter-spacing: -.03em; line-height: 1; margin-bottom: 10px; }
+  .card .t { font-size: 19px; font-weight: 600; margin-bottom: 6px; }
+  .card .l { font-size: 15px; line-height: 1.45; color: var(--muted); }
+  .dark .card .l { color: #a9bbb1; }
+  .step { position: relative; }
+  .step .n { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--green); margin-bottom: 14px; }
+  .step.you { background: var(--green-soft); border-color: #b6dcc5; }
+  .chip { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 15px; padding: 6px 12px; border-radius: 999px; background: var(--green-soft); color: var(--green); margin-right: 8px; }
+  .quote { font-size: 78px; font-weight: 600; letter-spacing: -.03em; line-height: 1.08; margin: auto 0; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  ul.clean { list-style: none; padding: 0; margin: 0; font-size: 25px; line-height: 1.95; color: var(--muted); }
+  ul.clean li::before { content: '—'; color: var(--green); margin-right: 14px; }
+  .dark ul.clean { color: #a9bbb1; }
+  .foot { margin-top: auto; display: flex; align-items: center; gap: 14px; font-size: 15px; opacity: .9; }
+  .logo { width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.22); display: grid; place-items: center; font-weight: 800; }
+  .shotslide { padding: 44px 56px 40px; }
+  .shotslide h3 { font-size: 34px; font-weight: 600; letter-spacing: -.02em; margin: 0 0 6px; }
+  .shotslide .cap { font-size: 18px; color: var(--muted); margin: 0 0 18px; }
+  .dark.shotslide .cap { color: #a9bbb1; }
+  .frame { flex: 1; min-height: 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 18px 50px -24px rgba(16,32,26,.45); background: #fff; }
+  .frame img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+  .hint { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); color: #7d9488; font: 12px 'JetBrains Mono', monospace; letter-spacing: .12em; }
+  @media (max-width: 1320px), (max-height: 760px) { .slide { transform: scale(var(--fit, .9)); } .slide.active { transform: scale(var(--fit, .9)); } }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+
+  <!-- 1 · Cover -->
+  <section class="slide brand">
+    <span class="num"></span>
+    <div class="eyebrow">Product overview · October 2026</div>
+    <h1 style="margin-top:auto">Relay</h1>
+    <p class="lead" style="font-size:32px;margin-top:22px;max-width:30ch">AI on your code, with the brakes on.</p>
+    <div class="foot" style="margin-top:56px"><div class="logo">R</div><span>Desktop prototype · macOS · Bring your own API keys</span></div>
+  </section>
+
+  <!-- 2 · Problem -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">The problem</div>
+    <h2>AI coding help is fast.<br/><span class="accent">It is not yet trustworthy.</span></h2>
+    <ul class="clean">
+      <li>Costs are invisible until the provider bill arrives.</li>
+      <li>Nobody is sure which files or secrets were sent.</li>
+      <li>Changes land without a plan anyone approved.</li>
+    </ul>
+  </section>
+
+  <!-- 3 · Solution statement -->
+  <section class="slide dark">
+    <span class="num"></span>
+    <div class="eyebrow">What Relay is</div>
+    <p class="quote">A control layer between<br/>your code and <span class="accent">your AI provider.</span></p>
+    <p class="lead">A desktop app that runs a repeatable review-to-patch workflow, with visible spending and your approval before any patch is drafted.</p>
+  </section>
+
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Everything that needs you, on one screen.</h3>
+    <p class="cap">The project overview: a run waiting for approval, spending so far, and the run limits.</p>
+    <div class="frame"><img src="screenshots/01-overview-attention.png" alt="Everything that needs you, on one screen."></div>
+  </section>
+  <!-- 4 · How it works -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">How a run works</div>
+    <h2>Five steps. <span class="accent">You hold the key one.</span></h2>
+    <p class="lead">Each step can use a different model and provider.</p>
+    <div class="grid5">
+      <div class="card step"><div class="n">01</div><div class="t">Review</div><div class="l">A model reads the files you chose and lists findings.</div></div>
+      <div class="card step"><div class="n">02</div><div class="t">Plan</div><div class="l">A second model proposes what to change, and why.</div></div>
+      <div class="card step you"><div class="n">03</div><div class="t">You approve</div><div class="l">Approve, ask for a revision, or reject. Nothing else happens first.</div></div>
+      <div class="card step"><div class="n">04</div><div class="t">Patch</div><div class="l">A model drafts the code change the plan allows.</div></div>
+      <div class="card step"><div class="n">05</div><div class="t">Verify</div><div class="l">A reviewer model checks the patch against the plan.</div></div>
+    </div>
+  </section>
+
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>You approve the plan before any code is written.</h3>
+    <p class="cap">Each step of the plan names the finding it fixes, the files it may change and its sources.</p>
+    <div class="frame"><img src="screenshots/04-approval.png" alt="You approve the plan before any code is written."></div>
+  </section>
+  <!-- 5 · Never edits your files -->
+  <section class="slide dark">
+    <span class="num"></span>
+    <div class="eyebrow">Safe by design</div>
+    <p class="quote">Relay never edits<br/><span class="accent">your project files.</span></p>
+    <p class="lead">You get a report and a proposed patch. You review it and apply it yourself.</p>
+  </section>
+
+  <!-- 6 · Cost -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Cost you can see</div>
+    <h2>Every call is checked <span class="accent">before</span> it is sent.</h2>
+    <p class="lead">Relay reserves the most a call could cost and refuses any call that would go over your budget.</p>
+    <div class="grid3">
+      <div class="card"><div class="t">Budgets</div><div class="l">Per run and per project per month. Raise them in place when a run pauses.</div></div>
+      <div class="card"><div class="t">Honest numbers</div><div class="l">Exact costs when known; otherwise shown as <span class="mono">~$0.06 (estimated)</span>, never “unknown”.</div></div>
+      <div class="card"><div class="t">No surprise retries</div><div class="l">A request that may have been charged is never re-sent without you.</div></div>
+    </div>
+  </section>
+
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Stopped before it overspends — with the math.</h3>
+    <p class="cap">The next request needed $0.11 and only $0.06 remained, so nothing was sent.</p>
+    <div class="frame"><img src="screenshots/05-budget-pause.png" alt="Stopped before it overspends — with the math."></div>
+  </section>
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Uncertain cost? An honest estimate, never “unknown”.</h3>
+    <p class="cap">Counted as ~$0.06 (estimated), may not have been charged. Retry or stop — never retried on its own.</p>
+    <div class="frame"><img src="screenshots/09-estimate.png" alt="Uncertain cost? An honest estimate, never “unknown”."></div>
+  </section>
+  <!-- 7 · Data -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Your data stays yours</div>
+    <h2>Only what you pick <span class="accent">leaves your Mac.</span></h2>
+    <div class="grid4">
+      <div class="card"><div class="t">Stored locally</div><div class="l">Projects, runs, history and memory live on your computer.</div></div>
+      <div class="card"><div class="t">You choose files</div><div class="l">Each run lists exactly which files and providers receive context.</div></div>
+      <div class="card"><div class="t">Secrets blocked</div><div class="l">Key and credential files are refused; files that look like they hold a key need your OK.</div></div>
+      <div class="card"><div class="t">Keys protected</div><div class="l">API keys sit in the macOS Keychain and never reach logs, exports or the UI.</div></div>
+    </div>
+  </section>
+
+  <!-- 8 · BYOK -->
+  <section class="slide dark">
+    <span class="num"></span>
+    <div class="eyebrow">Bring your own key</div>
+    <h2>Your providers. <span class="accent">Your contracts.</span></h2>
+    <p class="lead">Companies plug in their own keys and pay providers directly. Relay adds the control, not a markup.</p>
+    <div class="grid3">
+      <div class="card"><div class="k">Anthropic</div><div class="l">Claude models</div></div>
+      <div class="card"><div class="k">OpenAI</div><div class="l">GPT models</div></div>
+      <div class="card"><div class="k">Gemini</div><div class="l">Google models</div></div>
+    </div>
+  </section>
+
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Pick a model and an output limit for every step.</h3>
+    <p class="cap">Each step can use a different provider and model, with a sensible default limit.</p>
+    <div class="frame"><img src="screenshots/03-new-run-limits.png" alt="Pick a model and an output limit for every step."></div>
+  </section>
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Connect your own providers in a minute.</h3>
+    <p class="cap">Keys are tested, stored in the macOS Keychain, and only a redacted label is ever shown.</p>
+    <div class="frame"><img src="screenshots/08-providers.png" alt="Connect your own providers in a minute."></div>
+  </section>
+  <!-- 9 · Control & recovery -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Always in control</div>
+    <h2>Pause, export, recover — <span class="accent">at any point.</span></h2>
+    <div class="grid4">
+      <div class="card"><div class="t">Pause &amp; resume</div><div class="l">Stops after the current request and picks up exactly where it left off.</div></div>
+      <div class="card"><div class="t">Export anytime</div><div class="l">Save everything finished so far, even mid-run.</div></div>
+      <div class="card"><div class="t">Crash recovery</div><div class="l">A crash or quit leaves runs safe and resumable.</div></div>
+      <div class="card"><div class="t">Backups</div><div class="l">Daily automatic backups, one-click restore.</div></div>
+    </div>
+  </section>
+
+  <!-- 10 · Memory -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Project memory</div>
+    <h2>It learns your project's rules — <span class="accent">only with your approval.</span></h2>
+    <ul class="clean">
+      <li>Approved rules are reused in future runs.</li>
+      <li>Runs suggest new rules; nothing is added automatically.</li>
+      <li>Every rule has a source, a history and a review date.</li>
+    </ul>
+  </section>
+
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Every run ends in a clear report.</h3>
+    <p class="cap">Findings, approvals, revisions, limitations and the tracked cost — exportable as Markdown.</p>
+    <div class="frame"><img src="screenshots/06-report.png" alt="Every run ends in a clear report."></div>
+  </section>
+
+  <section class="slide shotslide">
+    <span class="num"></span>
+    <div class="eyebrow">In the app</div>
+    <h3>Project memory you can see and control.</h3>
+    <p class="cap">Approved rules with their source, scope, history and review date. Suggestions wait for you.</p>
+    <div class="frame"><img src="screenshots/07-memory.png" alt="Project memory you can see and control."></div>
+  </section>
+  <!-- 11 · Built to be trusted -->
+  <section class="slide dark">
+    <span class="num"></span>
+    <div class="eyebrow">Built to be trusted</div>
+    <h2>Tested like it handles money. <span class="accent">Because it does.</span></h2>
+    <div class="grid4">
+      <div class="card"><div class="k">3,656</div><div class="l">automated unit tests</div></div>
+      <div class="card"><div class="k">120</div><div class="l">integration tests, incl. crash recovery</div></div>
+      <div class="card"><div class="k">43</div><div class="l">end-to-end tests of the real app</div></div>
+      <div class="card"><div class="k">0</div><div class="l">secrets found by the release secret scan</div></div>
+    </div>
+    <p class="lead" style="font-size:18px;margin-top:22px">Independent security, money, UI and resilience audits, each followed by fixes and a bug hunt.</p>
+  </section>
+
+  <!-- 12 · Who it's for -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Who it is for</div>
+    <h2>Teams that already pay for AI <span class="accent">and want it predictable.</span></h2>
+    <div class="grid3">
+      <div class="card"><div class="t">Engineering leads</div><div class="l">Need AI help their team can audit and approve.</div></div>
+      <div class="card"><div class="t">Developers</div><div class="l">Want a reviewed plan and a clean patch, not a chat transcript.</div></div>
+      <div class="card"><div class="t">Budget owners</div><div class="l">Need hard spending limits and a ledger they can export.</div></div>
+    </div>
+  </section>
+
+  <!-- 13 · Status & next -->
+  <section class="slide">
+    <span class="num"></span>
+    <div class="eyebrow">Where we are</div>
+    <h2>Prototype complete. <span class="accent">Next: real-world proof.</span></h2>
+    <ul class="clean">
+      <li>Done: full workflow, desktop app, packaging, audits.</li>
+      <li>Next: live run against all three providers.</li>
+      <li>Next: signed macOS build and first pilot teams.</li>
+    </ul>
+  </section>
+
+  <!-- 14 · Close -->
+  <section class="slide brand">
+    <span class="num"></span>
+    <div class="eyebrow">Thank you</div>
+    <h1 style="margin-top:auto">Let's run it<br/>on your code.</h1>
+    <p class="lead" style="font-size:28px;margin-top:22px">Looking for pilot teams. Questions?</p>
+    <div class="foot" style="margin-top:56px"><div class="logo">R</div><span>Relay · AI on your code, with the brakes on</span></div>
+  </section>
+
+</div>
+<div class="hint">← → or space to navigate</div>
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const total = slides.length;
+  slides.forEach((s, i) => { s.querySelector('.num').textContent = String(i + 1).padStart(2, '0') + ' / ' + String(total).padStart(2, '0'); });
+  let current = 0;
+  function show(i) {
+    current = Math.max(0, Math.min(total - 1, i));
+    slides.forEach((s, j) => s.classList.toggle('active', j === current));
+    if (location.hash !== '#/' + (current + 1)) history.replaceState(null, '', '#/' + (current + 1));
+  }
+  function fromHash() {
+    const m = /^#\/(\d+)$/.exec(location.hash);
+    return m ? Number(m[1]) - 1 : 0;
+  }
+  function fit() {
+    const s = Math.min((innerWidth - 40) / 1280, (innerHeight - 60) / 720, 1);
+    document.documentElement.style.setProperty('--fit', String(s));
+  }
+  addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); show(current + 1); }
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); show(current - 1); }
+    if (e.key === 'Home') show(0);
+    if (e.key === 'End') show(total - 1);
+  });
+  addEventListener('click', (e) => { if (e.clientX > innerWidth / 2) show(current + 1); else show(current - 1); });
+  addEventListener('hashchange', () => show(fromHash()));
+  addEventListener('resize', fit);
+  fit();
+  show(fromHash());
+</script>
+</body>
+</html>
